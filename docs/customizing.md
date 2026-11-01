@@ -106,7 +106,10 @@ read at the start of every session for the life of the task.
 
 ## Change the hooks or the status line
 
-They live in `settings.policy.json`, and deploy merges them into
+Their commands live in `settings.policy.json`; the scripts live in `hooks/`.
+The status line uses `statusline.sh`, and `usage-pace.sh` adds prompt routing
+guidance from its local usage snapshot. Deploy links the scripts and merges
+the commands into
 `~/.claude/settings.json`. Deploy replaces the `PreCompact` and `SessionStart`
 hook events whole. For every other hook event, it replaces the repo's own
 entries and keeps yours as they are. An entry you edited counts as yours.

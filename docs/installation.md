@@ -239,8 +239,8 @@ repo edits need another deploy.
 
 ## The hooks
 
-Deploy asserts five hook events in `~/.claude/settings.json`. They run six
-scripts from `hooks/`:
+Deploy asserts five hook events in `~/.claude/settings.json`. They run seven
+hook scripts from `hooks/`, excluding the status line:
 
 - **SessionStart, `ledger-list.sh`** — reads the task ledger into the new
   session. It reads ledgers from linked worktrees, never from the main
@@ -251,6 +251,8 @@ scripts from `hooks/`:
 - **UserPromptSubmit, `ledger-list.sh prompt-submit`** — names the session
   after the task when you type `go <slug>`. It replaces an empty title or the
   name of another task. A name you gave with `/rename` stays.
+- **UserPromptSubmit, `usage-pace.sh`** — adds routing guidance when Claude
+  usage runs ahead of pace. If Codex is high too, asks the operator what to do.
 - **PreCompact, `ledger-list.sh pre-compact`** — tells the compaction pass that
   the ledger is authoritative, and that its path and Next step must survive
   verbatim.
@@ -262,6 +264,14 @@ scripts from `hooks/`:
   checkout.
 - **PermissionDenied, `denied-read-retry.sh`** — lets the model retry a denied
   call that only reads.
+
+The status line runs `hooks/statusline.sh`. It keeps the directory, branch,
+model, session usage and weekly usage display. When usage is available, it
+atomically saves `~/.claude/state/usage-snapshot.json` for the prompt hook.
+Weekly snapshots expire after 12 hours; five-hour data expires after one hour.
+Expired usage windows are ignored. Codex usage comes from the newest session
+JSONL file modified in the last eight days. No network request is needed.
+Run `~/.claude/hooks/usage-pace.sh --json` to inspect the computed pace.
 
 ## Undoing a deploy
 

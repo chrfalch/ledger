@@ -381,3 +381,19 @@ test('narrow deployment leaves no rule references to undeployed agent lanes', (t
     `no rule names a lane that was not deployed: ${JSON.stringify(dangling)}`,
   );
 });
+
+test('deploy installs usage hooks and preserves the prompt ledger hook', (t) => {
+  const home = freshHome(t);
+  const result = run(home, DEPLOY, '--no-codex', '--no-githooks');
+  assert.equal(result.status, 0, result.stderr);
+  for (const name of ['statusline.sh', 'usage-pace.sh']) {
+    const file = path.join(home, '.claude/hooks', name);
+    assert.ok(lstatSync(file).isSymbolicLink());
+    assert.ok(lstatSync(path.join(REPO, 'hooks', name)).mode & 0o111);
+  }
+  const settings = JSON.parse(readFileSync(path.join(home, '.claude/settings.json'), 'utf8'));
+  assert.equal(settings.statusLine.command, '"$HOME"/.claude/hooks/statusline.sh');
+  const commands = settings.hooks.UserPromptSubmit.flatMap((entry: { hooks: { command: string }[] }) => entry.hooks.map((hook) => hook.command));
+  assert.ok(commands.includes('"$HOME"/.claude/hooks/ledger-list.sh prompt-submit'));
+  assert.ok(commands.includes('"$HOME"/.claude/hooks/usage-pace.sh'));
+});
