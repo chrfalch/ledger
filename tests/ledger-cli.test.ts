@@ -115,10 +115,38 @@ const lineWith = (output: string, text: string): string => output.split('\n').fi
 const rowOf = (output: string, name: string): string =>
   output.split('\n').find(line => line.startsWith(`${name} `)) ?? assert.fail(`no row starts with "${name}" in:\n${output}`);
 
-test('ledger --help lists the five commands', (t) => {
+test('ledger --help lists the six commands', (t) => {
   const stdout = ok(ledger(home(t), REPO, '--help'));
   assert.match(stdout, /^Usage: ledger /m);
-  for (const command of [...COMMANDS, 'help']) assert.match(stdout, new RegExp(`^\\s+${command}\\b`, 'm'), `--help lists ${command}`);
+  for (const command of [...COMMANDS, 'deploy', 'help']) assert.match(stdout, new RegExp(`^\\s+${command}\\b`, 'm'), `--help lists ${command}`);
+});
+
+test('ledger deploy --dry-run matches bin/deploy from another folder', (t) => {
+  const h = home(t);
+  const direct = spawn(h, h, path.join(REPO, 'bin/deploy'), ['--dry-run']);
+  const forwarded = ledger(h, h, 'deploy', '--dry-run');
+  const normalize = (output: string): string => output.replace(/deploy-\d{4}-\d{2}-\d{2}-\d{6}/g, 'deploy-TIMESTAMP');
+  assert.equal(direct.status, 0, direct.stderr);
+  assert.equal(forwarded.status, 0, forwarded.stderr);
+  assert.match(forwarded.stdout, /DRY RUN/);
+  assert.equal(normalize(forwarded.stdout), normalize(direct.stdout));
+});
+
+test('ledger deploy --help prints bin/deploy help', (t) => {
+  const h = home(t);
+  const stdout = ok(ledger(h, h, 'deploy', '--help'));
+  assert.match(stdout, /^Deploy ledger\./);
+  assert.doesNotMatch(stdout, /Usage: ledger deploy/);
+});
+
+test('ledger deploy --bogus-option passes through the deploy error', (t) => {
+  const h = home(t);
+  const direct = spawn(h, h, path.join(REPO, 'bin/deploy'), ['--bogus-option']);
+  const forwarded = ledger(h, h, 'deploy', '--bogus-option');
+  assert.notEqual(forwarded.status, 0);
+  assert.equal(forwarded.status, direct.status);
+  assert.match(forwarded.stderr, /--bogus-option/);
+  assert.equal(forwarded.stderr, direct.stderr);
 });
 
 test('ledger <command> --help shows the usage of that command', (t) => {

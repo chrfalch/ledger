@@ -292,28 +292,40 @@ export function deploy(opts: DeployOptions): number {
   }
 
   const wrote: string[] = [];
+  const realRepo = realpathSync(REPO);
   const link = (src: string, dst: string): void => {
     const label = short(dst);
-    wrote.push(dst);
     const symlink = lstatSync(dst, { throwIfNoEntry: false })?.isSymbolicLink();
     const target = symlink ? readlinkSync(dst) : undefined;
-    if (target === src) return;
+    if (target === src) {
+      wrote.push(dst);
+      return;
+    }
+    const resolvedTarget = target === undefined ? undefined : path.resolve(path.dirname(dst), target);
+    const foreignLink = resolvedTarget !== undefined
+      && !(existsSync(resolvedTarget)
+        ? realpathSync(resolvedTarget).startsWith(`${realRepo}/`)
+        : resolvedTarget.startsWith(`${REPO}/`) || resolvedTarget.startsWith(`${realRepo}/`))
+      && !oldWrote.includes(dst);
     const ownedRule = dst.startsWith(`${rules}/`) && oldWrote.includes(dst);
     if (opts.dry) {
-      if (symlink) console.log(`relink   ${label}   (now points at ${target})`);
+      if (foreignLink) console.log(`REPLACE  ${label}   (a file of your own: deploy would ask, then back it up)`);
+      else if (symlink) console.log(`relink   ${label}   (now points at ${target})`);
       else if (existsSync(dst) && ownedRule) console.log(`relink   ${label}   (replaces a copy an earlier deploy generated)`);
       else if (existsSync(dst)) console.log(`REPLACE  ${label}   (a file of your own: deploy would ask, then back it up)`);
       else console.log(`link     ${label}`);
+      wrote.push(dst);
       return;
     }
-    if (existsSync(dst) && !symlink) {
+    if (foreignLink || (existsSync(dst) && !symlink)) {
       if (ownedRule) command('rm', ['-f', dst]);
       else {
         if (!opts.force) {
+          const kind = foreignLink ? ' (a symlink outside this repo)' : ', not a symlink';
           if (!process.stdin.isTTY) {
-            throw new DeployError(`\n${label} is a file of your own, not a symlink.\nDeploy would back it up and replace it with a symlink into this repo.\nRun bin/deploy --dry-run to see every change, then --force to proceed.`);
+            throw new DeployError(`\n${label} is a file of your own${kind}.\nDeploy would back it up and replace it with a symlink into this repo.\nRun bin/deploy --dry-run to see every change, then --force to proceed.`);
           }
-          process.stdout.write(`${label} is your own file. Back it up and replace it with a symlink? [y/N] `);
+          process.stdout.write(`${label} is a file of your own${kind}. Back it up and replace it with a symlink? [y/N] `);
           if (!['y', 'Y', 'yes', 'YES'].includes(readReply())) {
             console.log(`skipped  ${label}`);
             return;
@@ -321,11 +333,12 @@ export function deploy(opts: DeployOptions): number {
         }
         const saved = path.join(backup, path.relative(home, dst));
         mkdirSync(path.dirname(saved), { recursive: true });
-        command('cp', ['-p', dst, saved]);
+        command('cp', ['-pP', dst, saved]);
       }
     }
     mkdirSync(path.dirname(dst), { recursive: true });
     command('ln', ['-sfn', src, dst]);
+    wrote.push(dst);
     console.log(`linked   ${label}`);
   };
 
@@ -364,6 +377,11 @@ export function deploy(opts: DeployOptions): number {
     console.log('rules    generated, not linked: edits in the repo need another deploy');
   }
   link(path.join(REPO, 'ledger.template.md'), path.join(claude, 'ledger.template.md'));
+  link(path.join(REPO, 'bin/ledger'), path.join(home, '.local/bin/ledger'));
+  const onPath = (process.env.PATH ?? '').split(':').some((entry) => entry.replace(/\/+$/, '') === path.join(home, '.local/bin'));
+  if (!onPath) {
+    console.log('path     ~/.local/bin is not on PATH; add to your shell profile: export PATH="$HOME/.local/bin:$PATH"');
+  }
   for (const hook of readdirSync(path.join(REPO, 'hooks')).filter((f) => f.endsWith('.sh')).sort()) link(path.join(REPO, 'hooks', hook), path.join(claude, 'hooks', hook));
   link(path.join(REPO, 'notes/model-routing-rationale.md'), path.join(claude, 'notes/model-routing-rationale.md'));
   for (const agent of agents) link(path.join(REPO, 'agents', `${agent}.md`), path.join(claude, 'agents', `${agent}.md`));
@@ -412,6 +430,8 @@ export function shouldRunWizard(argv: string[], stdinTTY: boolean | undefined, s
 }
 
 const HELP = `Deploy ledger.
+
+Deploy links the ledger command into ~/.local/bin.
 
   bin/deploy                  link the owned files; apply policy; Codex if present
   bin/deploy --dry-run        print every change and write nothing

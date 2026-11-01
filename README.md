@@ -104,6 +104,8 @@ bin/deploy --dry-run   # print every change, write nothing
 bin/deploy
 ```
 
+Deploy links `ledger` into `~/.local/bin`; `ledger deploy` runs deploy from any folder.
+
 A clone made before the project was called ledger can still be in a folder
 named `agent-config`. Deploy works from any folder name.
 
