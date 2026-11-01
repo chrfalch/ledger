@@ -69,11 +69,13 @@ file instead of in the conversation. It ships five things:
   lanes, each pinned to a model.
 - **A task ledger** — a small file that holds the task state, so a session can
   be cleared and restarted without losing anything.
-- **Six hooks** — they put the ledger back into context when a session starts,
-  and protect it when a session compacts. They block writes that would put a
+- **Seven hook scripts across five hook events** — they put the ledger back
+  into context when a session starts, and protect it when a session compacts.
+  They block writes that would put a
   ledger in the wrong place or lose it, and Xcode builds into a wrong folder.
   They warn when the deployed config is old, and allow a retry of a denied
-  read-only call. See
+  read-only call. Usage pace warns when Claude runs ahead and guides model
+  routing. A status line script records the usage snapshot. See
   [The hooks](docs/installation.md#the-hooks).
 - **A ledger mod** — a Claude Code plugin that adds `/ledger` and thirteen
   `/ledger:` commands. [Commands](#commands) lists each one.
@@ -342,7 +344,7 @@ settings.policy.json      Claude Code keys this repo asserts
 codex/policy.toml         Codex keys this repo asserts
 mods/ledger/              the /ledger command and its /ledger: commands, /ledger:worktrees included (a Claude Code plugin)
 .claude-plugin/           marketplace.json, which lists the plugins in mods/ for Claude Code
-hooks/                    the six hook scripts that deploy installs
+hooks/                    the seven hook scripts and status line that deploy installs
 githooks/                 the git hook dispatcher that deploy installs
 tools/                    the deploy code, its wizard and CLI, the settings merge and the rule filter
 tests/                    the tests for tools/, bin/ and hooks/

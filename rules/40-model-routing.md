@@ -83,3 +83,28 @@ Rules:
   scope review is mandatory. Never add "verify your work".
 - Never use Haiku 4.5. Never use Haiku 5.5 for code, review, verdicts or
   untrusted input.
+
+### Usage pace
+
+The usage-pace hook adds a line when Claude usage runs ahead of an even pace.
+When the line says to route work to OpenAI:
+<!-- needs: gpt-6.1-sol, sol-implementer -->
+- Send volume work to `sol-implementer`.
+<!-- /needs -->
+<!-- needs: gpt-6-astra, astra-implementer -->
+- Send hard, clearly specified work to `astra-implementer`.
+<!-- /needs -->
+<!-- needs: opus-implementer -->
+- Keep taste work and untrusted input on `opus-implementer`.
+<!-- /needs -->
+<!-- needs: reviewer -->
+- Keep reviews on Claude (`reviewer`).
+<!-- /needs -->
+<!-- needs: gpt-6.1-sol, codex-runner -->
+- Large investigation may go to `codex-runner`.
+<!-- /needs -->
+- Tell the operator once per task that work moved to OpenAI and why.
+  Include the usage and pace numbers.
+
+When the line says both plans are high, do not switch models.
+Ask the operator what to do.
