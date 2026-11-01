@@ -1,5 +1,7 @@
 import { spinner } from '@clack/prompts';
 import { Command, CommanderError } from 'commander';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { nodeEngine, type Engine } from '../lib/node-engine.js';
 import { colors, showSpinner } from './colors.js';
 import { loadMod } from './hooks.js';
@@ -50,6 +52,20 @@ async function worktrees($: Engine, cwd: string): Promise<Output> {
   return { text: worktreesView(rows, prError) };
 }
 
+function deploy(args: string[]): number {
+  const script = fileURLToPath(new URL('../../bin/deploy', import.meta.url));
+  const result = spawnSync(process.execPath, [script, ...args], { stdio: 'inherit' });
+  if (result.error) {
+    console.error(`ledger deploy: ${result.error.message}`);
+    return 1;
+  }
+  if (result.signal) {
+    console.error(`ledger deploy: bin/deploy terminated by ${result.signal}`);
+    return 1;
+  }
+  return result.status ?? 1;
+}
+
 /** Runs the `ledger` command line `argv`, without the node and script paths, and returns its exit code. */
 export async function main(argv: string[]): Promise<number> {
   const cwd = process.cwd();
@@ -62,7 +78,14 @@ export async function main(argv: string[]): Promise<number> {
     } else console.log(output.text);
   };
 
-  const program = new Command('ledger').description('Show the task ledgers on this machine.').exitOverride();
+  const program = new Command('ledger').description('Show the task ledgers on this machine.').enablePositionalOptions().exitOverride();
+  program
+    .command('deploy')
+    .description('Run bin/deploy from this repo; options pass through.')
+    .helpOption(false)
+    .allowUnknownOption()
+    .allowExcessArguments()
+    .action(() => { exitCode = deploy(argv.slice(argv.indexOf('deploy') + 1)); });
   program
     .command('all')
     .description('List every registered task and the backlog.')

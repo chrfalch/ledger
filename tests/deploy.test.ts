@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -19,6 +21,191 @@ import { test } from 'node:test';
 import { freshHome, REPO, run, snapshot } from './helpers.js';
 
 const DEPLOY = [path.join(REPO, 'bin/deploy')] as const;
+
+test('plain deploy links the ledger terminal command', (t) => {
+  const home = freshHome(t);
+  const result = run(home, DEPLOY);
+  assert.equal(result.status, 0, result.stderr);
+  const command = path.join(home, '.local/bin/ledger');
+  assert.ok(lstatSync(command).isSymbolicLink());
+  assert.equal(readlinkSync(command), path.join(REPO, 'bin/ledger'));
+});
+
+test('--dry-run names the ledger terminal link without creating it', (t) => {
+  const home = freshHome(t);
+  const result = run(home, DEPLOY, '--dry-run');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /link\s+~\/\.local\/bin\/ledger/);
+  assert.equal(existsSync(path.join(home, '.local/bin/ledger')), false);
+});
+
+test('deploy reports a missing terminal command directory on PATH', (t) => {
+  const home = freshHome(t);
+  const directory = path.join(home, '.local/bin');
+  for (const dry of [false, true]) {
+    for (const suffix of [undefined, directory, `${directory}///`]) {
+      const searchPath = (process.env.PATH ?? '').split(':')
+        .filter((entry) => entry.replace(/\/+$/, '') !== directory);
+      if (suffix !== undefined) searchPath.push(suffix);
+      const result = spawnSync(DEPLOY[0], dry ? ['--dry-run'] : [], {
+        cwd: REPO,
+        env: { ...process.env, HOME: home, PATH: searchPath.join(':'), GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig') },
+        encoding: 'utf8',
+      });
+      assert.equal(result.status, 0, result.stderr);
+      if (suffix === undefined) {
+        assert.match(result.stdout, /^path\s+~\/\.local\/bin is not on PATH; add to your shell profile: export PATH="\$HOME\/\.local\/bin:\$PATH"$/m);
+      } else assert.doesNotMatch(result.stdout, /not on PATH/);
+    }
+  }
+});
+
+test('--revert removes the ledger terminal link', (t) => {
+  const home = freshHome(t);
+  assert.equal(run(home, DEPLOY).status, 0);
+  const command = path.join(home, '.local/bin/ledger');
+  assert.ok(lstatSync(command).isSymbolicLink());
+  const result = run(home, DEPLOY, '--revert');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(lstatSync(command, { throwIfNoEntry: false }), undefined);
+});
+
+test('ledger ownership: own file survives revert when the prompt is declined', async (t) => {
+  if (process.platform !== 'darwin') return t.skip('requires macOS script');
+  const home = freshHome(t);
+  const command = path.join(home, '.local/bin/ledger');
+  mkdirSync(path.dirname(command), { recursive: true });
+  writeFileSync(command, 'MINE\n');
+
+  // script rejects Node's socket stdio, so cat gives it plain pipes on both sides.
+  const child = spawn('/bin/sh', ['-c', 'cat | script -q /dev/null "$0" --no-codex | cat', DEPLOY[0]], {
+    cwd: REPO,
+    env: { ...process.env, HOME: home, GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig') },
+  });
+  let stdout = '';
+  let answered = false;
+  child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+    stdout += chunk;
+    if (!answered && stdout.includes('[y/N]')) {
+      answered = true;
+      child.stdin.end('N\n');
+    }
+  });
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('deploy prompt timed out after 60 seconds'));
+    }, 60_000);
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('close', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  assert.ok(stdout.includes('[y/N]'), 'the ownership prompt appeared');
+  let manifest = '';
+  try {
+    manifest = readFileSync(path.join(home, '.claude/.ledger-manifest'), 'utf8');
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+  }
+  assert.ok(!manifest.includes(command), 'declined own file must not be in the manifest');
+  const reverted = run(home, DEPLOY, '--revert');
+  assert.equal(reverted.status, 0, reverted.stderr);
+  assert.ok(lstatSync(command).isFile());
+  assert.equal(readFileSync(command, 'utf8'), 'MINE\n');
+});
+
+test('ledger ownership: nonterminal deploy refuses a foreign symlink', (t) => {
+  const home = freshHome(t);
+  const command = path.join(home, '.local/bin/ledger');
+  const target = path.join(home, 'foreign-ledger');
+  mkdirSync(path.dirname(command), { recursive: true });
+  writeFileSync(target, 'FOREIGN\n');
+  symlinkSync(target, command);
+
+  const refused = run(home, DEPLOY);
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /--force/);
+  assert.equal(readlinkSync(command), target);
+});
+
+test('--dry-run after a filtered deploy does not report selected rules as removed', (t) => {
+  const home = freshHome(t);
+  const deployed = run(home, DEPLOY, '--no-codex');
+  assert.equal(deployed.status, 0, deployed.stderr);
+
+  const dry = run(home, DEPLOY, '--dry-run');
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.doesNotMatch(dry.stdout, /^remove/m);
+});
+
+test('ledger ownership: first deploy accepts a symlink through a repo alias', (t) => {
+  const home = freshHome(t);
+  const alias = path.join(home, 'repo-alias');
+  const command = path.join(home, '.local/bin/ledger');
+  symlinkSync(REPO, alias, 'dir');
+  mkdirSync(path.dirname(command), { recursive: true });
+  symlinkSync(path.join(alias, 'bin/ledger'), command);
+
+  const deployed = run(home, DEPLOY);
+  assert.equal(deployed.status, 0, deployed.stderr);
+  assert.equal(readlinkSync(command), path.join(REPO, 'bin/ledger'));
+});
+
+test('ledger ownership: dry-run reports REPLACE for a foreign symlink', (t) => {
+  const home = freshHome(t);
+  const command = path.join(home, '.local/bin/ledger');
+  const target = path.join(home, 'foreign-ledger');
+  mkdirSync(path.dirname(command), { recursive: true });
+  writeFileSync(target, 'FOREIGN\n');
+  symlinkSync(target, command);
+
+  const dry = run(home, DEPLOY, '--dry-run');
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, /^REPLACE\s+~\/\.local\/bin\/ledger/m);
+});
+
+test('ledger ownership: force backs up a foreign symlink before replacing it', (t) => {
+  const home = freshHome(t);
+  const command = path.join(home, '.local/bin/ledger');
+  const target = path.join(home, 'foreign-ledger');
+  mkdirSync(path.dirname(command), { recursive: true });
+  writeFileSync(target, 'FOREIGN\n');
+  symlinkSync(target, command);
+
+  const forced = run(home, DEPLOY, '--force');
+  assert.equal(forced.status, 0, forced.stderr);
+  assert.equal(readlinkSync(command), path.join(REPO, 'bin/ledger'));
+  const backups = path.join(home, '.claude/backups');
+  assert.ok(existsSync(backups), 'creates a backup directory');
+  assert.ok(readdirSync(backups).some((deployment) => {
+    if (!deployment.startsWith('deploy-')) return false;
+    const saved = path.join(backups, deployment, '.local/bin/ledger');
+    return lstatSync(saved, { throwIfNoEntry: false })?.isSymbolicLink()
+      && readlinkSync(saved) === target;
+  }), 'preserves the original symlink target in the backup');
+});
+
+test('ledger ownership: previous manifest permits silent symlink replacement', (t) => {
+  const home = freshHome(t);
+  const command = path.join(home, '.local/bin/ledger');
+  mkdirSync(path.dirname(command), { recursive: true });
+  symlinkSync(path.join(home, 'old-repo/bin/ledger'), command);
+  writeFileSync(path.join(home, '.claude/.ledger-manifest'), `${command}\n`);
+
+  const deployed = run(home, DEPLOY);
+  assert.equal(deployed.status, 0, deployed.stderr);
+  assert.doesNotMatch(deployed.stdout, /\[y\/N\]/);
+  assert.equal(readlinkSync(command), path.join(REPO, 'bin/ledger'));
+  const backups = path.join(home, '.claude/backups');
+  assert.ok(!existsSync(backups) || readdirSync(backups).every((deployment) =>
+    lstatSync(path.join(backups, deployment, '.local/bin/ledger'), { throwIfNoEntry: false }) === undefined,
+  ));
+});
 
 function markdownNames(directory: string): string[] {
   if (!existsSync(directory)) return [];
