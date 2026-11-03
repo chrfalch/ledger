@@ -11,8 +11,8 @@ and reviews. It does not usually write code.
 The **subagents** do the expensive work in their own contexts and return short
 reports. See [fleet.md](fleet.md).
 
-The **ledger** is a file at `.claude/ledger.md` in the task's worktree. It is
-the state of the task.
+The **ledger** is a file at `.claude/ledger.md` in the task's worktree. Every
+non-trivial task has one. It is the state of the task.
 
 The **hooks** read the ledger into a session at start, and protect it when a
 session compacts.
@@ -24,7 +24,7 @@ investigate -> resolve ambiguity -> plan -> ledger -> red tests -> implement
             -> verify -> review -> clear point (if more remains) -> you accept
 ```
 
-Three things need you: plan approval, typing the `start:` line that a new task prints when another task is open, and typing `/ledger:next` at a clear point.
+Four things need you: starting the task (and typing the `start:` line that a new task prints when another task is open), plan approval, typing `/ledger:next` at a clear point, and typing `/ledger:retire` after the merge.
 
 ## A worked example
 
@@ -155,8 +155,9 @@ You type:
 ```
 
 It clears the session and sends `go <name>`, so the fresh session continues
-from the ledger. `/ledger:close` clears without continuing. If either command
-cannot clear the session, it says so; then type `/clear`, then `go`.
+from the ledger. `/ledger:close` clears without continuing. Type `go` later to
+continue. If either command cannot clear the session, it says so; then type
+`/clear`, then `go`.
 
 When every plan step of the task is done, `/ledger:next` first shows one line
 in the fresh session on how to retire the task:
@@ -245,6 +246,33 @@ hook shows a summary of each and the session asks which task you mean before
 reading the full file. Type `go <name>` to answer in advance. The session then
 moves into that task's worktree and continues from its ledger.
 
+Ask `What are we working on?` to see where each open task is. The answer comes
+from the ledgers: the goal, what is done, and the next step.
+
+In the examples in this section, the repository is `expo/expo` and the tasks
+are made up. [examples.md](examples.md) has two longer ones: starting a new
+task, and putting a second task in the backlog.
+
+**Stop for the day, continue the next morning.** Two tasks are open.
+
+**You:** `/ledger:close`
+
+The ledger is updated and the session clears. The next morning you open a new
+session in the main checkout.
+
+**You:** go
+
+**Agent:** Two tasks have a ledger: `image-clear-disk-cache` (next: check iOS)
+and `router-modal-e2e-flake` (next: investigate the CI failure). Which one?
+
+**You:** go image-clear-disk-cache
+
+**Agent:** (moves into that task's worktree and continues from the next step in
+its ledger)
+
+The agent does not read files or run tests again to find out where it was. The
+ledger is the state.
+
 To give a linked worktree that has no ledger one, type `/ledger:task --here` in
 its session. It adds the ledger without a new branch or worktree.
 
@@ -265,6 +293,20 @@ the local branch when every commit on it is in the default branch or in a
 merged PR. A branch with commits after its PR merged stays.
 `/ledger:archive <term>` finds the ledger of a task that was retired. Add
 `--all` to search the archive of every repo.
+
+**The PR is merged, retire the task.**
+
+**You:** `/ledger:retire image-clear-disk-cache`
+
+```
+archived ~/.claude/ledger-archive/expo/2026-10-26-image-clear-disk-cache.md
+archived evidence ~/.claude/ledger-archive/expo/2026-10-26-image-clear-disk-cache/
+removed  ~/repos/expo/expo/.claude/worktrees/image-clear-disk-cache
+deleted  branch image-clear-disk-cache
+```
+
+The worktree is gone, and the ledger is kept. Months later,
+`/ledger:archive glide` finds it again.
 
 A backlog task of this repo can be retired the same way, for example a parent
 task whose work all shipped in its child tasks. It has no worktree and no

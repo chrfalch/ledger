@@ -1,0 +1,169 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 428" width="880" height="428" role="img" aria-labelledby="title desc">
+  <title id="title">ledger in a Claude Code session: from /ledger:go to a pull request</title>
+  <desc id="desc">A terminal running Claude Code with the ledger tool. You type /ledger:go offline-queue-loss. The agent moves into the worktree, loads the ledger and proposes a plan: 1. a test that kills the app during a sync, 2. save each item to disk before sending it, 3. delete an item only after the server confirms it. You type yes; the plan is written to the ledger. Helper agents work: the researcher finds the cause, the new test fails and reproduces the bug, the implementer writes the fix, 14 tests pass, the reviewer accepts. The agent says: Clear point. Ledger updated. Type /ledger:next to continue. You type /ledger:next; the screen clears and a fresh session loads the ledger at step 3 of 3, finishes it, and asks to commit and open a PR. You type yes, and PR #42 opens.</desc>
+  <style>
+    svg * { animation-duration: 32s; animation-timing-function: linear; animation-iteration-count: infinite; }
+    svg { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    text { font-size: 16px; fill: #1f2328; }
+    .screen, .cover { fill: #ffffff; }
+    .edge { stroke: #d1d9e0; }
+    .dim { fill: #59636e; }
+    .b { font-weight: 700; }
+    .acc, .prompt { fill: #bc4c00; }
+    .agent { fill: #8250df; }
+    .ok { fill: #1a7f37; }
+    .fail { fill: #cf222e; }
+    .link { fill: #0969da; }
+    .tint-ok { fill: #dafbe1; }
+    .tint-fail { fill: #ffebe9; }
+    .seg { fill: none; stroke: #d1d9e0; stroke-width: 1.5; }
+    .seg-on { fill: #bc4c00; }
+    .spinner { fill: none; stroke: #bc4c00; stroke-width: 2.2; stroke-linecap: round; stroke-dasharray: 24 14;
+               animation: spin 1s linear infinite; }
+    .cursor { fill: #1f2328; opacity: .75; animation: blink 1s steps(1) infinite; }
+    .sparkle { fill: #bf8700; }
+    .c0 { fill: #bc4c00; } .c1 { fill: #0969da; } .c2 { fill: #1a7f37; } .c3 { fill: #8250df; } .c4 { fill: #bf8700; }
+    .wipe-edge { fill: #bc4c00; }
+
+    @media (prefers-color-scheme: dark) {
+      text { fill: #e6edf3; }
+      .screen, .cover { fill: #0d1117; }
+      .edge, .seg { stroke: #3d444d; }
+      .dim { fill: #9198a1; }
+      .acc, .prompt, .seg-on, .wipe-edge, .c0 { fill: #f0883e; }
+      .agent, .c3 { fill: #bc8cff; }
+      .ok, .c2 { fill: #3fb950; }
+      .fail { fill: #ff7b72; }
+      .link, .c1 { fill: #58a6ff; }
+      .tint-ok { fill: #0f2a1c; }
+      .tint-fail { fill: #2d1418; }
+      .spinner { stroke: #f0883e; }
+      .cursor { fill: #e6edf3; }
+      .sparkle, .c4 { fill: #e3b341; }
+    }
+
+    /* Static state = the final frame; the animations below replay the session over it. */
+    .screen-1, .run, .cursor-on, .wipe, .confetti { opacity: 0; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes blink { 50% { opacity: 0; } }
+    @keyframes type008 { 0%, 2.5% { transform: translateX(0); animation-timing-function: steps(29, end); } 6.875%, 100% { transform: translateX(278.4px); } }
+    @keyframes on000-026 { 0%, 0%, 8.281%, 100% { opacity: 0; } 0.469%, 8.125% { opacity: 1; } }
+    @keyframes in026 { 0%, 8.125% { opacity: 0; } 8.594%, 100% { opacity: 1; } }
+    @keyframes in030 { 0%, 9.375% { opacity: 0; } 9.844%, 100% { opacity: 1; } }
+    @keyframes in036 { 0%, 11.25% { opacity: 0; } 11.719%, 100% { opacity: 1; } }
+    @keyframes in039 { 0%, 12.188% { opacity: 0; } 12.656%, 100% { opacity: 1; } }
+    @keyframes in042 { 0%, 13.125% { opacity: 0; } 13.594%, 100% { opacity: 1; } }
+    @keyframes in045 { 0%, 14.062% { opacity: 0; } 14.531%, 100% { opacity: 1; } }
+    @keyframes in049 { 0%, 15.313% { opacity: 0; } 15.781%, 100% { opacity: 1; } }
+    @keyframes type060 { 0%, 18.75% { transform: translateX(0); animation-timing-function: steps(3, end); } 19.688%, 100% { transform: translateX(28.8px); } }
+    @keyframes on053-068 { 0%, 16.562%, 21.406%, 100% { opacity: 0; } 17.031%, 21.25% { opacity: 1; } }
+    @keyframes in053 { 0%, 16.562% { opacity: 0; } 17.031%, 100% { opacity: 1; } }
+    @keyframes in068 { 0%, 21.25% { opacity: 0; } 21.719%, 100% { opacity: 1; } }
+    @keyframes on074-090 { 0%, 23.125%, 28.281%, 100% { opacity: 0; } 23.594%, 28.125% { opacity: 1; } }
+    @keyframes in090 { 0%, 28.125% { opacity: 0; } 28.594%, 100% { opacity: 1; } }
+    @keyframes on092-104 { 0%, 28.75%, 32.656%, 100% { opacity: 0; } 29.219%, 32.5% { opacity: 1; } }
+    @keyframes in104 { 0%, 32.5% { opacity: 0; } 32.969%, 100% { opacity: 1; } }
+    @keyframes in112 { 0%, 35% { opacity: 0; } 35.469%, 100% { opacity: 1; } }
+    @keyframes in116 { 0%, 36.25% { opacity: 0; } 36.719%, 100% { opacity: 1; } }
+    @keyframes in120 { 0%, 37.5% { opacity: 0; } 37.969%, 100% { opacity: 1; } }
+    @keyframes in124 { 0%, 38.75% { opacity: 0; } 39.219%, 100% { opacity: 1; } }
+    @keyframes in128 { 0%, 40% { opacity: 0; } 40.469%, 100% { opacity: 1; } }
+    @keyframes on108-132 { 0%, 33.75%, 41.406%, 100% { opacity: 0; } 34.219%, 41.25% { opacity: 1; } }
+    @keyframes in132 { 0%, 41.25% { opacity: 0; } 41.719%, 100% { opacity: 1; } }
+    @keyframes on134-146 { 0%, 41.875%, 45.781%, 100% { opacity: 0; } 42.344%, 45.625% { opacity: 1; } }
+    @keyframes in146 { 0%, 45.625% { opacity: 0; } 46.094%, 100% { opacity: 1; } }
+    @keyframes on148-160 { 0%, 46.25%, 50.156%, 100% { opacity: 0; } 46.719%, 50% { opacity: 1; } }
+    @keyframes in160 { 0%, 50% { opacity: 0; } 50.469%, 100% { opacity: 1; } }
+    @keyframes in166 { 0%, 51.875% { opacity: 0; } 52.344%, 100% { opacity: 1; } }
+    @keyframes type179 { 0%, 55.937% { transform: translateX(0); animation-timing-function: steps(12, end); } 58.438%, 100% { transform: translateX(115.2px); } }
+    @keyframes on173-190 { 0%, 54.062%, 59.531%, 100% { opacity: 0; } 54.531%, 59.375% { opacity: 1; } }
+    @keyframes in173 { 0%, 54.062% { opacity: 0; } 54.531%, 100% { opacity: 1; } }
+    @keyframes in198 { 0%, 61.875% { opacity: 0; } 62.344%, 100% { opacity: 1; } }
+    @keyframes in207 { 0%, 64.688% { opacity: 0; } 65.156%, 100% { opacity: 1; } }
+    @keyframes in210 { 0%, 65.625% { opacity: 0; } 66.094%, 100% { opacity: 1; } }
+    @keyframes in213 { 0%, 66.562% { opacity: 0; } 67.031%, 100% { opacity: 1; } }
+    @keyframes in216 { 0%, 67.5% { opacity: 0; } 67.969%, 100% { opacity: 1; } }
+    @keyframes in219 { 0%, 68.438% { opacity: 0; } 68.906%, 100% { opacity: 1; } }
+    @keyframes on204-222 { 0%, 63.75%, 69.531%, 100% { opacity: 0; } 64.219%, 69.375% { opacity: 1; } }
+    @keyframes in222 { 0%, 69.375% { opacity: 0; } 69.844%, 100% { opacity: 1; } }
+    @keyframes on224-233 { 0%, 70%, 72.969%, 100% { opacity: 0; } 70.469%, 72.812% { opacity: 1; } }
+    @keyframes in233 { 0%, 72.812% { opacity: 0; } 73.281%, 100% { opacity: 1; } }
+    @keyframes on235-244 { 0%, 73.438%, 76.406%, 100% { opacity: 0; } 73.906%, 76.25% { opacity: 1; } }
+    @keyframes in244 { 0%, 76.25% { opacity: 0; } 76.719%, 100% { opacity: 1; } }
+    @keyframes in249 { 0%, 77.812% { opacity: 0; } 78.281%, 100% { opacity: 1; } }
+    @keyframes type261 { 0%, 81.562% { transform: translateX(0); animation-timing-function: steps(3, end); } 82.5%, 100% { transform: translateX(28.8px); } }
+    @keyframes on254-269 { 0%, 79.375%, 84.219%, 100% { opacity: 0; } 79.844%, 84.062% { opacity: 1; } }
+    @keyframes in254 { 0%, 79.375% { opacity: 0; } 79.844%, 100% { opacity: 1; } }
+    @keyframes in269 { 0%, 84.062% { opacity: 0; } 84.531%, 100% { opacity: 1; } }
+    @keyframes in271 { 0%, 84.688% { opacity: 0; } 85.156%, 100% { opacity: 1; } }
+    @keyframes screen1 { 0%, 60.938% { opacity: 1; } 61%, 100% { opacity: 0; } }
+    @keyframes scroll { 0%, 51.875% { transform: translateY(0); } 52.344%, 54.062% { transform: translateY(-46px); } 54.531%, 100% { transform: translateY(-69px); } }
+    @keyframes screen2 { 0%, 60.938% { opacity: 0; } 61%, 98.75% { opacity: 1; } 100% { opacity: 0; } }
+    @keyframes wipe { 0%, 59.219% { opacity: 0; transform: translateY(19px); } 59.375% { opacity: 1; transform: translateY(19px); animation-timing-function: ease-in; } 60.938% { opacity: 1; transform: translateY(428px); } 61.25%, 100% { opacity: 0; transform: translateY(428px); } }
+    @keyframes pop0 { 0%, 84.375% { transform: scale(0); animation-timing-function: ease-out; } 85.156% { transform: scale(1.4); } 85.781%, 100% { transform: scale(1); } }
+    @keyframes pop1 { 0%, 84.844% { transform: scale(0); animation-timing-function: ease-out; } 85.625% { transform: scale(1.4); } 86.25%, 100% { transform: scale(1); } }
+    @keyframes pop2 { 0%, 85.312% { transform: scale(0); animation-timing-function: ease-out; } 86.094% { transform: scale(1.4); } 86.719%, 100% { transform: scale(1); } }
+    @keyframes fly00 { 0%, 84.219% { opacity: 0; transform: translate(0, 0) rotate(0deg); } 84.375% { opacity: 1; transform: translate(0, 0) rotate(0deg); animation-timing-function: cubic-bezier(.2, .8, .4, 1); } 86.406% { opacity: 1; transform: translate(85px, -31px) rotate(90deg); animation-timing-function: ease-in; } 90.469%, 100% { opacity: 0; transform: translate(110px, 59px) rotate(180deg); } }
+    @keyframes fly01 { 0%, 84.375% { opacity: 0; transform: translate(0, 0) rotate(0deg); } 84.531% { opacity: 1; transform: translate(0, 0) rotate(0deg); animation-timing-function: cubic-bezier(.2, .8, .4, 1); } 86.562% { opacity: 1; transform: translate(138px, -37px) rotate(138deg); animation-timing-function: ease-in; } 90.625%, 100% { opacity: 0; transform: translate(179px, 53px) rotate(277deg); } }
+    @keyframes fly02 { 0%, 84.531% { opacity: 0; transform: translate(0, 0) rotate(0deg); } 84.688% { opacity: 1; transform: translate(0, 0) rotate(0deg); animation-timing-function: cubic-bezier(.2, .8, .4, 1); } 86.719% { opacity: 1; transform: translate(193px, -34px) rotate(187deg); animation-timing-function: ease-in; } 90.781%, 100% { opacity: 0; transform: translate(251px, 56px) rotate(374deg); } }
+    @keyframes fly03 { 0%, 84.219% { opacity: 0; transform: translate(0, 0) rotate(0deg); } 84.375% { opacity: 1; transform: translate(0, 0) rotate(0deg); animation-timing-function: cubic-bezier(.2, .8, .4, 1); } 86.406% { opacity: 1; transform: translate(119px, -10px) rotate(235deg); animation-timing-function: ease-in; } 90.469%, 100% { opacity: 0; transform: translate(155px, 80px) rotate(471deg); } }
+    @keyframes fly04 { 0%, 84.375% { opacity: 0; transform: translate(0, 0) rotate(0deg); } 84.531% { opacity: 1; transform: translate(0, 0) rotate(0deg); animation-timing-function: cubic-bezier(.2, .8, .4, 1); } 86.562% { opacity: 1; transform: translate(172px, 0px) rotate(104deg); animation-timing-function: ease-in; } 90.625%, 100% { opacity: 0; transform: translate(224px, 90px) rotate(208deg); } }
+    @keyframes fly05 { 0%, 84.531% { opacity: 0; transform: translate(0, 0) rotate(0deg); } 84.688% { opacity: 1; transform: translate(0, 0) rotate(0deg); animation-timing-function: cubic-bezier(.2, .8, .4, 1); } 86.719% { opacity: 1; transform: translate(95px, 8px) rotate(152deg); animation-timing-function: ease-in; } 90.781%, 100% { opacity: 0; transform: translate(124px, 98px) rotate(305deg); } }
+    @keyframes fly06 { 0%, 84.219% { opacity: 0; transform: translate(0, 0) rotate(0deg); } 84.375% { opacity: 1; transform: translate(0, 0) rotate(0deg); animation-timing-function: cubic-bezier(.2, .8, .4, 1); } 86.406% { opacity: 1; transform: translate(146px, 26px) rotate(201deg); animation-timing-function: ease-in; } 90.469%, 100% { opacity: 0; transform: translate(190px, 116px) rotate(402deg); } }
+    @keyframes fly07 { 0%, 84.375% { opacity: 0; transform: translate(0, 0) rotate(0deg); } 84.531% { opacity: 1; transform: translate(0, 0) rotate(0deg); animation-timing-function: cubic-bezier(.2, .8, .4, 1); } 86.562% { opacity: 1; transform: translate(194px, 52px) rotate(249deg); animation-timing-function: ease-in; } 90.625%, 100% { opacity: 0; transform: translate(252px, 142px) rotate(499deg); } }
+    @keyframes fly08 { 0%, 84.531% { opacity: 0; transform: translate(0, 0) rotate(0deg); } 84.688% { opacity: 1; transform: translate(0, 0) rotate(0deg); animation-timing-function: cubic-bezier(.2, .8, .4, 1); } 86.719% { opacity: 1; transform: translate(117px, 42px) rotate(118deg); animation-timing-function: ease-in; } 90.781%, 100% { opacity: 0; transform: translate(152px, 132px) rotate(236deg); } }
+    @keyframes fly09 { 0%, 84.219% { opacity: 0; transform: translate(0, 0) rotate(0deg); } 84.375% { opacity: 1; transform: translate(0, 0) rotate(0deg); animation-timing-function: cubic-bezier(.2, .8, .4, 1); } 86.406% { opacity: 1; transform: translate(160px, 75px) rotate(166deg); animation-timing-function: ease-in; } 90.469%, 100% { opacity: 0; transform: translate(208px, 165px) rotate(333deg); } }
+    @keyframes fly10 { 0%, 84.375% { opacity: 0; transform: translate(0, 0) rotate(0deg); } 84.531% { opacity: 1; transform: translate(0, 0) rotate(0deg); animation-timing-function: cubic-bezier(.2, .8, .4, 1); } 86.562% { opacity: 1; transform: translate(87px, 50px) rotate(215deg); animation-timing-function: ease-in; } 90.625%, 100% { opacity: 0; transform: translate(113px, 140px) rotate(430deg); } }
+    @keyframes fly11 { 0%, 84.531% { opacity: 0; transform: translate(0, 0) rotate(0deg); } 84.688% { opacity: 1; transform: translate(0, 0) rotate(0deg); animation-timing-function: cubic-bezier(.2, .8, .4, 1); } 86.719% { opacity: 1; transform: translate(125px, 88px) rotate(263deg); animation-timing-function: ease-in; } 90.781%, 100% { opacity: 0; transform: translate(162px, 178px) rotate(527deg); } }
+    @keyframes fly12 { 0%, 84.219% { opacity: 0; transform: translate(0, 0) rotate(0deg); } 84.375% { opacity: 1; transform: translate(0, 0) rotate(0deg); animation-timing-function: cubic-bezier(.2, .8, .4, 1); } 86.406% { opacity: 1; transform: translate(158px, 132px) rotate(132deg); animation-timing-function: ease-in; } 90.469%, 100% { opacity: 0; transform: translate(205px, 222px) rotate(264deg); } }
+    @keyframes fly13 { 0%, 84.375% { opacity: 0; transform: translate(0, 0) rotate(0deg); } 84.531% { opacity: 1; transform: translate(0, 0) rotate(0deg); animation-timing-function: cubic-bezier(.2, .8, .4, 1); } 86.562% { opacity: 1; transform: translate(91px, 91px) rotate(180deg); animation-timing-function: ease-in; } 90.625%, 100% { opacity: 0; transform: translate(118px, 181px) rotate(361deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      svg * { animation: none !important; }
+    }
+  </style>
+  <defs>
+    <clipPath id="screen-area"><rect x="0" y="19" width="880" height="405"/></clipPath>
+  </defs>
+
+  <rect class="screen edge" x=".75" y=".75" width="878.5" height="426.5" rx="12"/>
+
+  <g clip-path="url(#screen-area)">
+    <g class="screen-1" style="animation-name: screen1">
+      <g style="animation-name: scroll">
+      <g transform="translate(0 36)"><text x="24.0" class="prompt">❯</text><text x="43.2" textLength="278.4" lengthAdjust="spacing">/ledger:go offline-queue-loss</text><g transform="translate(278.4 0)" style="animation-name: type008"><rect class="cover" x="43.2" y="-17" width="700" height="24"/><g class="cursor-on" style="animation-name: on000-026"><rect class="cursor" x="43.2" y="-15" width="9.6" height="19"/></g></g></g>
+      <g transform="translate(0 59)" style="animation-name: in026"><text x="24.0" class="acc">●</text><text x="43.2">Moved into worktree <tspan class="dim">.claude/worktrees/offline-queue-loss</tspan></text></g>
+      <g transform="translate(0 82)" style="animation-name: in030"><text x="24.0" class="acc">●</text><text x="43.2">Ledger loaded — next: write the plan</text></g>
+      <g transform="translate(0 128)" style="animation-name: in036"><text x="24.0" class="acc">●</text><text x="43.2"><tspan class="b">Plan</tspan></text></g>
+      <g transform="translate(0 151)" style="animation-name: in039"><text x="43.2"><tspan class="dim">1.</tspan> A test that kills the app during a sync</text></g>
+      <g transform="translate(0 174)" style="animation-name: in042"><text x="43.2"><tspan class="dim">2.</tspan> Save each item to disk before sending it</text></g>
+      <g transform="translate(0 197)" style="animation-name: in045"><text x="43.2"><tspan class="dim">3.</tspan> Delete an item only after the server confirms it</text></g>
+      <g transform="translate(0 220)" style="animation-name: in049"><text x="43.2" class="b">Approve?</text></g>
+      <g transform="translate(0 243)" style="animation-name: in053"><text x="24.0" class="prompt">❯</text><text x="43.2" textLength="28.8" lengthAdjust="spacing">yes</text><g transform="translate(28.8 0)" style="animation-name: type060"><rect class="cover" x="43.2" y="-17" width="700" height="24"/><g class="cursor-on" style="animation-name: on053-068"><rect class="cursor" x="43.2" y="-15" width="9.6" height="19"/></g></g></g>
+      <g transform="translate(0 266)" style="animation-name: in068"><text x="24.0" class="acc">●</text><text x="43.2">Plan written to the ledger</text></g>
+      <g transform="translate(0 312)"><g class="run" style="animation-name: on074-090"><g transform="translate(29.0 -5)"><circle class="spinner" r="6"/></g><text x="43.2" class="agent">researcher</text><text x="168.0" class="dim">reading src/sync …</text></g><g style="animation-name: in090"><text x="24.0" class="ok">✓</text><text x="43.2" class="agent">researcher</text><text x="168.0">cause found</text></g></g>
+      <g transform="translate(0 335)"><g class="run" style="animation-name: on092-104"><g transform="translate(29.0 -5)"><circle class="spinner" r="6"/></g><text x="43.2" class="agent">tests</text><text x="168.0" class="dim">running the new test …</text></g><g style="animation-name: in104"><rect class="tint-fail" x="14" y="-17" width="560" height="23" rx="4"/><text x="24.0" class="fail">✗</text><text x="43.2" class="agent">tests</text><text x="168.0" class="fail">1 failing — the test reproduces the bug</text></g></g>
+      <g transform="translate(0 358)"><g class="run" style="animation-name: on108-132"><g transform="translate(29.0 -5)"><circle class="spinner" r="6"/></g><text x="43.2" class="agent">implementer</text><text x="168.0" class="dim">writing the fix</text><rect class="seg" x="321.6" y="-12" width="11" height="11" rx="2"/><rect class="seg-on" x="321.6" y="-12" width="11" height="11" rx="2" style="animation-name: in112"/><rect class="seg" x="335.6" y="-12" width="11" height="11" rx="2"/><rect class="seg-on" x="335.6" y="-12" width="11" height="11" rx="2" style="animation-name: in116"/><rect class="seg" x="349.6" y="-12" width="11" height="11" rx="2"/><rect class="seg-on" x="349.6" y="-12" width="11" height="11" rx="2" style="animation-name: in120"/><rect class="seg" x="363.6" y="-12" width="11" height="11" rx="2"/><rect class="seg-on" x="363.6" y="-12" width="11" height="11" rx="2" style="animation-name: in124"/><rect class="seg" x="377.6" y="-12" width="11" height="11" rx="2"/><rect class="seg-on" x="377.6" y="-12" width="11" height="11" rx="2" style="animation-name: in128"/></g><g style="animation-name: in132"><text x="24.0" class="ok">✓</text><text x="43.2" class="agent">implementer</text><text x="168.0">done</text></g></g>
+      <g transform="translate(0 381)"><g class="run" style="animation-name: on134-146"><g transform="translate(29.0 -5)"><circle class="spinner" r="6"/></g><text x="43.2" class="agent">tests</text><text x="168.0" class="dim">running all tests …</text></g><g style="animation-name: in146"><rect class="tint-ok" x="14" y="-17" width="560" height="23" rx="4"/><text x="24.0" class="ok">✓</text><text x="43.2" class="agent">tests</text><text x="168.0" class="ok">14 passing</text></g></g>
+      <g transform="translate(0 404)"><g class="run" style="animation-name: on148-160"><g transform="translate(29.0 -5)"><circle class="spinner" r="6"/></g><text x="43.2" class="agent">reviewer</text><text x="168.0" class="dim">reading the diff …</text></g><g style="animation-name: in160"><text x="24.0" class="ok">✓</text><text x="43.2" class="agent">reviewer</text><text x="168.0">accepted</text></g></g>
+      <g transform="translate(0 450)" style="animation-name: in166"><text x="24.0"><tspan class="b">Clear point.</tspan> Ledger updated. Type <tspan class="link">/ledger:next</tspan> to continue.</text></g>
+      <g transform="translate(0 473)" style="animation-name: in173"><text x="24.0" class="prompt">❯</text><text x="43.2" textLength="115.2" lengthAdjust="spacing">/ledger:next</text><g transform="translate(115.2 0)" style="animation-name: type179"><rect class="cover" x="43.2" y="-17" width="700" height="24"/><g class="cursor-on" style="animation-name: on173-190"><rect class="cursor" x="43.2" y="-15" width="9.6" height="19"/></g></g></g>
+      </g>
+    </g>
+    <g class="wipe" style="animation-name: wipe">
+      <rect class="cover" x="0" y="-428" width="880" height="428"/>
+      <rect class="wipe-edge" x="0" y="-3" width="880" height="3"/>
+    </g>
+  </g>
+
+  <g style="animation-name: screen2">
+    <g transform="translate(0 36)" style="animation-name: in198"><text x="24.0" class="acc">●</text><text x="43.2">Fresh session — ledger loaded, step 3 of 3</text></g>
+    <g transform="translate(0 82)"><g class="run" style="animation-name: on204-222"><g transform="translate(29.0 -5)"><circle class="spinner" r="6"/></g><text x="43.2" class="agent">implementer</text><text x="168.0" class="dim">writing step 3</text><rect class="seg" x="312.0" y="-12" width="11" height="11" rx="2"/><rect class="seg-on" x="312.0" y="-12" width="11" height="11" rx="2" style="animation-name: in207"/><rect class="seg" x="326.0" y="-12" width="11" height="11" rx="2"/><rect class="seg-on" x="326.0" y="-12" width="11" height="11" rx="2" style="animation-name: in210"/><rect class="seg" x="340.0" y="-12" width="11" height="11" rx="2"/><rect class="seg-on" x="340.0" y="-12" width="11" height="11" rx="2" style="animation-name: in213"/><rect class="seg" x="354.0" y="-12" width="11" height="11" rx="2"/><rect class="seg-on" x="354.0" y="-12" width="11" height="11" rx="2" style="animation-name: in216"/><rect class="seg" x="368.0" y="-12" width="11" height="11" rx="2"/><rect class="seg-on" x="368.0" y="-12" width="11" height="11" rx="2" style="animation-name: in219"/></g><g style="animation-name: in222"><text x="24.0" class="ok">✓</text><text x="43.2" class="agent">implementer</text><text x="168.0">done</text></g></g>
+    <g transform="translate(0 105)"><g class="run" style="animation-name: on224-233"><g transform="translate(29.0 -5)"><circle class="spinner" r="6"/></g><text x="43.2" class="agent">tests</text><text x="168.0" class="dim">running all tests …</text></g><g style="animation-name: in233"><rect class="tint-ok" x="14" y="-17" width="560" height="23" rx="4"/><text x="24.0" class="ok">✓</text><text x="43.2" class="agent">tests</text><text x="168.0" class="ok">15 passing</text></g></g>
+    <g transform="translate(0 128)"><g class="run" style="animation-name: on235-244"><g transform="translate(29.0 -5)"><circle class="spinner" r="6"/></g><text x="43.2" class="agent">reviewer</text><text x="168.0" class="dim">reading the diff …</text></g><g style="animation-name: in244"><text x="24.0" class="ok">✓</text><text x="43.2" class="agent">reviewer</text><text x="168.0">accepted</text></g></g>
+    <g transform="translate(0 174)" style="animation-name: in249"><text x="24.0" class="ok">✓</text><text x="43.2">All steps done. Commit and open a PR?</text></g>
+    <g transform="translate(0 197)" style="animation-name: in254"><text x="24.0" class="prompt">❯</text><text x="43.2" textLength="28.8" lengthAdjust="spacing">yes</text><g transform="translate(28.8 0)" style="animation-name: type261"><rect class="cover" x="43.2" y="-17" width="700" height="24"/><g class="cursor-on" style="animation-name: on254-269"><rect class="cursor" x="43.2" y="-15" width="9.6" height="19"/></g></g></g>
+    <g transform="translate(0 220)" style="animation-name: in269"><text x="24.0" class="ok">✓</text><text x="43.2" class="ok b">PR #42 opened</text></g>
+    <g transform="translate(0 243)" style="animation-name: in271"><text x="43.2" class="link">github.com/acme/app/pull/42</text></g>
+    <g transform="translate(192 210) scale(9)"><path class="sparkle" d="M0 -1 C.12 -.12 .12 -.12 1 0 C.12 .12 .12 .12 0 1 C-.12 .12 -.12 .12 -1 0 C-.12 -.12 -.12 -.12 0 -1Z" style="animation-name: pop0"/></g><g transform="translate(212 220) scale(6)"><path class="sparkle" d="M0 -1 C.12 -.12 .12 -.12 1 0 C.12 .12 .12 .12 0 1 C-.12 .12 -.12 .12 -1 0 C-.12 -.12 -.12 -.12 0 -1Z" style="animation-name: pop1"/></g><g transform="translate(210 200) scale(5)"><path class="sparkle" d="M0 -1 C.12 -.12 .12 -.12 1 0 C.12 .12 .12 .12 0 1 C-.12 .12 -.12 .12 -1 0 C-.12 -.12 -.12 -.12 0 -1Z" style="animation-name: pop2"/></g><g transform="translate(200 214)"><rect x="-4" y="-2" width="8" height="4" rx="1" class="confetti c0" style="animation-name: fly00"/></g><g transform="translate(207 214)"><circle r="2.6" class="confetti c1" style="animation-name: fly01"/></g><g transform="translate(214 214)"><rect x="-4" y="-2" width="8" height="4" rx="1" class="confetti c2" style="animation-name: fly02"/></g><g transform="translate(205 214)"><circle r="2.6" class="confetti c3" style="animation-name: fly03"/></g><g transform="translate(212 214)"><rect x="-4" y="-2" width="8" height="4" rx="1" class="confetti c4" style="animation-name: fly04"/></g><g transform="translate(203 214)"><circle r="2.6" class="confetti c0" style="animation-name: fly05"/></g><g transform="translate(210 214)"><rect x="-4" y="-2" width="8" height="4" rx="1" class="confetti c1" style="animation-name: fly06"/></g><g transform="translate(201 214)"><circle r="2.6" class="confetti c2" style="animation-name: fly07"/></g><g transform="translate(208 214)"><rect x="-4" y="-2" width="8" height="4" rx="1" class="confetti c3" style="animation-name: fly08"/></g><g transform="translate(215 214)"><circle r="2.6" class="confetti c4" style="animation-name: fly09"/></g><g transform="translate(206 214)"><rect x="-4" y="-2" width="8" height="4" rx="1" class="confetti c0" style="animation-name: fly10"/></g><g transform="translate(213 214)"><circle r="2.6" class="confetti c1" style="animation-name: fly11"/></g><g transform="translate(204 214)"><rect x="-4" y="-2" width="8" height="4" rx="1" class="confetti c2" style="animation-name: fly12"/></g><g transform="translate(211 214)"><circle r="2.6" class="confetti c3" style="animation-name: fly13"/></g>
+  </g>
+</svg>

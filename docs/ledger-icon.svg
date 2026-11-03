@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160" role="img" aria-label="ledger: a smiling notebook with a bookmark and a checklist">
+  <rect width="160" height="160" rx="36" fill="#F0A06A"/>
+  <path d="M138 22 L141 31 L150 34 L141 37 L138 46 L135 37 L126 34 L135 31 Z" fill="#FBFAF6"/>
+  <path d="M22 118 L24 123 L29 125 L24 127 L22 132 L20 127 L15 125 L20 123 Z" fill="#FBFAF6"/>
+  <polygon points="98,120 110,120 110,152 104,145 98,152" fill="#2F6BA8"/>
+  <rect x="48" y="32" width="78" height="104" rx="8" fill="#FBFAF6" stroke="#15201B" stroke-width="4"/>
+  <rect x="38" y="26" width="78" height="108" rx="10" fill="#15201B"/>
+  <rect x="50" y="26" width="4" height="108" fill="#33413A"/>
+  <rect x="60" y="40" width="46" height="44" rx="6" fill="#F5F3EC"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="3.5">
+    <path d="M65 51 L68 54 L73 48" stroke="#A94A17"/>
+    <path d="M79 51 H100" stroke="#9AA39E"/>
+    <path d="M65 63 L68 66 L73 60" stroke="#A94A17"/>
+    <path d="M79 63 H100" stroke="#9AA39E"/>
+    <circle cx="69" cy="75" r="3" stroke="#9AA39E"/>
+    <path d="M79 75 H94" stroke="#9AA39E"/>
+  </g>
+  <circle cx="69" cy="102" r="4.5" fill="#F5F3EC"/>
+  <circle cx="89" cy="102" r="4.5" fill="#F5F3EC"/>
+  <path d="M68 112 Q79 121 90 112" fill="none" stroke="#F0A06A" stroke-width="4" stroke-linecap="round"/>
+</svg>
