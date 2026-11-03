@@ -1,7 +1,7 @@
 # Examples
 
-Two longer walk-throughs of the ledger in use. The README has two short ones,
-in [Short examples](../README.md#short-examples).
+Two longer walk-throughs of the ledger in use. The usage guide has two short
+ones, in [Several tasks at once](usage.md#several-tasks-at-once).
 
 The repository is `expo/expo`, with its main checkout at `~/repos/expo/expo`.
 The tasks, commits, files and results are made up.

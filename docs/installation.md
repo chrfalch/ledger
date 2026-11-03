@@ -43,6 +43,12 @@ You choose deploy or revert, then the components, agents and models. The wizard
 shows a dry-run preview and asks you to confirm before it writes anything. Flags
 work as before and skip the wizard.
 
+Deploy also links the `ledger` command into `~/.local/bin`. If that folder is
+not on your `PATH`, deploy prints the line to add to your shell profile. After
+that, `ledger deploy` runs `bin/deploy` from any folder, and passes its options
+through. `ledger --help` lists its commands: `deploy`, and the read-only
+`/ledger` commands that `ledger` runs without a Claude Code session.
+
 | Flag | Effect |
 |---|---|
 | *(none)* | Apply everything. Codex policy too, if `~/.codex/config.toml` exists. |
