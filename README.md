@@ -1,6 +1,6 @@
 # ledger
 
-<img src="docs/ledger-icon.svg" width="96" align="right" alt="">
+<img src="docs/ledger-icon.svg" width="106" align="left" alt="">
 
 ledger cuts the cost of long Claude Code sessions. Each task keeps its goal,
 plan and next step in a small ledger file, and works in its own git worktree.
@@ -8,7 +8,7 @@ So you can clear the session often, and a fresh session continues from the
 file. Subagents do the verbose work, such as builds, code searches and
 implementation, and return short reports.
 
-<br clear="right">
+<br clear="left">
 
 <img src="docs/ledger-demo.svg" width="800" alt="A Claude Code session with ledger. You type /ledger:go offline-queue-loss. The agent moves into the task's worktree, loads the ledger and proposes a three-step plan. You type yes, and the plan goes into the ledger. Helper agents find the cause, write a test that fails, write the fix and review it. The agent stops at a clear point. You type /ledger:next, and a fresh session loads the ledger and finishes step 3. The agent asks to commit and open a pull request. You type yes, and the pull request opens.">
 
