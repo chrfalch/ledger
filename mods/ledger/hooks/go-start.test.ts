@@ -516,6 +516,20 @@ for (const via of ['typed', 'Skill'] as const) {
     await expectNothingChanged($, w)
   })
 
+  test(`/ledger:go ${via} with a task description instead of a slug points to /ledger:task, and runs nothing`, async ($, on) => {
+    const w = world(on, '/repo', {}, IDEA_REPLIES, IDEA_FILES)
+    const description = 'Add hide show button for the "Start here"-section. Default: Hidden.'
+
+    const { refusal } = await startVia(via, $, w, description)
+
+    expect(refusal).toBe(
+      `/ledger:go takes a task slug, such as fix-login, not a description. To make a new task from a description, use /ledger:task ${description} ${UNCHANGED}`,
+    )
+    expect(w.commands).toEqual([])
+    expect(w.skills).toEqual([])
+    await expectNothingChanged($, w)
+  })
+
   test(`/ledger:go ${via} names the new worktree when reading its ledger fails, and arms nothing`, async ($, on) => {
     const w = world(on, '/repo', {}, IDEA_REPLIES, { [backlogPathOf('idea')]: ledgerText('idea') })
 

@@ -381,6 +381,13 @@ export function unknownTaskMessage(target: string, tasks: TaskName[], outcome = 
 // Script errors have no final period.
 const sentence = (text: string): string => text.replace(/[.\s]*$/, '.')
 
+/** A slug never holds whitespace, so a target with whitespace before any @ is a task description. */
+export const isDescription = (target: string): boolean => /\s/.test(target.split('@')[0] ?? '')
+
+export function descriptionMessage(description: string): string {
+  return `/ledger:go takes a task slug, such as fix-login, not a description. To make a new task from a description, use /ledger:task ${sentence(description)} ${UNCHANGED}`
+}
+
 export function promoteFailedMessage(target: string, error: string): string {
   return `Could not start backlog task ${target}. ${sentence(error)} ${UNCHANGED}`
 }
