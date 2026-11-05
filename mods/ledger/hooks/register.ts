@@ -3,6 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import { allCommand } from './all-command'
 import {
   backlogUncheckedMessage,
+  descriptionMessage,
   folderSlug,
   formatAll,
   GO_FROM_SUBAGENT,
@@ -10,6 +11,7 @@ import {
   goArgs,
   goDeniedMessage,
   HELP,
+  isDescription,
   isGoArgs,
   lookupFailedMessage,
   markFailedWarning,
@@ -154,6 +156,7 @@ async function startGo($: EngineInterface, input: string): Promise<{ target: str
   let arm: GoArm | undefined
   let target = input.trim()
   if (target === '') return { text: GO_USAGE }
+  if (isDescription(target)) return { text: descriptionMessage(target) }
   if (goStarting !== undefined) return { text: oneSwitchPerTurnMessage({ mode: 'go', slug: goStarting }, target) }
   goStarting = target
   try {
