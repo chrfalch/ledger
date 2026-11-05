@@ -302,15 +302,18 @@ export type GoFields = {
   /** The ledger in which /ledger:go marked the task started. */
   marked?: string
   warnings?: string[]
+  /** No task has the slug yet: go.md creates it. */
+  isNew?: true
 }
 
 // One field per line, because a slug and a path can both hold spaces. go.md reads this format.
 export function goArgs(
   target: string,
   ledgerPath: string | undefined,
-  { parked, family = {}, promotedWorktree, picked, marked, warnings = [] }: GoFields = {},
+  { parked, family = {}, promotedWorktree, picked, marked, warnings = [], isNew }: GoFields = {},
 ): string {
   const fields = [`task: ${target}`, `ledger: ${ledgerPath ?? 'none'}`]
+  if (isNew) fields.push('new: yes')
   if (parked) fields.push(`parked: ${parked.date} — ${parked.reason}`)
   if (family.parent) fields.push(`parent: ${family.parent}`)
   if (family.children?.length) fields.push(`children: ${statusList(family.children)}`)
@@ -383,6 +386,12 @@ const sentence = (text: string): string => text.replace(/[.\s]*$/, '.')
 
 /** A slug never holds whitespace, so a target with whitespace before any @ is a task description. */
 export const isDescription = (target: string): boolean => /\s/.test(target.split('@')[0] ?? '')
+
+/** A slug cc-task-new accepts for a new task. */
+export const isNewSlug = (target: string): boolean => /^[a-z0-9][a-z0-9-]*$/.test(target)
+
+export const notCreatedMessage = (slug: string): string =>
+  `/ledger:go did not create task ${slug}, so the session was not cleared. Run /ledger:task, or /ledger:go ${slug} again.`
 
 export function descriptionMessage(description: string): string {
   return `/ledger:go takes a task slug, such as fix-login, not a description. To make a new task from a description, use /ledger:task ${sentence(description)} ${UNCHANGED}`
@@ -465,7 +474,7 @@ export const HELP = [
   "- `/ledger:update` — Write the latest results to this task's ledger. Without one, it points to `/ledger:task`.",
   "- `/ledger:next` — Write this task's ledger, clear the session, and continue from the next step. When every step is done, it first says how to retire the task. For a child task, it also names the next child task of its parent that has not started.",
   "- `/ledger:close` — Write this task's ledger, then clear the session.",
-  "- `/ledger:go <slug>` — Write this task's ledger, clear the session, and continue in the task named <slug>. A backlog task first gets its branch and worktree, which works only from a session in its repository. A child task is marked started in its parent ledger. A parent task starts its first child task not yet started instead; a parent task in the backlog with none left stays there. A child task in another repository gets its worktree there, and the session stays here. When every step of this task is done, it first says how to retire it.",
+  "- `/ledger:go <slug>` — Write this task's ledger, clear the session, and continue in the task named <slug>. When no task has that name, the agent first makes it, with a goal written from the conversation. A backlog task first gets its branch and worktree, which works only from a session in its repository. A child task is marked started in its parent ledger. A parent task starts its first child task not yet started instead; a parent task in the backlog with none left stays there. A child task in another repository gets its worktree there, and the session stays here. When every step of this task is done, it first says how to retire it.",
   "- `/ledger:park [<slug>] <reason>` — Mark a task parked. Without a slug it writes this task's ledger, parks it, then clears the session.",
   "- `/ledger:parent [<slug>]` — Show a parent task and each child's status and next step; without a slug, this task or its parent. `<slug> add <child>` and `<slug> remove <child>` change its children. `<slug>@<path>` names a task in the repository that holds <path>.",
   "- `/ledger:worktrees` — Show each linked git worktree's size, last commit, dirty files, ledger and PR.",
