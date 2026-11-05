@@ -1,7 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import { backlogUncheckedMessage, folderSlug, severalLedgersMessage, sharedSlugMessage, summarize, taskName, unknownTaskMessage } from './ledger'
-import { findBacklogLedgers, findLedgers, readBranch, run, sessionFolder, sessionLedger, titleSlug, type SessionFolder } from './lookup'
+import { findBacklogLedgers, findLedgers, readBranch, RETIRE_TIMEOUT_MS, run, sessionFolder, sessionLedger, titleSlug, type SessionFolder } from './lookup'
 import { scriptPath } from './registry'
 import {
   dirname,
@@ -136,7 +136,7 @@ async function retireBacklogLedger(
   cwd: string,
 ): Promise<string> {
   if (dryRun) return formatBacklogPlan(slug, ledgerPath, new Date(), await activeChildrenOf($, ledgerPath))
-  const { stdout, failure } = await run($, ['bash', scriptPath($, 'cc-worktree-retire'), ledgerPath, ...(forced ? ['--force'] : [])], cwd)
+  const { stdout, failure } = await run($, ['bash', scriptPath($, 'cc-worktree-retire'), ledgerPath, ...(forced ? ['--force'] : [])], cwd, RETIRE_TIMEOUT_MS)
   return failure === undefined ? formatRetired(slug, stdout, false) : formatRetireFailed(failure, stdout)
 }
 
@@ -159,7 +159,7 @@ export async function retireLedger(
   // From the main checkout, because the worktree is gone once the script returns.
   const deletesBranch = isBranchMerged(state)
   const flags = [...(deletesBranch ? ['--delete-branch', state.head] : []), ...(forced ? ['--force'] : [])]
-  const { stdout, failure } = await run($, ['bash', scriptPath($, 'cc-worktree-retire'), state.path, ...flags], state.mainCheckout)
+  const { stdout, failure } = await run($, ['bash', scriptPath($, 'cc-worktree-retire'), state.path, ...flags], state.mainCheckout, RETIRE_TIMEOUT_MS)
   if (failure !== undefined) return formatRetireFailed(failure, stdout)
   const kept = deletesBranch || state.branch === '' ? undefined : { branch: state.branch, reason: keptBranchReason(state) }
   // The session's own folder, not sessionFolder's fallback: the question is whether this retire removed it.

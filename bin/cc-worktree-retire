@@ -1,10 +1,11 @@
 #!/bin/bash
-# Archives a worktree's task ledger, removes the worktree, then deletes its cc-dd-path build folders.
+# Archives a worktree's task ledger, removes the worktree, then deletes its cc-dd-path build folders
+# in the background.
 # A non-empty .claude/evidence/ folder is archived first, next to the ledger copy and named after it,
 # or <date>-<slug> when there is no ledger.
-# --delete-branch <sha> then deletes the worktree's local branch, but only while it still points at
-# <sha>. The caller decides whether that commit is merged: a squash-merged branch never looks merged
-# to git. A branch that moved since is kept, and retiring still succeeds.
+# --delete-branch <sha> deletes the worktree's local branch before the build folders, but only while it
+# still points at <sha>. The caller decides whether that commit is merged: a squash-merged branch never
+# looks merged to git. A branch that moved since is kept, and retiring still succeeds.
 # Given a backlog ledger, ~/.claude/ledger-backlog/<repo>/<slug>.md, it archives the ledger and deletes
 # it: a backlog task has no worktree, branch or build folders.
 # A parent ledger with children not yet retired needs --force. A child in another repository counts
@@ -278,15 +279,6 @@ if [ -n "$dest" ]; then
   "$(dirname "$self")/cc-ledgers" archive "$ledger" "$dest" || echo "warning: registry not updated" >&2
 fi
 
-if [ -n "$prefix" ]; then
-  for build in "$prefix"*; do
-    if [ -d "$build" ]; then
-      rm -rf "$build"
-      echo "deleted  $build"
-    fi
-  done
-fi
-
 if [ -n "$delete_sha" ]; then
   if [ -z "$branch" ]; then
     echo "no branch to delete: HEAD was detached"
@@ -298,6 +290,25 @@ if [ -n "$delete_sha" ]; then
     echo "kept     branch $branch, because it moved after retire checked it"
   else
     echo "kept     branch $branch, because git could not delete it: $error"
+  fi
+fi
+
+if [ -n "$prefix" ]; then
+  # A build folder can hold many GB, too slow to delete before the caller's time limit. Moving it is instant; the
+  # trash is deleted after this script exits. Its leading dot keeps it out of the "$prefix"* glob and cc-dd-path,
+  # and with no info.plist at its top level /ledger:worktrees never counts it as an orphan to delete.
+  trash=""
+  for build in "$prefix"*; do
+    [ -d "$build" ] || continue
+    [ -n "$trash" ] || trash=$(mktemp -d "${prefix%/*}/.cc-trash-XXXXXX" 2>/dev/null) || trash=""
+    if [ -z "$trash" ] || ! mv "$build" "$trash/" 2>/dev/null; then
+      rm -rf "$build"
+    fi
+    echo "deleted  $build"
+  done
+  if [ -n "$trash" ]; then
+    # Its own process group and no inherited output, so a caller that reads to EOF or kills the group is not held.
+    (set -m; nohup rm -rf "$trash" </dev/null >/dev/null 2>&1 &)
   fi
 fi
 

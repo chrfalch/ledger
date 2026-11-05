@@ -774,3 +774,23 @@ only after the done-file exists.
 work had no wrapper. `codex-runner` runs them with `codex exec -s read-only`
 and relays the answer. It never writes code, edits, reviews or gives verdicts,
 and it takes no untrusted input.
+
+## 2026-11-05 — Retire gets ten minutes and deletes build folders in the background
+
+**The retire script may run for ten minutes.** The ledger mod ran
+`cc-worktree-retire` with the default limit of 30 seconds. In a big repository
+the script ran longer, and the mod stopped it after `git worktree remove`. The
+branch and a 14 GB build folder were not deleted. A second retire cannot finish
+them, because the worktree is gone. Ten minutes is the longest limit
+`$.process.run` allows.
+
+**Build folders are deleted in the background, after the branch.** Deleting a
+big build folder is the slowest step. The script now moves each build folder
+into one `.cc-trash-*` folder in DerivedData, which takes no time. A separate
+process then deletes that folder, and the script does not wait for it. The
+leading dot keeps the trash folder away from the build folder names that
+`cc-dd-path` and retire use. It has no `info.plist` at its top level, so
+`/ledger:worktrees prune-orphans` never counts it as an orphan. When the move
+fails, the script deletes the build folder at once, as before. The branch is
+now deleted before the build folders, so it is gone even if the script is
+stopped during a slow delete.

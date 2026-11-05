@@ -13,7 +13,7 @@ const exit = (exitCode: number, stdout: string, stderr: string): Reply => ({
 })
 
 type Replies = Record<string, Reply>
-type Call = { argv: string[]; cwd?: string }
+type Call = { argv: string[]; cwd?: string; timeoutMs?: number }
 
 // A script is keyed by its folder and name, because the plugin root differs from machine to machine.
 const script = (file: string): string => file.split('/').slice(-2).join('/')
@@ -81,8 +81,8 @@ function world(
     ...extra,
   }
   on('session.cwd', async () => ({ value: cwd }))
-  on('process.run', async (_, e: { argv: string[]; init?: { cwd?: string } }) => {
-    calls.push({ argv: e.argv, cwd: e.init?.cwd })
+  on('process.run', async (_, e: { argv: string[]; init?: { cwd?: string; timeoutMs?: number } }) => {
+    calls.push({ argv: e.argv, cwd: e.init?.cwd, timeoutMs: e.init?.timeoutMs })
     return known[argvKey(e.argv)] ?? { deny: `unexpected command: ${JSON.stringify(e.argv)}` }
   })
   on('fs.stat', async (_, e) =>
@@ -264,6 +264,12 @@ test('/ledger:retire on a clean, merged worktree runs the script from the main c
   expect(script?.argv.slice(2)).toEqual([FIX_LOGIN, '--delete-branch', HEAD])
   expect(script?.argv[1]?.endsWith('/../../bin/cc-worktree-retire')).toBe(true)
   expect(script?.cwd).toBe(REPO)
+})
+
+test('/ledger:retire gives the script ten minutes, because deleting a big worktree takes longer than the default limit', async ($, on) => {
+  const calls = world(on, { cwd: REPO })
+  await $.command.run({ command: 'ledger:retire', args: 'fast-steps' })
+  expect(ranScript(calls).map(({ timeoutMs }) => timeoutMs)).toEqual([600_000])
 })
 
 test('/ledger:retire --yes retires the same way as no flag', async ($, on) => {
@@ -473,6 +479,7 @@ test('/ledger:retire <slug> of a backlog task runs the script on its ledger and 
   const calls = backlogWorld(on)
   const { text } = await $.command.run({ command: 'ledger:retire', args: 'idea' })
   expect(ranScript(calls).map(({ argv }) => argv.slice(2))).toEqual([[IDEA]])
+  expect(ranScript(calls).map(({ timeoutMs }) => timeoutMs)).toEqual([600_000])
   expect(text).toBe(['**Retired idea**', '- archived /home/.claude/ledger-archive/repo/2026-10-21-idea.md', `- removed  ${IDEA}`].join('\n'))
 })
 
