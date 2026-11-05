@@ -51,6 +51,51 @@ test('retire deletes the worktree build folders and keeps the others', (t) => {
   assert.equal(result.stdout.match(/^deleted {2}/gm)?.length, own.length, result.stdout);
 });
 
+// An rm that takes 3 s on anything in DerivedData, so a foreground delete makes retire itself take 3 s.
+function slowRmPath(home: string): string {
+  const bin = path.join(home, 'slow-bin');
+  mkdirSync(bin);
+  writeFileSync(
+    path.join(bin, 'rm'),
+    '#!/bin/bash\ncase "$*" in *Library/Developer/Xcode/DerivedData/*) sleep 8 ;; esac\nexec /bin/rm "$@"\n',
+  );
+  chmodSync(path.join(bin, 'rm'), 0o755);
+  return `${bin}:${process.env.PATH ?? ''}`;
+}
+
+test('retire returns before the build folders are gone, and they are deleted in the background', async (t) => {
+  const { home, worktree, own, unrelated } = worktreeWithBuildFolders(t, ['Debug-sim', 'Debug-device']);
+  const derivedData = path.dirname(own[0]);
+  const started = Date.now();
+  const result = run(home, ['env', `PATH=${slowRmPath(home)}`, retire[0]], worktree);
+  const elapsed = Date.now() - started;
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(elapsed < 2500, `retire took ${elapsed} ms`);
+  for (const folder of own) {
+    assert.equal(existsSync(folder), false, folder);
+    assert.ok(result.stdout.includes(`deleted  ${folder}\n`), result.stdout);
+  }
+  const names = () => readdirSync(derivedData).sort();
+  const visible = names().filter((name) => !name.startsWith('.'));
+  assert.deepEqual(visible, unrelated.map((folder) => path.basename(folder)).sort());
+  assert.ok(names().length > visible.length, 'the build folders wait in a trash folder');
+  for (let waited = 0; names().length > visible.length && waited < 20_000; waited += 100) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.deepEqual(names(), visible);
+});
+
+test('retire --delete-branch <sha> deletes the branch before the build folders', (t) => {
+  const { home, worktree, own } = worktreeWithBuildFolders(t, ['Debug-sim']);
+  const result = run(home, retire, worktree, '--delete-branch', headOf(home, worktree));
+  assert.equal(result.status, 0, result.stderr);
+  const lines = result.stdout.split('\n');
+  const branchLine = lines.indexOf('deleted  branch test/wt-a');
+  const buildLine = lines.indexOf(`deleted  ${own[0]}`);
+  assert.ok(branchLine >= 0 && buildLine >= 0, result.stdout);
+  assert.ok(branchLine < buildLine, result.stdout);
+});
+
 test('retire without build folders prints no deleted line', (t) => {
   const { home, worktree } = worktreeWithBuildFolders(t, []);
   const result = run(home, retire, worktree);
@@ -179,7 +224,7 @@ for (const order of ['before', 'after'] as const) {
     assert.equal(result.status, 0, result.stderr);
     assert.equal(existsSync(worktree), false);
     assert.equal(hasBranch(home, mainOf(home), 'test/wt-a'), false);
-    assert.match(result.stdout, /\ndeleted  branch test\/wt-a\n$/);
+    assert.match(result.stdout, /\ndeleted  branch test\/wt-a\n/);
   });
 }
 

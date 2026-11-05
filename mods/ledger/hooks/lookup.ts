@@ -12,9 +12,15 @@ export const message = (error: unknown) => (error instanceof Error ? error.messa
 
 export type Ran = { stdout: string; stderr: string; failure?: string; exitCode?: number }
 
-export async function run($: EngineInterface, argv: string[], cwd: string): Promise<Ran> {
+/**
+ * The longest `$.process.run` allows. Retiring a big worktree outlasts the default 30 s, and a kill after the worktree
+ * is removed skips steps that a rerun cannot redo.
+ */
+export const RETIRE_TIMEOUT_MS = 600_000
+
+export async function run($: EngineInterface, argv: string[], cwd: string, timeoutMs?: number): Promise<Ran> {
   try {
-    const { exitCode, stdout, stderr } = await $.process.run(argv, { cwd })
+    const { exitCode, stdout, stderr } = await $.process.run(argv, { cwd, timeoutMs })
     return exitCode === 0 ? { stdout, stderr } : { stdout, stderr, exitCode, failure: `failed (exit ${exitCode}): ${stderr.trim()}` }
   } catch (error) {
     return { stdout: '', stderr: '', failure: `did not run: ${message(error)}` }
