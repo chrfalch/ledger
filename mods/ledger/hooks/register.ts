@@ -13,11 +13,13 @@ import {
   HELP,
   isDescription,
   isGoArgs,
+  isNewSlug,
   lookupFailedMessage,
   markFailedWarning,
   nextChildHint,
   noChildToStartMessage,
   noLedgerMessage,
+  notCreatedMessage,
   oneSwitchPerTurnMessage,
   otherRepositoryMessage,
   PARK_USAGE,
@@ -68,7 +70,7 @@ import { worktreesCommand } from './worktrees-command'
 
 const armed = { plugin: 'ledger', key: 'armed' } as const
 
-type GoArm = { mode: 'go'; slug: string; ledger?: string }
+type GoArm = { mode: 'go'; slug: string; ledger?: string; isNew?: true }
 
 /**
  * The task a /ledger:go call is starting, from its armed check until it armed the switch or gave up. It is set before the
@@ -79,13 +81,17 @@ let goStarting: string | undefined
 
 const uniqueByPath = (ledgers: Found[]): Found[] => ledgers.filter((ledger, index) => ledgers.findIndex(({ path }) => path === ledger.path) === index)
 
-/** A task's ledger in a worktree, or the registry's backlog entries for it, none when the registry missed it. */
-type Place = { ledger: string } | { backlog: Entry[]; isUnregistered: boolean }
+/**
+ * A task's ledger in a worktree, or the registry's backlog entries for it, none when the registry missed it.
+ * `namesWorktree` means the slug is the folder or branch of another worktree, where cc-task-new cannot make a new one.
+ */
+type Place = { ledger: string } | { backlog: Entry[]; isUnregistered: boolean; namesWorktree: boolean }
 
 /** Where the task `target` is. The text says why it cannot be started: no ledger, or several, has that slug. */
 async function placeOf($: EngineInterface, target: string, found: Found[], tasks: LedgerSummary[], cwd: string): Promise<Place | { text: string }> {
   const local = found.filter((_, index) => tasks[index]?.slug === target)
-  const matches = uniqueByPath([...local, ...(await lookUpOtherWorktrees($, target, cwd)).ledgers])
+  const elsewhere = await lookUpOtherWorktrees($, target, cwd)
+  const matches = uniqueByPath([...local, ...elsewhere.ledgers])
   const [match] = matches
   const registered = match === undefined ? await registeredTasks($, target) : []
   if ('error' in registered) return { text: backlogUncheckedMessage(target, tasks, registered.error) }
@@ -94,7 +100,7 @@ async function placeOf($: EngineInterface, target: string, found: Found[], tasks
   const isUnregistered = match === undefined && registered.length === 0
   if (match === undefined && backlog.length === 0 && !isUnregistered) return { text: unknownTaskMessage(target, tasks) }
   if (matches.length > 1) return { text: sharedSlugMessage(target, matches.map(ledger => ledger.path)) }
-  return match ? { ledger: match.path } : { backlog, isUnregistered }
+  return match ? { ledger: match.path } : { backlog, isUnregistered, namesWorktree: elsewhere.worktree !== undefined }
 }
 
 /**
@@ -112,6 +118,26 @@ async function hasChildren($: EngineInterface, slug: string, place: Place, main:
   if (!path) return false
   const text = await $.fs.read(path).catch(() => '')
   return summarize(text, '', 0).children !== undefined
+}
+
+/** Whether a worktree or backlog ledger has `slug`, found the way /ledger:go finds them. A failed lookup counts as none. */
+async function hasLedger($: EngineInterface, slug: string): Promise<boolean> {
+  try {
+    const found = await findLedgers($)
+    if ('error' in found) return false
+    const tasks = await Promise.all(found.map(async ledger => summarize(await $.fs.read(ledger.path), folderSlug(ledger.path), 0)))
+    const { path: cwd } = await sessionFolder($)
+    const place = await placeOf($, slug, found, tasks, cwd)
+    if ('text' in place) return false
+    if ('ledger' in place || place.backlog.length > 0) return true
+    const main = await mainCheckout($, cwd)
+    const backlog = main && (await backlogLedgerPath($, main, slug))
+    if (!backlog) return false
+    await $.fs.read(backlog)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -204,12 +230,19 @@ async function startGo($: EngineInterface, input: string): Promise<{ target: str
       }
     }
 
+    const current = active.kind === 'one' ? active.path : undefined
     let ledger: string
     if ('ledger' in place) ledger = place.ledger
     else {
       const promoted = await promoteBacklogTask($, target, cwd)
       if ('error' in promoted) {
-        return { text: place.isUnregistered && promoted.isMissing ? unknownTaskMessage(target, tasks) : promoteFailedMessage(target, promoted.error) }
+        if (!(place.isUnregistered && promoted.isMissing)) return { text: promoteFailedMessage(target, promoted.error) }
+        // A picked child task is named by its parent ledger, so its missing ledger is an error, not a request for a new task.
+        if (picked || place.namesWorktree || !isNewSlug(target)) return { text: unknownTaskMessage(target, tasks) }
+        arm = { mode: 'go', slug: target, isNew: true, ...(current && { ledger: current }) }
+        await $.state.set(armed, arm)
+        const fields: GoFields = { isNew: true }
+        return { target, fields, args: goArgs(target, current, fields), arm }
       }
       ledger = promoted.ledger
       promotedWorktree = worktreeOf(ledger)
@@ -224,7 +257,6 @@ async function startGo($: EngineInterface, input: string): Promise<{ target: str
         return { text: promotedWorktree === undefined ? unparkFailedMessage(target, message(error)) : promotedThenFailedMessage(target, promotedWorktree, reason) }
       }
     }
-    const current = active.kind === 'one' ? active.path : undefined
     const task = tasks.find(({ slug }) => slug === target) ?? summarize(text, target, 0)
     let marked: string | undefined
     if (task.parent) {
@@ -421,6 +453,11 @@ export const register: Register = on => {
     if (!value) return next(e)
     await $.state.set(armed, null)
     if (e.reason !== 'answer') return next(e)
+    // go.md creates the task only when the conversation shows what it is; without a ledger, `go <slug>` would find nothing.
+    if (value.mode === 'go' && value.isNew && !(await hasLedger($, value.slug))) {
+      $.ui.log(notCreatedMessage(value.slug))
+      return next(e)
+    }
     // After the model's turn, so its own edits to the ledger cannot move or drop the marker.
     if (value.mode === 'park') {
       try {

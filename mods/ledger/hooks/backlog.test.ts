@@ -348,18 +348,18 @@ test('/ledger:go with no registry entry for the slug still promotes a backlog le
   expect(w.markdownArgs()).toBe(`task: new-idea\nledger: none\npromoted: ${WORKTREES}/new-idea`)
 })
 
-test('/ledger:go with no registry entry and no backlog ledger keeps the unknown-task reply', async ($, on) => {
+test('/ledger:go with no registry entry and no backlog ledger asks go.md to create the task', async ($, on) => {
   const w = world(on, '/repo', [FIX_LOGIN], {
     [REGISTRY]: registry(),
     [COMMON_DIR]: exit(0, '/repo/.git\n'),
     [PROMOTE('new-idea')]: exit(2, '', 'no backlog task new-idea\n'),
   })
 
-  const { text } = await $.command.run({ command: 'ledger:go', args: 'new-idea' })
+  await $.command.run({ command: 'ledger:go', args: 'new-idea' })
 
-  expect(text).toBe(`No task ledger is named "new-idea". ${UNCHANGED} Task ledgers: fast-steps.`)
   expect(w.commands.map(call => call.key)).toContain(PROMOTE('new-idea'))
-  await expectNothingChanged($, w)
+  expect(w.markdownArgs()).toBe('task: new-idea\nledger: none\nnew: yes')
+  expect(w.armed).toEqual([{ mode: 'go', slug: 'new-idea', isNew: true }])
 })
 
 test('/ledger:go with no registry entry passes on the refusal for a backlog ledger of another repo', async ($, on) => {

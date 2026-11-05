@@ -572,6 +572,105 @@ for (const via of ['typed', 'Skill'] as const) {
   })
 }
 
+const NO_TASK_REPLIES = { [REGISTRY]: registry(), [COMMON_DIR]: exit(0, '/repo/.git\n'), [PROMOTE('new-idea')]: exit(2, '', 'no backlog task new-idea\n') }
+
+for (const via of ['typed', 'Skill'] as const) {
+  test(`/ledger:go ${via} to a slug no task has asks go.md to create the task, and arms a new-task switch`, async ($, on) => {
+    const w = world(on, `${WORKTREES}/solo`, { [pathOf('solo')]: ledgerText('solo') }, NO_TASK_REPLIES)
+
+    expect(await startVia(via, $, w, 'new-idea')).toEqual({ args: `task: new-idea\nledger: ${pathOf('solo')}\nnew: yes` })
+    expect(keys(w.commands)).toEqual([REGISTRY, COMMON_DIR, PROMOTE('new-idea')])
+    expect(w.writes).toEqual([])
+    expect(w.armed).toEqual([{ mode: 'go', slug: 'new-idea', isNew: true, ledger: pathOf('solo') }])
+  })
+}
+
+test('/ledger:go to a slug no task has, from a session without a ledger, passes ledger: none', async ($, on) => {
+  const w = world(on, '/repo', {}, NO_TASK_REPLIES)
+
+  await $.command.run({ command: 'ledger:go', args: 'new-idea' })
+
+  expect(w.markdownArgs()).toBe('task: new-idea\nledger: none\nnew: yes')
+  expect(w.armed).toEqual([{ mode: 'go', slug: 'new-idea', isNew: true }])
+})
+
+test('/ledger:go to a slug the registry knows outside the backlog still refuses', async ($, on) => {
+  const w = world(on, '/repo', {}, { [REGISTRY]: registry(backlogEntry('old-idea', { status: 'archived' })) })
+
+  const { text } = await $.command.run({ command: 'ledger:go', args: 'old-idea' })
+
+  expect(text).toBe(`No task ledger is named "old-idea". ${UNCHANGED} Task ledgers: none.`)
+  await expectNothingChanged($, w)
+})
+
+test('/ledger:go to an unknown word that is not a slug cc-task-new accepts still refuses', async ($, on) => {
+  const w = world(on, '/repo', {}, { [REGISTRY]: registry(), [COMMON_DIR]: exit(0, '/repo/.git\n'), [PROMOTE('New_Idea')]: exit(2, '', 'no backlog task New_Idea\n') })
+
+  const { text } = await $.command.run({ command: 'ledger:go', args: 'New_Idea' })
+
+  expect(text).toBe(`No task ledger is named "New_Idea". ${UNCHANGED} Task ledgers: none.`)
+  await expectNothingChanged($, w)
+})
+
+test('/ledger:go <parent> whose picked child has no ledger anywhere still refuses, and creates no task', async ($, on) => {
+  const w = world(
+    on,
+    `${WORKTREES}/epic`,
+    { [pathOf('epic')]: ledgerText('epic', { children: '- kid' }) },
+    {
+      [NEXT('epic')]: exit(0, 'epic kid\n'),
+      [REGISTRY]: registry(),
+      [COMMON_DIR]: exit(0, '/repo/.git\n'),
+      [PROMOTE('kid')]: exit(2, '', 'no backlog task kid\n'),
+    },
+  )
+
+  const { text } = await $.command.run({ command: 'ledger:go', args: 'epic' })
+
+  expect(text).toBe(`No task ledger is named "kid". ${UNCHANGED} Task ledgers: epic.`)
+  await expectNothingChanged($, w)
+})
+
+const NOT_CREATED = '/ledger:go did not create task new-idea, so the session was not cleared. Run /ledger:task, or /ledger:go new-idea again.'
+
+test('the turn after /ledger:go to a new task does not clear when no ledger has that slug yet', async ($, on) => {
+  mock.env(on, { HOME: '/home' })
+  const w = world(on, '/repo', {}, NO_TASK_REPLIES)
+  await $.command.run({ command: 'ledger:go', args: 'new-idea' })
+
+  await $.turn.complete(turnEnd)
+
+  expect(w.calls).toEqual([`log: ${NOT_CREATED}`])
+})
+
+test('the turn after /ledger:go to a new task does not clear when the ledger lookup fails', async ($, on) => {
+  const replies: Record<string, Reply> = { ...NO_TASK_REPLIES }
+  const w = world(on, '/repo', {}, replies)
+  await $.command.run({ command: 'ledger:go', args: 'new-idea' })
+  replies[REGISTRY] = exit(1, '', 'cannot read /home/.claude/ledgers.json\n')
+
+  await $.turn.complete(turnEnd)
+
+  expect(w.calls).toEqual([`log: ${NOT_CREATED}`])
+})
+
+test('the turn after /ledger:go to a new task clears and continues once its worktree ledger exists', async ($, on) => {
+  const listed: Record<string, string> = {}
+  const w = world(on, '/repo', listed, NO_TASK_REPLIES, { [pathOf('new-idea')]: ledgerText('new-idea') })
+  await $.command.run({ command: 'ledger:go', args: 'new-idea' })
+  listed[pathOf('new-idea')] = ledgerText('new-idea')
+
+  await expectGoTo($, w, 'new-idea')
+})
+
+test('the turn after /ledger:go to a new task clears and continues once its backlog ledger exists', async ($, on) => {
+  mock.env(on, { HOME: '/home' })
+  const w = world(on, '/repo', {}, NO_TASK_REPLIES, { [backlogPathOf('new-idea')]: ledgerText('new-idea') })
+  await $.command.run({ command: 'ledger:go', args: 'new-idea' })
+
+  await expectGoTo($, w, 'new-idea')
+})
+
 /** Starts /ledger:go without waiting for it. It answers with its refusal or denial, or with undefined when it started. */
 function goStarted(via: Via, $: EngineInterface, args: string): Promise<string | undefined> {
   if (via === 'typed') return $.command.run({ command: 'ledger:go', args }).then(({ text }) => text || undefined)
@@ -694,6 +793,30 @@ test('a Skill call of ledger:go that the person rejects after the hook ran disar
   expect(ran.text).toBe(message)
   await $.turn.complete(turnEnd)
   expect(w.calls).toEqual([`log: ${message}`])
+})
+
+test('a Skill call of ledger:go to a new task that is denied disarms the switch, and passes the denial on unchanged', async ($, on) => {
+  const w = world(on, '/repo', {}, NO_TASK_REPLIES)
+  w.denySkill('The user rejected this skill.')
+
+  const ran = await $.tool.call({ tool: 'Skill', skill: 'ledger:go', args: 'new-idea' })
+
+  expect(ran.deny).toBe('The user rejected this skill.')
+  expect(w.armed).toEqual([{ mode: 'go', slug: 'new-idea', isNew: true }])
+  await $.turn.complete(turnEnd)
+  expect(w.calls).toEqual([])
+})
+
+test('a Skill call of ledger:go to a new task that the person rejects disarms the switch', async ($, on) => {
+  const w = world(on, '/repo', {}, NO_TASK_REPLIES)
+  w.rejectSkill("The user doesn't want to proceed with this tool use.")
+
+  const ran = await $.tool.call({ tool: 'Skill', skill: 'ledger:go', args: 'new-idea' })
+
+  expect(ran.isError).toBe(true)
+  expect(w.armed).toEqual([{ mode: 'go', slug: 'new-idea', isNew: true }])
+  await $.turn.complete(turnEnd)
+  expect(w.calls).toEqual([])
 })
 
 test('a Skill call of ledger:go that the person rejects before it changed anything passes the rejection on unchanged', async ($, on) => {
