@@ -444,6 +444,18 @@ this hook. `ledger-list.sh prompt-submit` acts on a prompt that is exactly
 empty, or when it is the slug of an active or archived ledger. Any other
 title was given by the operator.
 
+**Since 2026-11-07, the ledger mod also runs `/rename`.** In VS Code, a title
+from a hook changes only the local title. The Claude app (Remote Control)
+keeps the old one. `/rename` reaches both. At the end of each turn, the mod
+runs `/rename <slug>` when the session's task differs from the task it last
+named. A task change replaces a title from the operator's `/rename`. While
+the task stays the same, the operator's title stays. The turn that clears
+the session does not rename; the turn of `go <slug>` does.
+The mod keeps the last named task in `$.state`, which lasts only as long as
+the host session. After a resume, the first turn renames once, even when the
+operator named the session for the same task. A rename that fails is tried
+again at the next turn end, with no message.
+
 ## 2026-10-20 — The ledger stays out of the main checkout; resume goes through `/ledger:next`
 
 **This replaces two points of the 2026-09-17 ledger entry.** That entry put
