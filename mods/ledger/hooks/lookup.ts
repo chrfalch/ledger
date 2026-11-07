@@ -197,6 +197,17 @@ async function ledgerIn($: EngineInterface, worktree: string): Promise<Found | u
   return stat?.kind === 'file' ? { path, slug: folderSlug(path), mtimeMs: stat.mtimeMs } : undefined
 }
 
+export type WorktreeTask = { path: string; slug: string }
+
+/** The ledger of each linked worktree other than the one holding `cwd`, with its task's slug. A ledger that cannot be read is skipped. */
+export async function otherWorktreeTasks($: EngineInterface, cwd: string): Promise<WorktreeTask[]> {
+  const ledgers = await Promise.all((await otherWorktrees($, cwd)).map(({ path }) => ledgerIn($, path)))
+  const tasks = await Promise.all(
+    ledgers.filter(ledger => ledger !== undefined).map(({ path }) => titleSlug($, path).then(slug => ({ path, slug }), () => undefined)),
+  )
+  return tasks.filter(task => task !== undefined)
+}
+
 const namesWorktree = ({ path, branch }: Worktree, word: string): boolean => [basename(path), branch, branch.split('/').at(-1)].includes(word)
 
 /** A worktree named by its folder or branch; `slug` is its task's, absent when it has no ledger. */

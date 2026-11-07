@@ -165,7 +165,7 @@ test('/ledger:retire <slug> --dry-run shows the plan for that task and runs only
   expect(lines[4]).toMatch(/^- archive: ~\/\.claude\/ledger-archive\/repo\/\d{4}-\d{2}-\d{2}-new-api\.md$/)
   expect(lines.at(-1)).toBe('Run `/ledger:retire new-api` to retire it.')
   expect(ranScript(calls)).toEqual([])
-  expect(calls.filter(({ argv }) => argv[0] === 'git').every(({ cwd }) => cwd === NEW_API)).toBe(true)
+  expect(calls.filter(({ argv }) => argv[0] === 'git' && !(argv[1] === 'worktree' && argv[2] === 'list')).every(({ cwd }) => cwd === NEW_API)).toBe(true)
 })
 
 test('/ledger:retire <slug> --dry-run lists the evidence folder it would archive, and copies nothing', async ($, on) => {
@@ -535,7 +535,7 @@ test('/ledger:retire <slug> --dry-run of a backlog task shows what it archives, 
       'Run `/ledger:retire idea` to retire it.',
     ].join('\n'),
   )
-  expect(calls.map(({ argv }) => argv[0])).toEqual(['bash', 'bash'])
+  expect(calls.map(({ argv }) => argv[0])).toEqual(['bash', 'git', 'bash'])
 })
 
 test('/ledger:retire <slug> of a backlog task runs the script on its ledger and reports what it did', async ($, on) => {
@@ -610,6 +610,59 @@ test('/ledger:retire with an unknown slug says when the backlog could not be che
   expect(text).toStartWith('No task ledger is named "nope". Nothing was retired. Task ledgers: fast-steps, new-api.')
   expect(text).toContain('The backlog could not be checked: ')
   expect(text).toEndWith('boom.')
+})
+
+const worktreeBlock = (path: string, branch: string): string => `worktree ${path}\0HEAD c0ffee1\0branch refs/heads/${branch}\0\0`
+const WORKTREE_LIST = replies([
+  ['git', 'worktree', 'list', '--porcelain', '-z'],
+  ok([worktreeBlock(REPO, 'main'), worktreeBlock(FIX_LOGIN, 'me/fix-login'), worktreeBlock(NEW_API, 'me/new-api')].join('')),
+])
+
+// As seen from a linked worktree: discovery lists only its own ledger, while git lists every worktree.
+const fromLinked = (extra: Replies = {}): Setup => ({ cwd: `${FIX_LOGIN}/src`, ledgers: [ledgerOf(FIX_LOGIN)], replies: { ...WORKTREE_LIST, ...extra } })
+
+test('/ledger:retire <slug> from a linked worktree retires the task in another linked worktree', async ($, on) => {
+  const calls = world(on, fromLinked(replies([retireScript(NEW_API, '--delete-branch', HEAD), ok('removed  /repo/.claude/worktrees/new-api\n')])))
+  const { text } = await $.command.run({ command: 'ledger:retire', args: 'new-api' })
+  expect(text.split('\n')[0]).toBe('**Retired new-api**')
+  expect(ranScript(calls).map(({ argv }) => argv.slice(2))).toEqual([[NEW_API, '--delete-branch', HEAD]])
+})
+
+test('/ledger:retire with an unknown slug from a linked worktree lists the tasks of every worktree', async ($, on) => {
+  world(on, fromLinked())
+  const { text } = await $.command.run({ command: 'ledger:retire', args: 'nope' })
+  expect(text).toContain('No task ledger is named "nope".')
+  expect(text).toContain('Task ledgers: fast-steps, new-api.')
+})
+
+test('/ledger:retire with an unknown slug from a linked worktree lists the tasks of every worktree when the backlog could not be checked', async ($, on) => {
+  world(on, fromLinked(replies([LEDGER_BACKLOG, exit(1, '', 'boom')])))
+  const { text } = await $.command.run({ command: 'ledger:retire', args: 'nope' })
+  expect(text).toStartWith('No task ledger is named "nope". Nothing was retired. Task ledgers: fast-steps, new-api.')
+})
+
+test('/ledger:retire <slug> from a linked worktree names both paths when another worktree task has the same slug', async ($, on) => {
+  world(on, { ...fromLinked(), titles: { [ledgerOf(NEW_API)]: 'fast-steps' } })
+  const { text } = await $.command.run({ command: 'ledger:retire', args: 'fast-steps' })
+  expect(text).toContain('Several task ledgers are named "fast-steps"')
+  expect(text).toContain(ledgerOf(FIX_LOGIN))
+  expect(text).toContain(ledgerOf(NEW_API))
+})
+
+test('/ledger:retire <slug> from a linked worktree never retires a ledger in the main checkout', async ($, on) => {
+  const calls = world(on, { ...fromLinked(), titles: { [ledgerOf(REPO)]: 'main-task' } })
+  const { text } = await $.command.run({ command: 'ledger:retire', args: 'main-task --force' })
+  expect(text).toContain('No task ledger is named "main-task".')
+  expect(text).toContain('Task ledgers: fast-steps, new-api.')
+  expect(ranScript(calls)).toEqual([])
+})
+
+test('/ledger:retire from the main checkout counts a worktree ledger that git also lists once', async ($, on) => {
+  world(on, { cwd: REPO, replies: WORKTREE_LIST })
+  const { text: retired } = await $.command.run({ command: 'ledger:retire', args: 'fast-steps' })
+  const { text: unknown } = await $.command.run({ command: 'ledger:retire', args: 'nope' })
+  expect(retired.split('\n')[0]).toBe('**Retired fast-steps**')
+  expect(unknown).toContain('Task ledgers: fast-steps, new-api.')
 })
 
 const withChildren = (slug: string, children: string): string => `# Task ledger — ${slug}\n\n## Goal\nSomething.\n\n## Children\n${children}`

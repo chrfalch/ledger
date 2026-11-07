@@ -11,7 +11,7 @@ import {
   taskName,
   unknownTaskMessage,
 } from './ledger'
-import { findBacklogLedgers, findLedgers, readBranch, RETIRE_TIMEOUT_MS, run, sessionFolder, sessionLedger, titleSlug, type SessionFolder } from './lookup'
+import { findBacklogLedgers, findLedgers, otherWorktreeTasks, readBranch, RETIRE_TIMEOUT_MS, run, sessionFolder, sessionLedger, titleSlug, type SessionFolder } from './lookup'
 import { childToStart } from './parent-command'
 import { scriptPath } from './registry'
 import {
@@ -63,10 +63,12 @@ async function findTarget($: EngineInterface, slug: string | null, folder: Sessi
     if (active.kind === 'several') return { text: severalLedgersMessage(folder.path, active.paths.map(folderSlug), UNRETIRED) }
     return { slug: await titleSlug($, active.path), ledgerPath: active.path }
   }
-  const slugs = await Promise.all(paths.map(path => titleSlug($, path)))
-  const matches = paths.filter((_, index) => slugs[index] === slug)
+  const local = await Promise.all(paths.map(async path => ({ path, slug: await titleSlug($, path) })))
+  const elsewhere = (await otherWorktreeTasks($, folder.path)).filter(task => !paths.includes(task.path))
+  const tasks = [...local, ...elsewhere]
+  const matches = tasks.filter(task => task.slug === slug).map(({ path }) => path)
   const [match] = matches
-  if (match === undefined) return findBacklogTarget($, slug, slugs)
+  if (match === undefined) return findBacklogTarget($, slug, tasks.map(task => task.slug))
   if (matches.length > 1) return { text: sharedSlugMessage(slug, matches, UNRETIRED) }
   return { slug, ledgerPath: match }
 }
