@@ -376,6 +376,15 @@ test('show of a task without children prints only the parent line', (t) => {
   assert.equal(ok(home, main, 'show', 'epic').stdout, 'epic\tGoal of epic.\n');
 });
 
+test('show from a linked worktree finds a parent in another linked worktree', (t) => {
+  const { home, main, ledgers } = repository(t, 'epic', 'child-a', 'other');
+  ok(home, main, 'add', 'epic', 'child-a');
+
+  const result = ok(home, path.dirname(path.dirname(ledgers.other ?? '')), 'show', 'epic');
+
+  assert.equal(result.stdout, 'epic\tGoal of epic.\nchild-a\tactive\tNext step of child-a.\n');
+});
+
 test('show names a listed child whose ledger is gone without a retire as missing', (t) => {
   const { home, main, ledgers } = repository(t, 'epic', 'child-a');
   ok(home, main, 'add', 'epic', 'child-a');
