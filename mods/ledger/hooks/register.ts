@@ -35,11 +35,13 @@ import {
   retireHint,
   severalLedgersMessage,
   sharedSlugMessage,
+  skillFailedMessage,
   slugExpectedMessage,
   startedElsewhereMessage,
   summarize,
   taskArgument,
   taskName,
+  typedOnlyMessage,
   unknownTaskMessage,
   unpark,
   unparkFailedMessage,
@@ -61,11 +63,11 @@ import {
   unlistedAncestors,
   type Found,
 } from './lookup'
-import { childToStart, familyOf, markStarted, parentCommand, showParent } from './parent-command'
+import { childToStart, familyOf, markStarted, parentCommand, parseParentChange, showParent } from './parent-command'
 import { backlogLedgerPath, mainCheckout, otherRepositoryTask, promoteBacklogTask, registeredTasks, type Entry } from './registry'
 import { worktreeOf } from './retire'
 import { retireCommand } from './retire-command'
-import { basename } from './worktrees'
+import { basename, parseCommand as parseWorktreesCommand } from './worktrees'
 import { worktreesCommand } from './worktrees-command'
 
 const armed = { plugin: 'ledger', key: 'armed' } as const
@@ -302,6 +304,39 @@ async function disarmedOnFailure<T>($: EngineInterface, arm: GoArm, answer: Prom
 // The hook sees the model's raw input: the name may be missing, or carry a leading slash the Skill tool strips later.
 const skillName = (skill: string | undefined): string => (skill ?? '').trim().replace(/^\//, '')
 
+/**
+ * The text of a command answered by text alone, with no markdown turn after it, as its command.run hook answers it;
+ * `undefined` for every other command. Not async, so that the Skill hook passes a /ledger:go call on without a wait,
+ * and /ledger:go reserves its turn's switch before an overlapping call can.
+ */
+function answerOf($: EngineInterface, command: string, args: string): Promise<string> | undefined {
+  switch (command) {
+    case 'ledger:worktrees':
+      return worktreesCommand($, args)
+    case 'ledger:archive':
+      return archiveCommand($, args)
+    case 'ledger:all':
+      return allCommand($, args)
+    case 'ledger:parent':
+      return parentCommand($, args)
+    case 'ledger:help':
+      return Promise.resolve(HELP)
+  }
+  return undefined
+}
+
+const TYPED_ONLY = new Set(['ledger:retire', 'ledger:dashboard', 'ledger:close', 'ledger:next', 'ledger:park'])
+
+/** Whether only the operator may run `command` with `args`: it deletes, writes, starts a server or clears the session. */
+function isTypedOnly(command: string, args: string): boolean {
+  if (command === 'ledger:parent') return parseParentChange(args) !== null
+  if (command === 'ledger:worktrees') {
+    const parsed = parseWorktreesCommand(args)
+    return (parsed.kind === 'prune' || parsed.kind === 'prune-orphans') && !parsed.dryRun
+  }
+  return TYPED_ONLY.has(command)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -364,6 +399,16 @@ export const register: Register = on => {
     const started = await startGo($, e.args ?? '')
     return 'text' in started ? started : disarmedOnFailure($, started.arm, next({ ...e, args: started.args }))
   }).catch(async ($, e, next) => (next.called ? next(e) : { text: lookupFailedMessage(next.error.message ?? next.error.kind) }))
+
+  // The other commands raise no command.run through the Skill tool either. A deny answers without running the tool, so the
+  // model gets this text instead of the command's markdown, which is only the fallback for a hook that did not answer.
+  // Registered before the /ledger:go hook, so that an error thrown in this hook reaches this .catch, not the /ledger:go hook's.
+  on('tool.call', { tool: 'Skill' }, async ($, e, next) => {
+    const command = skillName(e.skill)
+    if (isTypedOnly(command, e.args ?? '')) return { deny: typedOnlyMessage(command, e.args ?? '') }
+    const answer = answerOf($, command, e.args ?? '')
+    return answer === undefined ? next(e) : { deny: await answer }
+  }).catch(async ($, e, next) => (next.called ? next(e) : { deny: skillFailedMessage(skillName(e.skill), next.error.message ?? next.error.kind) }))
 
   // The model starts /ledger:go through the Skill tool, which raises no command.run: the Skill tool expands go.md itself.
   on('tool.call', { tool: 'Skill' }, async ($, e, next) => {

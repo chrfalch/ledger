@@ -1,7 +1,18 @@
 import type { EngineInterface } from 'claude-code'
 
-import { backlogUncheckedMessage, folderSlug, severalLedgersMessage, sharedSlugMessage, summarize, taskName, unknownTaskMessage } from './ledger'
+import {
+  backlogUncheckedMessage,
+  folderSlug,
+  retiredChildHint,
+  severalLedgersMessage,
+  sharedSlugMessage,
+  summarize,
+  taskArgument,
+  taskName,
+  unknownTaskMessage,
+} from './ledger'
 import { findBacklogLedgers, findLedgers, readBranch, RETIRE_TIMEOUT_MS, run, sessionFolder, sessionLedger, titleSlug, type SessionFolder } from './lookup'
+import { childToStart } from './parent-command'
 import { scriptPath } from './registry'
 import {
   dirname,
@@ -136,8 +147,10 @@ async function retireBacklogLedger(
   cwd: string,
 ): Promise<string> {
   if (dryRun) return formatBacklogPlan(slug, ledgerPath, new Date(), await activeChildrenOf($, ledgerPath))
+  const parent = await parentOf($, ledgerPath)
   const { stdout, failure } = await run($, ['bash', scriptPath($, 'cc-worktree-retire'), ledgerPath, ...(forced ? ['--force'] : [])], cwd, RETIRE_TIMEOUT_MS)
-  return failure === undefined ? formatRetired(slug, stdout, false) : formatRetireFailed(failure, stdout)
+  if (failure !== undefined) return formatRetireFailed(failure, stdout)
+  return withNextChild($, formatRetired(slug, stdout, false), parent, cwd)
 }
 
 /** Plans or retires the worktree that holds `ledgerPath`, named `slug` in the text. */
@@ -156,6 +169,7 @@ export async function retireLedger(
   const blockers = retireBlockers(state)
   if (blockers.length > 0 && !forced) return notRetiredMessage(blockers)
 
+  const parent = await parentOf($, ledgerPath)
   // From the main checkout, because the worktree is gone once the script returns.
   const deletesBranch = isBranchMerged(state)
   const flags = [...(deletesBranch ? ['--delete-branch', state.head] : []), ...(forced ? ['--force'] : [])]
@@ -163,5 +177,21 @@ export async function retireLedger(
   if (failure !== undefined) return formatRetireFailed(failure, stdout)
   const kept = deletesBranch || state.branch === '' ? undefined : { branch: state.branch, reason: keptBranchReason(state) }
   // The session's own folder, not sessionFolder's fallback: the question is whether this retire removed it.
-  return formatRetired(slug, stdout, isInside(await $.session.cwd(), state.path), kept)
+  return withNextChild($, formatRetired(slug, stdout, isInside(await $.session.cwd(), state.path), kept), parent, state.mainCheckout)
+}
+
+/** `retired`, then for a child task its parent's next child task, looked up after the script marked the child retired there. */
+async function withNextChild($: EngineInterface, retired: string, parent: string | undefined, cwd: string): Promise<string> {
+  if (parent === undefined) return retired
+  return `${retired}\n\n${retiredChildHint(parent, await childToStart($, parent, cwd))}`
+}
+
+/** As `cc-ledger-parent next` takes it. Read before the retire archives the ledger; an unreadable one has no parent. */
+async function parentOf($: EngineInterface, ledgerPath: string): Promise<string | undefined> {
+  try {
+    const { parent } = summarize(await $.fs.read(ledgerPath), '', 0)
+    return parent === undefined ? undefined : taskArgument(parent)
+  } catch {
+    return undefined
+  }
 }

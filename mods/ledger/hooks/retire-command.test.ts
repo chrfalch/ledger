@@ -399,6 +399,69 @@ test('/ledger:retire from the main checkout leaves out the working directory not
   expect(text).not.toContain('working directory')
 })
 
+const NEXT_EPIC = ['bin/cc-ledger-parent', 'next', 'epic']
+const childOf = (parent: string): Record<string, string> => ({ [ledgerOf(FIX_LOGIN)]: `# Task ledger — fast-steps\n\n## Location\n- parent: ${parent}\n` })
+const RETIRED = [
+  '**Retired fast-steps**',
+  '- archived /Users/me/.claude/ledger-archive/repo/2026-10-05-fix-login.md',
+  '- removed  /repo/.claude/worktrees/fix-login',
+  '- deleted  branch me/fix-login',
+].join('\n')
+
+test('/ledger:retire of a child task names the next child task of its parent, looked up after the retire', async ($, on) => {
+  const calls = world(on, { cwd: REPO, files: childOf('epic'), replies: replies([NEXT_EPIC, ok('epic child-b\n')]) })
+  const { text } = await $.command.run({ command: 'ledger:retire', args: 'fast-steps' })
+  expect(text).toBe(`${RETIRED}\n\nParent epic has a child task that has not started: child-b. Start it with \`/ledger:go epic\`.`)
+  const scripts = calls.map(({ argv }) => script((argv[0] === 'bash' ? argv[1] : argv[0]) ?? '')).filter(name => name.startsWith('bin/'))
+  expect(scripts).toEqual(['bin/cc-worktree-retire', 'bin/cc-ledger-parent'])
+  expect(calls.find(({ argv }) => argv[0]?.endsWith('/bin/cc-ledger-parent'))?.cwd).toBe(REPO)
+})
+
+test('/ledger:retire of a child task in another repository names its parent as /ledger:go takes it', async ($, on) => {
+  world(on, { cwd: REPO, files: childOf('epic @ /other'), replies: replies([['bin/cc-ledger-parent', 'next', 'epic@/other'], ok('epic@/other child-b\n')]) })
+  const { text } = await $.command.run({ command: 'ledger:retire', args: 'fast-steps' })
+  expect(text.split('\n').at(-1)).toBe('Parent epic@/other has a child task that has not started: child-b. Start it with `/ledger:go epic@/other`.')
+})
+
+test('/ledger:retire of the last child task says its parent can be retired once its child tasks are', async ($, on) => {
+  world(on, { cwd: REPO, files: childOf('epic'), replies: replies([NEXT_EPIC, ok('')]) })
+  const { text } = await $.command.run({ command: 'ledger:retire', args: 'fast-steps' })
+  expect(text).toBe(
+    `${RETIRED}\n\nParent epic has no child task left to start. Retire epic once each of its child tasks is retired.`,
+  )
+})
+
+test('/ledger:retire of a child task still reports the retire when the next child task cannot be looked up', async ($, on) => {
+  world(on, { cwd: REPO, files: childOf('epic'), replies: replies([NEXT_EPIC, exit(1, '', 'epic has no ledger\n')]) })
+  const { text } = await $.command.run({ command: 'ledger:retire', args: 'fast-steps' })
+  expect(text.startsWith(`${RETIRED}\n\n`)).toBe(true)
+  expect(text.split('\n').at(-1)).toBe('Could not look up the next child task of epic: epic has no ledger. Run `/ledger:parent epic` to see its child tasks.')
+})
+
+test('/ledger:retire of a child task from inside its worktree keeps the working directory note', async ($, on) => {
+  world(on, { cwd: `${FIX_LOGIN}/src`, ledgers: [ledgerOf(FIX_LOGIN)], files: childOf('epic'), replies: replies([NEXT_EPIC, ok('epic child-b\n')]) })
+  const { text } = await $.command.run({ command: 'ledger:retire', args: '' })
+  expect(text).toContain("This session's working directory was removed with the worktree.")
+  expect(text.split('\n').at(-1)).toBe('Parent epic has a child task that has not started: child-b. Start it with `/ledger:go epic`.')
+})
+
+test('/ledger:retire of a child task that fails or only plans looks up no next child task', async ($, on) => {
+  const failed = exit(1, '', 'busy\n')
+  const calls = world(on, { cwd: REPO, files: childOf('epic'), replies: replies([retireScript(FIX_LOGIN, '--delete-branch', HEAD), failed]) })
+  const { text: plan } = await $.command.run({ command: 'ledger:retire', args: 'fast-steps --dry-run' })
+  const { text: refusal } = await $.command.run({ command: 'ledger:retire', args: 'fast-steps' })
+  expect(plan).not.toContain('Parent epic')
+  expect(refusal).toBe('cc-worktree-retire failed (exit 1): busy')
+  expect(calls.filter(({ argv }) => argv[0]?.endsWith('/bin/cc-ledger-parent'))).toEqual([])
+})
+
+test('/ledger:retire of a task without a parent looks up no next child task', async ($, on) => {
+  const calls = world(on, { cwd: REPO })
+  const { text } = await $.command.run({ command: 'ledger:retire', args: 'fast-steps' })
+  expect(text).toBe(RETIRED)
+  expect(calls.filter(({ argv }) => argv[0]?.endsWith('/bin/cc-ledger-parent'))).toEqual([])
+})
+
 test('/ledger:retire <slug> --dry-run says the merged branch is deleted', async ($, on) => {
   world(on, { cwd: REPO })
   const { text } = await $.command.run({ command: 'ledger:retire', args: 'new-api --dry-run' })
@@ -481,6 +544,46 @@ test('/ledger:retire <slug> of a backlog task runs the script on its ledger and 
   expect(ranScript(calls).map(({ argv }) => argv.slice(2))).toEqual([[IDEA]])
   expect(ranScript(calls).map(({ timeoutMs }) => timeoutMs)).toEqual([600_000])
   expect(text).toBe(['**Retired idea**', '- archived /home/.claude/ledger-archive/repo/2026-10-21-idea.md', `- removed  ${IDEA}`].join('\n'))
+})
+
+const IDEA_RETIRED = ['**Retired idea**', '- archived /home/.claude/ledger-archive/repo/2026-10-21-idea.md', `- removed  ${IDEA}`].join('\n')
+const IDEA_CHILD = { [IDEA]: '# Task ledger — idea\n\n## Location\n- parent: epic\n' }
+
+test('/ledger:retire <slug> of a backlog child task names the next child task of its parent, looked up after the retire', async ($, on) => {
+  const calls = backlogWorld(on, replies([NEXT_EPIC, ok('epic child-b\n')]), IDEA_CHILD)
+  const { text } = await $.command.run({ command: 'ledger:retire', args: 'idea' })
+  expect(text).toBe(`${IDEA_RETIRED}\n\nParent epic has a child task that has not started: child-b. Start it with \`/ledger:go epic\`.`)
+  const scripts = calls.map(({ argv }) => script((argv[0] === 'bash' ? argv[1] : argv[0]) ?? '')).filter(name => name.startsWith('bin/'))
+  expect(scripts).toEqual(['bin/cc-worktree-retire', 'bin/cc-ledger-parent'])
+  expect(calls.find(({ argv }) => argv[0]?.endsWith('/bin/cc-ledger-parent'))?.cwd).toBe(REPO)
+})
+
+test('/ledger:retire <slug> of the last backlog child task says its parent can be retired once its child tasks are', async ($, on) => {
+  backlogWorld(on, replies([NEXT_EPIC, ok('')]), IDEA_CHILD)
+  const { text } = await $.command.run({ command: 'ledger:retire', args: 'idea' })
+  expect(text).toBe(`${IDEA_RETIRED}\n\nParent epic has no child task left to start. Retire epic once each of its child tasks is retired.`)
+})
+
+test('/ledger:retire <slug> of a backlog child task still reports the retire when the next child task cannot be looked up', async ($, on) => {
+  backlogWorld(on, replies([NEXT_EPIC, exit(1, '', 'epic has no ledger\n')]), IDEA_CHILD)
+  const { text } = await $.command.run({ command: 'ledger:retire', args: 'idea' })
+  expect(text).toBe(`${IDEA_RETIRED}\n\nCould not look up the next child task of epic: epic has no ledger. Run \`/ledger:parent epic\` to see its child tasks.`)
+})
+
+test('/ledger:retire <slug> of a backlog child task that fails or only plans looks up no next child task', async ($, on) => {
+  const calls = backlogWorld(on, replies([retireScript(IDEA), exit(1, '', 'busy\n')]), IDEA_CHILD)
+  const { text: plan } = await $.command.run({ command: 'ledger:retire', args: 'idea --dry-run' })
+  const { text: refusal } = await $.command.run({ command: 'ledger:retire', args: 'idea' })
+  expect(plan).not.toContain('Parent epic')
+  expect(refusal).toBe('cc-worktree-retire failed (exit 1): busy')
+  expect(calls.filter(({ argv }) => argv[0]?.endsWith('/bin/cc-ledger-parent'))).toEqual([])
+})
+
+test('/ledger:retire <slug> of a backlog task without a parent looks up no next child task', async ($, on) => {
+  const calls = backlogWorld(on)
+  const { text } = await $.command.run({ command: 'ledger:retire', args: 'idea' })
+  expect(text).toBe(IDEA_RETIRED)
+  expect(calls.filter(({ argv }) => argv[0]?.endsWith('/bin/cc-ledger-parent'))).toEqual([])
 })
 
 test('/ledger:retire <slug> --force of a backlog task passes --force to the script', async ($, on) => {
