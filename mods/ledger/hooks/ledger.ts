@@ -468,6 +468,23 @@ export function nextChildHint(parent: string, child: string | null): string {
   return `Parent ${parent} has a child task that has not started: ${child}. Start it with \`/ledger:go ${parent}\`.`
 }
 
+// The retire is already done, so a failed lookup only points to /ledger:parent instead of failing.
+export function retiredChildHint(parent: string, chain: string[] | { error: string }): string {
+  if ('error' in chain) return `Could not look up the next child task of ${parent}: ${sentence(chain.error)} Run \`/ledger:parent ${parent}\` to see its child tasks.`
+  const child = chain.at(-1)
+  // /ledger:retire takes a slug of this repository only, so the parent is named, not a command for it.
+  return child === undefined ? `${nextChildHint(parent, null)} Retire ${parent} once each of its child tasks is retired.` : nextChildHint(parent, child)
+}
+
+export function typedOnlyMessage(command: string, args: string): string {
+  const typed = [`/${command}`, args.trim().replace(/\s+/g, ' ')].filter(part => part !== '').join(' ')
+  return `/${command} runs only when the operator types it. Ask the operator to type \`${typed}\`.`
+}
+
+export function skillFailedMessage(command: string, error: string): string {
+  return `/${command} failed: ${sentence(error)} Ask the operator to type it.`
+}
+
 export const HELP = [
   "- `/ledger` — Show each task ledger's goal, current step and next step. A parent task in this repo's backlog is shown too, marked (backlog). `/ledger <name>` shows one.",
   '- `/ledger:task` — Add a separate task to the backlog: a ledger only, with no branch or worktree yet. `/ledger:go <slug>` starts it. With no current ledger, it starts the task at once and continues in this session. `--here` adds a ledger to this worktree instead.',

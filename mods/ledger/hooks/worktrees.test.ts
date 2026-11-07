@@ -1146,6 +1146,41 @@ test('/ledger:worktrees prune-orphans --yes deletes the same as no flag', async 
   expect(rmCalls(argvs)).toEqual([rm(GONE_A), rm(GONE_B)])
 })
 
+// fs.stat lets every rm through, so only the refusal keeps a prune from deleting.
+test('/ledger:worktrees prune <name> through the Skill tool plans with --dry-run as the typed command does, and is refused without it', async ($, on) => {
+  const { argvs, run } = recording(pruneReplies())
+  on('session.cwd', async () => ({ value: REPO }))
+  on('process.run', run)
+  on('fs.exists', fakeExists)
+  on('fs.list', fakeDerivedData)
+  on('fs.stat', fakeRealFs())
+  mock.env(on, { HOME })
+  const { text } = await $.command.run({ command: 'ledger:worktrees', args: 'prune big --dry-run' })
+  const plan = await $.tool.call({ tool: 'Skill', skill: 'ledger:worktrees', args: 'prune big --dry-run' })
+  const prune = await $.tool.call({ tool: 'Skill', skill: 'ledger:worktrees', args: 'prune big' })
+  expect(text.split('\n')[0]).toBe('**Prune big** · dry run · 18.1 GB in 6 folders')
+  expect(plan.deny).toBe(text)
+  expect(prune.deny).toBe('/ledger:worktrees runs only when the operator types it. Ask the operator to type `/ledger:worktrees prune big`.')
+  expect(rmCalls(argvs)).toEqual([])
+})
+
+test('/ledger:worktrees prune-orphans through the Skill tool plans with --dry-run as the typed command does, and is refused without it', async ($, on) => {
+  const { argvs, run } = recording(derivedDataReplies())
+  on('session.cwd', async () => ({ value: REPO }))
+  on('process.run', run)
+  on('fs.exists', fakeXcodeExists)
+  on('fs.list', fakeXcodeList)
+  on('fs.stat', fakeRealFs())
+  mock.env(on, { HOME })
+  const { text } = await $.command.run({ command: 'ledger:worktrees', args: 'prune-orphans --dry-run' })
+  const plan = await $.tool.call({ tool: 'Skill', skill: 'ledger:worktrees', args: 'prune-orphans --dry-run' })
+  const prune = await $.tool.call({ tool: 'Skill', skill: 'ledger:worktrees', args: 'prune-orphans' })
+  expect(text.split('\n')[0]).toBe('**Prune orphans in ~/Library/Developer/Xcode/DerivedData** · dry run · 1.0 GB in 2 folders')
+  expect(plan.deny).toBe(text)
+  expect(prune.deny).toBe('/ledger:worktrees runs only when the operator types it. Ask the operator to type `/ledger:worktrees prune-orphans`.')
+  expect(rmCalls(argvs)).toEqual([])
+})
+
 test('/ledger:worktrees prune-orphans skips a folder whose project came back before deletion, and a symbolic link', async ($, on) => {
   const { argvs, run } = recording(derivedDataReplies())
   let goneAsked = 0

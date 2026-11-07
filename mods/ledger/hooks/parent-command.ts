@@ -134,16 +134,21 @@ async function change($: EngineInterface, verb: 'add' | 'remove', parent: string
   return warning ? `${done} ${warning}` : done
 }
 
+/** The arguments of a /ledger:parent that changes a parent ledger: `<parent> add <child>` or `<parent> remove <child>`. */
+export function parseParentChange(args: string): { parent: string; verb: 'add' | 'remove'; child: string } | null {
+  const [parent, verb, child, ...rest] = args.split(/\s+/).filter(word => word !== '')
+  if (parent === undefined || child === undefined || rest.length > 0 || (verb !== 'add' && verb !== 'remove')) return null
+  return { parent, verb, child }
+}
+
 export async function parentCommand($: EngineInterface, args: string): Promise<string> {
   const words = args.split(/\s+/).filter(word => word !== '')
-  const [parent, verb, child] = words
+  const [parent] = words
   if (words.length === 1 && (parent === 'add' || parent === 'remove')) return USAGE
   if (words.length <= 1) {
     const shown = await familyToShow($, parent)
     return 'none' in shown ? USAGE : 'error' in shown ? shown.error : formatShown(shown)
   }
-  if (words.length === 3 && parent !== undefined && child !== undefined && (verb === 'add' || verb === 'remove')) {
-    return change($, verb, parent, child, (await sessionFolder($)).path)
-  }
-  return USAGE
+  const parsed = parseParentChange(args)
+  return parsed ? change($, parsed.verb, parsed.parent, parsed.child, (await sessionFolder($)).path) : USAGE
 }
