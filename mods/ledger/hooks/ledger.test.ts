@@ -110,6 +110,8 @@ type World = {
   runs: Run[]
   /** Makes fs.stat fail for `folder` and everything in it, as after /ledger:retire removed the worktree. */
   removeFolder: (folder: string) => void
+  /** Moves the session to `folder`, as EnterWorktree does. */
+  moveTo: (folder: string) => void
 }
 
 type Run = { argv: readonly string[]; cwd?: string }
@@ -138,7 +140,8 @@ function world(on: On, cwd: string, ledgers: string[], command: string, broken?:
   let fixLogin = LEDGER
   const runs: Run[] = []
   const removed: string[] = []
-  on('session.cwd', async () => ({ value: cwd }))
+  let sessionCwd = cwd
+  on('session.cwd', async () => ({ value: sessionCwd }))
   on('process.run', async (_, e) => {
     runs.push({ argv: e.argv, cwd: e.init?.cwd })
     if (e.argv[0] !== 'bash') {
@@ -189,6 +192,9 @@ function world(on: On, cwd: string, ledgers: string[], command: string, broken?:
     runs,
     removeFolder: folder => {
       removed.push(folder)
+    },
+    moveTo: folder => {
+      sessionCwd = folder
     },
   }
 }
@@ -682,4 +688,85 @@ test('nextChildHint names the child task that /ledger:go <parent> starts', () =>
 
 test('nextChildHint says when a parent has no child task left to start', () => {
   expect(nextChildHint('big-feature', null)).toBe('Parent big-feature has no child task left to start.')
+})
+
+/** Records each /rename the mod runs in `calls`, in order with the clear and the submit; `isBroken` makes it fail. */
+function recordRenames(on: On, calls: string[], isBroken = false): void {
+  on('command.run', { command: 'rename' }, async (_, e) => {
+    calls.push(`rename: ${e.args}`)
+    if (isBroken) throw new Error('rename refused')
+    return { text: '' }
+  })
+}
+
+const NEW_API_TREE = `${WORKTREES}/new-api`
+
+test('a turn that ends in a task worktree names the session after its task once', async ($, on) => {
+  const { calls } = world(on, `${FIX_LOGIN_TREE}/src`, [FIX_LOGIN, NEW_API], 'ledger:go')
+  recordRenames(on, calls)
+  await $.turn.complete(turnEnd)
+  await $.turn.complete({ ...turnEnd, turnId: 't2' })
+  expect(calls).toEqual(['rename: fast-steps'])
+})
+
+test('a turn that ends in another task worktree renames the session to that task', async ($, on) => {
+  const { calls, moveTo } = world(on, FIX_LOGIN_TREE, [FIX_LOGIN, NEW_API], 'ledger:go')
+  recordRenames(on, calls)
+  await $.turn.complete(turnEnd)
+  moveTo(NEW_API_TREE)
+  await $.turn.complete({ ...turnEnd, turnId: 't2' })
+  expect(calls).toEqual(['rename: fast-steps', 'rename: new-api'])
+})
+
+const NESTED = `${WORKTREES}/fix-login/.claude/worktrees/inner`
+const untitledCases: [name: string, cwd: string, ledgers: string[]][] = [
+  ['outside every task worktree', '/repo', [FIX_LOGIN, NEW_API]],
+  ['in several nested worktrees', NESTED, [FIX_LOGIN, `${NESTED}/.claude/ledger.md`]],
+]
+for (const [name, cwd, ledgers] of untitledCases) {
+  test(`a turn that ends ${name} renames nothing`, async ($, on) => {
+    const { calls } = world(on, cwd, ledgers, 'ledger:go')
+    recordRenames(on, calls)
+    await $.turn.complete(turnEnd)
+    expect(calls).toEqual([])
+  })
+}
+
+test('a subagent turn or an interrupted turn renames nothing', async ($, on) => {
+  const { calls } = world(on, FIX_LOGIN_TREE, [FIX_LOGIN], 'ledger:go')
+  recordRenames(on, calls)
+  await $.turn.complete({ ...turnEnd, agentId: 'a1' })
+  await $.turn.complete({ ...turnEnd, turnId: 't2', reason: 'aborted', isAborted: true })
+  expect(calls).toEqual([])
+})
+
+test('/ledger:go renames nothing in the turn that clears, and renames to the new task at the end of the go turn', async ($, on) => {
+  const { calls, moveTo } = world(on, FIX_LOGIN_TREE, [FIX_LOGIN, NEW_API], 'ledger:go')
+  recordRenames(on, calls)
+  await $.command.run({ command: 'ledger:go', args: 'new-api' })
+  await $.turn.complete(turnEnd)
+  expect(calls).toEqual(['clear', 'submit: go new-api'])
+  moveTo(NEW_API_TREE)
+  await $.turn.complete({ ...turnEnd, turnId: 't2' })
+  expect(calls).toEqual(['clear', 'submit: go new-api', 'rename: new-api'])
+})
+
+test('/ledger:next keeps a title the session already has for its task', async ($, on) => {
+  const { calls } = world(on, FIX_LOGIN_TREE, [FIX_LOGIN], 'ledger:next')
+  recordRenames(on, calls)
+  await $.turn.complete(turnEnd)
+  await $.command.run({ command: 'ledger:next', args: '' })
+  await $.turn.complete({ ...turnEnd, turnId: 't2' })
+  await $.turn.complete({ ...turnEnd, turnId: 't3' })
+  expect(calls).toEqual(['rename: fast-steps', 'clear', 'submit: go fast-steps'])
+})
+
+test('a failed rename ends the turn quietly, leaves the clear alone, and is tried again at the next turn end', async ($, on) => {
+  const { calls } = world(on, FIX_LOGIN_TREE, [FIX_LOGIN], 'ledger:next')
+  recordRenames(on, calls, true)
+  await $.turn.complete(turnEnd)
+  await $.command.run({ command: 'ledger:next', args: '' })
+  await $.turn.complete({ ...turnEnd, turnId: 't2' })
+  await $.turn.complete({ ...turnEnd, turnId: 't3' })
+  expect(calls).toEqual(['rename: fast-steps', 'clear', 'submit: go fast-steps', 'rename: fast-steps'])
 })

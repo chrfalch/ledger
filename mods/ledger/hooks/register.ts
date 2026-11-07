@@ -71,6 +71,7 @@ import { basename, parseCommand as parseWorktreesCommand } from './worktrees'
 import { worktreesCommand } from './worktrees-command'
 
 const armed = { plugin: 'ledger', key: 'armed' } as const
+const titled = { plugin: 'ledger', key: 'titled' } as const
 
 type GoArm = { mode: 'go'; slug: string; ledger?: string; isNew?: true }
 
@@ -157,6 +158,25 @@ async function showRetireHint($: EngineInterface, ledger: string, namesNextChild
     const parentArgument = taskArgument(parent)
     const chain = await childToStart($, parentArgument, worktree)
     if (!('error' in chain)) $.ui.log(nextChildHint(parentArgument, chain.at(-1) ?? null))
+  } catch {}
+}
+
+/**
+ * Names the session after its task with /rename, because a hook's sessionTitle does not reach Remote Control in VS Code.
+ * Only a new task renames, so a title the operator gave stays while the task does. A failure is tried again next turn;
+ * the title is not worth a line in the transcript.
+ */
+async function titleSession($: EngineInterface): Promise<void> {
+  try {
+    const found = await findLedgers($)
+    if ('error' in found) return
+    const active = sessionLedger(found, await sessionFolder($))
+    if (active.kind !== 'one') return
+    const slug = await titleSlug($, active.path)
+    const { value: last } = await $.state.get(titled)
+    if (slug === last) return
+    await $.command.run({ command: 'rename', args: slug })
+    await $.state.set(titled, slug)
   } catch {}
 }
 
@@ -495,7 +515,11 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     const { value } = await $.state.get(armed)
-    if (!value) return next(e)
+    // A turn that clears does not rename: the session is still in the old task, and the turn of `go <slug>` renames.
+    if (!value) {
+      if (e.reason === 'answer') await titleSession($)
+      return next(e)
+    }
     await $.state.set(armed, null)
     if (e.reason !== 'answer') return next(e)
     // go.md creates the task only when the conversation shows what it is; without a ledger, `go <slug>` would find nothing.

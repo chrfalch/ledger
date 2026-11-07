@@ -13,6 +13,7 @@ export type LedgerArmed =
 
 declare module 'claude-code' {
   interface PluginState {
-    ledger: { armed: LedgerArmed | null }
+    /** `titled`: the slug the mod last named the session after with /rename. */
+    ledger: { armed: LedgerArmed | null; titled: string | null }
   }
 }
