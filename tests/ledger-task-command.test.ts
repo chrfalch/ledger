@@ -175,6 +175,14 @@ test('a finished child task names the next child task of its parent on resume', 
   assert.match(bullet, /When no child task is left, say that the parent task can be retired after its child tasks are/);
 });
 
+test('starting or resuming a task shows the operator its task tree', () => {
+  const bullet = read('rules/10-operating-model.md').match(/\*\*Resume from the ledger\.\*\*.*? - /)?.[0] ?? '';
+  assert.match(bullet, /When you start or resume a task that has a parent task or child tasks, first show the operator its task tree/);
+  assert.match(bullet, /`\/ledger:parent`/);
+  assert.match(bullet, /Mark the task this session works on/);
+  assert.match(bullet, /A task with no parent task and no child tasks has no tree; show nothing/);
+});
+
 test('/ledger:help says /ledger:next names the next child task of a finished child task', () => {
   const line = HELP.split('\n').find(l => l.startsWith('- `/ledger:next`')) ?? '';
   assert.match(line, /When every step is done, it first says how to retire the task\./);
