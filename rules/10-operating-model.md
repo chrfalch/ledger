@@ -188,6 +188,12 @@ transcript is re-billed on every turn; the ledger is read once per fresh session
   continue. A task still in the backlog has no worktree yet. For such a task,
   start `/ledger:go <slug>` yourself through the Skill tool. It makes the worktree
   and clears the session, the same as when the operator types it.
+  When you start or resume a task that has a parent task or child tasks,
+  first show the operator its task tree, so the operator sees where this task
+  is in the bigger plan. Get it from `/ledger:parent`, which you invoke
+  through the Skill tool. Show the parent task, then each child task with its
+  status, in the parent's order. Mark the task this session works on. A task
+  with no parent task and no child tasks has no tree; show nothing.
   Do not re-read files or rerun tests to re-establish state; the ledger is the
   state. If every step is done, say so and ask whether to commit or open a PR.
   When every step is done and the task has a parent, also say which child
