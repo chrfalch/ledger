@@ -1,6 +1,6 @@
 import { formatTime, taskName } from '../../mods/ledger/hooks/ledger.js';
 import { colors } from './colors.js';
-import type { Archive, DerivedDataSection, Overview, PruneFolder, Pruned, Shown, WorktreeRow } from './hooks.js';
+import type { Archive, DerivedDataSection, Overview, PruneFolder, Pruned, PrunedWorktree, Shown, WorktreeRow } from './hooks.js';
 import { table, truncate } from './table.js';
 
 const TEXT_WIDTH = 80;
@@ -128,23 +128,42 @@ function folderTable(folders: PruneFolder[]): string[] {
 const planView = (title: string, folders: PruneFolder[], notes: string[]): string =>
   [heading(title, 'dry run', sizeOf(folders)), '', ...folderTable(folders), '', ...notes].join('\n');
 
+const freed = (deleted: PruneFolder[]): string => `${totalGb(deleted)} freed in ${folderCount(deleted)}`;
+
 function deletedView(title: string, deleted: PruneFolder[], failures: string[]): string {
   return [
-    heading(title, `${totalGb(deleted)} freed in ${folderCount(deleted)}`),
+    heading(title, freed(deleted)),
     ...(deleted.length > 0 ? ['', ...folderTable(deleted)] : []),
     ...(failures.length > 0 ? ['', ...failures.map(failure => colors.yellow(failure))] : []),
   ].join('\n');
 }
 
+const KEPT_NOTES = [colors.dim('Folders inside a .claude folder are never deleted.'), colors.dim('node_modules and Pods folders are kept, so the worktree still builds.')];
+
 /** What `ledger worktrees prune <name>` planned or deleted in the linked worktree `name`. */
 export function pruneView(name: string, pruned: Pruned): string {
   if ('deleted' in pruned) return deletedView(`Pruned ${name}`, pruned.deleted, pruned.failures);
   if (pruned.planned.length === 0) return `Nothing to prune in ${name}.`;
-  return planView(`Prune ${name}`, pruned.planned, [
-    colors.dim('Folders inside a .claude folder are never deleted.'),
-    colors.dim('node_modules and Pods folders are kept, so the worktree still builds.'),
-    `Run ${colors.bold(`ledger worktrees prune ${shellWord(name)}`)} to delete them.`,
-  ]);
+  return planView(`Prune ${name}`, pruned.planned, [...KEPT_NOTES, `Run ${colors.bold(`ledger worktrees prune ${shellWord(name)}`)} to delete them.`]);
+}
+
+function worktreeSection({ name, pruned }: PrunedWorktree): string[] {
+  if ('error' in pruned) return [heading(name, colors.yellow('not pruned')), colors.yellow(pruned.error)];
+  if ('planned' in pruned) return pruned.planned.length === 0 ? [heading(name, colors.dim('nothing to prune'))] : [heading(name, sizeOf(pruned.planned)), ...folderTable(pruned.planned)];
+  return [heading(name, freed(pruned.deleted)), ...(pruned.deleted.length > 0 ? folderTable(pruned.deleted) : []), ...pruned.failures.map(failure => colors.yellow(failure))];
+}
+
+/** What `ledger worktrees prune --all` planned or deleted: a section per linked worktree, under the total. */
+export function pruneAllView(results: PrunedWorktree[], dryRun: boolean): string {
+  if (results.length === 0) return 'No linked worktrees.';
+  if (results.every(({ pruned }) => 'planned' in pruned && pruned.planned.length === 0)) return 'Nothing to prune in any linked worktree.';
+  const planned = results.flatMap(({ pruned }) => ('planned' in pruned ? pruned.planned : []));
+  const deleted = results.flatMap(({ pruned }) => ('deleted' in pruned ? pruned.deleted : []));
+  return [
+    dryRun ? heading('Prune every linked worktree', 'dry run', sizeOf(planned)) : heading('Pruned every linked worktree', freed(deleted)),
+    ...results.flatMap(result => ['', ...worktreeSection(result)]),
+    ...(dryRun && planned.length > 0 ? ['', ...KEPT_NOTES, `Run ${colors.bold('ledger worktrees prune --all')} to delete them.`] : []),
+  ].join('\n');
 }
 
 export function pruneOrphansView(pruned: Pruned): string {

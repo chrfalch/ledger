@@ -776,12 +776,15 @@ test('/ledger:worktrees prune refuses a name that two linked worktrees share', a
   expect(text).toBe(`Two or more linked worktrees are named "big": ${BIG}, ${twin}`)
 })
 
+const USAGE_LINE =
+  'Usage: `/ledger:worktrees`, `/ledger:worktrees prune <name> [--dry-run]`, `/ledger:worktrees prune --all [--dry-run]`, `/ledger:worktrees derived-data` or `/ledger:worktrees prune-orphans [--dry-run]`'
+
 test('/ledger:worktrees prints a usage line for arguments it does not know', async ($, on) => {
   on('session.cwd', async () => ({ value: REPO }))
   on('process.run', fakeRun(pruneReplies()))
   for (const args of ['prune', 'prune --yes', 'prune --dry-run', 'clean']) {
     const { text } = await $.command.run({ command: 'ledger:worktrees', args })
-    expect(text).toBe('Usage: `/ledger:worktrees`, `/ledger:worktrees prune <name> [--dry-run]`, `/ledger:worktrees derived-data` or `/ledger:worktrees prune-orphans [--dry-run]`')
+    expect(text).toBe(USAGE_LINE)
   }
 })
 
@@ -1398,4 +1401,161 @@ test('derivedDataSections groups the folders in the order formatDerivedData show
     { label: 'Shared caches', kind: 'cache', folders: [cache] },
   ])
   expect(derivedDataSections([])).toEqual([])
+})
+
+test('parseCommand reads prune --all [--dry-run] as a prune of every linked worktree, with the flags in either order', () => {
+  expect(parseCommand('prune --all')).toEqual({ kind: 'prune-all', dryRun: false })
+  expect(parseCommand(' prune --all --dry-run ')).toEqual({ kind: 'prune-all', dryRun: true })
+  expect(parseCommand('prune --dry-run --all')).toEqual({ kind: 'prune-all', dryRun: true })
+  expect(parseCommand('prune --all --yes')).toEqual(parseCommand('prune --all'))
+})
+
+test('parseCommand reads --all with a worktree name, or after prune-orphans, as a request for usage', () => {
+  for (const args of ['prune big --all', 'prune --all big', 'prune big --all --dry-run', 'prune my --all wt', 'prune-orphans --all', 'derived-data --all']) {
+    expect(parseCommand(args)).toEqual({ kind: 'usage' })
+  }
+})
+
+const SMALL_STATUS = ['git', '-C', SMALL, 'status', '--ignored', '--porcelain']
+
+function pruneAllReplies(): Replies {
+  return {
+    ...pruneReplies(),
+    ...replies(
+      [SMALL_STATUS, ok('!! build/\n!! node_modules/\n')],
+      [['du', '-sk', `${SMALL}/build`], ok(`976563\t${SMALL}/build\n`)],
+      [rm(`${SMALL}/build`), ok('')],
+    ),
+  }
+}
+
+const SMALL_TABLE = ['| Folder | Size GB |', '|---|---:|', '| build | 1.0 |']
+
+test('/ledger:worktrees prune --all --dry-run lists the build folders of each linked worktree and a total, and deletes nothing', async ($, on) => {
+  const { argvs, run } = recording(pruneAllReplies())
+  on('session.cwd', async () => ({ value: REPO }))
+  on('process.run', run)
+  on('fs.exists', fakeExists)
+  on('fs.list', fakeDerivedData)
+  mock.env(on, { HOME })
+  const { text } = await $.command.run({ command: 'ledger:worktrees', args: 'prune --all --dry-run' })
+  expect(text).toBe(
+    [
+      '**Prune every linked worktree** · dry run · 19.1 GB in 7 folders',
+      '',
+      '**big** · 18.1 GB in 6 folders',
+      '',
+      ...PRUNE_TABLE,
+      '',
+      '**small** · 1.0 GB in 1 folder',
+      '',
+      ...SMALL_TABLE,
+      '',
+      'Folders inside a `.claude` folder are never deleted.',
+      '`node_modules` and `Pods` folders are kept, so the worktree still builds.',
+      'Run `/ledger:worktrees prune --all` to delete them.',
+    ].join('\n'),
+  )
+  expect(rmCalls(argvs)).toEqual([])
+})
+
+test('/ledger:worktrees prune --all deletes the build folders of every linked worktree, never the main checkout, and totals what it freed', async ($, on) => {
+  const { argvs, run } = recording(pruneAllReplies())
+  on('session.cwd', async () => ({ value: REPO }))
+  on('process.run', run)
+  on('fs.exists', fakeExists)
+  on('fs.list', fakeDerivedData)
+  on('fs.stat', fakeRealFs())
+  mock.env(on, { HOME })
+  const { text } = await $.command.run({ command: 'ledger:worktrees', args: 'prune --all' })
+  expect(text).toBe(
+    [
+      '**Pruned every linked worktree** · 19.1 GB freed in 7 folders',
+      '',
+      '**big** · 18.1 GB freed in 6 folders',
+      '',
+      ...PRUNE_TABLE,
+      '',
+      '**small** · 1.0 GB freed in 1 folder',
+      '',
+      ...SMALL_TABLE,
+    ].join('\n'),
+  )
+  expect(rmCalls(argvs)).toEqual([...PRUNE_FOLDERS, `${SMALL}/build`].map(rm).sort(byArgv))
+  expect(argvs.some(argv => argv[0] === 'git' && argv[1] === '-C' && argv[2] === REPO)).toBe(false)
+})
+
+test('/ledger:worktrees prune --all reports a worktree it could not prune and still prunes the others', async ($, on) => {
+  const { argvs, run } = recording({ ...pruneAllReplies(), ...replies([SMALL_STATUS, exit(128, '', 'fatal: bad object')]) })
+  on('session.cwd', async () => ({ value: REPO }))
+  on('process.run', run)
+  on('fs.exists', fakeExists)
+  on('fs.list', fakeDerivedData)
+  on('fs.stat', fakeRealFs())
+  mock.env(on, { HOME })
+  const { text } = await $.command.run({ command: 'ledger:worktrees', args: 'prune --all' })
+  expect(text).toBe(
+    [
+      '**Pruned every linked worktree** · 18.1 GB freed in 6 folders',
+      '',
+      '**big** · 18.1 GB freed in 6 folders',
+      '',
+      ...PRUNE_TABLE,
+      '',
+      '**small** · not pruned',
+      '',
+      'Could not read the ignored files of small. git status failed (exit 128): fatal: bad object',
+    ].join('\n'),
+  )
+  expect(rmCalls(argvs)).toEqual(PRUNE_FOLDERS.map(rm).sort(byArgv))
+})
+
+test('/ledger:worktrees prune --all says nothing to prune for a worktree without build folders', async ($, on) => {
+  on('session.cwd', async () => ({ value: REPO }))
+  on('process.run', fakeRun({ ...pruneAllReplies(), ...replies([IGNORED_STATUS, ok('!! dist/\n')]) }))
+  on('fs.exists', fakeExists)
+  on('fs.list', async (_$: unknown, e: { path: string }) => ({ deny: `ENOENT: ${e.path}` }))
+  mock.env(on, { HOME })
+  const { text } = await $.command.run({ command: 'ledger:worktrees', args: 'prune --all --dry-run' })
+  expect(text.split('\n').slice(0, 5)).toEqual(['**Prune every linked worktree** · dry run · 1.0 GB in 1 folder', '', '**big** · nothing to prune', '', '**small** · 1.0 GB in 1 folder'])
+})
+
+test('/ledger:worktrees prune --all says so when no linked worktree has build folders, or there are no linked worktrees', async ($, on) => {
+  let porcelain = PORCELAIN
+  const run = fakeRun({ ...pruneAllReplies(), ...replies([IGNORED_STATUS, ok('')], [SMALL_STATUS, ok('')]) })
+  on('session.cwd', async () => ({ value: REPO }))
+  on('process.run', async (_$: unknown, e: { argv: string[] }) => (argvKey(e.argv) === argvKey(WORKTREE_LIST) ? ok(porcelain) : run(_$, e)))
+  on('fs.exists', fakeExists)
+  on('fs.list', async (_$: unknown, e: { path: string }) => ({ deny: `ENOENT: ${e.path}` }))
+  mock.env(on, { HOME })
+  expect((await $.command.run({ command: 'ledger:worktrees', args: 'prune --all' })).text).toBe('Nothing to prune in any linked worktree.')
+  porcelain = porcelainZ([`worktree ${REPO}`, 'HEAD 1111', 'branch refs/heads/main'])
+  expect((await $.command.run({ command: 'ledger:worktrees', args: 'prune --all' })).text).toBe('No linked worktrees.')
+})
+
+test('/ledger:worktrees prune --all with a worktree name prints the usage line and runs nothing', async ($, on) => {
+  const { argvs, run } = recording(pruneAllReplies())
+  on('session.cwd', async () => ({ value: REPO }))
+  on('process.run', run)
+  for (const args of ['prune big --all', 'prune --all big']) {
+    const { text } = await $.command.run({ command: 'ledger:worktrees', args })
+    expect(text).toBe(USAGE_LINE)
+  }
+  expect(argvs).toEqual([])
+})
+
+test('/ledger:worktrees prune --all through the Skill tool plans with --dry-run as the typed command does, and is refused without it', async ($, on) => {
+  const { argvs, run } = recording(pruneAllReplies())
+  on('session.cwd', async () => ({ value: REPO }))
+  on('process.run', run)
+  on('fs.exists', fakeExists)
+  on('fs.list', fakeDerivedData)
+  on('fs.stat', fakeRealFs())
+  mock.env(on, { HOME })
+  const { text } = await $.command.run({ command: 'ledger:worktrees', args: 'prune --all --dry-run' })
+  const plan = await $.tool.call({ tool: 'Skill', skill: 'ledger:worktrees', args: 'prune --all --dry-run' })
+  const prune = await $.tool.call({ tool: 'Skill', skill: 'ledger:worktrees', args: 'prune --all' })
+  expect(plan.deny).toBe(text)
+  expect(prune.deny).toBe('/ledger:worktrees runs only when the operator types it. Ask the operator to type `/ledger:worktrees prune --all`.')
+  expect(rmCalls(argvs)).toEqual([])
 })

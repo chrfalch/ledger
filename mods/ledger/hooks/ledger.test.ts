@@ -2,6 +2,7 @@ import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
 import { activeLedger, folderSlug, format, formatAll, ledgerPaths, lookupFailedMessage, nextChildHint, noLedgerMessage, retireHint, summarize } from './ledger'
+import { PRUNED_MARKER } from './worktrees-command'
 
 const LEDGER = `# Task ledger — fast-steps
 
@@ -118,6 +119,15 @@ type Run = { argv: readonly string[]; cwd?: string }
 
 const isUnder = (path: string, folder: string): boolean => path === folder || path.startsWith(`${folder}/`)
 
+/**
+ * The auto-prune marker as it stands between finishes: a finished task was pruned when it finished, and an open one has no
+ * marker. auto-prune.test.ts covers the moves between the two.
+ */
+function isMarkerAbsent(path: string, textOf: (ledger: string) => string): boolean {
+  const marker = `/.claude/${PRUNED_MARKER}`
+  return path.endsWith(marker) && summarize(textOf(`${path.slice(0, -marker.length)}/.claude/ledger.md`), '', 0).current !== 'all done'
+}
+
 type Broken = 'spawn' | 'lookup' | 'read' | 'markdown' | 'clear' | 'submit'
 
 type Reply = { value: { exitCode: number; stdout: string; stderr: string; isStdoutTruncated: false; isStderrTruncated: false } } | { deny: string }
@@ -151,14 +161,15 @@ function world(on: On, cwd: string, ledgers: string[], command: string, broken?:
     if (broken === 'spawn') return { deny: 'spawn bash ENOENT' }
     return broken === 'lookup' ? exit(1, '', 'not a repository') : ok(ledgers.join('\n'))
   })
+  const textOf = (path: string): string => (path === NEW_API ? UNTITLED : path === FIX_LOGIN ? fixLogin : LEDGER)
   on('fs.stat', async (_, e) =>
-    removed.some(folder => isUnder(e.path, folder))
+    removed.some(folder => isUnder(e.path, folder)) || isMarkerAbsent(e.path, textOf)
       ? { deny: `ENOENT: no such file or directory, stat '${e.path}'` }
       : { value: { kind: 'file', size: 0, mtimeMs: 0, isLink: false } },
   )
   on('fs.read', async (_, e) => {
     if (broken === 'read') return { deny: 'EACCES: ledger unreadable' }
-    return { value: e.path === NEW_API ? UNTITLED : e.path === FIX_LOGIN ? fixLogin : LEDGER }
+    return { value: textOf(e.path) }
   })
   on('command.run', { command }, async (_, e) => {
     isMarkdownReached = true

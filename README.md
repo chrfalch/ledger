@@ -95,6 +95,7 @@ session. It also runs deploy.
 | `ledger parent [slug]` | Shows a parent task and its child tasks, like `/ledger:parent`. Without a slug, it shows the family of the task in the current folder. |
 | `ledger worktrees` | Lists this repo's linked worktrees, largest first, like `/ledger:worktrees`. |
 | `ledger worktrees prune <name> [--dry-run]` | Deletes the build folders of one linked worktree, like `/ledger:worktrees prune`. It keeps `node_modules`, `Pods` and `.claude` folders. `--dry-run` only lists the folders. |
+| `ledger worktrees prune --all [--dry-run]` | Deletes the build folders of every linked worktree, like `/ledger:worktrees prune --all`. It never touches the main checkout. A worktree that fails is reported, and the others are still pruned. `--dry-run` only lists the folders. |
 | `ledger worktrees derived-data` | Lists the folders in Xcode DerivedData, grouped by the project they were built from, like `/ledger:worktrees derived-data`. |
 | `ledger worktrees prune-orphans [--dry-run]` | Deletes the DerivedData folders whose project no longer exists on disk, like `/ledger:worktrees prune-orphans`. `--dry-run` only lists the folders. |
 | `ledger help [command]` | Prints help for `ledger`, or for one of its commands. |
@@ -108,9 +109,21 @@ does not exist.
 A hook answers `/ledger`, `/ledger:help`, `/ledger:worktrees`,
 `/ledger:retire`, `/ledger:archive`, `/ledger:all`, `/ledger:parent` and
 `/ledger:dashboard` directly, without a model turn. Most of them only print.
-`/ledger:retire` and the two prune forms of `/ledger:worktrees` delete files.
+`/ledger:retire` and the three prune forms of `/ledger:worktrees` delete files.
 Add `--dry-run` to see what they would delete first. The other commands run a
 model turn, for example to write a ledger, start a task, or switch to one.
+
+When every step of the session's task is done, the end of the turn deletes the
+build folders of the task's worktree. It uses the checks of
+`/ledger:worktrees prune`. The folders move at once to a trash folder, and a
+background process deletes them. So the turn does not wait. The trash folder
+goes in the worktree's git folder when that folder is on the same disk. Then
+`git status` does not show it. Otherwise it goes next to the build folder.
+There, `git status` shows it until the delete ends. A file
+`.claude/build-folders-pruned` in the worktree stops a second prune. A failed
+prune also writes this file, so the failure is shown once. The file names the
+command to prune by hand. When the task has open steps again, the file is
+removed, so the next finish prunes again.
 
 ### Daily use
 
@@ -123,13 +136,13 @@ model turn, for example to write a ledger, start a task, or switch to one.
 | `/ledger:task --here [<slug>]` | Gives the linked worktree this session is in a ledger, instead of a new worktree. Without a slug, the task takes the branch name without its owner prefix. It refuses the main checkout and a worktree that already has a ledger. The reply is the path of the new ledger. |
 | `/ledger:update` | Writes the step status, the subagent reports, the decisions and the next step to the task's ledger. After an implement-and-review cycle with work left, the reply is the clear point line. Otherwise it says only that the ledger is updated. With no ledger in the working directory, the agent creates nothing and tells you to use `/ledger:task`. |
 | `/ledger:close` | Writes the ledger the same way, then clears the session. Type `go` later to continue. It never starts a task: with no ledger in the worktree, it prints why and does nothing. |
-| `/ledger:next` | Writes the ledger the same way, clears the session, then sends `go <name>`, so the fresh session continues from the next step. When every step is done, it first says how to retire the task. Like `/ledger:close`, it never starts a task. |
+| `/ledger:next` | Writes the ledger the same way, clears the session, then sends `go <name>`, so the fresh session continues from the next step. When every step is done, it first says how to retire the task, and deletes its build folders as every finished turn does. Like `/ledger:close`, it never starts a task. |
 
 ### Switching and parking
 
 | You type | What happens |
 |---|---|
-| `/ledger:go <slug>` | Switches to the task named `<slug>`; `/ledger` shows each name. If the session has a task ledger, the agent writes it first. The session then clears and `go <slug>` is sent, so the fresh session moves into that task's worktree. If that task was parked, the mark is removed. A backlog task first gets its branch and worktree. When no task has that name, the agent makes it: it writes the goal from the conversation, then makes the ledger, branch and worktree. If no ledger exists at the end of the turn, for example because it had to ask you what the task is, the session does not clear. The branch starts at the `--base` ref given when the task was written. Without one, it starts at the commit that `origin/HEAD` points to. Nothing fetches first, so that commit is from your last `git fetch`. Without `origin/HEAD`, the branch starts at the branch that the main checkout is on. A backlog task starts only from a session in its repo. From another repo, `/ledger:go` names the repo and changes nothing. For a parent task, `/ledger:go` starts its next child task instead: the first one under `## Children` that is not started yet and is still in the backlog. A child task in another repo is promoted there, and the session stays where it is. When you leave a task whose steps are all done, it first says how to retire it. |
+| `/ledger:go <slug>` | Switches to the task named `<slug>`; `/ledger` shows each name. If the session has a task ledger, the agent writes it first. The session then clears and `go <slug>` is sent, so the fresh session moves into that task's worktree. If that task was parked, the mark is removed. A backlog task first gets its branch and worktree. When no task has that name, the agent makes it: it writes the goal from the conversation, then makes the ledger, branch and worktree. If no ledger exists at the end of the turn, for example because it had to ask you what the task is, the session does not clear. The branch starts at the `--base` ref given when the task was written. Without one, it starts at the commit that `origin/HEAD` points to. Nothing fetches first, so that commit is from your last `git fetch`. Without `origin/HEAD`, the branch starts at the branch that the main checkout is on. A backlog task starts only from a session in its repo. From another repo, `/ledger:go` names the repo and changes nothing. For a parent task, `/ledger:go` starts its next child task instead: the first one under `## Children` that is not started yet and is still in the backlog. A child task in another repo is promoted there, and the session stays where it is. When you leave a task whose steps are all done, it first says how to retire it, and deletes its build folders as every finished turn does. |
 | `/ledger:park [<slug>] <reason>` | Marks a task parked, with the date and the reason. With the slug of another task, it only marks that task. Without a slug, it writes this task's ledger, parks it, then clears the session. |
 
 ### Big work
@@ -150,6 +163,8 @@ model turn, for example to write a ledger, start a task, or switch to one.
 | `/ledger:worktrees` | Prints a table of the repo's linked git worktrees, largest first, with size, last commit, changed files, ledger and PR. |
 | `/ledger:worktrees prune <name>` | Deletes the build folders of that worktree. It keeps `node_modules`, `Pods`, `.claude` and the worktree itself. |
 | `/ledger:worktrees prune <name> --dry-run` | Lists those build folders and their sizes. It deletes nothing. |
+| `/ledger:worktrees prune --all` | Deletes the build folders of every linked worktree, never the main checkout. It shows one table per worktree and the total freed. A worktree that fails is reported, and the others are still pruned. |
+| `/ledger:worktrees prune --all --dry-run` | Lists the build folders of every linked worktree and their sizes. It deletes nothing. |
 | `/ledger:worktrees derived-data` | Lists every folder in `~/Library/Developer/Xcode/DerivedData` with its size. It groups them by where the project is: the main checkout, a linked worktree, another location, or gone. Folders with no source project, and shared caches, have their own groups. |
 | `/ledger:worktrees prune-orphans` | Deletes the DerivedData folders whose project no longer exists. It never deletes shared caches or folders without a recorded project. |
 | `/ledger:worktrees prune-orphans --dry-run` | Lists those folders. It deletes nothing. |

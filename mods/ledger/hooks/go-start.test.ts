@@ -2,6 +2,7 @@ import type { EngineInterface, On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 import { summarize } from './ledger'
+import { PRUNED_MARKER } from './worktrees-command'
 
 type Reply = { value: { exitCode: number; stdout: string; stderr: string; isStdoutTruncated: false; isStderrTruncated: false } } | { deny: string }
 
@@ -83,8 +84,14 @@ function world(on: On, cwd: string, listed: Record<string, string>, replies: Rec
     if (key !== WORKTREE_LIST) commands.push({ key, cwd: e.init?.cwd })
     return replies[key] ?? { deny: `unexpected command: ${JSON.stringify(e.argv)}` }
   })
+  // The auto-prune marker as it stands between finishes: a finished task has one, an open task has none.
+  const marker = `/.claude/${PRUNED_MARKER}`
+  const isMarkerAbsent = (path: string): boolean =>
+    path.endsWith(marker) && summarize(all[`${path.slice(0, -marker.length)}/.claude/ledger.md`] ?? '', '', 0).current !== 'all done'
   on('fs.stat', async (_, e) =>
-    e.path === removed ? { deny: `ENOENT: no such file or directory, stat '${e.path}'` } : { value: { kind: 'file', size: 0, mtimeMs: 0, isLink: false } },
+    e.path === removed || isMarkerAbsent(e.path)
+      ? { deny: `ENOENT: no such file or directory, stat '${e.path}'` }
+      : { value: { kind: 'file', size: 0, mtimeMs: 0, isLink: false } },
   )
   on('fs.read', async (_, e) => (e.path in all ? { value: all[e.path] ?? '' } : { deny: `ENOENT: ${e.path}` }))
   on('fs.write', async (_, e) => {
