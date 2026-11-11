@@ -3,6 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import {
   classifyDerivedData,
   derivedDataPrefix,
+  derivedDataSections,
   dirtyCount,
   formatDerivedData,
   formatTable,
@@ -23,6 +24,7 @@ import {
   volumeOf,
   workspacePathOf,
   type DerivedDataEntry,
+  type DerivedDataGroup,
   type RepoLayout,
   type WorktreeRow,
 } from './worktrees'
@@ -1381,4 +1383,19 @@ test('/ledger:worktrees prune-orphans deletes the orphans on a mounted disk and 
   mock.env(on, { HOME })
   await $.command.run({ command: 'ledger:worktrees', args: 'prune-orphans' })
   expect(rmCalls(argvs)).toEqual([rm(GONE_BOOT), rm(GONE_SSD)])
+})
+
+test('derivedDataSections groups the folders in the order formatDerivedData shows them, with the label and kind of each group', () => {
+  const folder = (name: string, group: DerivedDataGroup) => ({ path: `${DERIVED_DATA}/${name}`, label: name, sizeGb: 1, group })
+  const cache = folder('ModuleCache.noindex', { kind: 'cache' })
+  const gone = folder('Gone-a', { kind: 'orphan' })
+  const small = folder('App-small', { kind: 'worktree', path: SMALL })
+  const big = folder('App-big', { kind: 'worktree', path: BIG })
+  expect(derivedDataSections([cache, gone, small, big])).toEqual([
+    { label: 'Linked worktree big', kind: 'worktree', folders: [big] },
+    { label: 'Linked worktree small', kind: 'worktree', folders: [small] },
+    { label: 'Orphan', kind: 'orphan', folders: [gone] },
+    { label: 'Shared caches', kind: 'cache', folders: [cache] },
+  ])
+  expect(derivedDataSections([])).toEqual([])
 })

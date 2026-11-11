@@ -36,6 +36,7 @@ import {
   type DerivedDataEntry,
   type DerivedDataFolder,
   type PruneFolder,
+  type Pruned,
   type PruneScope,
   type PullRequest,
   type RepoLayout,
@@ -165,20 +166,26 @@ async function deleteFolder($: EngineInterface, folder: PruneFolder, problem: st
   return failure === undefined ? undefined : `Could not delete ${folder.label}: rm ${failure}`
 }
 
-async function prune($: EngineInterface, worktrees: Worktree[], name: string, dryRun: boolean, cwd: string): Promise<string> {
+async function deleteFolders($: EngineInterface, folders: PruneFolder[], problemOf: (folder: PruneFolder) => Promise<string | undefined>, cwd: string): Promise<Pruned> {
+  const failures = await Promise.all(folders.map(async folder => deleteFolder($, folder, await problemOf(folder), cwd)))
+  return { deleted: folders.filter((_, index) => failures[index] === undefined), failures: failures.filter(failure => failure !== undefined) }
+}
+
+/** Finds the non-empty build folders of the linked worktree `name` and deletes those that pass `deletionProblem`, or with `dryRun` only plans. */
+export async function pruneWorktree($: EngineInterface, worktrees: Worktree[], name: string, dryRun: boolean, cwd: string): Promise<Pruned | { error: string }> {
   const [match, ...others] = worktrees.filter(({ path }) => basename(path) === name)
   if (match === undefined) {
     const names = worktrees.map(({ path }) => basename(path)).join(', ') || 'none'
-    return `No linked worktree named "${name}". Worktrees: ${names}`
+    return { error: `No linked worktree named "${name}". Worktrees: ${names}` }
   }
-  if (others.length > 0) return `Two or more linked worktrees are named "${name}": ${[match, ...others].map(({ path }) => path).join(', ')}`
+  if (others.length > 0) return { error: `Two or more linked worktrees are named "${name}": ${[match, ...others].map(({ path }) => path).join(', ')}` }
 
   const scope = await pruneScope($, match.path)
   const [ignored, xcodePaths] = await Promise.all([
     run($, ['git', '-C', match.path, 'status', '--ignored', '--porcelain'], cwd),
     xcodeBuildFolders($, scope),
   ])
-  if (ignored.failure !== undefined) return `Could not read the ignored files of ${name}. git status ${ignored.failure}`
+  if (ignored.failure !== undefined) return { error: `Could not read the ignored files of ${name}. git status ${ignored.failure}` }
   const sized = await Promise.all(
     [...ignoredBuildFolders(ignored.stdout, match.path), ...xcodePaths].map(async path => ({
       path,
@@ -187,14 +194,8 @@ async function prune($: EngineInterface, worktrees: Worktree[], name: string, dr
     })),
   )
   const folders = sized.filter(folder => !isEmptyFolder(folder))
-  if (dryRun || folders.length === 0) return formatPrunePlan(name, folders)
-
-  const failures = await Promise.all(folders.map(async folder => deleteFolder($, folder, await deletionProblem($, folder.path, scope), cwd)))
-  return formatPruned(
-    name,
-    folders.filter((_, index) => failures[index] === undefined),
-    failures.filter(failure => failure !== undefined),
-  )
+  if (dryRun || folders.length === 0) return { planned: folders }
+  return deleteFolders($, folders, folder => deletionProblem($, folder.path, scope), cwd)
 }
 
 async function isVolumeConnected($: EngineInterface, volume: string, cwd: string): Promise<boolean> {
@@ -231,8 +232,9 @@ async function derivedDataFolders($: EngineInterface, derivedData: string | null
   )
 }
 
-async function derivedDataReport($: EngineInterface, layout: RepoLayout, cwd: string): Promise<string> {
-  return formatDerivedData(await derivedDataFolders($, await derivedDataPath($), layout, cwd))
+/** Every folder in DerivedData, with its size and the group its WorkspacePath puts it in. */
+export async function listDerivedData($: EngineInterface, layout: RepoLayout, cwd: string): Promise<DerivedDataFolder[]> {
+  return derivedDataFolders($, await derivedDataPath($), layout, cwd)
 }
 
 /** Why `rm -rf` must not touch the folder: it must really be a folder directly inside DerivedData, and still be an orphan now; undefined when it may. */
@@ -247,18 +249,12 @@ async function orphanDeletionProblem($: EngineInterface, path: string, derivedDa
   return isOrphan(entry, layout) ? undefined : 'it is no longer an orphan.'
 }
 
-async function pruneOrphans($: EngineInterface, layout: RepoLayout, dryRun: boolean, cwd: string): Promise<string> {
+/** Finds the orphans in DerivedData and deletes those that pass `orphanDeletionProblem`, or with `dryRun` only plans. */
+export async function pruneOrphans($: EngineInterface, layout: RepoLayout, dryRun: boolean, cwd: string): Promise<Pruned> {
   const derivedData = await derivedDataPath($)
   const orphans = (await derivedDataFolders($, derivedData, layout, cwd)).filter(({ group }) => group.kind === 'orphan')
-  if (dryRun || derivedData === null || orphans.length === 0) return formatOrphanPlan(orphans)
-
-  const failures = await Promise.all(
-    orphans.map(async folder => deleteFolder($, folder, await orphanDeletionProblem($, folder.path, derivedData, layout, cwd), cwd)),
-  )
-  return formatPrunedOrphans(
-    orphans.filter((_, index) => failures[index] === undefined),
-    failures.filter(failure => failure !== undefined),
-  )
+  if (dryRun || derivedData === null || orphans.length === 0) return { planned: orphans }
+  return deleteFolders($, orphans, folder => orphanDeletionProblem($, folder.path, derivedData, layout, cwd), cwd)
 }
 
 /** The text /ledger:worktrees answers with for the arguments the operator typed. */
@@ -271,11 +267,16 @@ export async function worktreesCommand($: EngineInterface, args: string): Promis
   switch (command.kind) {
     case 'table':
       return table($, layout.worktrees, cwd)
-    case 'prune':
-      return prune($, layout.worktrees, command.name, command.dryRun, cwd)
+    case 'prune': {
+      const pruned = await pruneWorktree($, layout.worktrees, command.name, command.dryRun, cwd)
+      if ('error' in pruned) return pruned.error
+      return 'planned' in pruned ? formatPrunePlan(command.name, pruned.planned) : formatPruned(command.name, pruned.deleted, pruned.failures)
+    }
     case 'derived-data':
-      return derivedDataReport($, layout, cwd)
-    case 'prune-orphans':
-      return pruneOrphans($, layout, command.dryRun, cwd)
+      return formatDerivedData(await listDerivedData($, layout, cwd))
+    case 'prune-orphans': {
+      const pruned = await pruneOrphans($, layout, command.dryRun, cwd)
+      return 'planned' in pruned ? formatOrphanPlan(pruned.planned) : formatPrunedOrphans(pruned.deleted, pruned.failures)
+    }
   }
 }

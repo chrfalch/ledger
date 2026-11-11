@@ -8,6 +8,12 @@ export type Archive = { repo: string | null; ledgers: ArchivedLedger[] };
 export type Shown = { parent: string; goal: string; children: ChildStatus[] };
 export type Worktree = { path: string; branch: string };
 export type WorktreeRow = { name: string; sizeGb: number | null; lastCommit: string | null; dirty: number | null; hasLedger: boolean; ledgerRole?: string; pr: string };
+export type RepoLayout = { main: string | null; worktrees: Worktree[] };
+export type PruneFolder = { path: string; label: string; sizeGb: number | null };
+export type Pruned = { planned: PruneFolder[] } | { deleted: PruneFolder[]; failures: string[] };
+type DerivedDataKind = 'main' | 'worktree' | 'other' | 'disk-not-connected' | 'orphan' | 'no-source' | 'cache';
+export type DerivedDataFolder = PruneFolder & { group: { kind: 'worktree'; path: string } | { kind: Exclude<DerivedDataKind, 'worktree'> } };
+export type DerivedDataSection = { label: string; kind: DerivedDataKind; folders: DerivedDataFolder[] };
 type Failed = { error: string };
 
 // The signatures of the mod's functions that loadHooks imports. archive.ts and worktrees.ts import './ledger' without
@@ -19,8 +25,12 @@ export type Mod = {
   emptyArchiveMessage(repo: string | null, term: string): string;
   countLabel(count: number, term: string): string;
   familyToShow(engine: Engine, slug: string | undefined): Promise<Shown | { none: true } | Failed>;
-  linkedWorktrees(engine: Engine, cwd: string): Promise<{ worktrees: Worktree[]; error?: string }>;
+  linkedWorktrees(engine: Engine, cwd: string): Promise<RepoLayout & { error?: string }>;
   worktreeRows(engine: Engine, worktrees: Worktree[], cwd: string): Promise<{ rows: WorktreeRow[]; prError?: string }>;
+  pruneWorktree(engine: Engine, worktrees: Worktree[], name: string, dryRun: boolean, cwd: string): Promise<Pruned | Failed>;
+  listDerivedData(engine: Engine, layout: RepoLayout, cwd: string): Promise<DerivedDataFolder[]>;
+  derivedDataSections(folders: DerivedDataFolder[]): DerivedDataSection[];
+  pruneOrphans(engine: Engine, layout: RepoLayout, dryRun: boolean, cwd: string): Promise<Pruned>;
 };
 
 export const MOD_EXPORTS = [
@@ -32,6 +42,10 @@ export const MOD_EXPORTS = [
   'familyToShow',
   'linkedWorktrees',
   'worktreeRows',
+  'pruneWorktree',
+  'listDerivedData',
+  'derivedDataSections',
+  'pruneOrphans',
 ] as const satisfies readonly (keyof Mod)[];
 
-export const loadMod = (): Promise<Mod> => loadHooks<Mod>(['all-command', 'archive', 'archive-command', 'parent-command', 'worktrees-command'], MOD_EXPORTS);
+export const loadMod = (): Promise<Mod> => loadHooks<Mod>(['all-command', 'archive', 'archive-command', 'parent-command', 'worktrees', 'worktrees-command'], MOD_EXPORTS);
