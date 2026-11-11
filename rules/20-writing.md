@@ -40,7 +40,10 @@ Rules:
   `🔴 1 of 3 runs failed`. Never a mark alone; colour alone does not
   reach every reader. The word is the outcome, never "red" or "green".
 - In a comparison table, give each row one mark.
-- Next steps, recommendations and questions stay plain text, without a mark.
+- Start each question you ask the user with ❓: `❓ Commit and open a PR?`.
+  Use ❓ only for a question the user must answer. 🟡 marks a result; ❓
+  marks a question.
+- Next steps and recommendations stay plain text, without a mark.
 - ⚠ stays a warning callout. It is not a result mark.
 - Subagent reports stay plain text. Add the mark when you pass a result to the
   user.
