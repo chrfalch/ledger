@@ -196,6 +196,9 @@ export function realPathProblem(realPath: string, realBase: string): string | un
 
 export type PruneFolder = { path: string; label: string; sizeGb: number | null }
 
+/** What a prune did: the folders it would delete when it only planned, else the folders it deleted and a line for each one it did not. */
+export type Pruned = { planned: PruneFolder[] } | { deleted: PruneFolder[]; failures: string[] }
+
 /** Whether the folder's size prints as 0.0; an unknown size does not count as empty. */
 export const isEmptyFolder = ({ sizeGb }: PruneFolder): boolean => sizeGb !== null && sizeGb < 0.05
 
@@ -339,28 +342,35 @@ const ORPHAN_NOTE = 'An orphan was built from a project that no longer exists on
 
 const DISK_NOT_CONNECTED_NOTE = 'A folder here was built from a project on a disk that is not connected, so it is never deleted.'
 
-function groupLines(members: DerivedDataFolder[]): string[] {
-  const { group } = members[0]
-  return [
-    '',
-    `**${groupLabel(group)}** · ${gb(members)} GB in ${folderCount(members)}`,
-    '',
-    ...pruneTable(members),
-    ...(group.kind === 'disk-not-connected' ? ['', DISK_NOT_CONNECTED_NOTE] : []),
-  ]
-}
+export type DerivedDataSection = { label: string; kind: DerivedDataGroup['kind']; folders: DerivedDataFolder[] }
 
-export function formatDerivedData(folders: DerivedDataFolder[]): string {
-  if (folders.length === 0) return `No folders in ${DERIVED_DATA_LABEL}.`
+/** The folders split by group, in the order they are shown. */
+export function derivedDataSections(folders: DerivedDataFolder[]): DerivedDataSection[] {
   const groups = new Map<string, DerivedDataFolder[]>()
   for (const folder of [...folders].sort(byGroup)) {
     const key = groupKey(folder.group)
     groups.set(key, [...(groups.get(key) ?? []), folder])
   }
+  return [...groups.values()].map(members => ({ label: groupLabel(members[0].group), kind: members[0].group.kind, folders: members }))
+}
+
+function sectionLines({ label, kind, folders }: DerivedDataSection): string[] {
+  return [
+    '',
+    `**${label}** · ${gb(folders)} GB in ${folderCount(folders)}`,
+    '',
+    ...pruneTable(folders),
+    ...(kind === 'disk-not-connected' ? ['', DISK_NOT_CONNECTED_NOTE] : []),
+  ]
+}
+
+export function formatDerivedData(folders: DerivedDataFolder[]): string {
+  if (folders.length === 0) return `No folders in ${DERIVED_DATA_LABEL}.`
+  const sections = derivedDataSections(folders)
   return [
     `**${DERIVED_DATA_LABEL}** · ${gb(folders)} GB in ${folderCount(folders)}`,
-    ...[...groups.values()].flatMap(groupLines),
-    ...(groups.has('orphan') ? ['', ORPHAN_NOTE, 'Run `/ledger:worktrees prune-orphans` to delete the orphans.'] : []),
+    ...sections.flatMap(sectionLines),
+    ...(sections.some(({ kind }) => kind === 'orphan') ? ['', ORPHAN_NOTE, 'Run `/ledger:worktrees prune-orphans` to delete the orphans.'] : []),
   ].join('\n')
 }
 

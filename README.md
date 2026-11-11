@@ -84,8 +84,8 @@ to your shell profile:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-The `ledger` command runs the read-only `/ledger` commands without a Claude
-Code session. It also runs deploy.
+The `ledger` command runs some `/ledger` commands without a Claude Code
+session. It also runs deploy.
 
 | You type | What happens |
 |---|---|
@@ -93,7 +93,10 @@ Code session. It also runs deploy.
 | `ledger all [--scan]` | Lists every registered task and the backlog, like `/ledger:all`. `--scan` first rebuilds the list from the ledgers on disk. |
 | `ledger archive [term] [--all]` | Lists this repo's archived ledgers, newest first, like `/ledger:archive`. A term keeps only the ledgers that contain it, in any case. `--all` lists the archive of every repo. |
 | `ledger parent [slug]` | Shows a parent task and its child tasks, like `/ledger:parent`. Without a slug, it shows the family of the task in the current folder. |
-| `ledger worktrees` | Lists this repo's linked worktrees, largest first, like `/ledger:worktrees`. It has no prune forms. |
+| `ledger worktrees` | Lists this repo's linked worktrees, largest first, like `/ledger:worktrees`. |
+| `ledger worktrees prune <name> [--dry-run]` | Deletes the build folders of one linked worktree, like `/ledger:worktrees prune`. It keeps `node_modules`, `Pods` and `.claude` folders. `--dry-run` only lists the folders. |
+| `ledger worktrees derived-data` | Lists the folders in Xcode DerivedData, grouped by the project they were built from, like `/ledger:worktrees derived-data`. |
+| `ledger worktrees prune-orphans [--dry-run]` | Deletes the DerivedData folders whose project no longer exists on disk, like `/ledger:worktrees prune-orphans`. `--dry-run` only lists the folders. |
 | `ledger help [command]` | Prints help for `ledger`, or for one of its commands. |
 
 ## Commands

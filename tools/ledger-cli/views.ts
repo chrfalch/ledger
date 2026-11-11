@@ -1,6 +1,6 @@
 import { formatTime, taskName } from '../../mods/ledger/hooks/ledger.js';
 import { colors } from './colors.js';
-import type { Archive, Overview, Shown, WorktreeRow } from './hooks.js';
+import type { Archive, DerivedDataSection, Overview, PruneFolder, Pruned, Shown, WorktreeRow } from './hooks.js';
 import { table, truncate } from './table.js';
 
 const TEXT_WIDTH = 80;
@@ -102,4 +102,67 @@ export function worktreesView(rows: WorktreeRow[], prError?: string): string {
     ['left', 'right', 'left', 'right'],
   );
   return [heading('Worktrees', count, `${totalGb.toFixed(1)} GB total`), '', ...lines, ...(prError ? ['', colors.dim(`PR is ? because ${prError}`)] : [])].join('\n');
+}
+
+const DERIVED_DATA = '~/Library/Developer/Xcode/DerivedData';
+const ORPHANS = `orphans in ${DERIVED_DATA}`;
+const ORPHAN_NOTE = colors.dim('An orphan was built from a project that no longer exists on disk.');
+const DISK_NOT_CONNECTED_NOTE = colors.dim('A folder here was built from a project on a disk that is not connected, so it is never deleted.');
+const PRUNE_ORPHANS = colors.bold('ledger worktrees prune-orphans');
+
+/** The text as one shell word, so a printed command still works when pasted. */
+const shellWord = (text: string): string => (/^[\w./@%+=:,-]+$/.test(text) ? text : `'${text.replaceAll("'", `'\\''`)}'`);
+
+const totalGb = (folders: PruneFolder[]): string => `${folders.reduce((sum, { sizeGb }) => sum + (sizeGb ?? 0), 0).toFixed(1)} GB`;
+
+const folderCount = (folders: PruneFolder[]): string => (folders.length === 1 ? '1 folder' : `${folders.length} folders`);
+
+const sizeOf = (folders: PruneFolder[]): string => `${totalGb(folders)} in ${folderCount(folders)}`;
+
+function folderTable(folders: PruneFolder[]): string[] {
+  const sorted = [...folders].sort((a, b) => (b.sizeGb ?? -1) - (a.sizeGb ?? -1));
+  return table(header('folder', 'size GB'), sorted.map(({ label, sizeGb }) => [label, unknown(sizeGb?.toFixed(1))]), ['left', 'right']);
+}
+
+/** `notes` end with the command that deletes what the plan lists. */
+const planView = (title: string, folders: PruneFolder[], notes: string[]): string =>
+  [heading(title, 'dry run', sizeOf(folders)), '', ...folderTable(folders), '', ...notes].join('\n');
+
+function deletedView(title: string, deleted: PruneFolder[], failures: string[]): string {
+  return [
+    heading(title, `${totalGb(deleted)} freed in ${folderCount(deleted)}`),
+    ...(deleted.length > 0 ? ['', ...folderTable(deleted)] : []),
+    ...(failures.length > 0 ? ['', ...failures.map(failure => colors.yellow(failure))] : []),
+  ].join('\n');
+}
+
+/** What `ledger worktrees prune <name>` planned or deleted in the linked worktree `name`. */
+export function pruneView(name: string, pruned: Pruned): string {
+  if ('deleted' in pruned) return deletedView(`Pruned ${name}`, pruned.deleted, pruned.failures);
+  if (pruned.planned.length === 0) return `Nothing to prune in ${name}.`;
+  return planView(`Prune ${name}`, pruned.planned, [
+    colors.dim('Folders inside a .claude folder are never deleted.'),
+    colors.dim('node_modules and Pods folders are kept, so the worktree still builds.'),
+    `Run ${colors.bold(`ledger worktrees prune ${shellWord(name)}`)} to delete them.`,
+  ]);
+}
+
+export function pruneOrphansView(pruned: Pruned): string {
+  if ('deleted' in pruned) return deletedView(`Pruned ${ORPHANS}`, pruned.deleted, pruned.failures);
+  if (pruned.planned.length === 0) return `Nothing to prune: no ${ORPHANS}.`;
+  return planView(`Prune ${ORPHANS}`, pruned.planned, [ORPHAN_NOTE, `Run ${PRUNE_ORPHANS} to delete them.`]);
+}
+
+export function derivedDataView(sections: DerivedDataSection[]): string {
+  if (sections.length === 0) return `No folders in ${DERIVED_DATA}.`;
+  return [
+    heading(DERIVED_DATA, sizeOf(sections.flatMap(({ folders }) => folders))),
+    ...sections.flatMap(({ label, kind, folders }) => [
+      '',
+      heading(label, sizeOf(folders)),
+      ...folderTable(folders),
+      ...(kind === 'disk-not-connected' ? ['', DISK_NOT_CONNECTED_NOTE] : []),
+    ]),
+    ...(sections.some(({ kind }) => kind === 'orphan') ? ['', ORPHAN_NOTE, `Run ${PRUNE_ORPHANS} to delete the orphans.`] : []),
+  ].join('\n');
 }

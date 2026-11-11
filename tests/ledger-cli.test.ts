@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stripVTControlCharacters } from 'node:util';
@@ -307,6 +307,127 @@ test('ledger worktrees outside a git repository fails with the reason', (t) => {
   assert.match(ran.stderr, /Could not list worktrees\./);
 });
 
+test('ledger worktrees --help lists prune, derived-data and prune-orphans', (t) => {
+  const h = home(t);
+  const stdout = ok(ledger(h, REPO, 'worktrees', '--help'));
+  for (const command of ['prune', 'derived-data', 'prune-orphans']) assert.match(stdout, new RegExp(`^\\s+${command}\\b`, 'm'), `--help lists ${command}`);
+  assert.match(ok(ledger(h, REPO, 'worktrees', 'prune', '--help')), /^Usage: ledger worktrees prune \[options\] <name>[\s\S]*--dry-run/m);
+  assert.match(ok(ledger(h, REPO, 'worktrees', 'prune-orphans', '--help')), /--dry-run/);
+});
+
+/** Build output in a linked worktree, plus the same in folders prune must keep. 60 MB each, because prune leaves out a folder whose size rounds to 0.0 GB. */
+function buildOutput(worktree: string): void {
+  writeFileSync(path.join(worktree, '.gitignore'), 'build/\nnode_modules/\n');
+  const data = Buffer.alloc(60_000_000, 1);
+  for (const folder of ['build', 'node_modules/pkg/build', '.claude/build']) {
+    mkdirSync(path.join(worktree, folder), { recursive: true });
+    writeFileSync(path.join(worktree, folder, 'output.bin'), data);
+  }
+}
+
+test('ledger worktrees prune --dry-run lists the build folders and deletes nothing; prune deletes them and keeps node_modules and .claude', (t) => {
+  const { home: h, main, worktrees } = repository(t);
+  const worktree = worktrees['child-task'] ?? assert.fail('missing child worktree');
+  buildOutput(worktree);
+
+  const plan = ok(ledger(h, main, 'worktrees', 'prune', 'child-task', '--dry-run'));
+  assert.match(plan, /Prune child-task · dry run · 0\.1 GB in 1 folder/);
+  assert.match(rowOf(plan, 'build'), /^build\s+0\.1$/);
+  assert.doesNotMatch(plan, /node_modules\/pkg|\.claude\/build/);
+  assert.match(plan, /Folders inside a \.claude folder are never deleted\./);
+  assert.match(plan, /node_modules and Pods folders are kept, so the worktree still builds\./);
+  assert.match(plan, /Run ledger worktrees prune child-task to delete them\./);
+  assert.equal(existsSync(path.join(worktree, 'build/output.bin')), true);
+
+  const pruned = ok(ledger(h, main, 'worktrees', 'prune', 'child-task'));
+  assert.match(pruned, /Pruned child-task · 0\.1 GB freed in 1 folder/);
+  assert.match(rowOf(pruned, 'build'), /^build\s+0\.1$/);
+  assert.equal(existsSync(path.join(worktree, 'build')), false);
+  assert.equal(existsSync(path.join(worktree, 'node_modules/pkg/build/output.bin')), true);
+  assert.equal(existsSync(path.join(worktree, '.claude/build/output.bin')), true);
+  assert.equal(existsSync(path.join(worktree, '.claude/ledger.md')), true);
+
+  assert.match(ok(ledger(h, main, 'worktrees', 'prune', 'child-task')), /^Nothing to prune in child-task\.$/m);
+});
+
+test('ledger worktrees prune never deletes the target of a build folder that is a symbolic link', (t) => {
+  const { home: h, main, worktrees } = repository(t);
+  const worktree = worktrees['child-task'] ?? assert.fail('missing child worktree');
+  const outside = path.join(h, 'outside');
+  mkdirSync(outside);
+  writeFileSync(path.join(outside, 'output.bin'), Buffer.alloc(60_000_000, 1));
+  writeFileSync(path.join(worktree, '.gitignore'), 'build\n');
+  symlinkSync(outside, path.join(worktree, 'build'));
+
+  const ran = ledger(h, main, 'worktrees', 'prune', 'child-task');
+  assert.equal(ran.status, 0, ran.stderr);
+  // du does not follow the link, so the link measures as empty and is dropped before the link check runs.
+  assert.match(ran.stdout, /^Nothing to prune in child-task\.$/m);
+  assert.equal(existsSync(path.join(outside, 'output.bin')), true);
+  assert.equal(lstatSync(path.join(worktree, 'build')).isSymbolicLink(), true);
+});
+
+test('ledger worktrees prune of an unknown worktree exits 1 and names the linked worktrees', (t) => {
+  const { home: h, main } = repository(t);
+  const ran = ledger(h, main, 'worktrees', 'prune', 'nope');
+  assert.equal(ran.status, 1);
+  assert.match(ran.stderr, /No linked worktree named "nope"\. Worktrees: (parent-task, child-task|child-task, parent-task)/);
+});
+
+const derivedData = (h: string): string => path.join(h, 'Library/Developer/Xcode/DerivedData');
+
+function xcodeFolder(h: string, name: string, workspacePath: string): string {
+  const folder = path.join(derivedData(h), name);
+  mkdirSync(folder, { recursive: true });
+  writeFileSync(
+    path.join(folder, 'info.plist'),
+    `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>WorkspacePath</key><string>${workspacePath}</string></dict></plist>\n`,
+  );
+  return folder;
+}
+
+/** One DerivedData folder built from the child worktree, and one orphan whose project is gone. */
+function xcodeFolders(h: string, worktree: string): { built: string; orphan: string } {
+  const workspace = path.join(worktree, 'ios/App.xcworkspace');
+  mkdirSync(workspace, { recursive: true });
+  return { built: xcodeFolder(h, 'App-child', workspace), orphan: xcodeFolder(h, 'Gone-old', path.join(h, 'gone/App.xcworkspace')) };
+}
+
+test('ledger worktrees derived-data groups the DerivedData folders and names the command that deletes the orphans', (t) => {
+  const { home: h, main, worktrees } = repository(t);
+  xcodeFolders(h, worktrees['child-task'] ?? assert.fail('missing child worktree'));
+  const stdout = ok(ledger(h, main, 'worktrees', 'derived-data'));
+  assert.match(stdout, /~\/Library\/Developer\/Xcode\/DerivedData · 0\.0 GB in 2 folders/);
+  assert.match(stdout, /Linked worktree child-task · 0\.0 GB in 1 folder\n(.*\n)*App-child\s+0\.0/);
+  assert.match(stdout, /Orphan · 0\.0 GB in 1 folder\n(.*\n)*Gone-old\s+0\.0/);
+  assert.match(stdout, /An orphan was built from a project that no longer exists on disk\./);
+  assert.match(stdout, /Run ledger worktrees prune-orphans to delete the orphans\./);
+});
+
+test('ledger worktrees derived-data says so when there are no folders', (t) => {
+  const { home: h, main } = repository(t);
+  assert.match(ok(ledger(h, main, 'worktrees', 'derived-data')), /^No folders in ~\/Library\/Developer\/Xcode\/DerivedData\.$/m);
+});
+
+test('ledger worktrees prune-orphans --dry-run lists only the orphans; prune-orphans deletes them', (t) => {
+  const { home: h, main, worktrees } = repository(t);
+  const { built, orphan } = xcodeFolders(h, worktrees['child-task'] ?? assert.fail('missing child worktree'));
+
+  const plan = ok(ledger(h, main, 'worktrees', 'prune-orphans', '--dry-run'));
+  assert.match(plan, /Prune orphans in ~\/Library\/Developer\/Xcode\/DerivedData · dry run · 0\.0 GB in 1 folder/);
+  assert.match(rowOf(plan, 'Gone-old'), /^Gone-old\s+0\.0$/);
+  assert.doesNotMatch(plan, /App-child/);
+  assert.match(plan, /Run ledger worktrees prune-orphans to delete them\./);
+  assert.equal(existsSync(orphan), true);
+
+  const pruned = ok(ledger(h, main, 'worktrees', 'prune-orphans'));
+  assert.match(pruned, /Pruned orphans in ~\/Library\/Developer\/Xcode\/DerivedData · 0\.0 GB freed in 1 folder/);
+  assert.equal(existsSync(orphan), false);
+  assert.equal(existsSync(built), true);
+
+  assert.match(ok(ledger(h, main, 'worktrees', 'prune-orphans')), /^Nothing to prune: no orphans in ~\/Library\/Developer\/Xcode\/DerivedData\.$/m);
+});
+
 function colorRun(h: string, overrides: NodeJS.ProcessEnv): Ran {
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: h, CI: '1', GIT_CONFIG_GLOBAL: path.join(h, '.gitconfig') };
   delete env.NO_COLOR;
@@ -405,7 +526,7 @@ test('loaded hooks retain every copied row field', async (t) => {
     },
   };
   const { MOD_EXPORTS } = await import('../tools/ledger-cli/hooks.js');
-  const mod = await loadHooks<Mod>(['all-command', 'archive', 'archive-command', 'parent-command', 'worktrees-command'], MOD_EXPORTS);
+  const mod = await loadHooks<Mod>(['all-command', 'archive', 'archive-command', 'parent-command', 'worktrees', 'worktrees-command'], MOD_EXPORTS);
   const registry = await mod.readRegistry($, false);
   if ('error' in registry) assert.fail(registry.error);
   assert.equal(registry.entries.length, 3);

@@ -1,12 +1,13 @@
 import { spawn } from 'node:child_process';
-import { access, lstat, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { access, lstat, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const PLUGIN_ROOT = fileURLToPath(new URL('../../mods/ledger', import.meta.url));
 
 export type RunResult = { exitCode: number; stdout: string; stderr: string; isStdoutTruncated: boolean; isStderrTruncated: boolean };
-export type FileStat = { kind: 'file' | 'directory' | 'other'; size: number; mtimeMs: number; isLink: boolean };
+/** `realPath` is set only when `stat` was asked to resolve the path. */
+export type FileStat = { kind: 'file' | 'directory' | 'other'; size: number; mtimeMs: number; isLink: boolean; realPath?: string };
 export type FolderEntry = { name: string; kind: 'file' | 'dir' | 'other' };
 
 /** The part of Claude Code's `$` that the ledger mod's commands use, backed by Node. */
@@ -15,7 +16,7 @@ export type Engine = {
   fs: {
     read(file: string): Promise<string>;
     write(file: string, text: string): Promise<void>;
-    stat(file: string): Promise<FileStat>;
+    stat(file: string, options?: { resolve?: boolean }): Promise<FileStat>;
     exists(file: string): Promise<boolean>;
     list(folder: string): Promise<FolderEntry[]>;
   };
@@ -37,10 +38,10 @@ function runProcess(argv: string[], init: { cwd?: string } = {}): Promise<RunRes
   });
 }
 
-async function statOf(file: string): Promise<FileStat> {
-  const [target, link] = await Promise.all([stat(file), lstat(file)]);
+async function statOf(file: string, { resolve = false }: { resolve?: boolean } = {}): Promise<FileStat> {
+  const [target, link, realPath] = await Promise.all([stat(file), lstat(file), resolve ? realpath(file) : undefined]);
   const kind = target.isFile() ? 'file' : target.isDirectory() ? 'directory' : 'other';
-  return { kind, size: target.size, mtimeMs: target.mtimeMs, isLink: link.isSymbolicLink() };
+  return { kind, size: target.size, mtimeMs: target.mtimeMs, isLink: link.isSymbolicLink(), ...(realPath === undefined ? {} : { realPath }) };
 }
 
 async function list(folder: string): Promise<FolderEntry[]> {

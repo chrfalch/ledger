@@ -4,8 +4,8 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { nodeEngine, type Engine } from '../lib/node-engine.js';
 import { colors, showSpinner } from './colors.js';
-import { loadMod } from './hooks.js';
-import { archiveView, overviewView, parentView, worktreesView } from './views.js';
+import { loadMod, type Mod, type RepoLayout } from './hooks.js';
+import { archiveView, derivedDataView, overviewView, parentView, pruneOrphansView, pruneView, worktreesView } from './views.js';
 
 /** Text for stdout, or an error for stderr that makes the command exit 1. */
 type Output = { text: string } | { error: string };
@@ -51,6 +51,24 @@ async function worktrees($: Engine, cwd: string): Promise<Output> {
   const { rows, prError } = await mod.worktreeRows($, linked, cwd);
   return { text: worktreesView(rows, prError) };
 }
+
+async function inRepo($: Engine, cwd: string, work: (mod: Mod, layout: RepoLayout) => Promise<Output>): Promise<Output> {
+  const mod = await loadMod();
+  const { error, ...layout } = await mod.linkedWorktrees($, cwd);
+  return error === undefined ? work(mod, layout) : { error };
+}
+
+const prune = ($: Engine, cwd: string, name: string, dryRun: boolean): Promise<Output> =>
+  inRepo($, cwd, async (mod, { worktrees: linked }) => {
+    const pruned = await mod.pruneWorktree($, linked, name, dryRun, cwd);
+    return 'error' in pruned ? pruned : { text: pruneView(name, pruned) };
+  });
+
+const derivedData = ($: Engine, cwd: string): Promise<Output> =>
+  inRepo($, cwd, async (mod, layout) => ({ text: derivedDataView(mod.derivedDataSections(await mod.listDerivedData($, layout, cwd))) }));
+
+const pruneOrphans = ($: Engine, cwd: string, dryRun: boolean): Promise<Output> =>
+  inRepo($, cwd, async (mod, layout) => ({ text: pruneOrphansView(await mod.pruneOrphans($, layout, dryRun, cwd)) }));
 
 function deploy(args: string[]): number {
   const script = fileURLToPath(new URL('../../bin/deploy', import.meta.url));
@@ -102,10 +120,27 @@ export async function main(argv: string[]): Promise<number> {
     .description('Show a parent task and its child tasks.')
     .argument('[slug]', 'the parent task; without it, the family of the task in this folder')
     .action(async (slug: string | undefined) => print(await parent($, slug)));
-  program
+  const worktreesCommand = program
     .command('worktrees')
     .description("List this repo's linked worktrees, largest first.")
     .action(async () => print(await withSpinner('Looking at the worktrees', () => worktrees($, cwd))));
+  worktreesCommand
+    .command('prune')
+    .description('Delete the build folders of a linked worktree. node_modules, Pods and .claude folders are kept.')
+    .argument('<name>', 'the folder name of the linked worktree')
+    .option('--dry-run', 'list the folders and delete nothing')
+    .action(async (name: string, { dryRun = false }: { dryRun?: boolean }) =>
+      print(await withSpinner(dryRun ? 'Looking for build folders' : 'Deleting build folders', () => prune($, cwd, name, dryRun))));
+  worktreesCommand
+    .command('derived-data')
+    .description('List the folders in Xcode DerivedData, grouped by the project they were built from.')
+    .action(async () => print(await withSpinner('Reading DerivedData', () => derivedData($, cwd))));
+  worktreesCommand
+    .command('prune-orphans')
+    .description('Delete the DerivedData folders whose project no longer exists on disk.')
+    .option('--dry-run', 'list the folders and delete nothing')
+    .action(async ({ dryRun = false }: { dryRun?: boolean }) =>
+      print(await withSpinner(dryRun ? 'Looking for orphans' : 'Deleting orphans', () => pruneOrphans($, cwd, dryRun))));
 
   try {
     await program.parseAsync(argv, { from: 'user' });
