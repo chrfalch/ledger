@@ -104,35 +104,42 @@ export function formatTable(rows: WorktreeRow[], prError?: string): string {
 export type WorktreesCommand =
   | { kind: 'table' }
   | { kind: 'prune'; name: string; dryRun: boolean }
+  | { kind: 'prune-all'; dryRun: boolean }
   | { kind: 'derived-data' }
   | { kind: 'prune-orphans'; dryRun: boolean }
   | { kind: 'usage' }
 
 export const USAGE =
-  'Usage: `/ledger:worktrees`, `/ledger:worktrees prune <name> [--dry-run]`, `/ledger:worktrees derived-data` or `/ledger:worktrees prune-orphans [--dry-run]`'
+  'Usage: `/ledger:worktrees`, `/ledger:worktrees prune <name> [--dry-run]`, `/ledger:worktrees prune --all [--dry-run]`, `/ledger:worktrees derived-data` or `/ledger:worktrees prune-orphans [--dry-run]`'
 
 /** `--yes` is still accepted from before pruning was the default, and changes nothing. */
-const FINAL_FLAG = /(?:^|\s+)(--dry-run|--yes)$/
+const FINAL_FLAG = /(?:^|\s+)(--dry-run|--yes|--all)$/
 
 /** Flags count only at the end, because a worktree name may hold spaces and words that start with -. */
-function takeFinalFlags(text: string): { rest: string; dryRun: boolean } {
+function takeFinalFlags(text: string): { rest: string; dryRun: boolean; all: boolean } {
   let rest = text
   let dryRun = false
+  let all = false
   for (let found = rest.match(FINAL_FLAG); found !== null; found = rest.match(FINAL_FLAG)) {
     dryRun ||= found[1] === '--dry-run'
+    all ||= found[1] === '--all'
     rest = rest.slice(0, found.index)
   }
-  return { rest, dryRun }
+  return { rest, dryRun, all }
 }
+
+/** So that `prune --all big` is refused, not read as a worktree named `--all big`. */
+const NAMES_ALL = /(?:^|\s)--all(?:\s|$)/
 
 export function parseCommand(args: string): WorktreesCommand {
   const trimmed = args.trim()
   if (trimmed === '') return { kind: 'table' }
   if (trimmed === 'derived-data') return { kind: 'derived-data' }
-  const { rest, dryRun } = takeFinalFlags(trimmed)
+  const { rest, dryRun, all } = takeFinalFlags(trimmed)
+  if (all) return rest === 'prune' ? { kind: 'prune-all', dryRun } : { kind: 'usage' }
   if (rest === 'prune-orphans') return { kind: 'prune-orphans', dryRun }
   const name = rest.match(/^prune\s+(.+)$/s)?.[1]
-  return name === undefined ? { kind: 'usage' } : { kind: 'prune', name, dryRun }
+  return name === undefined || NAMES_ALL.test(name) ? { kind: 'usage' } : { kind: 'prune', name, dryRun }
 }
 
 const BUILD_FOLDER_NAMES = new Set(['.build', '.expo-prebuild', '.cache', 'build', '.DerivedData'])
@@ -216,6 +223,8 @@ function pruneTable(folders: PruneFolder[]): string[] {
   return ['| Folder | Size GB |', '|---|---:|', ...sorted.map(({ label, sizeGb }) => `| ${label} | ${cell(sizeGb?.toFixed(1) ?? null)} |`)]
 }
 
+const KEPT_NOTES = ['Folders inside a `.claude` folder are never deleted.', '`node_modules` and `Pods` folders are kept, so the worktree still builds.']
+
 export function formatPrunePlan(name: string, folders: PruneFolder[]): string {
   if (folders.length === 0) return `Nothing to prune in ${name}.`
   return [
@@ -223,18 +232,58 @@ export function formatPrunePlan(name: string, folders: PruneFolder[]): string {
     '',
     ...pruneTable(folders),
     '',
-    'Folders inside a `.claude` folder are never deleted.',
-    '`node_modules` and `Pods` folders are kept, so the worktree still builds.',
+    ...KEPT_NOTES,
     `Run \`/ledger:worktrees prune ${name}\` to delete them.`,
   ].join('\n')
 }
 
+const freed = (deleted: PruneFolder[]): string => `${gb(deleted)} GB freed in ${folderCount(deleted)}`
+
 export function formatPruned(name: string, deleted: PruneFolder[], failures: string[]): string {
   return [
-    `**Pruned ${name}** · ${gb(deleted)} GB freed in ${folderCount(deleted)}`,
+    `**Pruned ${name}** · ${freed(deleted)}`,
     ...(deleted.length > 0 ? ['', ...pruneTable(deleted)] : []),
     ...(failures.length > 0 ? ['', ...failures] : []),
   ].join('\n')
+}
+
+/** What a prune did in one linked worktree, which `name` names by its folder. */
+export type PrunedWorktree = { name: string; pruned: Pruned | { error: string } }
+
+function worktreeSection({ name, pruned }: PrunedWorktree): string[] {
+  if ('error' in pruned) return [`**${name}** · not pruned`, '', pruned.error]
+  if ('planned' in pruned) {
+    return pruned.planned.length === 0 ? [`**${name}** · nothing to prune`] : [`**${name}** · ${gb(pruned.planned)} GB in ${folderCount(pruned.planned)}`, '', ...pruneTable(pruned.planned)]
+  }
+  return [
+    `**${name}** · ${freed(pruned.deleted)}`,
+    ...(pruned.deleted.length > 0 ? ['', ...pruneTable(pruned.deleted)] : []),
+    ...(pruned.failures.length > 0 ? ['', ...pruned.failures] : []),
+  ]
+}
+
+const isNothingToPrune = ({ pruned }: PrunedWorktree): boolean => 'planned' in pruned && pruned.planned.length === 0
+
+/** What `/ledger:worktrees prune --all` planned or did: a section per linked worktree, under the total. */
+export function formatPruneAll(results: PrunedWorktree[], dryRun: boolean): string {
+  if (results.length === 0) return 'No linked worktrees.'
+  if (results.every(isNothingToPrune)) return 'Nothing to prune in any linked worktree.'
+  const planned = results.flatMap(({ pruned }) => ('planned' in pruned ? pruned.planned : []))
+  const deleted = results.flatMap(({ pruned }) => ('deleted' in pruned ? pruned.deleted : []))
+  return [
+    dryRun ? `**Prune every linked worktree** · dry run · ${gb(planned)} GB in ${folderCount(planned)}` : `**Pruned every linked worktree** · ${freed(deleted)}`,
+    ...results.flatMap(result => ['', ...worktreeSection(result)]),
+    ...(dryRun && planned.length > 0 ? ['', ...KEPT_NOTES, 'Run `/ledger:worktrees prune --all` to delete them.'] : []),
+  ].join('\n')
+}
+
+/** The line logged after the build folders of the finished task's worktree `name` were pruned. */
+export function autoPrunedMessage(name: string, pruned: Pruned): string {
+  if ('planned' in pruned) return `The task is finished, and ${name} has no build folders to prune.`
+  const line = `Pruned the build folders of ${name}, because its task is finished: ${freed(pruned.deleted)}.`
+  const left = pruned.failures.length
+  if (left === 0) return line
+  return `${line} ${left === 1 ? '1 folder was' : `${left} folders were`} not deleted; run \`/ledger:worktrees prune ${name}\` to see why.`
 }
 
 /**

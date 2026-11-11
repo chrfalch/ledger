@@ -68,7 +68,7 @@ import { backlogLedgerPath, mainCheckout, otherRepositoryTask, promoteBacklogTas
 import { worktreeOf } from './retire'
 import { retireCommand } from './retire-command'
 import { basename, parseCommand as parseWorktreesCommand } from './worktrees'
-import { worktreesCommand } from './worktrees-command'
+import { autoPrune, worktreesCommand } from './worktrees-command'
 
 const armed = { plugin: 'ledger', key: 'armed' } as const
 const titled = { plugin: 'ledger', key: 'titled' } as const
@@ -146,11 +146,12 @@ async function hasLedger($: EngineInterface, slug: string): Promise<boolean> {
 /**
  * Read at the turn's end, because the model may have just finished the last step. The lines are only advice, so a failure
  * skips them. `namesNextChild` is false after /ledger:go: it has already marked its target started, so the parent's next
- * child would be the one after it.
+ * child would be the one after it. The build folders of a finished task are pruned first.
  */
 async function showRetireHint($: EngineInterface, ledger: string, namesNextChild: boolean): Promise<void> {
   try {
     const { slug, current, parent } = summarize(await $.fs.read(ledger), folderSlug(ledger), 0)
+    await autoPrune($, ledger, current === 'all done')
     if (current !== 'all done') return
     const worktree = worktreeOf(ledger)
     $.ui.log(retireHint(slug, await lookUpBranch($, worktree)))
@@ -161,22 +162,38 @@ async function showRetireHint($: EngineInterface, ledger: string, namesNextChild
   } catch {}
 }
 
+/** The ledger of the session's own task, undefined when there is not exactly one or the lookup failed. */
+async function sessionTaskLedger($: EngineInterface): Promise<string | undefined> {
+  try {
+    const found = await findLedgers($)
+    if ('error' in found) return undefined
+    const active = sessionLedger(found, await sessionFolder($))
+    return active.kind === 'one' ? active.path : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * Names the session after its task with /rename, because a hook's sessionTitle does not reach Remote Control in VS Code.
  * Only a new task renames, so a title the operator gave stays while the task does. A failure is tried again next turn;
  * the title is not worth a line in the transcript.
  */
-async function titleSession($: EngineInterface): Promise<void> {
+async function titleSession($: EngineInterface, ledger: string): Promise<void> {
   try {
-    const found = await findLedgers($)
-    if ('error' in found) return
-    const active = sessionLedger(found, await sessionFolder($))
-    if (active.kind !== 'one') return
-    const slug = await titleSlug($, active.path)
+    const slug = await titleSlug($, ledger)
     const { value: last } = await $.state.get(titled)
     if (slug === last) return
     await $.command.run({ command: 'rename', args: slug })
     await $.state.set(titled, slug)
+  } catch {}
+}
+
+/** At a turn end that does not clear, because the model may have just finished or reopened the task. A ledger that cannot be read is skipped. */
+async function pruneIfFinished($: EngineInterface, ledger: string): Promise<void> {
+  try {
+    const { current } = summarize(await $.fs.read(ledger), folderSlug(ledger), 0)
+    await autoPrune($, ledger, current === 'all done')
   } catch {}
 }
 
@@ -352,7 +369,7 @@ function isTypedOnly(command: string, args: string): boolean {
   if (command === 'ledger:parent') return parseParentChange(args) !== null
   if (command === 'ledger:worktrees') {
     const parsed = parseWorktreesCommand(args)
-    return (parsed.kind === 'prune' || parsed.kind === 'prune-orphans') && !parsed.dryRun
+    return (parsed.kind === 'prune' || parsed.kind === 'prune-all' || parsed.kind === 'prune-orphans') && !parsed.dryRun
   }
   return TYPED_ONLY.has(command)
 }
@@ -516,8 +533,13 @@ export const register: Register = on => {
     if (e.agentId !== undefined) return next(e)
     const { value } = await $.state.get(armed)
     // A turn that clears does not rename: the session is still in the old task, and the turn of `go <slug>` renames.
+    // It prunes through showRetireHint instead, so each turn prunes at most once.
     if (!value) {
-      if (e.reason === 'answer') await titleSession($)
+      const ledger = e.reason === 'answer' ? await sessionTaskLedger($) : undefined
+      if (ledger !== undefined) {
+        await titleSession($, ledger)
+        await pruneIfFinished($, ledger)
+      }
       return next(e)
     }
     await $.state.set(armed, null)

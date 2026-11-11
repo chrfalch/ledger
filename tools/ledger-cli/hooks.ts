@@ -11,6 +11,7 @@ export type WorktreeRow = { name: string; sizeGb: number | null; lastCommit: str
 export type RepoLayout = { main: string | null; worktrees: Worktree[] };
 export type PruneFolder = { path: string; label: string; sizeGb: number | null };
 export type Pruned = { planned: PruneFolder[] } | { deleted: PruneFolder[]; failures: string[] };
+export type PrunedWorktree = { name: string; pruned: Pruned | { error: string } };
 type DerivedDataKind = 'main' | 'worktree' | 'other' | 'disk-not-connected' | 'orphan' | 'no-source' | 'cache';
 export type DerivedDataFolder = PruneFolder & { group: { kind: 'worktree'; path: string } | { kind: Exclude<DerivedDataKind, 'worktree'> } };
 export type DerivedDataSection = { label: string; kind: DerivedDataKind; folders: DerivedDataFolder[] };
@@ -28,6 +29,7 @@ export type Mod = {
   linkedWorktrees(engine: Engine, cwd: string): Promise<RepoLayout & { error?: string }>;
   worktreeRows(engine: Engine, worktrees: Worktree[], cwd: string): Promise<{ rows: WorktreeRow[]; prError?: string }>;
   pruneWorktree(engine: Engine, worktrees: Worktree[], name: string, dryRun: boolean, cwd: string): Promise<Pruned | Failed>;
+  pruneAll(engine: Engine, worktrees: Worktree[], dryRun: boolean, cwd: string): Promise<PrunedWorktree[]>;
   listDerivedData(engine: Engine, layout: RepoLayout, cwd: string): Promise<DerivedDataFolder[]>;
   derivedDataSections(folders: DerivedDataFolder[]): DerivedDataSection[];
   pruneOrphans(engine: Engine, layout: RepoLayout, dryRun: boolean, cwd: string): Promise<Pruned>;
@@ -43,6 +45,7 @@ export const MOD_EXPORTS = [
   'linkedWorktrees',
   'worktreeRows',
   'pruneWorktree',
+  'pruneAll',
   'listDerivedData',
   'derivedDataSections',
   'pruneOrphans',

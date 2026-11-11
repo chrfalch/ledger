@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { nodeEngine, type Engine } from '../lib/node-engine.js';
 import { colors, showSpinner } from './colors.js';
 import { loadMod, type Mod, type RepoLayout } from './hooks.js';
-import { archiveView, derivedDataView, overviewView, parentView, pruneOrphansView, pruneView, worktreesView } from './views.js';
+import { archiveView, derivedDataView, overviewView, parentView, pruneAllView, pruneOrphansView, pruneView, worktreesView } from './views.js';
 
 /** Text for stdout, or an error for stderr that makes the command exit 1. */
 type Output = { text: string } | { error: string };
@@ -63,6 +63,11 @@ const prune = ($: Engine, cwd: string, name: string, dryRun: boolean): Promise<O
     const pruned = await mod.pruneWorktree($, linked, name, dryRun, cwd);
     return 'error' in pruned ? pruned : { text: pruneView(name, pruned) };
   });
+
+const pruneAll = ($: Engine, cwd: string, dryRun: boolean): Promise<Output> =>
+  inRepo($, cwd, async (mod, { worktrees: linked }) => ({ text: pruneAllView(await mod.pruneAll($, linked, dryRun, cwd), dryRun) }));
+
+const PRUNE_USAGE = 'Name one linked worktree, or use --all: ledger worktrees prune <name> or ledger worktrees prune --all.';
 
 const derivedData = ($: Engine, cwd: string): Promise<Output> =>
   inRepo($, cwd, async (mod, layout) => ({ text: derivedDataView(mod.derivedDataSections(await mod.listDerivedData($, layout, cwd))) }));
@@ -126,11 +131,15 @@ export async function main(argv: string[]): Promise<number> {
     .action(async () => print(await withSpinner('Looking at the worktrees', () => worktrees($, cwd))));
   worktreesCommand
     .command('prune')
-    .description('Delete the build folders of a linked worktree. node_modules, Pods and .claude folders are kept.')
-    .argument('<name>', 'the folder name of the linked worktree')
+    .description('Delete the build folders of a linked worktree, or of every linked worktree. node_modules, Pods and .claude folders are kept.')
+    .argument('[name]', 'the folder name of the linked worktree')
+    .option('--all', 'prune every linked worktree instead of one')
     .option('--dry-run', 'list the folders and delete nothing')
-    .action(async (name: string, { dryRun = false }: { dryRun?: boolean }) =>
-      print(await withSpinner(dryRun ? 'Looking for build folders' : 'Deleting build folders', () => prune($, cwd, name, dryRun))));
+    .action(async (name: string | undefined, { all = false, dryRun = false }: { all?: boolean; dryRun?: boolean }) => {
+      if (all === (name !== undefined)) return print({ error: PRUNE_USAGE });
+      const work = name === undefined ? () => pruneAll($, cwd, dryRun) : () => prune($, cwd, name, dryRun);
+      print(await withSpinner(dryRun ? 'Looking for build folders' : 'Deleting build folders', work));
+    });
   worktreesCommand
     .command('derived-data')
     .description('List the folders in Xcode DerivedData, grouped by the project they were built from.')

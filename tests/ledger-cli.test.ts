@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stripVTControlCharacters } from 'node:util';
@@ -311,7 +311,7 @@ test('ledger worktrees --help lists prune, derived-data and prune-orphans', (t) 
   const h = home(t);
   const stdout = ok(ledger(h, REPO, 'worktrees', '--help'));
   for (const command of ['prune', 'derived-data', 'prune-orphans']) assert.match(stdout, new RegExp(`^\\s+${command}\\b`, 'm'), `--help lists ${command}`);
-  assert.match(ok(ledger(h, REPO, 'worktrees', 'prune', '--help')), /^Usage: ledger worktrees prune \[options\] <name>[\s\S]*--dry-run/m);
+  assert.match(ok(ledger(h, REPO, 'worktrees', 'prune', '--help')), /^Usage: ledger worktrees prune \[options\] \[name\][\s\S]*--all[\s\S]*--dry-run/m);
   assert.match(ok(ledger(h, REPO, 'worktrees', 'prune-orphans', '--help')), /--dry-run/);
 });
 
@@ -372,6 +372,128 @@ test('ledger worktrees prune of an unknown worktree exits 1 and names the linked
   const ran = ledger(h, main, 'worktrees', 'prune', 'nope');
   assert.equal(ran.status, 1);
   assert.match(ran.stderr, /No linked worktree named "nope"\. Worktrees: (parent-task, child-task|child-task, parent-task)/);
+});
+
+test('ledger worktrees prune --all --dry-run lists the build folders of every linked worktree; prune --all deletes them and keeps node_modules and .claude', (t) => {
+  const { home: h, main, worktrees } = repository(t);
+  const child = worktrees['child-task'] ?? assert.fail('missing child worktree');
+  const parentTree = worktrees['parent-task'] ?? assert.fail('missing parent worktree');
+  buildOutput(child);
+  buildOutput(parentTree);
+  buildOutput(main);
+
+  const plan = ok(ledger(h, main, 'worktrees', 'prune', '--all', '--dry-run'));
+  assert.match(plan, /Prune every linked worktree · dry run · 0\.1 GB in 2 folders/);
+  assert.match(plan, /^child-task · 0\.1 GB in 1 folder$/m);
+  assert.match(plan, /^parent-task · 0\.1 GB in 1 folder$/m);
+  assert.match(plan, /Run ledger worktrees prune --all to delete them\./);
+  assert.equal(existsSync(path.join(child, 'build/output.bin')), true);
+  assert.equal(existsSync(path.join(parentTree, 'build/output.bin')), true);
+
+  const pruned = ok(ledger(h, main, 'worktrees', 'prune', '--all'));
+  assert.match(pruned, /Pruned every linked worktree · 0\.1 GB freed in 2 folders/);
+  assert.match(pruned, /^child-task · 0\.1 GB freed in 1 folder$/m);
+  for (const worktree of [child, parentTree]) {
+    assert.equal(existsSync(path.join(worktree, 'build')), false);
+    assert.equal(existsSync(path.join(worktree, 'node_modules/pkg/build/output.bin')), true);
+    assert.equal(existsSync(path.join(worktree, '.claude/build/output.bin')), true);
+  }
+  assert.equal(existsSync(path.join(main, 'build/output.bin')), true, 'the main checkout is never pruned');
+
+  assert.match(ok(ledger(h, main, 'worktrees', 'prune', '--all')), /^Nothing to prune in any linked worktree\.$/m);
+});
+
+test('ledger worktrees prune --all reports a worktree it could not prune, still prunes the others, and exits 0', (t) => {
+  const { home: h, main, worktrees } = repository(t);
+  const child = worktrees['child-task'] ?? assert.fail('missing child worktree');
+  const parentTree = worktrees['parent-task'] ?? assert.fail('missing parent worktree');
+  buildOutput(child);
+  buildOutput(parentTree);
+  const gitFile = path.join(parentTree, '.git');
+  writeFileSync(gitFile, 'gitdir: /nowhere\n');
+
+  const ran = ledger(h, main, 'worktrees', 'prune', '--all');
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.match(ran.stdout, /^parent-task · not pruned$/m);
+  assert.match(ran.stdout, /Could not read the ignored files of parent-task\. git status failed/);
+  assert.match(ran.stdout, /^child-task · 0\.1 GB freed in 1 folder$/m);
+  assert.equal(existsSync(path.join(child, 'build')), false);
+  assert.equal(existsSync(path.join(parentTree, 'build/output.bin')), true);
+});
+
+test('ledger worktrees prune with both a name and --all, or with neither, exits 1 and deletes nothing', (t) => {
+  const { home: h, main, worktrees } = repository(t);
+  const child = worktrees['child-task'] ?? assert.fail('missing child worktree');
+  buildOutput(child);
+  for (const args of [['child-task', '--all'], ['--all', 'child-task'], []]) {
+    const ran = ledger(h, main, 'worktrees', 'prune', ...args);
+    assert.equal(ran.status, 1, `prune ${args.join(' ')}`);
+    assert.match(ran.stderr, /Name one linked worktree, or use --all: ledger worktrees prune <name> or ledger worktrees prune --all/);
+  }
+  assert.equal(existsSync(path.join(child, 'build/output.bin')), true);
+});
+
+test('a prune that deletes in the background moves the build folders out at once and deletes them after it returns, with the same safety checks', async (t) => {
+  const { home: h, main, worktrees } = repository(t);
+  const child = worktrees['child-task'] ?? assert.fail('missing child worktree');
+  buildOutput(child);
+  const outside = path.join(h, 'outside');
+  mkdirSync(outside);
+  writeFileSync(path.join(outside, 'output.bin'), Buffer.alloc(60_000_000, 1));
+  writeFileSync(path.join(child, '.gitignore'), 'build/\nnode_modules/\nios/build\n');
+  mkdirSync(path.join(child, 'ios'));
+  symlinkSync(outside, path.join(child, 'ios/build'));
+
+  type BackgroundMod = { pruneBuildFolders(engine: Engine, root: string, mode: 'delete-in-background', cwd: string): Promise<{ deleted: { label: string }[]; failures: string[] } | { planned: unknown[] } | { error: string }> };
+  const mod = await loadHooks<BackgroundMod>(['worktrees-command'], ['pruneBuildFolders']);
+  const pruned = await mod.pruneBuildFolders({ ...nodeEngine(main), env: { get: async name => (name === 'HOME' ? h : process.env[name]) } }, child, 'delete-in-background', main);
+  if (!('deleted' in pruned)) assert.fail(JSON.stringify(pruned));
+  assert.deepEqual(pruned.deleted.map(({ label }) => label), ['build']);
+  assert.equal(existsSync(path.join(child, 'build')), false);
+  assert.equal(existsSync(path.join(child, 'node_modules/pkg/build/output.bin')), true);
+  assert.equal(existsSync(path.join(outside, 'output.bin')), true);
+
+  assert.doesNotMatch(ok(spawn(h, child, 'git', ['status', '--porcelain', '--untracked-files=all'])), /cc-trash/);
+  assert.equal(readdirSync(child).some(name => name.includes('cc-trash')), false, 'the trash is never inside the worktree');
+
+  const gitDir = path.join(main, '.git/worktrees/child-task');
+  const isTrashLeft = (): boolean => readdirSync(gitDir).some(name => name.includes('cc-trash'));
+  for (let waited = 0; isTrashLeft() && waited < 5000; waited += 50) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(isTrashLeft(), false, 'the trash folder is deleted in the background');
+});
+
+type TrashMod = { moveToTrashArgv(folder: string, trashParent: string): string[] };
+
+/** Runs the move with a nohup that does nothing, so the trash stays where the move put it; returns the trash folders' paths. */
+async function moveWithoutDelete(h: string, folder: string, trashParent: string): Promise<string[]> {
+  const stubs = path.join(h, 'stub-bin');
+  writeFileSync(path.join(stubs, 'nohup'), '#!/bin/sh\nexit 0\n');
+  chmodSync(path.join(stubs, 'nohup'), 0o755);
+  const [command = '', ...args] = (await loadHooks<TrashMod>(['worktrees-command'], ['moveToTrashArgv'])).moveToTrashArgv(folder, trashParent);
+  assert.equal(spawn(h, h, command, args).status, 0);
+  const trashes = (parent: string): string[] => (existsSync(parent) ? readdirSync(parent).filter(name => name.includes('cc-trash')).map(name => path.join(parent, name)) : []);
+  return [...trashes(path.dirname(folder)), ...(trashParent === '' ? [] : trashes(trashParent))];
+}
+
+test('the background move puts the trash in the named folder on the same disk, and beside the build folder when that folder is missing or not named', async (t) => {
+  const { home: h, main, worktrees } = repository(t);
+  const child = worktrees['child-task'] ?? assert.fail('missing child worktree');
+  const gitDir = path.join(main, '.git/worktrees/child-task');
+  for (const [trashParent, expectedParent] of [
+    [gitDir, gitDir],
+    ['', child],
+    [path.join(h, 'no-such-folder'), child],
+  ] as const) {
+    const build = path.join(child, 'build');
+    mkdirSync(build, { recursive: true });
+    writeFileSync(path.join(build, 'output.bin'), 'x');
+    const [trash, ...others] = await moveWithoutDelete(h, build, trashParent);
+    assert.equal(others.length, 0);
+    assert.equal(path.dirname(trash ?? ''), expectedParent, `trash parent for "${trashParent}"`);
+    assert.equal(existsSync(path.join(trash ?? '', 'build/output.bin')), true);
+    assert.equal(existsSync(build), false);
+    rmSync(trash ?? '', { recursive: true });
+  }
 });
 
 const derivedData = (h: string): string => path.join(h, 'Library/Developer/Xcode/DerivedData');
