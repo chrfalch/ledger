@@ -14,6 +14,9 @@
 <!-- needs: opus-implementer -->
 | opus-implementer  | opus-5.5    | medium/high/max | implement judged and taste work            | architecture, review                                  |
 <!-- /needs -->
+<!-- needs: fable-implementer -->
+| fable-implementer | fable-5.2   | xhigh/max       | implement the hardest judged and taste work | routine work, untrusted input, security- or biology-adjacent work, architecture, review |
+<!-- /needs -->
 <!-- needs: sol-implementer -->
 | sol-implementer   | gpt-6.1-sol | routine only    | implement free volume work                 | hard tier, untrusted input, taste work, fill spec gaps |
 <!-- /needs -->

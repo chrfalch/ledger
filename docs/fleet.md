@@ -1,6 +1,6 @@
 # The fleet
 
-Nine subagents. Each has one question it answers, one lane it stays in, and a
+Ten subagents. Each has one question it answers, one lane it stays in, and a
 list of things it never does. The orchestrator routes work to them; you rarely
 name one yourself.
 
@@ -10,6 +10,7 @@ name one yourself.
 | `runner` | sonnet-5.5 | — | *what happened* — build and test verdicts | fix beyond a trivial retry, dump raw logs |
 | `ui-runner` | opus-5.5 | medium/high | *what the UI did* — device flows, assertions | fix code, paste hierarchies or screenshots |
 | `opus-implementer` | opus-5.5 | medium/high/max | implement judged and taste work | architecture, review |
+| `fable-implementer` | fable-5.2 | xhigh/max | implement the hardest judged and taste work | routine work, untrusted input, security- or biology-adjacent work, architecture, review |
 | `sol-implementer` | gpt-6.1-sol | routine only | implement free volume work | hard tier, untrusted input, taste work, fill spec gaps |
 | `astra-implementer` | gpt-6-astra | high/xhigh/max | implement the hardest well-specified work | routine work, taste work, untrusted input, fill spec gaps |
 | `reviewer` | opus-5.5 | medium | is it actually done, with red/green evidence | fix code |
@@ -34,6 +35,7 @@ does not include the model named, or if you want a lane to run cheaper.
 | `researcher` | `claude-opus-5-5` | medium | — |
 | `reviewer` | `claude-opus-5-5` | medium | — |
 | `opus-implementer` | `claude-opus-5-5` | high | — |
+| `fable-implementer` | `claude-fable-5-2` | xhigh | — |
 | `ui-runner` | `claude-opus-5-5` | — | argent |
 | `sol-implementer` | `claude-haiku-5-5` | low | Codex, `gpt-6.1-sol` |
 | `astra-implementer` | `claude-haiku-5-5` | low | Codex, `gpt-6-astra` |
@@ -61,7 +63,7 @@ unsupervised. Taste covers UI and UX, code quality, API design, and copy.
 | sonnet-5.5 | 7 | 7 | 7 | |
 | opus-5.5 | 5 | 9 | 9 | the orchestrator; default for anything judged |
 | gpt-6-astra | 3 | 8 | 6 | Codex only; cost score assumes plan |
-| fable-5 | 2 | 9 | 9 | retired from routing; manual only |
+| fable-5.2 | 4 | 10 | 9 | hardest judged work; xhigh/max only |
 
 These rankings, and the cost figures beside them, come from one operator's own
 eight-week corpus. Treat the ordering as a starting point and the absolute
@@ -77,6 +79,11 @@ Two questions: is the work volume or judged, and if judged, does it need taste?
   needs high reasoning is not volume.
 - **Judged, with taste** — features, user-facing work, API design, judgment in
   approach. Use `opus-implementer`, with the effort stated.
+- **Judged or taste work at the hardest tier** — long-horizon or taste-critical
+  work where Opus at max effort is expected to fall short. Use
+  `fable-implementer` at xhigh or max. Choose it when you plan, never as a retry
+  after an Opus failure. At high effort it scored level with Opus at twice the price, so use
+  Opus. Never for untrusted input, or for security- or biology-adjacent work.
 - **Hard, crisply specified, no taste** — multi-file refactors, concurrency,
   tricky migrations, algorithmic work. Use `astra-implementer`. The spec must be
   complete and the criteria mechanical. In doubt, use Opus.
@@ -87,8 +94,8 @@ Two questions: is the work volume or judged, and if judged, does it need taste?
 
 Raise effort on one model before switching models: low, medium, high, xhigh,
 max. Medium is routine, high is hard, xhigh and max are for difficult or
-taste-critical work. The Astra lane is for a shape of work, not a step up the
-ladder.
+taste-critical work. The Astra and Fable lanes are for a shape of work, not a
+step up the ladder.
 
 ### Two warnings
 

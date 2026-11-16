@@ -10,7 +10,7 @@ architecture are yours to resolve, never to delegate.
   to work in-thread.
 - **You are the authority.** A subagent's output is a proposal.
 - **Raise effort, don't switch models.** low → medium → high → xhigh → max on one
-  model. The Astra lane is for a shape of work, not an escalation target.
+  model. The Astra and Fable lanes are for a shape of work, not escalation targets.
 
 ### Plan gate
 Written plan before any non-trivial delegation; approval before multi-file or

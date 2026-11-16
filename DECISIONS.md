@@ -806,3 +806,41 @@ leading dot keeps the trash folder away from the build folder names that
 fails, the script deletes the build folder at once, as before. The branch is
 now deleted before the build folders, so it is gone even if the script is
 stopped during a slow delete.
+
+## 2026-11-16 — Fable 5.2 enters routing as `fable-implementer`
+
+**`fable-5.2` replaces the retired `fable-5` row.** Cost 4, intelligence 10,
+taste 9. Claude Fable 5.2 (9 Nov) lists at $8/$40, twice Opus 5.5. Its cache
+read is $0.20/M, the same as Opus 5.5, and cache read is most of the measured
+bill. So the real gap is smaller than the list price. Intelligence 10 rests on
+vendor figures only: it leads Opus 5.5 on FrontierCode 2.0 at xhigh (49.1 vs
+45.5), FrontierSWE v2 (69.9 vs 62.3), OSWorld 2.1 (89.3 vs 87.2) and
+AA-Briefcase v1.1 (66.1 vs 61.2). Taste is not measured and stays at 9.
+
+**A new lane, `fable-implementer`.** It takes judged or taste work at the
+hardest tier, where `opus-implementer` at max is expected to fall short:
+long-horizon or taste-critical work. The orchestrator chooses it when it plans
+the work, never as a retry after an Opus failure. A retry escalation would make
+it a step up the effort ladder, and rule 10 keeps model switches for a shape of
+work.
+
+**xhigh or max only.** At high effort Fable 5.2 scores 45.3 on FrontierCode
+2.0 and Opus 5.5 scores 45.5. Below xhigh it buys nothing at twice the price.
+
+**Kept off the lane.** Untrusted or externally-sourced input stays on opus-5.5:
+no prompt-injection figures are published for Fable 5.2. Security- and
+biology-adjacent work stays off: the classifiers block about 55% less than on
+Fable 5.1, but they still block. Routine work, architecture and review stay
+where they were.
+
+**Usage pace.** When the pace line routes work away from Claude, Fable work
+moves to `opus-implementer` at max.
+
+**API limits.** Adaptive thinking is always on. Setting `thinking` to enabled
+or disabled, or forcing tool use, returns HTTP 400. The rule on subagent
+mechanics carries this.
+
+Sources, read 2026-11-16: anthropic.com/claude-fable-and-mythos-5-2,
+platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2,
+platform.claude.com/docs/en/about-claude/pricing. Details are in
+`notes/model-routing-rationale.md`.
