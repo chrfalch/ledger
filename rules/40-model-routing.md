@@ -27,8 +27,8 @@ design, copy. Rationale and benchmarks: `~/.claude/notes/model-routing-rationale
 <!-- needs: gpt-6-astra -->
 | gpt-6-astra | 3    | 8            | 6     | Codex only; cost score assumes plan    |
 <!-- /needs -->
-<!-- needs: fable-5 -->
-| fable-5     | 2    | 9            | 9     | retired from routing; manual only      |
+<!-- needs: fable-5.2 -->
+| fable-5.2   | 4    | 10           | 9     | hardest judged work; xhigh/max only    |
 <!-- /needs -->
 
 Rules:
@@ -46,6 +46,13 @@ Rules:
 <!-- needs: opus-implementer -->
   - Judged with taste (features, user-facing, API design, judgment in approach) →
     `opus-implementer`, effort stated.
+<!-- /needs -->
+<!-- needs: fable-5.2, fable-implementer -->
+  - Judged or taste work at the hardest tier, where Opus at max is expected to
+    fall short (long-horizon, taste-critical) → `fable-implementer`, xhigh or max.
+    Choose it when you plan, never as a retry after an Opus failure. At high effort
+    it scored level with Opus at twice the price: use Opus. Never untrusted input, never
+    security- or biology-adjacent work: safeguards still block it.
 <!-- /needs -->
 <!-- needs: gpt-6-astra, astra-implementer -->
   - Hard, crisply specified, non-taste (multi-file refactors, concurrency, tricky
@@ -96,6 +103,9 @@ When the line says to route work to OpenAI:
 <!-- /needs -->
 <!-- needs: opus-implementer -->
 - Keep taste work and untrusted input on `opus-implementer`.
+<!-- /needs -->
+<!-- needs: fable-5.2, fable-implementer, opus-implementer -->
+- Move Fable work to `opus-implementer` at max.
 <!-- /needs -->
 <!-- needs: reviewer -->
 - Keep reviews on Claude (`reviewer`).

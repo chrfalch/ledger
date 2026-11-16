@@ -2,9 +2,10 @@
 
 Kept out of the rule files to save context. Update when the routing table changes.
 
-## Published rates, OpenAI re-checked 2026-10-27
+## Published rates, Anthropic and OpenAI re-checked 2026-11-16
 
-Anthropic rates are unchanged since 2026-10-09.
+Anthropic added Fable 5.2 and Mythos 5.2 on 2026-11-09. Its other rates are
+unchanged since 2026-10-09. OpenAI list prices are unchanged since 2026-10-27.
 
 US dollars per million tokens. Anthropic cache write is the five-minute rate.
 
@@ -15,6 +16,8 @@ Anthropic (source: platform.claude.com pricing page):
 | opus-5.5 | 4 | 20 | 0.20 | 5 |
 | sonnet-5.5 | 2 | 10 | 0.10 | 2.50 |
 | sonnet-5 | 2 | 10 | 0.20 | 2.50 |
+| fable-5.2 | 8 | 40 | 0.20 | 10 |
+| mythos-5.2 | 8 | 40 | 0.20 | 10 |
 | fable-5.1 | 10 | 50 | 0.25 | 12.50 |
 | mythos-5.1 | 10 | 50 | 0.25 | 12.50 |
 | opus-5 | 5 | 25 | 0.50 | 6.25 |
@@ -48,6 +51,47 @@ On 2026-10-27 the same list recommends `gpt-6-astra`, `gpt-6.1-sol`,
 eight-week measurement put cache reads at 61.5% of the bill and generation at
 13.6%. Opus 5.5 and Sonnet 5 charge $0.20/M for a cache read. Sonnet 5.5 charges
 $0.10/M (pricing page, checked 2026-10-09; the 2026-09-30 table had $0.20).
+
+## Changes on 2026-11-16
+
+- **fable-5.2** (9 Nov 2026, `claude-fable-5-2`) replaces the retired fable-5
+  row. $8/$40, cache read $0.20/M (same as Opus 5.5), cache write $10/M for five
+  minutes or $16/M for one hour. Batch $4/$20, fast mode $16/$80. 1M context,
+  128k output. Fable 5.1 was $10/$50, cache read $0.25/M, cache write $12.50/M.
+- **mythos-5.2:** same prices. Access is limited to verified organizations. No
+  lane.
+- **Vendor figures**, Fable 5.2 / Fable 5.1 / Opus 5.5 / GPT-6 Astra:
+  FrontierCode 2.0 at xhigh 49.1 / 32.4 / 45.5 / 42.8; FrontierSWE v2
+  69.9 / 56.3 / 62.3 / 65.5; OSWorld 2.1 offline partial 89.3 / 83.5 / 87.2 /
+  79.5; AA-Briefcase v1.1 66.1 / 61.5 / 61.2 / 52.0. An unnamed Elo row in the
+  AA-Briefcase block: 1785 / 1669 / 1800 / 1569. At high effort, FrontierCode
+  2.0 is 45.3 for Fable 5.2 and 45.5 for Opus 5.5.
+- **Safety classifiers** block about 55% less than on Fable 5.1 (60% less on
+  cyber, 40% less on bio), from early testing. The pages publish no false-refusal
+  base rate and no prompt-injection figures.
+- **API:** adaptive thinking is always on. `thinking` set to enabled or disabled
+  returns 400. Forced tool use (`tool_choice` any or tool) returns 400. Only
+  Fable 5.2 and Mythos 5.2 can read Fable 5.2 thinking blocks.
+- **Scores:** cost 4. The list price is 2x Opus 5.5, but the cache read is the
+  same, and cache read is most of the measured bill. Intelligence 10, from
+  vendor figures only: Fable 5.2 leads Opus 5.5 on FrontierCode at xhigh,
+  FrontierSWE, OSWorld and AA-Briefcase. Taste is not measured; it stays at 9.
+- **Lane `fable-implementer`:** judged or taste work at the hardest tier, where
+  opus-implementer at max is expected to fall short: long-horizon or
+  taste-critical work. Chosen when the work is planned, never as a retry after an
+  Opus failure. Effort xhigh or max only: at high effort Fable 5.2 ties Opus 5.5
+  on FrontierCode at twice the price. Untrusted input stays on opus-5.5, because
+  no injection figures are published. Security- and biology-adjacent work stays
+  off the lane, because the safeguards still block some of it. When the usage
+  pace line routes work away from Claude, Fable work moves to opus-implementer at
+  max.
+- **Unchanged:** Opus 5.5 $4/$20, Sonnet 5.5 $2/$10, Haiku 5.5 $0.10/$0.50, with
+  cache read $0.20, $0.10 and $0.01. The Codex model list is still
+  `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra` and `gpt-6-luna`, with the same
+  list prices. GPT-6 Cyber (5 Nov 2026) has restricted access and no lane.
+- **Sources** (read 2026-11-16): anthropic.com/claude-fable-and-mythos-5-2,
+  platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2,
+  platform.claude.com/docs/en/about-claude/pricing.
 
 ## Changes on 2026-10-27
 
@@ -157,6 +201,7 @@ $0.10/M (pricing page, checked 2026-10-09; the 2026-09-30 table had $0.20).
   work (42% vs 5%). Manual invocation only. Revisit on a Mythos-tier update.
   Opus 5.5 is claimed at Fable 5.1's level on most work at 40% of the price,
   which strengthens the retirement rather than weakening it.
+  Fable 5.2 reopened routing on 2026-11-16; see Changes on 2026-11-16.
 - **gpt-5.6-sol** (superseded 2026-09-30 by gpt-6.1-sol) kept a lane on cost,
   not capability — free on our Codex plan.
   Leads DeepSWE v1.1 (72.7), level on web research. Lost computer use to Opus 5

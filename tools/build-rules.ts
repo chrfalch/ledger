@@ -3,9 +3,9 @@ import path from 'node:path';
 import { isMain, parseArguments } from './cli.js';
 import { compareCodePoints, PYTHON_WHITESPACE, splitLinesKeepingEnds } from './pycompat.js';
 
-const MODELS = ['gpt-6-luna', 'haiku-5.5', 'gpt-6.1-terra', 'gpt-6.1-sol', 'sonnet-5.5', 'opus-5.5', 'gpt-6-astra', 'fable-5'];
+const MODELS = ['gpt-6-luna', 'haiku-5.5', 'gpt-6.1-terra', 'gpt-6.1-sol', 'sonnet-5.5', 'opus-5.5', 'gpt-6-astra', 'fable-5.2'];
 const TOOLS = ['codex', 'argent', 'gh-stack'];
-const AGENTS = ['researcher', 'runner', 'ui-runner', 'opus-implementer', 'sol-implementer', 'astra-implementer', 'astra-reviewer', 'codex-runner', 'reviewer'];
+const AGENTS = ['researcher', 'runner', 'ui-runner', 'opus-implementer', 'fable-implementer', 'sol-implementer', 'astra-implementer', 'astra-reviewer', 'codex-runner', 'reviewer'];
 const VOCABULARY = new Set([...MODELS, ...TOOLS, ...AGENTS]);
 const MODEL_REQUIRES = new Map([['gpt-6-luna', 'codex'], ['gpt-6.1-terra', 'codex'], ['gpt-6.1-sol', 'codex'], ['gpt-6-astra', 'codex']]);
 

@@ -3,6 +3,11 @@
 - Claude models run via the Agent/Workflow model parameter with `effort` per
   delegation. opus-5.x: thinking on by default; `thinking: disabled` with xhigh/max
   → 400; `max_tokens` caps thinking plus response.
+<!-- needs: fable-5.2 -->
+- fable-5.2: adaptive thinking is always on; `thinking` set to enabled or
+  disabled → 400. Forced tool use (`tool_choice` any or tool) → 400. Only Fable
+  5.2 and Mythos 5.2 can read its thinking blocks.
+<!-- /needs -->
 <!-- needs: codex -->
 - OpenAI models run only through the Codex CLI (`codex exec` / `codex review`).
   `~/.codex/config.toml` sets its own default model, which can be any model. Always
