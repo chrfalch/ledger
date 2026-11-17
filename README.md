@@ -15,8 +15,8 @@ implementation, and return short reports.
 ## How you use it
 
 Most of the time you do four things. You start the task, approve the plan with
-`yes`, type `/ledger:next` at each clear point, and type `/ledger:retire` after
-the PR merges. The full loop:
+`yes`, type `/ledger:next` at each clear point, and tick "retire" after the PR
+merges. The full loop:
 
 1. Start a task in one sentence: `Start a new task: …`. If another task is
    open, the reply ends with a `start:` line, `/ledger:go <name>`. Type it.
@@ -27,8 +27,11 @@ the PR merges. The full loop:
    ledger. Steps 3 and 4 repeat until the plan is done.
 5. When the last review passes, the agent asks to commit and open a PR.
    Answer `yes`.
-6. After the PR merges, type `/ledger:retire`. It archives the ledger and
-   removes the worktree.
+6. After the PR merges, the agent asks one question with check boxes: retire
+   this task, retire other finished tasks, start the next task. Tick the ones
+   you want. The agent retires first and starts the next task last. A retire
+   archives the ledger and removes the worktree. The agent never forces a
+   retire; when one would need `--force`, it fixes the cause or asks you.
 
 To stop for the day, type `/ledger:close`. The next day, type `go`, or
 `go <name>` when several tasks are open.

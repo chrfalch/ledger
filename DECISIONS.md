@@ -878,3 +878,30 @@ table. The two triggers can differ.
 **Not probed in T3 Code.** Whether T3 Code draws the row above its prompt box
 was not checked. Hosts without a prompt box, such as SDK hosts, keep the text
 hint.
+
+## 2026-11-17 — The agent retires a task after a ticked box
+
+**Problem.** At the end of a task the operator typed `/ledger:retire` and the
+next task by hand. T3 Code draws no button row above its prompt box, so the
+buttons from the entry above do not reach it.
+
+**A multi-select question replaces the typing.** When a task is done or merged,
+the agent asks one question with check boxes: retire this task, retire each
+other finished task, start the next task. A ticked box is the operator's
+approval. This changes the earlier rule that only the operator runs
+`/ledger:retire`. The button row stays for hosts that draw it.
+
+**Fixed order.** The agent runs each dry run and fixes its problems while it
+is still in the worktree. Then it leaves the worktree (`ExitWorktree` keep),
+retires this task, retires the others, and runs `/ledger:go` last, because it
+clears the session.
+
+**The mod's retire, not the script.** The Skill tool now runs `/ledger:retire`
+through the same function as the typed command. The mod also deletes a merged
+branch and marks the child task retired in its parent; `bin/cc-worktree-retire`
+alone does not.
+
+**No `--force` from the agent.** The hook refuses `--force` from the Skill
+tool. The agent runs `--dry-run` first and fixes each problem: it commits task
+work or asks before it discards a change, it leaves an unmerged branch alone,
+and it retires finished child tasks before their parent.

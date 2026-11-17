@@ -106,7 +106,7 @@ export async function readState($: EngineInterface, path: string): Promise<Workt
   }
 }
 
-/** The text /ledger:retire answers with for the arguments the operator typed. */
+/** The text /ledger:retire answers with for its arguments, typed or from the Skill tool. */
 export async function retireCommand($: EngineInterface, args: string): Promise<string> {
   const command = parseRetireArgs(args)
   if (command.kind === 'usage') return RETIRE_USAGE

@@ -357,17 +357,29 @@ function answerOf($: EngineInterface, command: string, args: string): Promise<st
       return allCommand($, args)
     case 'ledger:parent':
       return parentCommand($, args)
+    case 'ledger:retire':
+      return retireAnswer($, args)
     case 'ledger:help':
       return Promise.resolve(HELP)
   }
   return undefined
 }
 
-const TYPED_ONLY = new Set(['ledger:retire', 'ledger:dashboard', 'ledger:close', 'ledger:next', 'ledger:park'])
+// A typed retire has no turn of its own, and a Skill-tool retire's turn ends later, so the band would otherwise keep a retired task's row until the next turn ends.
+async function retireAnswer($: EngineInterface, args: string): Promise<string> {
+  const text = await retireCommand($, args)
+  const { value: shown } = await $.state.get(finished).catch(() => ({ value: undefined }))
+  if (shown) await storeFinished($, await sessionTaskLedger($))
+  return text
+}
+
+const TYPED_ONLY = new Set(['ledger:dashboard', 'ledger:close', 'ledger:next', 'ledger:park'])
 
 /** Whether only the operator may run `command` with `args`: it deletes, writes, starts a server or clears the session. */
 function isTypedOnly(command: string, args: string): boolean {
   if (command === 'ledger:parent') return parseParentChange(args) !== null
+  // --force discards uncommitted changes and unmerged work.
+  if (command === 'ledger:retire') return args.split(/\s+/).includes('--force')
   if (command === 'ledger:worktrees') {
     const parsed = parseWorktreesCommand(args)
     return (parsed.kind === 'prune' || parsed.kind === 'prune-all' || parsed.kind === 'prune-orphans') && !parsed.dryRun
@@ -520,13 +532,7 @@ export const register: Register = on => {
   // Typed as always a string, but `claude plugin test` leaves it undefined when the caller omits it.
   on('command.run', { command: 'ledger:worktrees' }, async ($, e) => ({ text: await worktreesCommand($, e.args ?? '') }))
 
-  // A typed retire has no turn of its own, so the band would otherwise keep a retired task's row until the next turn ends.
-  on('command.run', { command: 'ledger:retire' }, async ($, e) => {
-    const text = await retireCommand($, e.args ?? '')
-    const { value: shown } = await $.state.get(finished).catch(() => ({ value: undefined }))
-    if (shown) await storeFinished($, await sessionTaskLedger($))
-    return { text }
-  })
+  on('command.run', { command: 'ledger:retire' }, async ($, e) => ({ text: await retireAnswer($, e.args ?? '') }))
 
   on('command.run', { command: 'ledger:archive' }, async ($, e) => ({ text: await archiveCommand($, e.args ?? '') }))
 
