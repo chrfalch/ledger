@@ -18,10 +18,25 @@ test, what was ruled out and why. Short headings. Do not restate the summary.
 Explanations to the operator default to layer 1; offer layer 2. Use plain words:
 describe what happens step by step, explain each technical term the first time
 you use it, and keep file paths and function names out. When the operator must
-decide, say what changes compared with earlier decisions, then end with the
-options and your recommendation. If the operator asks for layman's terms, the
-default was wrong — fix the default. Do not tell the operator to run a command you
-have not seen exist in this environment; check first, or say it is unverified.
+decide, say what changes compared with earlier decisions. If the operator asks for
+layman's terms, the default was wrong — fix the default. Do not tell the operator to
+run a command you have not seen exist in this environment; check first, or say it
+is unverified.
+
+### Asking the operator
+
+Ask every question that has fixed answers with the question widget (the
+AskUserQuestion tool), not as text. This includes yes/no questions, such as
+whether to commit and open a PR.
+- Make each possible answer one option, two to four per question. The widget
+  adds its own free-text answer, so do not add an "Other" option.
+- Put your recommended option first, and end its label with "(Recommended)".
+- In each option's description, say in plain words what that option changes.
+- The widget can hide the text above it. Make each question complete on its own,
+  and put what changes compared with earlier decisions in the question or the
+  option descriptions.
+- Where the widget is not available, such as in a subagent, end with the options
+  as text and your recommendation.
 
 ## Result status marks
 
@@ -40,9 +55,10 @@ Rules:
   `🔴 1 of 3 runs failed`. Never a mark alone; colour alone does not
   reach every reader. The word is the outcome, never "red" or "green".
 - In a comparison table, give each row one mark.
-- Start each question you ask the user with ❓: `❓ Commit and open a PR?`.
-  Use ❓ only for a question the user must answer. 🟡 marks a result; ❓
-  marks a question.
+- A question with fixed answers goes in the question widget (see Asking the
+  operator). Start any other question you ask the user with ❓:
+  `❓ What should the new command be called?`. Use ❓ only for a question the
+  user must answer. 🟡 marks a result; ❓ marks a question.
 - Next steps and recommendations stay plain text, without a mark.
 - ⚠ stays a warning callout. It is not a result mark.
 - Subagent reports stay plain text. Add the mark when you pass a result to the
