@@ -11,9 +11,16 @@ export type LedgerArmed =
   | { mode: 'go'; slug: string; ledger?: string; isNew?: true }
   | { mode: 'park'; slug: string; ledger: string; marker: string }
 
+/** The session's task when its next step says it is done, with the parent's next child to start, if any. */
+export type FinishedTask = { slug: string; start?: { parent: string; child: string } }
+
 declare module 'claude-code' {
   interface PluginState {
-    /** `titled`: the slug the mod last named the session after with /rename. */
-    ledger: { armed: LedgerArmed | null; titled: string | null }
+    /**
+     * `titled`: the slug the mod last named the session after with /rename.
+     * `finished`: the session's finished task as of the session's start, the last main turn's end or the last retire, null
+     * when there is none. A StateRead gives undefined when the value was never written.
+     */
+    ledger: { armed: LedgerArmed | null; titled: string | null; finished: FinishedTask | null }
   }
 }

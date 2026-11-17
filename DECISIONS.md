@@ -857,3 +857,24 @@ Sources, read 2026-11-16: anthropic.com/claude-fable-and-mythos-5-2,
 platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2,
 platform.claude.com/docs/en/about-claude/pricing. Details are in
 `notes/model-routing-rationale.md`.
+
+## 2026-11-17 — Buttons above the prompt box for a finished task
+
+**A click fills the prompt box and does not run the command.** `/ledger:retire`
+removes a worktree. A button that ran it would delete files on one click, past
+the rule that only the operator runs it. So the button only puts the command in
+the prompt box, and the operator presses Enter. The guard that refuses
+`/ledger:retire` from the Skill tool does not change. When the prompt box does
+not take the text, for example under a dialog, the transcript names the command
+to type.
+
+**The trigger is a next step that starts with `Done`.** The row reads the first
+line under `## Next step`. Finished ledgers already write their next step this
+way, for example "Done. Operator retires with /ledger:retire <slug>". The plan
+table can show every step done while a commit or PR is still open, so it would
+offer a retire too early. The text hint after a clear still uses the plan
+table. The two triggers can differ.
+
+**Not probed in T3 Code.** Whether T3 Code draws the row above its prompt box
+was not checked. Hosts without a prompt box, such as SDK hosts, keep the text
+hint.
