@@ -114,11 +114,9 @@ the commands into
 hook events whole. For every other hook event, it replaces the repo's own
 entries and keeps yours as they are. An entry you edited counts as yours.
 
-If you change or remove a hook entry in any other event, add its old form to
-`RETIRED_HOOK_ENTRIES` in `tools/apply-policy.ts`. Otherwise upgraded settings
-keep the old entry beside the new one. The list is read only for events the
-policy still writes. If you remove a whole event from the policy, the old
-entries stay in upgraded settings; remove them by hand.
+If you change or remove a hook entry in the policy of any other hook event, or
+remove a whole event, the old entries stay in upgraded settings beside the new
+ones. Remove them by hand.
 
 The `SessionStart` hook is what makes the `/clear` then `go` loop work. If you
 change it, test that a session started in a worktree still finds

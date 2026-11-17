@@ -58,7 +58,6 @@ unsupervised. Taste covers UI and UX, code quality, API design, and copy.
 |---|---|---|---|---|
 | gpt-6-luna | 8 | 4 | — | Codex plan; trivial batch only |
 | haiku-5.5 | 8 | 5 | — | trusted text only; a prompt over 100k tokens costs 5x |
-| gpt-6.1-terra | 7 | 6 | — | Codex plan; no lane yet |
 | gpt-6.2-sol | 7 | 8 | 6 | Codex plan; injection resisted 99.76% benchmark, 91.65% generated; external agent messages engaged 0% |
 | sonnet-5.5 | 7 | 7 | 7 | |
 | opus-5.5 | 5 | 9 | 9 | the orchestrator; default for anything judged |
@@ -134,8 +133,7 @@ OpenAI models run only through the Codex CLI (`codex exec` and `codex review`).
   be pinned.
 - Read-only Codex work goes to `codex-runner`. It runs `codex exec -s read-only`
   with a self-contained prompt.
-- Codex CLI 0.167.0 lists gpt-6.2-sol and gpt-6.2-astra. The lowest version
-  that runs them is not known. On `model_not_found`, upgrade the Codex CLI.
+- On `model_not_found`, upgrade the Codex CLI.
 - Astra wrappers never run below high effort.
 - Astra runs with `approval_policy = "on-request"`. Never `--full-auto`, never
   `approval_policy = "never"`.

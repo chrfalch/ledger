@@ -421,7 +421,7 @@ and the second plugin with it.
 `worktrees@agent-config` at user scope, deploy runs
 `claude plugin uninstall worktrees@agent-config --scope user`, after it
 installs the ledger mod. A second run finds nothing to uninstall. An install
-at another scope is the operator's own, and deploy leaves it alone.
+at another scope is the operator's own, and deploy leaves it alone. Removed 2026-11-17: no machine has the old state.
 
 **`/ledger:go <slug>` always runs a model turn.** A mod cannot clear the
 session from a `command.run` hook, and a command that a hook answers ends no
@@ -572,7 +572,8 @@ unauthorized-action rate of 13.75%. 6.1 Sol has 1.25%. A UI run acts on a device
 for a long time, so that rate matters most there.
 
 **New gate name: `gpt-6.1-terra`.** It needs `codex`, like the other OpenAI
-models.
+models. Removed 2026-11-17: Terra never got a lane, so its table row, its rule
+bullet and the gate are gone.
 
 **Kept, on purpose.** The ban on untrusted input for Sol stays. No Anthropic model
 or price changed since 2026-10-09.
@@ -764,17 +765,15 @@ fix instead. A project-scope uninstall edits the project's
 marketplace `agent-config` that points elsewhere is not ours and stays. Deploy
 reads `~/.claude/.agent-config-manifest` when the new manifest is missing, so
 generated rule copies are still replaced without a prompt, and deletes it after
-it writes the new one.
+it writes the new one. Removed 2026-11-17: no machine has the old state.
 
 **Where the old name stays, and why:**
 
 - `tools/deploy.ts`: `OLD_MARKETPLACE` and the old manifest path. Deploy must
-  find an install made under the old name.
-- `tests/deploy-rename.test.ts`: the tests of that move.
-- `README.md` and `docs/installation.md`: an older clone can still be in a
-  folder named `agent-config`, and the deploy section describes the move.
-- `notes/review-brief-2026-09-25.md`: a dated note. Its path names the checkout
-  folder, which keeps its name.
+  find an install made under the old name. Removed 2026-11-17.
+- `tests/deploy-rename.test.ts`: the tests of that move. Removed 2026-11-17.
+- `README.md`: an older clone can still be in a folder named `agent-config`.
+  The description of the move in `docs/installation.md` was removed 2026-11-17.
 - Dated entries above in this file: they are history.
 
 ## 2026-10-30 — Every Codex run goes through a wrapper
@@ -927,10 +926,28 @@ The rule "Untrusted or externally-sourced input → opus-5.5 only" is unchanged.
 **Engine prefix.** Sol and Astra wrappers use `gpt-6.2:`. Luna keeps `gpt-6:`.
 
 **Codex CLI.** Version 0.167.0 lists both models. The lowest version that runs
-them was not found, so the rules no longer name one.
+them was not found, so the rules no longer name one. Removed 2026-11-17: the
+rules and agents no longer name 0.167.0 either.
 
 Sources, read 2026-11-17: deploymentsafety.openai.com/gpt-6-2-astra-sol,
 developers.openai.com/api/docs/models/gpt-6.2-sol,
 developers.openai.com/api/docs/models/gpt-6.2-astra,
 officechai.com/ai/gpt-6-2-sol-gpt-6-2-astra-benchmarks/ (chart reads). Details
 are in `notes/model-routing-rationale.md`.
+
+## 2026-11-17 — Policy files are written with native JSON
+
+`tools/pycompat.ts` and `tools/python-json.ts` kept the byte output of the old
+Python deploy script. They are deleted. `tools/apply-policy.ts` and
+`tools/build-rules.ts` now use native JSON and string functions. The written
+values are the same. These details change:
+
+- Non-ASCII characters are written as they are, not as `\u` escapes.
+- `JSON.stringify` puts integer-like keys first and writes `1.0` as `1`.
+- Lines split on `\n` only, not on the other Python line breaks.
+- Trim and sort use JavaScript rules: `\s`, and UTF-16 order.
+- A value compare is strict: `true` no longer equals `1`.
+
+Our policy, settings and rule files contain none of these cases. Old and new
+output parsed equal in every test case, and the rule markdown was
+byte-identical.

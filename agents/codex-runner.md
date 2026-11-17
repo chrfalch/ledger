@@ -38,8 +38,7 @@ work runs on gpt-6-luna.
    `-s read-only` and `-m`; the Codex config default can be any model. If the
    delegation names a reasoning effort, add
    `-c model_reasoning_effort=<effort>`. If Codex answers `model_not_found` for
-   gpt-6.2-sol, report blocked and say the Codex CLI needs an upgrade (0.167.0
-   lists gpt-6.2-sol).
+   gpt-6.2-sol, report blocked and say the Codex CLI needs an upgrade.
 
 4. **Wait for Codex to end.** A Codex run often takes longer than Bash's
    10-minute foreground limit.

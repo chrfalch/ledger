@@ -101,7 +101,7 @@ export function formatTable(rows: WorktreeRow[], prError?: string): string {
   ].join('\n')
 }
 
-export type WorktreesCommand =
+type WorktreesCommand =
   | { kind: 'table' }
   | { kind: 'prune'; name: string; dryRun: boolean }
   | { kind: 'prune-all'; dryRun: boolean }
@@ -189,8 +189,6 @@ export function pruneBase(path: string, { root, derivedData, prefix }: PruneScop
   const name = path.slice(derivedData.length + 1)
   return !name.includes('/') && isOwnXcodeFolder(name, prefix) ? derivedData : null
 }
-
-export const isPrunable = (path: string, scope: PruneScope): boolean => pruneBase(path, scope) !== null
 
 /** Why a folder whose real path is `realPath` may not be deleted from the folder whose real path is `realBase`; undefined when it may. */
 export function realPathProblem(realPath: string, realBase: string): string | undefined {
@@ -329,7 +327,7 @@ function resolveAbsolute(path: string): string {
 /** The `/Volumes/<name>` folder macOS mounts a disk at, when the path is inside one. */
 export const volumeOf = (path: string): string | null => /^\/Volumes\/[^/]+(?=\/.)/.exec(path)?.[0] ?? null
 
-export type VolumeProbe = {
+type VolumeProbe = {
   /** `/usr/bin/stat -L -f %d /Volumes/<name>` output; null when stat failed. */
   device: string | null
   /** `/usr/bin/stat -f %d /Volumes` output; null when stat failed. */
@@ -391,7 +389,7 @@ const ORPHAN_NOTE = 'An orphan was built from a project that no longer exists on
 
 const DISK_NOT_CONNECTED_NOTE = 'A folder here was built from a project on a disk that is not connected, so it is never deleted.'
 
-export type DerivedDataSection = { label: string; kind: DerivedDataGroup['kind']; folders: DerivedDataFolder[] }
+type DerivedDataSection = { label: string; kind: DerivedDataGroup['kind']; folders: DerivedDataFolder[] }
 
 /** The folders split by group, in the order they are shown. */
 export function derivedDataSections(folders: DerivedDataFolder[]): DerivedDataSection[] {

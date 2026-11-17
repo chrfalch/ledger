@@ -1,7 +1,7 @@
 import { isoDate } from './ledger'
 import { basename } from './worktrees'
 
-export type RetireArgs = { kind: 'retire'; slug: string | null; dryRun: boolean; forced: boolean } | { kind: 'usage' }
+type RetireArgs = { kind: 'retire'; slug: string | null; dryRun: boolean; forced: boolean } | { kind: 'usage' }
 
 export const RETIRE_USAGE =
   'Usage: /ledger:retire [<slug>] [--dry-run] [--force]. --dry-run only shows what would be retired. --force retires a task with uncommitted changes or unmerged work. Run /ledger to see each slug.'

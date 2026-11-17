@@ -1,9 +1,9 @@
-export type Row = { number: string; step: string; status: string }
+type Row = { number: string; step: string; status: string }
 
-export type Parked = { date: string; reason: string }
+type Parked = { date: string; reason: string }
 
 /** A line of a parent's Children section, as bin/cc-ledger-parent writes it. `main` is set for a child in another repository. */
-export type ChildLine = { slug: string; main?: string; retired?: string; started?: string }
+type ChildLine = { slug: string; main?: string; retired?: string; started?: string }
 
 /** How a ledger names a task in another repository: by its slug and that repository's main checkout. */
 export const taskName = ({ slug, main }: { slug: string; main?: string }): string => (main ? `${slug} @ ${main}` : slug)
@@ -137,7 +137,7 @@ export function groupByParent<T>(
 }
 
 /** A registry entry as far as its family goes. `main` is its main checkout, which older registry entries lack. */
-export type FamilyEntry = { repo: string; slug: string; main?: string; parent?: string; parentMain?: string }
+type FamilyEntry = { repo: string; slug: string; main?: string; parent?: string; parentMain?: string }
 
 /**
  * Whether `task` is the parent `child` names. A parent with `parentMain` is in that main checkout; any other is in the
@@ -367,7 +367,7 @@ export function goDeniedMessage(target: string, { promotedWorktree, parked, mark
   return `${done.join(' ')} Then the Skill call was denied: ${sentence(denial)} The session was not cleared.`
 }
 
-export type TaskName = { slug: string; parent?: string }
+type TaskName = { slug: string; parent?: string }
 
 function taskList(tasks: TaskName[]): string {
   const groups = groupByParent(tasks, task => task.slug, task => task.parent)
@@ -405,7 +405,7 @@ export function promotedThenFailedMessage(target: string, worktree: string, erro
   return `Promoted backlog task ${target}: its branch, worktree and ledger are at ${worktree}. Then this failed: ${sentence(error)} The session was not cleared.`
 }
 
-export type StartedElsewhere = { child: string; parent: string; main: string; worktree: string; marked?: string; warnings: string[] }
+type StartedElsewhere = { child: string; parent: string; main: string; worktree: string; marked?: string; warnings: string[] }
 
 /** /ledger:go picked a child task in another repository and promoted it there. The session cannot follow it. */
 export function startedElsewhereMessage({ child, parent, main, worktree, marked, warnings }: StartedElsewhere): string {

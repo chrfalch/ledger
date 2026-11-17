@@ -19,11 +19,11 @@ const ALL_MODELS = MODELS.split(',');
 type Component = (typeof COMPONENTS)[number]['value'];
 export type Components = Record<Component, boolean>;
 
-export type Answers =
+type Answers =
   | { action: 'revert'; dryRun?: boolean }
   | { action: 'deploy'; components: Components; agents: string[]; models: string[]; force?: boolean; dryRun?: boolean };
 
-export interface Environment {
+interface Environment {
   codex: boolean;
   argent: boolean;
   stacks: boolean;

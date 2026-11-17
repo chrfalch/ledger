@@ -179,19 +179,6 @@ Deploy installs the mod through the `claude` CLI, at user scope:
 - It adds this repo as a folder marketplace named `ledger`.
 - It installs the plugin `ledger@ledger`. The part before `@` is the plugin
   name. The part after `@` is the name of the plugin source, the marketplace.
-- An earlier deploy added this repo as a marketplace named `agent-config`, the
-  old project name. When deploy finds that marketplace pointing at this repo,
-  it first uninstalls `ledger@agent-config` and `worktrees@agent-config`, then
-  removes the marketplace `agent-config`. So only one ledger plugin is
-  installed. `worktrees@agent-config` is the plugin that held `/worktrees`
-  before that command moved into the ledger mod as `/ledger:worktrees`.
-- Deploy also uninstalls each `agent-config` plugin installed at local or
-  project scope. It runs the uninstall in that project's folder. If the folder
-  is unknown or missing, deploy prints the command to run instead. The
-  user-scope `ledger@ledger` covers those projects, so deploy does not install
-  it there again.
-- An uninstall at project scope edits `.claude/settings.json` in that project,
-  a file the project's repo may track. Review and commit that change there.
 
 Deploy skips each step that is already done. The plugin loads from this repo,
 so an edit to the repo reaches a running session after `/reload-plugins`. It

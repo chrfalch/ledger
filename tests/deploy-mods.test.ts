@@ -13,7 +13,6 @@ const LIST_MARKETPLACES = 'plugin marketplace list --json';
 const LIST_PLUGINS = 'plugin list --json';
 const ADD = `plugin marketplace add ${REPO_ARGUMENT} --scope user`;
 const INSTALL_LEDGER = 'plugin install ledger@ledger --scope user';
-const UNINSTALL_WORKTREES = 'plugin uninstall worktrees@ledger --scope user';
 
 const changesState = (call: string): boolean => / (add|install|uninstall) /.test(call);
 
@@ -112,65 +111,36 @@ const registeredAt = (location: string): string =>
 
 const installed = (...plugins: { id: string; scope: string }[]): string => JSON.stringify(plugins);
 const LEDGER_AT_USER = { id: 'ledger@ledger', scope: 'user' };
-const WORKTREES_AT_USER = { id: 'worktrees@ledger', scope: 'user' };
 
-test('deploy reports the ledger mod as already installed and uninstalls the old worktrees mod', (t) => {
+test('deploy reports the ledger mod as already installed', (t) => {
   const home = freshHome(t);
-  claudeLists(home, { marketplaces: registeredAt(REPO_ARGUMENT), plugins: installed(LEDGER_AT_USER, WORKTREES_AT_USER) });
-
-  const result = run(home, DEPLOY);
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(claudeCalls(home), [LIST_MARKETPLACES, LIST_PLUGINS, UNINSTALL_WORKTREES]);
-  assert.match(result.stdout, /^mods {5}ledger@ledger already installed$/m);
-  assert.match(result.stdout, /^mods {5}uninstalled worktrees@ledger \(now \/ledger:worktrees\)$/m);
-});
-
-test('deploy installs the ledger mod before it uninstalls the old worktrees mod', (t) => {
-  const home = freshHome(t);
-  claudeLists(home, { marketplaces: registeredAt(REPO_ARGUMENT), plugins: installed(WORKTREES_AT_USER) });
-
-  const result = run(home, DEPLOY);
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(claudeCalls(home), [LIST_MARKETPLACES, LIST_PLUGINS, INSTALL_LEDGER, UNINSTALL_WORKTREES]);
-});
-
-test('a second deploy finds the old worktrees mod gone and uninstalls nothing', (t) => {
-  const home = freshHome(t);
-  claudeLists(home, { marketplaces: registeredAt(REPO_ARGUMENT), plugins: installed(LEDGER_AT_USER, WORKTREES_AT_USER) });
-  run(home, DEPLOY);
-  const before = claudeCalls(home).length;
-
-  const result = run(home, DEPLOY);
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(claudeCalls(home).slice(before), [LIST_MARKETPLACES, LIST_PLUGINS]);
-  assert.doesNotMatch(result.stdout, /worktrees/);
-});
-
-test('--dry-run names the old worktrees mod it would uninstall and uninstalls nothing', (t) => {
-  const home = freshHome(t);
-  claudeLists(home, { marketplaces: registeredAt(REPO_ARGUMENT), plugins: installed(LEDGER_AT_USER, WORKTREES_AT_USER) });
-
-  const result = run(home, DEPLOY, '--dry-run');
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(claudeCalls(home).filter(changesState), []);
-  assert.match(result.stdout, /^mods {5}would uninstall worktrees@ledger \(now \/ledger:worktrees\)$/m);
-});
-
-test('deploy leaves a worktrees mod installed at another scope alone', (t) => {
-  const home = freshHome(t);
-  claudeLists(home, {
-    marketplaces: registeredAt(REPO_ARGUMENT),
-    plugins: installed(LEDGER_AT_USER, { id: 'worktrees@ledger', scope: 'local' }),
-  });
+  claudeLists(home, { marketplaces: registeredAt(REPO_ARGUMENT), plugins: installed(LEDGER_AT_USER) });
 
   const result = run(home, DEPLOY);
 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(claudeCalls(home), [LIST_MARKETPLACES, LIST_PLUGINS]);
+  assert.match(result.stdout, /^mods {5}ledger@ledger already installed$/m);
+});
+
+test('deploy installs the ledger mod when the marketplace is already registered', (t) => {
+  const home = freshHome(t);
+  claudeLists(home, { marketplaces: registeredAt(REPO_ARGUMENT), plugins: installed() });
+
+  const result = run(home, DEPLOY);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(claudeCalls(home), [LIST_MARKETPLACES, LIST_PLUGINS, INSTALL_LEDGER]);
+});
+
+test('--dry-run makes no changes when the ledger mod is already installed', (t) => {
+  const home = freshHome(t);
+  claudeLists(home, { marketplaces: registeredAt(REPO_ARGUMENT), plugins: installed(LEDGER_AT_USER) });
+
+  const result = run(home, DEPLOY, '--dry-run');
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(claudeCalls(home).filter(changesState), []);
 });
 
 test('deploy installs the ledger mod at user scope when it is installed only at another scope', (t) => {
@@ -184,17 +154,6 @@ test('deploy installs the ledger mod at user scope when it is installed only at 
 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(claudeCalls(home), [LIST_MARKETPLACES, LIST_PLUGINS, INSTALL_LEDGER]);
-});
-
-test('a failing uninstall fails deploy with a message on stderr', (t) => {
-  const home = freshHome(t);
-  claudeLists(home, { marketplaces: registeredAt(REPO_ARGUMENT), plugins: installed(LEDGER_AT_USER, WORKTREES_AT_USER) });
-  failClaude(home, 'uninstall');
-
-  const result = run(home, DEPLOY);
-
-  assert.equal(result.status, 1, result.stdout);
-  assert.notEqual(result.stderr.trim(), '');
 });
 
 test('a marketplace already added from this repo is reported and not added again', (t) => {

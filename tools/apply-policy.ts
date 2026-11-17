@@ -11,16 +11,9 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { parse as parseToml } from 'smol-toml';
 import { isMain, parseArguments } from './cli.js';
-import { compareCodePoints, PYTHON_WHITESPACE, splitLinesKeepingEnds } from './pycompat.js';
-import {
-  dumpPythonJson,
-  jsonEqual,
-  JsonObject,
-  parsePythonJson,
-  type JsonValue,
-} from './python-json.js';
 
 const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const HOME = os.homedir();
@@ -29,10 +22,6 @@ function readText(filename: string): string {
   return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
     .decode(readFileSync(filename))
     .replace(/\r\n?/g, '\n');
-}
-
-function lstrip(value: string): string {
-  return value.replace(new RegExp(`^${PYTHON_WHITESPACE}+`), '');
 }
 
 function backup(source: string, backupDir: string): void {
@@ -46,12 +35,18 @@ function backup(source: string, backupDir: string): void {
   utimesSync(destination, metadata.atime, metadata.mtime);
 }
 
-function requireObject(value: JsonValue): JsonObject {
-  if (!(value instanceof JsonObject)) throw new TypeError('Expected a JSON object');
+type JsonObject = Record<string, unknown>;
+
+function isObject(value: unknown): value is JsonObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function requireObject(value: unknown): JsonObject {
+  if (!isObject(value)) throw new TypeError('Expected a JSON object');
   return value;
 }
 
-type MergeChild = (key: string, liveValue: JsonValue | undefined, policyValue: JsonValue) => JsonValue;
+type MergeChild = (key: string, liveValue: unknown, policyValue: unknown) => unknown;
 
 const takePolicy: MergeChild = (_key, _liveValue, policyValue) => policyValue;
 
@@ -59,49 +54,31 @@ const takePolicy: MergeChild = (_key, _liveValue, policyValue) => policyValue;
 // whole rather than merged entry by entry.
 const ASSERTED_HOOK_EVENTS = new Set(['PreCompact', 'SessionStart']);
 
-// Entries an earlier policy wrote that the current one no longer writes
-// identically. When a hook entry is changed, renamed or removed, add its old
-// form here, or upgraded settings keep it beside the new one.
-const RETIRED_HOOK_ENTRIES = new Map<string, JsonValue[]>(
-  Object.entries({
-    PreToolUse: [
-      // ada53e6
-      { matcher: 'Bash', hooks: [{ type: 'command', command: '"$HOME"/.claude/hooks/derived-data-gate.sh' }] },
-    ],
-  }).map(([event, entries]) => [event, entries.map((entry) => parsePythonJson(JSON.stringify(entry)))]),
-);
-
 const mergeHookEvent: MergeChild = (event, liveEntries, policyEntries) => {
   if (ASSERTED_HOOK_EVENTS.has(event) || !Array.isArray(liveEntries) || !Array.isArray(policyEntries)) {
     return policyEntries;
   }
-  const owned = [...policyEntries, ...(RETIRED_HOOK_ENTRIES.get(event) ?? [])];
-  const isOwned = (entry: JsonValue): boolean => owned.some((ownedEntry) => jsonEqual(entry, ownedEntry));
+  const isOwned = (entry: unknown): boolean => policyEntries.some((ownedEntry) => isDeepStrictEqual(entry, ownedEntry));
   return [...liveEntries.filter((entry) => !isOwned(entry)), ...policyEntries];
 };
 
 function mergeKey(
-  liveValue: JsonValue | undefined,
-  policyValue: JsonValue,
+  liveValue: unknown,
+  policyValue: unknown,
   mergeChild = takePolicy,
-): [JsonValue, string[], string[]] {
-  if (!(liveValue instanceof JsonObject && policyValue instanceof JsonObject)) {
-    return [policyValue, jsonEqual(liveValue, policyValue) ? [] : [''], []];
+): [unknown, string[], string[]] {
+  if (!(isObject(liveValue) && isObject(policyValue))) {
+    return [policyValue, isDeepStrictEqual(liveValue ?? null, policyValue) ? [] : [''], []];
   }
-  const merged = new JsonObject();
-  for (const [key, value] of liveValue.entries) merged.entries.set(key, value);
+  const merged = new Map(Object.entries(liveValue));
   const changed: string[] = [];
-  for (const [key, value] of policyValue.entries) {
-    const mergedValue = mergeChild(key, merged.entries.get(key), value);
-    if (!jsonEqual(merged.entries.get(key), mergedValue)) changed.push(key);
-    merged.entries.set(key, mergedValue);
+  for (const [key, value] of Object.entries(policyValue)) {
+    const mergedValue = mergeChild(key, merged.get(key), value);
+    if (!isDeepStrictEqual(merged.get(key) ?? null, mergedValue)) changed.push(key);
+    merged.set(key, mergedValue);
   }
-  const kept = [...liveValue.entries.keys()].filter((key) => !policyValue.entries.has(key));
-  return [merged, changed, kept];
-}
-
-function pythonSort(values: string[]): string[] {
-  return values.sort(compareCodePoints);
+  const kept = Object.keys(liveValue).filter((key) => !Object.hasOwn(policyValue, key));
+  return [Object.fromEntries(merged), changed, kept];
 }
 
 export function applyJson(
@@ -110,44 +87,43 @@ export function applyJson(
   backupDir: string,
   dry = false,
 ): [string[], string[]] {
-  const policy = requireObject(parsePythonJson(readText(policyPath)));
+  const policy = requireObject(JSON.parse(readText(policyPath)));
   if (!existsSync(target)) {
     if (!dry) {
       mkdirSync(path.dirname(target), { recursive: true });
-      writeFileSync(target, `${dumpPythonJson(policy)}\n`);
+      writeFileSync(target, `${JSON.stringify(policy, null, 2)}\n`);
     }
-    return [pythonSort([...policy.entries.keys()]), []];
+    return [Object.keys(policy).sort(), []];
   }
-  const live = requireObject(parsePythonJson(readText(target)));
-  const merged = new JsonObject();
-  for (const [key, value] of live.entries) merged.entries.set(key, value);
+  const live = requireObject(JSON.parse(readText(target)));
+  const merged = new Map(Object.entries(live));
   const changed: string[] = [];
   const kept: string[] = [];
-  for (const [key, value] of policy.entries) {
+  for (const [key, value] of Object.entries(policy)) {
     const [newValue, subChanged, subKept] = mergeKey(
-      live.entries.get(key),
+      Object.hasOwn(live, key) ? live[key] : undefined,
       value,
       key === 'hooks' ? mergeHookEvent : takePolicy,
     );
-    merged.entries.set(key, newValue);
+    merged.set(key, newValue);
     changed.push(...subChanged.map((subkey) => (subkey === '' ? key : `${key}.${subkey}`)));
     kept.push(...subKept.map((subkey) => `${key}.${subkey}`));
   }
-  kept.push(...[...live.entries.keys()].filter((key) => !policy.entries.has(key)));
-  if (changed.length === 0) return [[], pythonSort(kept)];
+  kept.push(...Object.keys(live).filter((key) => !Object.hasOwn(policy, key)));
+  if (changed.length === 0) return [[], kept.sort()];
   if (!dry) {
     backup(target, backupDir);
-    writeFileSync(target, `${dumpPythonJson(merged)}\n`);
+    writeFileSync(target, `${JSON.stringify(Object.fromEntries(merged), null, 2)}\n`);
   }
-  return [pythonSort(changed), pythonSort(kept)];
+  return [changed.sort(), kept.sort()];
 }
 
 function setTomlKey(lines: string[], key: string, rawValue: string): boolean {
   const found = lines.findIndex((line) => line.startsWith('['));
   const firstTable = found === -1 ? lines.length : found;
   for (let index = 0; index < firstTable; index++) {
-    const stripped = lstrip(lines[index]!);
-    if (stripped.startsWith(key) && lstrip(stripped.slice(key.length)).startsWith('=')) {
+    const stripped = lines[index]!.trimStart();
+    if (stripped.startsWith(key) && stripped.slice(key.length).trimStart().startsWith('=')) {
       const replacement = `${key} = ${rawValue}\n`;
       if (lines[index] === replacement) return false;
       lines[index] = replacement;
@@ -159,6 +135,17 @@ function setTomlKey(lines: string[], key: string, rawValue: string): boolean {
     lines.splice(firstTable + 1, 0, '\n');
   }
   return true;
+}
+
+function formatTomlValue(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(formatTomlValue).join(', ')}]`;
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'number') {
+    if (Object.is(value, -0)) return '-0.0';
+    const formatted = String(value);
+    return /^-?\d+$/.test(formatted) ? `${formatted}.0` : formatted;
+  }
+  return JSON.stringify(value);
 }
 
 export function applyToml(
@@ -178,9 +165,9 @@ export function applyToml(
     return prototype !== Object.prototype && prototype !== null;
   });
   if (!existsSync(target)) return [null, null];
-  const lines = splitLinesKeepingEnds(readText(target));
+  const lines = readText(target).match(/[^\n]*\n|[^\n]+$/g) ?? [];
   const changed = flat
-    .filter(([key, value]) => setTomlKey(lines, key, dumpPythonJson(value, false)))
+    .filter(([key, value]) => setTomlKey(lines, key, formatTomlValue(value)))
     .map(([key]) => key);
   const tables = lines.filter((line) => line.startsWith('[')).length;
   if (changed.length === 0) return [[], tables];

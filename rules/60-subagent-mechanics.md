@@ -17,12 +17,10 @@
   neither `-m` nor `-s`; set its model with `-c model="gpt-6.2-astra"`.
 <!-- /needs -->
 <!-- needs: gpt-6.2-sol -->
-- Codex CLI 0.167.0 lists gpt-6.2-sol. The lowest version that runs it is not
-  known. On `model_not_found`, upgrade with `brew upgrade codex`.
+- On `model_not_found`, upgrade with `brew upgrade codex`.
 <!-- /needs -->
 <!-- needs: gpt-6.2-astra -->
-- Codex CLI 0.167.0 lists gpt-6.2-astra. The lowest version that runs it is not
-  known. Astra wrappers never run below high.
+- Astra wrappers never run below high.
 <!-- /needs -->
 <!-- needs: gpt-6.2-astra -->
 - ⚠ Astra: `approval_policy = "on-request"`, set globally in `~/.codex/config.toml`.
