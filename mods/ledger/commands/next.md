@@ -15,7 +15,7 @@ command checked that before this prompt ran. Do not start a task.
 3. Roll each finished step into one line. Keep the ledger under about 4k
    tokens.
 4. End your reply with one line saying the ledger is updated, the session
-   clears automatically after this turn, and the new session continues with
-   `go <slug>`. The slug is the text after "Task ledger — " (em dash or
-   hyphen) in the ledger's title. If there is no such title, or it has no
-   slug, it is the name of the worktree folder. Do not ask the operator to run `/clear`.
+   clears automatically after this turn, and the new session then continues
+   from the next step by itself, so the operator types nothing. Do not show
+   `go <slug>` or any other command for the operator to type. Do not ask the
+   operator to run `/clear`.
