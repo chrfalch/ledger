@@ -18,7 +18,7 @@ function deployFeatures({ agents, noCodex = false }: { agents?: string[]; noCode
 }
 
 const SELECTIONS: [string, string[]][] = [
-  ['features codex,codex-runner,gpt-6.1-sol', ['codex', 'codex-runner', 'gpt-6.1-sol']],
+  ['features codex,codex-runner,gpt-6.2-sol', ['codex', 'codex-runner', 'gpt-6.2-sol']],
   ['--no-codex', deployFeatures({ noCodex: true })],
   ...ALL_AGENTS.map((agent): [string, string[]] => [`--agents ${agent}`, deployFeatures({ agents: [agent] })]),
 ];
@@ -68,7 +68,7 @@ const UI_RUN_SELECTIONS: [string, string[]][] = [
 for (const [label, features] of UI_RUN_SELECTIONS) {
   test(`rules rendered for ${label} keep long UI runs on ui-runner`, (t) => {
     const routing = render(t, features).get('40-model-routing.md') ?? '';
-    assert.doesNotMatch(routing, /stay on gpt-6-astra/);
+    assert.doesNotMatch(routing, /stay on gpt-6.2-astra/);
     assert.match(routing, /stay on ui-runner/);
   });
 }

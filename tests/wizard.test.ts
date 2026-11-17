@@ -63,8 +63,8 @@ test('--agents and --models keep the order of the source lists', () => {
     ['--models', 'gpt-6-luna,opus-5.5'],
   );
   assert.deepEqual(
-    answersToArgs(deployAnswers({}, undefined, ['gpt-6.1-sol', 'gpt-6.1-terra'])),
-    ['--models', 'gpt-6.1-terra,gpt-6.1-sol'],
+    answersToArgs(deployAnswers({}, undefined, ['gpt-6.2-sol', 'gpt-6.1-terra'])),
+    ['--models', 'gpt-6.1-terra,gpt-6.2-sol'],
   );
 });
 

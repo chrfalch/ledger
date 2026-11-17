@@ -15,8 +15,8 @@ design, copy. Rationale and benchmarks: `~/.claude/notes/model-routing-rationale
 <!-- needs: gpt-6.1-terra -->
 | gpt-6.1-terra | 7  | 6            | —     | Codex plan; no lane yet                |
 <!-- /needs -->
-<!-- needs: gpt-6.1-sol -->
-| gpt-6.1-sol | 7    | 8            | 6     | Codex plan; injection not measured     |
+<!-- needs: gpt-6.2-sol -->
+| gpt-6.2-sol | 7    | 8            | 6     | Codex plan; injection resisted 99.76% benchmark, 91.65% generated; external agent messages engaged 0% |
 <!-- /needs -->
 <!-- needs: sonnet-5.5 -->
 | sonnet-5.5  | 7    | 7            | 7     |                                        |
@@ -24,8 +24,8 @@ design, copy. Rationale and benchmarks: `~/.claude/notes/model-routing-rationale
 <!-- needs: opus-5.5 -->
 | opus-5.5    | 5    | 9            | 9     | you; default for everything judged     |
 <!-- /needs -->
-<!-- needs: gpt-6-astra -->
-| gpt-6-astra | 3    | 8            | 6     | Codex only; cost score assumes plan    |
+<!-- needs: gpt-6.2-astra -->
+| gpt-6.2-astra | 4  | 9            | 6     | Codex only; cost score assumes plan    |
 <!-- /needs -->
 <!-- needs: fable-5.2 -->
 | fable-5.2   | 4    | 10           | 9     | hardest judged work; xhigh/max only    |
@@ -38,7 +38,7 @@ Rules:
 - Effort: medium routine, high hard, xhigh/max difficult or taste-critical.
 - **Implementation — two questions: volume or judged? if judged, taste?** The
   Fleet reference table carries each agent's effort range and its never-does list.
-<!-- needs: gpt-6.1-sol, sol-implementer -->
+<!-- needs: gpt-6.2-sol, sol-implementer -->
   - Volume (mechanical, clear-spec, free is the point: migrations, codemods, test
     scaffolding, bulk renames) → `sol-implementer`. Needs high reasoning → not
     volume.
@@ -54,7 +54,7 @@ Rules:
     it scored level with Opus at twice the price: use Opus. Never untrusted input, never
     security- or biology-adjacent work: safeguards still block it.
 <!-- /needs -->
-<!-- needs: gpt-6-astra, astra-implementer -->
+<!-- needs: gpt-6.2-astra, astra-implementer -->
   - Hard, crisply specified, non-taste (multi-file refactors, concurrency, tricky
     migrations, algorithmic, long many-file sessions) → `astra-implementer`. Spec
     complete, criteria mechanical. In doubt → Opus: cheaper on our plan,
@@ -62,8 +62,8 @@ Rules:
 <!-- /needs -->
   - Untrusted or externally-sourced input → opus-5.5 only.
   - Ambiguous spec → nobody. Resolve it first.
-<!-- needs: gpt-6.1-sol, codex-runner -->
-- Deep investigation with a self-contained brief → `codex-runner` on gpt-6.1-sol
+<!-- needs: gpt-6.2-sol, codex-runner -->
+- Deep investigation with a self-contained brief → `codex-runner` on gpt-6.2-sol
   (plan-covered).
 <!-- /needs -->
 <!-- needs: gpt-6-luna, codex-runner -->
@@ -83,8 +83,8 @@ Rules:
   hierarchy in your context is re-read by every later turn.
 <!-- /needs -->
 <!-- needs: argent, ui-runner, gpt-6.1-terra -->
-- gpt-6.1-terra has no lane yet. Its unauthorized-action rate is 13.75% (6.1 Sol
-  1.25%), so long UI runs stay on ui-runner.
+- gpt-6.1-terra has no lane yet. Its unauthorized-action rate is 13.75% (6.2 Sol
+  0%), so long UI runs stay on ui-runner.
 <!-- /needs -->
 - ⚠ Every model here **expands scope and fills gaps** if allowed. Complete specs;
   scope review is mandatory. Never add "verify your work".
@@ -95,10 +95,10 @@ Rules:
 
 The usage-pace hook adds a line when Claude usage runs ahead of an even pace.
 When the line says to route work to OpenAI:
-<!-- needs: gpt-6.1-sol, sol-implementer -->
+<!-- needs: gpt-6.2-sol, sol-implementer -->
 - Send volume work to `sol-implementer`.
 <!-- /needs -->
-<!-- needs: gpt-6-astra, astra-implementer -->
+<!-- needs: gpt-6.2-astra, astra-implementer -->
 - Send hard, clearly specified work to `astra-implementer`.
 <!-- /needs -->
 <!-- needs: opus-implementer -->
@@ -110,7 +110,7 @@ When the line says to route work to OpenAI:
 <!-- needs: reviewer -->
 - Keep reviews on Claude (`reviewer`).
 <!-- /needs -->
-<!-- needs: gpt-6.1-sol, codex-runner -->
+<!-- needs: gpt-6.2-sol, codex-runner -->
 - Large investigation may go to `codex-runner`.
 <!-- /needs -->
 - Tell the operator once per task that work moved to OpenAI and why.
