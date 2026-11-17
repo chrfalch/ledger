@@ -456,6 +456,19 @@ the host session. After a resume, the first turn renames once, even when the
 operator named the session for the same task. A rename that fails is tried
 again at the next turn end, with no message.
 
+**Since 2026-11-17: T3 Code follows `/rename` from version 0.1.10. No mod
+change.** T3 0.1.8 kept its own thread title: it ignored the
+`session_title_changed` event that Claude Code sends after `/rename`. T3 fixed
+this upstream in pingdotgg/t3code#36879 (merged 2026-11-14, in v0.1.10, closes
+#34342). On a successful `/rename` result, T3 now sets the thread title to the
+new name. The fix is in the T3 server, so updating the desktop app also fixes
+the title on the iPhone app that connects to it. Checked by hand on
+2026-11-17 with a typed `/rename` in T3 0.1.10. Ruled out: a model call to
+T3's `t3_thread_update` tool on each task change, a direct write to T3's
+database, and a T3 pull request of our own (the fix exists, and T3 accepts
+only bug fixes from outside its team). A session in T3 has
+`CLAUDE_CODE_ENTRYPOINT=t3-code`.
+
 ## 2026-10-20 — The ledger stays out of the main checkout; resume goes through `/ledger:next`
 
 **This replaces two points of the 2026-09-17 ledger entry.** That entry put
