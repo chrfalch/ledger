@@ -684,6 +684,34 @@ function goStarted(via: Via, $: EngineInterface, args: string): Promise<string |
   return $.tool.call({ tool: 'Skill', skill: 'ledger:go', args }).then(({ deny }) => deny)
 }
 
+/**
+ * Starts /ledger:go idea via `first` and holds it at its armed check, right after it claimed the one start a turn allows.
+ * Meanwhile it answers /ledger:go new-api via `second`, then releases the first. The order is fixed here because the
+ * engine's dispatch order for two calls started in one tick differs between versions.
+ */
+async function overlappingGo($: EngineInterface, on: On, first: Via, second: Via): Promise<[string | undefined, string | undefined]> {
+  const reached = Promise.withResolvers<void>()
+  const released = Promise.withResolvers<void>()
+  let isHeld = false
+  on('state.get', async (_, e, next) => {
+    if (!isHeld && e.plugin === 'ledger' && e.key === 'armed') {
+      isHeld = true
+      reached.resolve()
+      await released.promise
+    }
+    return next(e)
+  })
+  const firstAnswer = goStarted(first, $, 'idea')
+  await reached.promise
+  let secondAnswer: string | undefined
+  try {
+    secondAnswer = await goStarted(second, $, 'new-api')
+  } finally {
+    released.resolve()
+  }
+  return [await firstAnswer, secondAnswer]
+}
+
 const REFUSED_WHILE_IDEA_STARTS =
   'This turn already switches to task idea, so /ledger:go new-api was not started and nothing was written. A turn switches tasks only once: run /ledger:go new-api after the session clears.'
 
@@ -691,7 +719,7 @@ for (const [first, second] of [['typed', 'Skill'], ['Skill', 'Skill']] as const)
   test(`a /ledger:go ${second} that overlaps a /ledger:go ${first} still starting is refused, and changes nothing`, async ($, on) => {
     const w = world(on, '/repo', { [pathOf('new-api')]: PARKED_API }, IDEA_REPLIES, IDEA_FILES)
 
-    const answers = await Promise.all([goStarted(first, $, 'idea'), goStarted(second, $, 'new-api')])
+    const answers = await overlappingGo($, on, first, second)
 
     expect(answers).toEqual([undefined, REFUSED_WHILE_IDEA_STARTS])
     expect(keys(w.commands)).toEqual([REGISTRY, COMMON_DIR, PROMOTE('idea')])
@@ -706,7 +734,7 @@ test('a Skill call of ledger:go refused while an overlapping /ledger:go starts l
   const w = world(on, '/repo', { [pathOf('new-api')]: PARKED_API }, IDEA_REPLIES, IDEA_FILES)
   w.denySkill('The user rejected this skill.')
 
-  const answers = await Promise.all([goStarted('typed', $, 'idea'), goStarted('Skill', $, 'new-api')])
+  const answers = await overlappingGo($, on, 'typed', 'Skill')
 
   expect(answers).toEqual([undefined, REFUSED_WHILE_IDEA_STARTS])
   expect(w.skills).toEqual([])
