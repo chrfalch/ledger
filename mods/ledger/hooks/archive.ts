@@ -1,6 +1,6 @@
 import { summarize } from './ledger'
 
-export type ArchiveArgs = { kind: 'list'; term: string; all: boolean } | { kind: 'usage' }
+type ArchiveArgs = { kind: 'list'; term: string; all: boolean } | { kind: 'usage' }
 
 export const ARCHIVE_USAGE =
   "Usage: /ledger:archive [<term>] [--all]. Lists this repo's archived ledgers; a term keeps those that contain it, and --all lists every repo."
@@ -38,7 +38,7 @@ export function firstMatch(text: string, term: string): string | undefined {
 export const newestFirst = (a: ArchivedLedger, b: ArchivedLedger): number =>
   b.date.localeCompare(a.date) || b.mtimeMs - a.mtimeMs || b.slug.localeCompare(a.slug)
 
-export const archiveFolder = (repo: string | null): string => `~/.claude/ledger-archive/${repo === null ? '' : `${repo}/`}`
+const archiveFolder = (repo: string | null): string => `~/.claude/ledger-archive/${repo === null ? '' : `${repo}/`}`
 
 export const listFailedMessage = (repo: string | null, error: string): string => `Could not list ${archiveFolder(repo)}: ${error}`
 

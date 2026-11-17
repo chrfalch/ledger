@@ -1,9 +1,11 @@
 // Proves foreign hooks and local keys survive, policy keys apply, repeat runs
 // change nothing, and absent settings are created from the policy alone.
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { applyJson, applyToml } from '../tools/apply-policy.js';
 import { freshHome, REPO, run } from './helpers.js';
 
 const APPLY_POLICY = [process.execPath, '--import', 'tsx', 'tools/apply-policy.ts'] as const;
@@ -115,19 +117,6 @@ test('foreign entries keep their order and owned entries follow them', (t) => {
   ]);
 });
 
-test('an owned hook entry from an earlier deploy is replaced, not duplicated', (t) => {
-  const foreignDenied = { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo denied' }] };
-  const ada53e6Gate = { matcher: 'Bash', hooks: [{ type: 'command', command: GATE }] };
-  const out = applyToHooks(t, { PreToolUse: [ada53e6Gate], PermissionDenied: [foreignDenied] });
-  const policy = readSettings(POLICY);
-  assert.deepEqual(hookEntries(out, 'PreToolUse'), hookEntries(policy, 'PreToolUse'), 'earlier owned gate kept');
-  assert.deepEqual(
-    hookEntries(out, 'PermissionDenied'),
-    [foreignDenied, ...hookEntries(policy, 'PermissionDenied')],
-    'FOREIGN HOOK LOST OR ALTERED',
-  );
-});
-
 test('applying policy a second time reports no changes', (t) => {
   const home = freshHome(t);
   const target = path.join(home, '.claude/settings.json');
@@ -152,4 +141,165 @@ test('absent settings are created from policy with all keys changed and none kep
   assert.deepEqual(report.changed.sort(), Object.keys(policy).sort());
   assert.deepEqual(report.kept, []);
   assert.deepEqual(readSettings(target), policy);
+});
+
+test('policy CLI preserves dry-run and required or skipped Codex reports', (t) => {
+  const home = freshHome(t);
+  const policy = JSON.parse(readFileSync(POLICY, 'utf8')) as Record<string, unknown>;
+  const target = path.join(home, '.claude/settings.json');
+  writeFileSync(target, '{}\n');
+  const backupDirectory = path.join(home, 'backup');
+  const claude = `claude   policy keys would apply: ${Object.keys(policy).sort().join(', ')}\n`;
+  const optional = run(home, APPLY_POLICY, '--backup-dir', backupDirectory, '--dry-run');
+  assert.equal(optional.status, 0, optional.stderr);
+  assert.equal(optional.stdout, `${claude}codex    skipped (no ~/.codex/config.toml; pass --codex to require it)\n`);
+  assert.equal(optional.stderr, '');
+  const required = run(home, APPLY_POLICY, '--backup-dir', backupDirectory, '--dry-run', '--codex');
+  assert.equal(required.status, 1);
+  assert.equal(required.stdout, claude);
+  assert.equal(required.stderr, `codex    ERROR: ${path.join(home, '.codex/config.toml')} not found\n`);
+  const skipped = run(home, APPLY_POLICY, '--backup-dir', backupDirectory, '--dry-run', '--codex', '--no-codex');
+  assert.equal(skipped.status, 0, skipped.stderr);
+  assert.equal(skipped.stdout, `${claude}codex    skipped (--no-codex)\n`);
+  assert.equal(readFileSync(target, 'utf8'), '{}\n');
+  assert.equal(existsSync(backupDirectory), false);
+});
+
+function temporaryDirectory(t: TestContext): string {
+  const directory = mkdtempSync(path.join(tmpdir(), 'apply-policy-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  return directory;
+}
+
+test('JSON output preserves merged values and backup metadata', (t) => {
+  const directory = temporaryDirectory(t);
+  const policy = path.join(directory, 'policy.json');
+  const target = path.join(directory, 'live.json');
+  const backupDirectory = path.join(directory, 'backup');
+  const original = '{"7":"😀","é":{"3":false},"untouched":1.0}\n';
+  writeFileSync(policy, '{"é":{"10":"☃","2":1.0},"owned":true}\n');
+  writeFileSync(target, original);
+  chmodSync(target, 0o640);
+  const timestamp = new Date('2020-02-03T04:05:06.000Z');
+  utimesSync(target, timestamp, timestamp);
+
+  const [changed, kept] = applyJson(policy, target, backupDirectory);
+
+  assert.deepEqual(changed, ['owned', 'é.10', 'é.2']);
+  assert.deepEqual(kept, ['7', 'untouched', 'é.3']);
+  assert.deepEqual(readSettings(target), {
+    '7': '😀',
+    é: { '3': false, '10': '☃', '2': 1 },
+    untouched: 1,
+    owned: true,
+  });
+  const backup = path.join(backupDirectory, path.basename(target));
+  assert.equal(readFileSync(backup, 'utf8'), original);
+  assert.equal(statSync(backup).mode & 0o777, 0o640);
+  assert.equal(statSync(backup).mtimeMs, timestamp.getTime());
+});
+
+test('JSON dry run reports changes without writing or backing up', (t) => {
+  const directory = temporaryDirectory(t);
+  const policy = path.join(directory, 'policy.json');
+  const target = path.join(directory, 'live.json');
+  const backupDirectory = path.join(directory, 'backup');
+  writeFileSync(policy, '{"missing":null,"changed":2}\n');
+  writeFileSync(target, '{"changed":1}\n');
+
+  assert.deepEqual(applyJson(policy, target, backupDirectory, true), [['changed'], []]);
+  assert.equal(readFileSync(target, 'utf8'), '{"changed":1}\n');
+  assert.equal(existsSync(backupDirectory), false);
+});
+
+test('TOML editing is line based, normalizes newlines, and preserves local tables', (t) => {
+  const directory = temporaryDirectory(t);
+  const target = path.join(directory, 'config.toml');
+  const backupDirectory = path.join(directory, 'backup');
+  const original = '  approval_policy = "old"\r\n# keep\r\n[projects.x]\r\ntrust_level = "trusted"\r\n';
+  writeFileSync(target, original);
+
+  const [changed, tables] = applyToml(
+    path.join(REPO, 'codex/policy.toml'),
+    target,
+    backupDirectory,
+  );
+
+  assert.deepEqual(changed, ['approval_policy', 'sandbox_mode']);
+  assert.equal(tables, 1);
+  assert.equal(
+    readFileSync(target, 'utf8'),
+    'approval_policy = "on-request"\n# keep\nsandbox_mode = "workspace-write"\n\n[projects.x]\ntrust_level = "trusted"\n',
+  );
+  assert.equal(readFileSync(path.join(backupDirectory, path.basename(target)), 'utf8'), original);
+});
+
+test('TOML current policy does not create a backup', (t) => {
+  const directory = temporaryDirectory(t);
+  const target = path.join(directory, 'config.toml');
+  const backupDirectory = path.join(directory, 'backup');
+  mkdirSync(path.dirname(target), { recursive: true });
+  writeFileSync(
+    target,
+    'approval_policy = "on-request"\nsandbox_mode = "workspace-write"\n[plugins.example]\nenabled = true\n',
+  );
+
+  assert.deepEqual(
+    applyToml(path.join(REPO, 'codex/policy.toml'), target, backupDirectory),
+    [[], 1],
+  );
+  assert.equal(existsSync(backupDirectory), false);
+});
+
+test('TOML preserves large local integers and inserts compact arrays with distinct numeric types', (t) => {
+  const directory = temporaryDirectory(t);
+  const policy = path.join(directory, 'policy.toml');
+  const target = path.join(directory, 'config.toml');
+  writeFileSync(policy, 'items = [1, 2.0, "é"]\n');
+  writeFileSync(target, 'local = 9007199254740993\n');
+  assert.deepEqual(applyToml(policy, target, path.join(directory, 'backup')), [['items'], 0]);
+  assert.equal(readFileSync(target, 'utf8'), 'local = 9007199254740993\nitems = [1, 2.0, "é"]\n');
+});
+
+test('policy rejects invalid UTF-8 in policy or live files without changing or backing up targets', (t) => {
+  const directory = temporaryDirectory(t);
+  for (const extension of ['json', 'toml']) {
+    for (const invalidFile of ['policy', 'live']) {
+      const policy = path.join(directory, `policy.${extension}`);
+      const target = path.join(directory, `live.${extension}`);
+      const backupDirectory = path.join(directory, 'backup');
+      const valid = extension === 'json' ? '{"key":"value"}\n' : 'key = "value"\n';
+      const invalid = Buffer.concat([Buffer.from(extension === 'json' ? '{"key":"' : 'key = "'), Buffer.from([0xff]), Buffer.from(extension === 'json' ? '"}\n' : '"\n')]);
+      writeFileSync(policy, invalidFile === 'policy' ? invalid : valid);
+      writeFileSync(target, invalidFile === 'live' ? invalid : '{}\n');
+      const before = readFileSync(target);
+      const apply = extension === 'json' ? applyJson : applyToml;
+      assert.throws(() => apply(policy, target, backupDirectory), /encoded data was not valid/);
+      assert.deepEqual(readFileSync(target), before);
+      assert.equal(existsSync(backupDirectory), false);
+    }
+  }
+});
+
+test('invalid TOML refuses both a real apply and dry run without mutations', (t) => {
+  const directory = temporaryDirectory(t);
+  const target = path.join(directory, 'config.toml');
+  const backupDirectory = path.join(directory, 'backup');
+  const original = '[broken\n';
+  writeFileSync(target, original);
+  for (const dry of [false, true]) {
+    assert.throws(() => applyToml(path.join(REPO, 'codex/policy.toml'), target, backupDirectory, dry));
+    assert.equal(readFileSync(target, 'utf8'), original);
+    assert.equal(existsSync(backupDirectory), false);
+  }
+});
+
+test('applyToml writes string, integer and array values from a custom policy', (t) => {
+  const directory = temporaryDirectory(t);
+  const policy = path.join(directory, 'policy.toml');
+  const target = path.join(directory, 'config.toml');
+  writeFileSync(policy, "name = 'example'\ncount = 42\nitems = [1,2]\n");
+  writeFileSync(target, '');
+  assert.deepEqual(applyToml(policy, target, path.join(directory, 'backup')), [['name', 'count', 'items'], 0]);
+  assert.equal(readFileSync(target, 'utf8'), 'name = "example"\ncount = 42\nitems = [1, 2]\n');
 });

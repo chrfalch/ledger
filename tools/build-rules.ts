@@ -1,21 +1,19 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { isMain, parseArguments } from './cli.js';
-import { compareCodePoints, PYTHON_WHITESPACE, splitLinesKeepingEnds } from './pycompat.js';
 
-const MODELS = ['gpt-6-luna', 'haiku-5.5', 'gpt-6.1-terra', 'gpt-6.2-sol', 'sonnet-5.5', 'opus-5.5', 'gpt-6.2-astra', 'fable-5.2'];
+const MODELS = ['gpt-6-luna', 'haiku-5.5', 'gpt-6.2-sol', 'sonnet-5.5', 'opus-5.5', 'gpt-6.2-astra', 'fable-5.2'];
 const TOOLS = ['codex', 'argent', 'gh-stack'];
 const AGENTS = ['researcher', 'runner', 'ui-runner', 'opus-implementer', 'fable-implementer', 'sol-implementer', 'astra-implementer', 'astra-reviewer', 'codex-runner', 'reviewer'];
 const VOCABULARY = new Set([...MODELS, ...TOOLS, ...AGENTS]);
-const MODEL_REQUIRES = new Map([['gpt-6-luna', 'codex'], ['gpt-6.1-terra', 'codex'], ['gpt-6.2-sol', 'codex'], ['gpt-6.2-astra', 'codex']]);
+const MODEL_REQUIRES = new Map([['gpt-6-luna', 'codex'], ['gpt-6.2-sol', 'codex'], ['gpt-6.2-astra', 'codex']]);
 
-const OPEN = new RegExp(`^<!--${PYTHON_WHITESPACE}*needs:${PYTHON_WHITESPACE}*(.+?)${PYTHON_WHITESPACE}*-->${PYTHON_WHITESPACE}*$`);
-const CLOSE = new RegExp(`^<!--${PYTHON_WHITESPACE}*/needs${PYTHON_WHITESPACE}*-->${PYTHON_WHITESPACE}*$`);
+const OPEN = /^<!--\s*needs:\s*(.+?)\s*-->\s*$/;
+const CLOSE = /^<!--\s*\/needs\s*-->\s*$/;
 const FRONT = /^---\n(.*?)\n---\n/s;
-const strip = (text: string): string => text.replace(new RegExp(`^${PYTHON_WHITESPACE}+|${PYTHON_WHITESPACE}+$`, 'g'), '');
 
 function parseNeeds(raw: string): Set<string> {
-  return new Set(raw.split(',').map(strip).filter(Boolean));
+  return new Set(raw.split(',').map((name) => name.trim()).filter(Boolean));
 }
 
 function includes(needs: Set<string>, features: Set<string>): boolean {
@@ -26,8 +24,8 @@ function wanted(text: string, features: Set<string>): boolean {
   const front = FRONT.exec(text);
   let needs = new Set<string>();
   if (front) {
-    for (const line of splitLinesKeepingEnds(front[1])) {
-      if (strip(line).startsWith('needs:')) needs = parseNeeds(line.slice(line.indexOf(':') + 1));
+    for (const line of front[1].split('\n')) {
+      if (line.trim().startsWith('needs:')) needs = parseNeeds(line.slice(line.indexOf(':') + 1));
     }
   }
   return includes(needs, features);
@@ -36,7 +34,7 @@ function wanted(text: string, features: Set<string>): boolean {
 function render(text: string, features: Set<string>): string {
   const out: string[] = [];
   const stack: boolean[] = [];
-  for (const line of splitLinesKeepingEnds(text)) {
+  for (const line of text.match(/[^\n]*\n|[^\n]+$/g) ?? []) {
     const marker = line.replace(/\n+$/, '');
     const open = OPEN.exec(marker);
     if (open) {
@@ -49,7 +47,7 @@ function render(text: string, features: Set<string>): string {
     }
   }
   if (stack.length) throw new Error('unclosed block marker');
-  return collapseBlankLineRuns(out.join('')).replace(new RegExp(`${PYTHON_WHITESPACE}+$`), '') + '\n';
+  return collapseBlankLineRuns(out.join('')).trimEnd() + '\n';
 }
 
 function collapseBlankLineRuns(text: string): string {
@@ -64,13 +62,13 @@ export function buildRules({ src, out, features: rawFeatures }: { src: string; o
   }
   const unknown = [...features].filter((feature) => !VOCABULARY.has(feature));
   if (unknown.length) {
-    console.error(`unknown feature(s): ${unknown.sort(compareCodePoints).join(', ')}`);
+    console.error(`unknown feature(s): ${unknown.sort().join(', ')}`);
     return 1;
   }
   mkdirSync(out, { recursive: true });
   let names: string[];
   try {
-    names = readdirSync(src).filter((name) => name.endsWith('.md')).sort(compareCodePoints);
+    names = readdirSync(src).filter((name) => name.endsWith('.md')).sort();
   } catch (error) {
     if (!(error instanceof Error) || !('code' in error) || (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')) throw error;
     names = [];
@@ -107,7 +105,7 @@ function main(): number {
     { name: '--vocabulary' },
   ]);
   if (args['--vocabulary']) {
-    console.log([...VOCABULARY].sort(compareCodePoints).join(' '));
+    console.log([...VOCABULARY].sort().join(' '));
     return 0;
   }
   if (args['--out'] === undefined) {

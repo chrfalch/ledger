@@ -10,7 +10,7 @@ export type Found = { path: string; slug: string; mtimeMs: number }
 
 export const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
-export type Ran = { stdout: string; stderr: string; failure?: string; exitCode?: number }
+type Ran = { stdout: string; stderr: string; failure?: string; exitCode?: number }
 
 /**
  * The longest `$.process.run` allows. Retiring a big worktree outlasts the default 30 s, and a kill after the worktree
@@ -209,7 +209,7 @@ async function ledgerIn($: EngineInterface, worktree: string): Promise<Found | u
   return stat?.kind === 'file' ? { path, slug: folderSlug(path), mtimeMs: stat.mtimeMs } : undefined
 }
 
-export type WorktreeTask = { path: string; slug: string }
+type WorktreeTask = { path: string; slug: string }
 
 /** The ledger of each linked worktree other than the one holding `cwd`, with its task's slug. A ledger that cannot be read is skipped. */
 export async function otherWorktreeTasks($: EngineInterface, cwd: string): Promise<WorktreeTask[]> {
@@ -223,9 +223,9 @@ export async function otherWorktreeTasks($: EngineInterface, cwd: string): Promi
 const namesWorktree = ({ path, branch }: Worktree, word: string): boolean => [basename(path), branch, branch.split('/').at(-1)].includes(word)
 
 /** A worktree named by its folder or branch; `slug` is its task's, absent when it has no ledger. */
-export type NamedWorktree = { path: string; slug?: string }
+type NamedWorktree = { path: string; slug?: string }
 
-export type OtherWorktreeMatch = { ledgers: Found[]; worktree?: NamedWorktree }
+type OtherWorktreeMatch = { ledgers: Found[]; worktree?: NamedWorktree }
 
 /**
  * From a linked worktree, findLedgers lists only its own ledger; this finds the ledgers in the other linked worktrees whose slug is
@@ -245,7 +245,7 @@ export async function lookUpOtherWorktrees($: EngineInterface, word: string, cwd
   return named ? { ledgers: [], worktree: { path: named.worktree.path, slug: named.slug } } : { ledgers: [] }
 }
 
-export type BranchRead = {
+type BranchRead = {
   /** Empty on a detached HEAD, as `git branch --show-current` prints it. */
   branch: string
   /** The commit HEAD points at; empty on a branch with no commits yet. */

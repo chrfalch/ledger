@@ -71,7 +71,7 @@ const table = (header: string[], rows: string[][]): string[] =>
 type TaskRow = { entry: Entry; name: string; status: string; next: string }
 type BacklogRow = { entry: Entry; name: string; goal: string }
 /** Every registered task once: `tasks` and `backlog` each list parents before their children, and otherwise newest first. */
-export type Overview = { tasks: TaskRow[]; backlog: BacklogRow[] }
+type Overview = { tasks: TaskRow[]; backlog: BacklogRow[] }
 
 /** The registry as `cc-ledgers list` prints it, or as `cc-ledgers scan` rebuilds it from disk; `rebuilt` is the line scan reports that with. */
 export async function readRegistry($: EngineInterface, scan: boolean): Promise<{ entries: Entry[]; rebuilt?: string } | { error: string }> {
@@ -103,7 +103,7 @@ export async function overview($: EngineInterface, entries: Entry[]): Promise<Ov
   return { tasks: familyOrder(tasks), backlog: backlogRows }
 }
 
-export function formatOverview({ tasks, backlog }: Overview): string {
+function formatOverview({ tasks, backlog }: Overview): string {
   const total = tasks.length + backlog.length
   const taskRows = tasks.map(({ entry, name, status, next }) => [entry.repo, name, status, formatTime(Date.parse(entry.updated)), truncate(next)].map(cell))
   const backlogRows = backlog.map(({ entry, name, goal }) => [entry.repo, name, formatTime(Date.parse(entry.updated)), truncate(goal)].map(cell))

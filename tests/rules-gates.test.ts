@@ -60,19 +60,6 @@ for (const [label, features] of SELECTIONS) {
   });
 }
 
-const UI_RUN_SELECTIONS: [string, string[]][] = [
-  ['features codex,argent,ui-runner,gpt-6.1-terra', ['codex', 'argent', 'ui-runner', 'gpt-6.1-terra']],
-  ['--agents ui-runner', deployFeatures({ agents: ['ui-runner'] })],
-];
-
-for (const [label, features] of UI_RUN_SELECTIONS) {
-  test(`rules rendered for ${label} keep long UI runs on ui-runner`, (t) => {
-    const routing = render(t, features).get('40-model-routing.md') ?? '';
-    assert.doesNotMatch(routing, /stay on gpt-6.2-astra/);
-    assert.match(routing, /stay on ui-runner/);
-  });
-}
-
 const WRAPPER_RULE = /Every Codex run goes through a wrapper/;
 
 for (const agent of ['researcher', 'sol-implementer']) {

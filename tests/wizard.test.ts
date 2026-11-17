@@ -62,9 +62,12 @@ test('--agents and --models keep the order of the source lists', () => {
     answersToArgs(deployAnswers({}, undefined, ['opus-5.5', 'gpt-6-luna'])),
     ['--models', 'gpt-6-luna,opus-5.5'],
   );
+});
+
+test('--models lists selected Codex models in canonical order', () => {
   assert.deepEqual(
-    answersToArgs(deployAnswers({}, undefined, ['gpt-6.2-sol', 'gpt-6.1-terra'])),
-    ['--models', 'gpt-6.1-terra,gpt-6.2-sol'],
+    answersToArgs(deployAnswers({}, undefined, ['gpt-6.2-sol', 'gpt-6-luna'])),
+    ['--models', 'gpt-6-luna,gpt-6.2-sol'],
   );
 });
 

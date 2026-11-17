@@ -48,14 +48,12 @@ If unstated, treat as routine.
    forbid editing them.
    **State the scope boundary twice and forcefully** — list what is in scope, then
    explicitly forbid everything else (no drive-by refactors, renames, dependency
-   bumps, or "improvements"). gpt-6.2-sol is not yet measured for this, but its
-   predecessor gpt-5.6-sol had a documented tendency to exceed instructions in
-   agentic coding, and high reasoning amplified its confidence in doing so.
+   bumps, or "improvements").
 2. **Run via Bash**: `codex exec -m gpt-6.2-sol -c model_reasoning_effort=<effort>`,
    with the effort set per the difficulty indication (medium for routine, high
    for hard). Always pass `-m`; the Codex config default can be any model.
    If Codex answers `model_not_found` for gpt-6.2-sol, report BLOCKED and say
-   the Codex CLI needs an upgrade (0.167.0 lists gpt-6.2-sol).
+   the Codex CLI needs an upgrade.
 3. **Wait for Codex to end.** A Codex run often takes longer than Bash's
    10-minute foreground limit, at high reasoning especially.
    - Make a new directory with `mktemp -d`. Pick three paths in it: the

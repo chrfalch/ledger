@@ -6,7 +6,7 @@ import { findLedgers, message, run, sessionFolder, sessionLedger, type SessionFo
 const USAGE =
   'Usage: /ledger:parent [<slug>] shows a parent task and its children; /ledger:parent <slug> add <child> and /ledger:parent <slug> remove <child> change them.'
 
-export type Shown = { parent: string; goal: string; children: ChildStatus[] }
+type Shown = { parent: string; goal: string; children: ChildStatus[] }
 
 function isChildStatus(value: unknown): value is ChildStatus {
   if (typeof value !== 'object' || value === null) return false

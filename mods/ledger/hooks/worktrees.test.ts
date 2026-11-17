@@ -12,7 +12,6 @@ import {
   isDirectChild,
   isDiskConnected,
   isOrphan,
-  isPrunable,
   parseCommand,
   parseMainWorktree,
   parsePrs,
@@ -413,42 +412,6 @@ const DEBUG_SIM = `${DERIVED_DATA}/cc-big-b4dd60-Debug-sim`
 const RELEASE_SIM = `${DERIVED_DATA}/cc-big-b4dd60-Release-sim`
 const EMPTY_DEVICE = `${DERIVED_DATA}/cc-big-b4dd60-Debug-device`
 const EMPTY_ANDROID = `${BIG}/android/build`
-
-test('isPrunable allows only folders strictly inside the worktree and outside node_modules and Pods, or its own Xcode build folders', () => {
-  const scope = { root: BIG, derivedData: DERIVED_DATA, prefix: 'cc-big-b4dd60-' }
-  expect(isPrunable(`${BIG}/.build`, scope)).toBe(true)
-  expect(isPrunable(DEBUG_SIM, scope)).toBe(true)
-  for (const path of [
-    BIG,
-    `${BIG}/node_modules`,
-    `${BIG}/node_modules/x/build`,
-    `${BIG}/packages/app/ios/Pods`,
-    `${BIG}/packages/app/ios/Pods/build`,
-    `${BIG}/`,
-    `${BIG}/.`,
-    `${BIG}/./node_modules`,
-    `${BIG}/packages/./build`,
-    `${BIG}-other/node_modules`,
-    `${BIG}/.claude/worktrees/x/node_modules`,
-    `${BIG}/../small/node_modules`,
-    REPO,
-    DERIVED_DATA,
-    `${DERIVED_DATA}/./cc-big-b4dd60-Debug-sim`,
-    `${DERIVED_DATA}/Expo-abcdef`,
-    `${DERIVED_DATA}/cc-big-000000-Debug-sim`,
-    `${DEBUG_SIM}/../..`,
-  ]) {
-    expect(isPrunable(path, scope)).toBe(false)
-  }
-})
-
-test('isPrunable leaves alone the Xcode build folders of another worktree whose name starts with this one', () => {
-  const scope = { root: '/repo/.claude/worktrees/a', derivedData: DERIVED_DATA, prefix: 'cc-a-1b2c3d-' }
-  expect(isPrunable(`${DERIVED_DATA}/cc-a-1b2c3d-Debug-sim`, scope)).toBe(true)
-  // cc-<a-1b2c3d-x>-abcdef-Debug-sim and cc-<a-1b2c3d>-abcdef-Debug-sim
-  expect(isPrunable(`${DERIVED_DATA}/cc-a-1b2c3d-x-abcdef-Debug-sim`, scope)).toBe(false)
-  expect(isPrunable(`${DERIVED_DATA}/cc-a-1b2c3d-abcdef-Debug-sim`, scope)).toBe(false)
-})
 
 test('realPathProblem allows a real path strictly inside the real base and outside any .claude, node_modules or Pods folder below it', () => {
   expect(realPathProblem('/private/big/build', '/private/big')).toBeUndefined()

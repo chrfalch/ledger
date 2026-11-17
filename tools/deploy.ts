@@ -11,10 +11,10 @@ import { isMain } from './cli.js';
 const REPO = process.env.DEPLOY_REPO || path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 export const ALL_AGENTS = ['researcher', 'runner', 'ui-runner', 'opus-implementer', 'fable-implementer', 'sol-implementer', 'astra-implementer', 'astra-reviewer', 'codex-runner', 'reviewer'];
 export const CODEX_AGENTS = ['sol-implementer', 'astra-implementer', 'astra-reviewer', 'codex-runner'];
-export const MODELS = 'gpt-6-luna,haiku-5.5,gpt-6.1-terra,gpt-6.2-sol,sonnet-5.5,opus-5.5,gpt-6.2-astra,fable-5.2';
+export const MODELS = 'gpt-6-luna,haiku-5.5,gpt-6.2-sol,sonnet-5.5,opus-5.5,gpt-6.2-astra,fable-5.2';
 const HOOKS = ['commit-msg', 'prepare-commit-msg', 'pre-commit', 'pre-merge-commit', 'pre-push', 'pre-rebase', 'post-checkout', 'post-merge', 'post-commit', 'post-rewrite'];
 
-export interface DeployOptions {
+interface DeployOptions {
   dry?: boolean;
   force?: boolean;
   revert?: boolean;
@@ -73,18 +73,14 @@ function command(program: string, args: string[], allowFailure = false): string 
 }
 
 const MARKETPLACE = 'ledger';
-// The marketplace name before the project was called ledger. Deploy moves an install from it to MARKETPLACE.
-const OLD_MARKETPLACE = 'agent-config';
 const MODS = ['ledger'];
-// Mods an earlier deploy installed that now live inside another mod, each with the command that replaces it.
-const RETIRED_MODS = { worktrees: '/ledger:worktrees' } as const;
-const modId = (name: string, marketplace = MARKETPLACE): string => `${name}@${marketplace}`;
+const modId = (name: string): string => `${name}@${MARKETPLACE}`;
 const MOD_COMMANDS = MODS.map((name) => `/${name}`).join(', ');
 
-function runClaude(args: string[], cwd?: string): string {
-  const result = spawnSync('claude', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
+function runClaude(args: string[]): string {
+  const result = spawnSync('claude', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
   if (result.error || result.status !== 0) {
-    throw new DeployError(`deploy: claude ${args.join(' ')} failed${cwd ? ` in ${cwd}` : ''}${result.error ? `: ${result.error.message}` : ''}`);
+    throw new DeployError(`deploy: claude ${args.join(' ')} failed${result.error ? `: ${result.error.message}` : ''}`);
   }
   return result.stdout;
 }
@@ -109,7 +105,7 @@ function samePath(first: string, second: string): boolean {
   return real(first) === real(second);
 }
 
-const PAST = { add: 'added', remove: 'removed', install: 'installed', uninstall: 'uninstalled' } as const;
+const PAST = { add: 'added', install: 'installed' } as const;
 
 // Installed from this repo as a folder marketplace, so repo edits reach a session through
 // /reload-plugins without a reinstall. --revert leaves both in place: they live in Claude
@@ -123,12 +119,12 @@ function deployMods(opts: DeployOptions): void {
     console.log('mods     skipped (no claude CLI on PATH)');
     return;
   }
-  const change = (verb: keyof typeof PAST, args: string[], what: string, scope = ['--scope', 'user'], cwd?: string): void => {
+  const change = (verb: keyof typeof PAST, args: string[], what: string): void => {
     if (opts.dry) {
       console.log(`mods     would ${verb} ${what}`);
       return;
     }
-    runClaude([...args, ...scope], cwd);
+    runClaude([...args, '--scope', 'user']);
     console.log(`mods     ${PAST[verb]} ${what}`);
   };
   const marketplaces = claudeList<{ name: string; path?: string; installLocation?: string }>(['plugin', 'marketplace']);
@@ -143,46 +139,16 @@ function deployMods(opts: DeployOptions): void {
     console.log(`mods     skipped install of ${MODS.map((name) => modId(name)).join(', ')} until the marketplace points at this repo`);
     return;
   }
-  let plugins: { id: string; scope?: string; projectPath?: string }[] | undefined;
+  let plugins: { id: string; scope?: string }[] | undefined;
   const listPlugins = () => (plugins ??= claudeList(['plugin']));
   // Deploy installs at user scope only; an install at another scope is the operator's own.
   const installedByDeploy = (mod: string): boolean => listPlugins().some(({ id, scope }) => id === mod && scope === 'user');
-  if (located(OLD_MARKETPLACE)?.fromRepo) {
-    // The old plugins go first so no session loads two ledger plugins, and the old marketplace goes
-    // before the add so two marketplaces never share this directory.
-    const replacements = { ...Object.fromEntries(MODS.map((name) => [name, modId(name)])), ...RETIRED_MODS };
-    for (const [name, replacement] of Object.entries(replacements)) {
-      const mod = modId(name, OLD_MARKETPLACE);
-      if (installedByDeploy(mod)) change('uninstall', ['plugin', 'uninstall', mod], `${mod} (now ${replacement})`);
-    }
-    // Assumed, not checked against the CLI: it uninstalls a local or project install from the
-    // project of its working directory.
-    // No reinstall there: the user-scope install below covers every project.
-    for (const { id, scope, projectPath } of listPlugins()) {
-      if (!id.endsWith(`@${OLD_MARKETPLACE}`) || (scope !== 'local' && scope !== 'project')) continue;
-      if (projectPath && existsSync(projectPath) && statSync(projectPath).isDirectory()) {
-        const settings = scope === 'project' ? `; this edits ${path.join(projectPath, '.claude/settings.json')}, which that repo may track` : '';
-        change('uninstall', ['plugin', 'uninstall', id], `${id} at ${scope} scope in ${projectPath} (now ${modId('ledger')})${settings}`, ['--scope', scope], projectPath);
-      } else {
-        const where = projectPath ? ` in ${projectPath}, which is missing` : '';
-        const folder = projectPath ? 'the folder the project moved to' : "the project's folder";
-        console.log(`mods     ${id} is installed at ${scope} scope${where}; to fix: run claude plugin uninstall ${id} --scope ${scope} in ${folder}`);
-      }
-    }
-    // Without --scope the CLI removes the marketplace from every scope. The list does not report
-    // scope, so a scoped remove could leave an agent-config declaration beside ledger.
-    change('remove', ['plugin', 'marketplace', 'remove', OLD_MARKETPLACE], `marketplace ${OLD_MARKETPLACE} (now ${MARKETPLACE})`, []);
-  }
   if (marketplace) console.log(`mods     marketplace ${MARKETPLACE} already added`);
   else change('add', ['plugin', 'marketplace', 'add', REPO], `marketplace ${MARKETPLACE} (this repo)`);
   for (const name of MODS) {
     const mod = modId(name);
     if (installedByDeploy(mod)) console.log(`mods     ${mod} already installed`);
     else change('install', ['plugin', 'install', mod], `${mod} (/${name})`);
-  }
-  for (const [name, replacement] of Object.entries(RETIRED_MODS)) {
-    const mod = modId(name);
-    if (installedByDeploy(mod)) change('uninstall', ['plugin', 'uninstall', mod], `${mod} (now ${replacement})`);
   }
 }
 
@@ -225,17 +191,13 @@ export function deploy(opts: DeployOptions): number {
   const claude = path.join(home, '.claude');
   const rules = path.join(claude, 'rules');
   const manifest = path.join(claude, '.ledger-manifest');
-  // Deploys before the rename to ledger wrote this one. Without it, a home those deploys set up
-  // could not have its generated rule copies replaced without a prompt.
-  const oldManifest = path.join(claude, '.agent-config-manifest');
-  const manifestRead = isFile(manifest) || !isFile(oldManifest) ? manifest : oldManifest;
   const backup = path.join(claude, 'backups', `deploy-${command('date', ['+%Y-%m-%d-%H%M%S'])}`);
   const githooks = path.join(home, '.config/git/hooks');
   // path.join drops the slash a HOME like /x/ ends in, so match on HOME without it.
   const homePrefix = home.replace(/\/+$/, '');
   const short = (filename: string): string => filename.startsWith(homePrefix) ? `~${filename.slice(homePrefix.length)}` : filename;
   const note = (text: string): void => console.log(`${opts.dry ? 'would ' : ''}${text}`);
-  const oldWrote = manifestLines(manifestRead);
+  const oldWrote = manifestLines(manifest);
   let agents: string[];
   if (opts.agents) {
     const firstLine = opts.agents.split('\n')[0];
@@ -256,9 +218,7 @@ export function deploy(opts: DeployOptions): number {
       if (!opts.dry) command('rm', ['-f', filename]);
       console.log(`${opts.dry ? 'remove  ' : 'removed '} ${short(filename)}`);
     }
-    for (const filename of [manifest, oldManifest]) {
-      if (!opts.dry && isFile(filename)) command('rm', ['-f', filename]);
-    }
+    if (!opts.dry && isFile(manifest)) command('rm', ['-f', manifest]);
     if (!found) console.log('nothing from this repo is in place');
     if (command('git', ['config', '--global', 'core.hooksPath'], true) === githooks) {
       console.log(`hooks    core.hooksPath still points at ${short(githooks)}`);
@@ -408,7 +368,6 @@ export function deploy(opts: DeployOptions): number {
   }
   if (!opts.dry) {
     writeFileSync(manifest, `${wrote.join('\n')}\n`);
-    rmSync(oldManifest, { force: true });
   }
   // Policy parse failures must retain the standalone CLI's diagnostics and stack.
   const policyArgs = ['--backup-dir', backup];

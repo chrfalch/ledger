@@ -218,7 +218,7 @@ async function deleteFolders(folders: PruneFolder[], problemOf: (folder: PruneFo
 }
 
 /** `delete-in-background` returns once the folders are moved out of the way, for a caller that must not wait for the delete. */
-export type PruneMode = 'dry-run' | 'delete' | 'delete-in-background'
+type PruneMode = 'dry-run' | 'delete' | 'delete-in-background'
 
 /** Finds the non-empty build folders of the linked worktree at `root` and deletes those that pass `deletionProblem`, or in `dry-run` only plans. */
 export async function pruneBuildFolders($: EngineInterface, root: string, mode: PruneMode, cwd: string): Promise<Pruned | { error: string }> {
