@@ -320,7 +320,7 @@ test('filtered deploy generates only the requested rules and models', (t) => {
   );
   assert.ok(
     !routing.includes('fable-5') &&
-      !routing.includes('gpt-6-astra') &&
+      !routing.includes('gpt-6.2-astra') &&
       routing.includes('opus-5.5'),
     '--models drops the rows not asked for',
   );

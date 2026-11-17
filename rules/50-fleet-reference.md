@@ -18,19 +18,19 @@
 | fable-implementer | fable-5.2   | xhigh/max       | implement the hardest judged and taste work | routine work, untrusted input, security- or biology-adjacent work, architecture, review |
 <!-- /needs -->
 <!-- needs: sol-implementer -->
-| sol-implementer   | gpt-6.1-sol | routine only    | implement free volume work                 | hard tier, untrusted input, taste work, fill spec gaps |
+| sol-implementer   | gpt-6.2-sol | routine only    | implement free volume work                 | hard tier, untrusted input, taste work, fill spec gaps |
 <!-- /needs -->
 <!-- needs: astra-implementer -->
-| astra-implementer | gpt-6-astra | high/xhigh/max  | implement the hardest well-specified work  | routine work, taste work, untrusted input, fill spec gaps, `--full-auto` |
+| astra-implementer | gpt-6.2-astra | high/xhigh/max  | implement the hardest well-specified work  | routine work, taste work, untrusted input, fill spec gaps, `--full-auto` |
 <!-- /needs -->
 <!-- needs: reviewer -->
 | reviewer          | opus-5.5    | medium          | is it actually done, red/green provenance  | fix code                                              |
 <!-- /needs -->
 <!-- needs: astra-reviewer -->
-| astra-reviewer    | gpt-6-astra | high/xhigh      | independent cross-lab verdict on critical work | fix code, see the Claude verdict before reviewing |
+| astra-reviewer    | gpt-6.2-astra | high/xhigh      | independent cross-lab verdict on critical work | fix code, see the Claude verdict before reviewing |
 <!-- /needs -->
 <!-- needs: codex-runner -->
-| codex-runner      | gpt-6.1-sol / gpt-6-luna | routine | read-only Codex investigation and batch work | code, edits, review, verdicts, untrusted input |
+| codex-runner      | gpt-6.2-sol / gpt-6-luna | routine | read-only Codex investigation and batch work | code, edits, review, verdicts, untrusted input |
 <!-- /needs -->
 
 <!-- needs: runner, researcher -->

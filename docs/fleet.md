@@ -11,11 +11,11 @@ name one yourself.
 | `ui-runner` | opus-5.5 | medium/high | *what the UI did* — device flows, assertions | fix code, paste hierarchies or screenshots |
 | `opus-implementer` | opus-5.5 | medium/high/max | implement judged and taste work | architecture, review |
 | `fable-implementer` | fable-5.2 | xhigh/max | implement the hardest judged and taste work | routine work, untrusted input, security- or biology-adjacent work, architecture, review |
-| `sol-implementer` | gpt-6.1-sol | routine only | implement free volume work | hard tier, untrusted input, taste work, fill spec gaps |
-| `astra-implementer` | gpt-6-astra | high/xhigh/max | implement the hardest well-specified work | routine work, taste work, untrusted input, fill spec gaps |
+| `sol-implementer` | gpt-6.2-sol | routine only | implement free volume work | hard tier, untrusted input, taste work, fill spec gaps |
+| `astra-implementer` | gpt-6.2-astra | high/xhigh/max | implement the hardest well-specified work | routine work, taste work, untrusted input, fill spec gaps |
 | `reviewer` | opus-5.5 | medium | is it actually done, with red/green evidence | fix code |
-| `astra-reviewer` | gpt-6-astra | high/xhigh | independent cross-lab verdict on critical work | fix code, see the Claude verdict first |
-| `codex-runner` | gpt-6.1-sol / gpt-6-luna | routine | read-only Codex investigation and batch work | code, edits, review, verdicts, untrusted input |
+| `astra-reviewer` | gpt-6.2-astra | high/xhigh | independent cross-lab verdict on critical work | fix code, see the Claude verdict first |
+| `codex-runner` | gpt-6.2-sol / gpt-6-luna | routine | read-only Codex investigation and batch work | code, edits, review, verdicts, untrusted input |
 
 `runner` first when there are errors. `researcher` when the errors are known but
 the cause is not.
@@ -37,10 +37,10 @@ does not include the model named, or if you want a lane to run cheaper.
 | `opus-implementer` | `claude-opus-5-5` | high | — |
 | `fable-implementer` | `claude-fable-5-2` | xhigh | — |
 | `ui-runner` | `claude-opus-5-5` | — | argent |
-| `sol-implementer` | `claude-haiku-5-5` | low | Codex, `gpt-6.1-sol` |
-| `astra-implementer` | `claude-haiku-5-5` | low | Codex, `gpt-6-astra` |
-| `astra-reviewer` | `claude-haiku-5-5` | low | Codex, `gpt-6-astra` |
-| `codex-runner` | `claude-haiku-5-5` | low | Codex, `gpt-6.1-sol` or `gpt-6-luna` |
+| `sol-implementer` | `claude-haiku-5-5` | low | Codex, `gpt-6.2-sol` |
+| `astra-implementer` | `claude-haiku-5-5` | low | Codex, `gpt-6.2-astra` |
+| `astra-reviewer` | `claude-haiku-5-5` | low | Codex, `gpt-6.2-astra` |
+| `codex-runner` | `claude-haiku-5-5` | low | Codex, `gpt-6.2-sol` or `gpt-6-luna` |
 
 To drop the models you do not have from the routing and fleet tables:
 
@@ -59,10 +59,10 @@ unsupervised. Taste covers UI and UX, code quality, API design, and copy.
 | gpt-6-luna | 8 | 4 | — | Codex plan; trivial batch only |
 | haiku-5.5 | 8 | 5 | — | trusted text only; a prompt over 100k tokens costs 5x |
 | gpt-6.1-terra | 7 | 6 | — | Codex plan; no lane yet |
-| gpt-6.1-sol | 7 | 8 | 6 | Codex plan; injection not measured |
+| gpt-6.2-sol | 7 | 8 | 6 | Codex plan; injection resisted 99.76% benchmark, 91.65% generated; external agent messages engaged 0% |
 | sonnet-5.5 | 7 | 7 | 7 | |
 | opus-5.5 | 5 | 9 | 9 | the orchestrator; default for anything judged |
-| gpt-6-astra | 3 | 8 | 6 | Codex only; cost score assumes plan |
+| gpt-6.2-astra | 4 | 9 | 6 | Codex only; cost score assumes plan |
 | fable-5.2 | 4 | 10 | 9 | hardest judged work; xhigh/max only |
 
 These rankings, and the cost figures beside them, come from one operator's own
@@ -123,28 +123,27 @@ OpenAI models run only through the Codex CLI (`codex exec` and `codex review`).
   `astra-implementer`, `astra-reviewer` or `codex-runner`. The orchestrator
   never runs `codex exec` or `codex review` itself, not even in the background.
   A direct run shows "0 agents" in the UI, and no agent owns it.
-- Always pass `-m` explicitly to `codex exec`: `-m gpt-6.1-sol`, or
-  `-m gpt-6-astra`. The config default can be any model, and relying on it is
+- Always pass `-m` explicitly to `codex exec`: `-m gpt-6.2-sol`, or
+  `-m gpt-6.2-astra`. The config default can be any model, and relying on it is
   a bug.
 - Reasoning effort is a config override, not a flag:
   `-c model_reasoning_effort=high|xhigh|max`. The `--reasoning-effort` flag is
   gone as of Codex CLI 0.153.4.
 - `codex review` accepts neither `-m` nor `-s`. Set its model with
-  `-c model="gpt-6-astra"`. Use `codex exec -s read-only` when the sandbox must
+  `-c model="gpt-6.2-astra"`. Use `codex exec -s read-only` when the sandbox must
   be pinned.
 - Read-only Codex work goes to `codex-runner`. It runs `codex exec -s read-only`
   with a self-contained prompt.
-- Sol needs Codex CLI 0.165.0 or later. On 0.153.4, `-m gpt-6.1-sol` fails
-  with `model_not_found`.
-- Astra needs Codex CLI 0.153.1 or later. Astra wrappers never run below high
-  effort.
+- Codex CLI 0.167.0 lists gpt-6.2-sol and gpt-6.2-astra. The lowest version
+  that runs them is not known. On `model_not_found`, upgrade the Codex CLI.
+- Astra wrappers never run below high effort.
 - Astra runs with `approval_policy = "on-request"`. Never `--full-auto`, never
   `approval_policy = "never"`.
 - A Codex run can exceed the 10-minute Bash foreground limit. The wrapper starts
   Codex in the background with no timeout. The command writes the Codex
   output to a file, then a done-file when Codex exits. The wrapper waits on the
   done-file with Monitor and never returns before Codex ends.
-- Name the engine with a prefix — `gpt-6.1:` for Sol, `gpt-6:` for Astra and
+- Name the engine with a prefix — `gpt-6.2:` for Sol and Astra, `gpt-6:` for
   Luna — because the UI shows only the wrapper's model. In an Agent call, start
   `description` with the prefix. In a workflow, put it in `label`.
 

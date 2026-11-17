@@ -905,3 +905,32 @@ alone does not.
 tool. The agent runs `--dry-run` first and fixes each problem: it commits task
 work or asks before it discards a change, it leaves an unmerged branch alone,
 and it retires finished child tasks before their parent.
+
+## 2026-11-17 — Sol and Astra move to gpt-6.2
+
+**`gpt-6.2-sol` replaces `gpt-6.1-sol`.** Scores stay at cost 7, intelligence
+8, taste 6. The list price is the same, $2/$10. The system card puts it ahead
+of 6.1 Sol on SEC-Bench Pro (88.34 vs 78.8) and ExploitBench (50.5 vs 21.5). It
+engaged with external agent messages in 0% of runs (6.1 Sol 1.25%, 6.1 Terra
+13.75%). It resisted 99.76% of prompt-injection attacks in benchmark
+environments and 91.65% in model-generated ones.
+
+**`gpt-6.2-astra` replaces `gpt-6-astra`.** Cost 3→4, intelligence 8→9, taste
+stays 6. The list price drops from $10/$50 to $8/$40. Chart reads put it near 77
+on Terminal-Bench-Science 0.1 at about $7 per task, against about 68 at about
+$24 for 6 Astra. Injection resistance in model-generated environments rose from
+44.98% to 84.67%.
+
+**Untrusted input stays on opus-5.5.** The operator decided this on 2026-11-17.
+The rule "Untrusted or externally-sourced input → opus-5.5 only" is unchanged.
+
+**Engine prefix.** Sol and Astra wrappers use `gpt-6.2:`. Luna keeps `gpt-6:`.
+
+**Codex CLI.** Version 0.167.0 lists both models. The lowest version that runs
+them was not found, so the rules no longer name one.
+
+Sources, read 2026-11-17: deploymentsafety.openai.com/gpt-6-2-astra-sol,
+developers.openai.com/api/docs/models/gpt-6.2-sol,
+developers.openai.com/api/docs/models/gpt-6.2-astra,
+officechai.com/ai/gpt-6-2-sol-gpt-6-2-astra-benchmarks/ (chart reads). Details
+are in `notes/model-routing-rationale.md`.

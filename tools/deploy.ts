@@ -11,7 +11,7 @@ import { isMain } from './cli.js';
 const REPO = process.env.DEPLOY_REPO || path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 export const ALL_AGENTS = ['researcher', 'runner', 'ui-runner', 'opus-implementer', 'fable-implementer', 'sol-implementer', 'astra-implementer', 'astra-reviewer', 'codex-runner', 'reviewer'];
 export const CODEX_AGENTS = ['sol-implementer', 'astra-implementer', 'astra-reviewer', 'codex-runner'];
-export const MODELS = 'gpt-6-luna,haiku-5.5,gpt-6.1-terra,gpt-6.1-sol,sonnet-5.5,opus-5.5,gpt-6-astra,fable-5.2';
+export const MODELS = 'gpt-6-luna,haiku-5.5,gpt-6.1-terra,gpt-6.2-sol,sonnet-5.5,opus-5.5,gpt-6.2-astra,fable-5.2';
 const HOOKS = ['commit-msg', 'prepare-commit-msg', 'pre-commit', 'pre-merge-commit', 'pre-push', 'pre-rebase', 'post-checkout', 'post-merge', 'post-commit', 'post-rewrite'];
 
 export interface DeployOptions {

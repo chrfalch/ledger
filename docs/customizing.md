@@ -63,7 +63,7 @@ needs: argent
 A block inside a file, with HTML comments:
 
 ```markdown
-<!-- needs: gpt-6-astra -->
+<!-- needs: gpt-6.2-astra -->
 - Astra wrappers never run below high.
 <!-- /needs -->
 ```

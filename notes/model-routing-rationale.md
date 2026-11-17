@@ -33,9 +33,11 @@ not what the plan charges.
 
 | model | input | cached input | output | context |
 |---|---|---|---|---|
-| gpt-6-astra | 10 | 1 | 50 | 1.05M |
+| gpt-6.2-astra | 8 | 0.40 | 40 | 1.05M |
+| gpt-6.2-sol | 2 | 0.10 | 10 | 1.05M |
+| gpt-6-astra (superseded 2026-11-17) | 10 | 1 | 50 | 1.05M |
 | gpt-6.1-terra | 1 | 0.05 | 5 | 1.05M |
-| gpt-6.1-sol | 2 | 0.10 | 10 | 1.1M |
+| gpt-6.1-sol (superseded 2026-11-17) | 2 | 0.10 | 10 | 1.1M |
 | gpt-6-sol | 2 | 0.20 | 10 | 1.1M |
 | gpt-6-luna | 0.10 | 0.01 | 0.50 | 1.1M |
 
@@ -51,6 +53,52 @@ On 2026-10-27 the same list recommends `gpt-6-astra`, `gpt-6.1-sol`,
 eight-week measurement put cache reads at 61.5% of the bill and generation at
 13.6%. Opus 5.5 and Sonnet 5 charge $0.20/M for a cache read. Sonnet 5.5 charges
 $0.10/M (pricing page, checked 2026-10-09; the 2026-09-30 table had $0.20).
+
+## Changes on 2026-11-17
+
+Rows for gpt-6.2-sol and gpt-6.2-astra in the OpenAI price table come from the
+OpenAI model pages, read 2026-11-17.
+
+- **gpt-6.2-sol** (17 Nov 2026) replaces gpt-6.1-sol in the `sol-implementer`
+  lane and the read-only investigation route. $2/$10, cached $0.10, the same as
+  6.1 Sol. 1.05M context, 128k output, knowledge cutoff 2026-06-01. System card
+  against 6.1 Sol: SEC-Bench Pro 88.34 vs 78.8, ExploitBench Internal Port 50.5
+  vs 21.5, Sandbox Bench 25.0 vs 11.4; GPQA Diamond 96.0. Chart reads
+  (approximate): Terminal-Bench-Science 0.1 about 68 vs about 57, GDPval v2 +5.3,
+  FrontierCode 2.0 within 0.5 of 6.2 Astra at about a fifth of the cost.
+  Prompt injection resisted: 99.76% in benchmark environments (all five attempts
+  99.13%), 91.65% in model-generated environments (all five 80.06%). No figure
+  exists for 6.1 Sol. Unintended engagement with external agent messages: 0%
+  (6.1 Sol 1.25%, 6.1 Terra 13.75%, 6 Sol 16.25%). Improper workplace actions
+  0.71% vs 1.32%. Scores unchanged: cost 7, intelligence 8, taste 6. Untrusted
+  input stays on opus-5.5 (operator decision, 2026-11-17).
+- **gpt-6.2-astra** (17 Nov 2026) replaces gpt-6-astra in `astra-implementer`
+  and `astra-reviewer`. $8/$40, cached $0.40 (6 Astra $10/$50, cached $1).
+  1.05M context, 128k output, knowledge cutoff 2026-05-18. System card against
+  6 Astra: SEC-Bench Pro 86.75 vs 85.4, ExploitBench 53.5 vs 31.5, Sandbox Bench
+  36.4 vs 18.2, GPQA 97.0 vs 96.0, PostTrainBench Lite 74.79 vs 76.97. Chart
+  reads (approximate): Terminal-Bench-Science 0.1 about 77 at about $7 per task
+  vs about 68 at about $24 per task; Agents' Last Exam about 78 vs about 73;
+  GDPval v2 +6.2. Prompt injection resisted: benchmark environments 99.23% vs
+  98.06% (all five 97.73% vs 94.70%), model-generated environments 84.67% vs
+  44.98% (all five 74.46% vs 20.33%). Unintended engagement 0% vs 0%; improper
+  workplace actions 0.64% vs 1.20%; AgentReplay 12.30 vs 27.14. First OpenAI
+  model rated "High" for AI self-improvement. Scores: cost 3→4 (20% lower list
+  price, fewer dollars per task on the chart), intelligence 8→9, taste 6.
+- **Codex CLI.** Version 0.167.0 lists both models. The lowest version that
+  runs them was not found.
+- **Not found:** standard Terminal-Bench or SWE-bench scores, an Artificial
+  Analysis index, an OpenRouter listing, a head-to-head with Claude. The
+  announcement page answered 403.
+
+Sources, read 2026-11-17:
+https://deploymentsafety.openai.com/gpt-6-2-astra-sol,
+https://deploymentsafety.openai.com/gpt-6-2-astra-sol/robustness-to-indirect-prompt-injection,
+https://developers.openai.com/api/docs/models/gpt-6.2-sol,
+https://developers.openai.com/api/docs/models/gpt-6.2-astra,
+https://developers.openai.com/api/docs/changelog,
+https://learn.chatgpt.com/docs/changelog?date=2026-11-17,
+https://officechai.com/ai/gpt-6-2-sol-gpt-6-2-astra-benchmarks/ (chart reads).
 
 ## Changes on 2026-11-16
 
@@ -148,7 +196,7 @@ $0.10/M (pricing page, checked 2026-10-09; the 2026-09-30 table had $0.20).
   tokens per task claimed), intelligence 6→7. Vendor claims, not measured here.
   Main-thread work stays on Opus: the 2026-09-22 withdrawal of "move main-thread
   turns to Sonnet" still stands.
-- **gpt-6.1-sol** (29 Sep 2026) replaces gpt-5.6-sol in the `sol-implementer`
+- **gpt-6.1-sol** (29 Sep 2026; superseded 2026-11-17 by gpt-6.2-sol) replaces gpt-5.6-sol in the `sol-implementer`
   lane and the read-only investigation route. $2/$10, cached $0.10. OpenAI
   claims it matches Astra on DeepSWE v1.1 at a fifth of the cost, +6.4 points
   over GPT-6 Sol; within 2.1 points of Astra on OSWorld 2.0; above Opus 5.5 on
@@ -188,7 +236,7 @@ $0.10/M (pricing page, checked 2026-10-09; the 2026-09-30 table had $0.20).
   transcripts rather than assuming the frontmatter was honoured.
 - **opus-5** (24 Jul 2026, superseded by 5.5): $5/$25. Topped the Artificial
   Analysis Intelligence and Agentic indices above Fable 5 and Sol.
-- **gpt-6-astra** (3 Sep 2026; OpenRouter lists 4 Sep): $10/$50 list, cached $1/M, 5x Sol, same as Fable 5. 1M context,
+- **gpt-6-astra** (3 Sep 2026; OpenRouter lists 4 Sep; superseded 2026-11-17 by gpt-6.2-astra): $10/$50 list, cached $1/M, 5x Sol, same as Fable 5. 1M context,
   effort low→max. Ties Sol on the AA Intelligence Index, behind Fable 5.1. Clear
   gains over Sol in agentic coding and computer use (1.9x faster on Mind2Web).
   Codex CLI only. Cost score 3 assumes plan-covered Codex usage; correct once spend
