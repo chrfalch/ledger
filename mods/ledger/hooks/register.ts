@@ -51,6 +51,7 @@ import {
   type LedgerSummary,
 } from './ledger'
 import { archiveCommand } from './archive-command'
+import { band, finishedTask } from './band'
 import { dashboardCommand } from './dashboard-command'
 import {
   findLedgers,
@@ -59,6 +60,7 @@ import {
   message,
   sessionFolder,
   sessionLedger,
+  sessionTaskLedger,
   titleSlug,
   unlistedAncestors,
   type Found,
@@ -72,6 +74,7 @@ import { autoPrune, worktreesCommand } from './worktrees-command'
 
 const armed = { plugin: 'ledger', key: 'armed' } as const
 const titled = { plugin: 'ledger', key: 'titled' } as const
+const finished = { plugin: 'ledger', key: 'finished' } as const
 
 type GoArm = { mode: 'go'; slug: string; ledger?: string; isNew?: true }
 
@@ -162,16 +165,14 @@ async function showRetireHint($: EngineInterface, ledger: string, namesNextChild
   } catch {}
 }
 
-/** The ledger of the session's own task, undefined when there is not exactly one or the lookup failed. */
-async function sessionTaskLedger($: EngineInterface): Promise<string | undefined> {
+/**
+ * Stores for the band whether the task at `ledger` is finished: once per event, not per draw, as the band redraws on every
+ * scroll and resize. A failed store keeps the last value, so it never stops the hook that calls it.
+ */
+async function storeFinished($: EngineInterface, ledger: string | undefined): Promise<void> {
   try {
-    const found = await findLedgers($)
-    if ('error' in found) return undefined
-    const active = sessionLedger(found, await sessionFolder($))
-    return active.kind === 'one' ? active.path : undefined
-  } catch {
-    return undefined
-  }
+    await $.state.set(finished, await finishedTask($, ledger).catch(() => null))
+  } catch {}
 }
 
 /**
@@ -375,11 +376,14 @@ function isTypedOnly(command: string, args: string): boolean {
 }
 
 export const register: Register = on => {
+  band(on)
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'ledger',
       description: 'Show each task ledger: goal, current step, next step. /ledger <name> shows one.',
     })
+    await storeFinished($, await sessionTaskLedger($))
     return next(e)
   })
 
@@ -516,7 +520,13 @@ export const register: Register = on => {
   // Typed as always a string, but `claude plugin test` leaves it undefined when the caller omits it.
   on('command.run', { command: 'ledger:worktrees' }, async ($, e) => ({ text: await worktreesCommand($, e.args ?? '') }))
 
-  on('command.run', { command: 'ledger:retire' }, async ($, e) => ({ text: await retireCommand($, e.args ?? '') }))
+  // A typed retire has no turn of its own, so the band would otherwise keep a retired task's row until the next turn ends.
+  on('command.run', { command: 'ledger:retire' }, async ($, e) => {
+    const text = await retireCommand($, e.args ?? '')
+    const { value: shown } = await $.state.get(finished).catch(() => ({ value: undefined }))
+    if (shown) await storeFinished($, await sessionTaskLedger($))
+    return { text }
+  })
 
   on('command.run', { command: 'ledger:archive' }, async ($, e) => ({ text: await archiveCommand($, e.args ?? '') }))
 
@@ -531,12 +541,13 @@ export const register: Register = on => {
   // $.command.run and $.prompt.submit must not be awaited inside a command.run hook, so the clear waits for the turn's end.
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
+    const ledger = await sessionTaskLedger($)
+    await storeFinished($, ledger)
     const { value } = await $.state.get(armed)
     // A turn that clears does not rename: the session is still in the old task, and the turn of `go <slug>` renames.
     // It prunes through showRetireHint instead, so each turn prunes at most once.
     if (!value) {
-      const ledger = e.reason === 'answer' ? await sessionTaskLedger($) : undefined
-      if (ledger !== undefined) {
+      if (e.reason === 'answer' && ledger !== undefined) {
         await titleSession($, ledger)
         await pruneIfFinished($, ledger)
       }

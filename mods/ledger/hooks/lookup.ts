@@ -77,6 +77,18 @@ export function findLedgers($: EngineInterface): Promise<Found[] | { error: stri
   return listLedgers($, 'paths', folderSlug)
 }
 
+/** The ledger of the session's own task, undefined when there is not exactly one or the lookup failed. */
+export async function sessionTaskLedger($: EngineInterface): Promise<string | undefined> {
+  try {
+    const found = await findLedgers($)
+    if ('error' in found) return undefined
+    const active = sessionLedger(found, await sessionFolder($))
+    return active.kind === 'one' ? active.path : undefined
+  } catch {
+    return undefined
+  }
+}
+
 const backlogSlug = (path: string): string => basename(path).replace(/\.md$/, '')
 
 /** The backlog ledgers of the repository the session is in, matched on its main checkout as cc-task-new and cc-ledger-parent do. */

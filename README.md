@@ -125,6 +125,14 @@ prune also writes this file, so the failure is shown once. The file names the
 command to prune by hand. When the task has open steps again, the file is
 removed, so the next finish prunes again.
 
+When the first line under the task's `## Next step` starts with `Done`, a row
+of buttons shows above the prompt box. **Retire &lt;slug&gt;** puts
+`/ledger:retire <slug>` in the prompt box. For a child task whose parent has a
+child task that has not started, **Next: &lt;child&gt;** puts
+`/ledger:go <parent>` there. A click only fills the prompt box; you press Enter
+to run the command. The text lines that name these commands stay, so hosts
+without a prompt box, such as SDK hosts, still show them.
+
 ### Daily use
 
 | You type | What happens |

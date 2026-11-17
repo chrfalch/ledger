@@ -254,6 +254,17 @@ test('/ledger:next clears, then submits go <slug> from the ledger title', async 
   expect(calls).toEqual(['clear', 'submit: go fast-steps'])
 })
 
+test('/ledger:next still clears when storing the finished task fails', async ($, on) => {
+  const { calls } = world(on, `${WORKTREES}/fix-login/src`, [FIX_LOGIN], 'ledger:next')
+  on('state.set', async (_, e, next) => {
+    if (e.plugin === 'ledger' && e.key === 'finished') return { deny: 'state store unavailable' }
+    return next(e)
+  })
+  await $.command.run({ command: 'ledger:next', args: '' })
+  await $.turn.complete(turnEnd)
+  expect(calls).toEqual(['clear', 'submit: go fast-steps'])
+})
+
 test('an interrupted turn disarms without clearing', async ($, on) => {
   const { calls } = world(on, `${WORKTREES}/fix-login`, [FIX_LOGIN], 'ledger:next')
   await $.command.run({ command: 'ledger:next', args: '' })

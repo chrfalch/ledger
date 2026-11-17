@@ -197,7 +197,9 @@ transcript is re-billed on every turn; the ledger is read once per fresh session
   Do not re-read files or rerun tests to re-establish state; the ledger is the
   state. If every step is done, say so and ask with the question widget
   whether to commit or open a PR.
-  When every step is done and the task has a parent, also say which child
+  When the work is merged, or the operator says the task is finished, name
+  `/ledger:retire <slug>` for this task first. Name the next task only after
+  it. When every step is done and the task has a parent, also say which child
   task starts next. Read it from `/ledger:parent <parent>`, and ask with the
   question widget whether to start it with `/ledger:go <parent>`. When no child task is left, say that the parent task
   can be retired after its child tasks are.
