@@ -84,8 +84,9 @@ ledger steps:
    tokens.
 4. End your reply with one line saying whether the ledger is updated (or that there is none), that the
    session clears automatically after this turn, and that the new session
-   continues with `go <task>`, where <task> is the `task:` value. Do not ask
-   the operator to run `/clear`. If there is a `new:` line, add one line
+   then continues by itself in the task that the `task:` value names, so the
+   operator types nothing. Do not show `go <task>` or any other command for
+   the operator to type. Do not ask the operator to run `/clear`. If there is a `new:` line, add one line
    before it: the task was made, and its worktree is at the path on the
    `worktree` line that `--promote` printed. If `--promote` failed, say
    instead that the task is in the backlog. If there is a `parked:` line, add
