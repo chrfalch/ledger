@@ -169,9 +169,9 @@ test('the parent task rule states both directions', () => {
 
 test('a finished child task names the next child task of its parent on resume', () => {
   const bullet = read('rules/10-operating-model.md').match(/\*\*Resume from the ledger\.\*\*.*? - /)?.[0] ?? '';
-  assert.match(bullet, /If every step is done, say so and ask whether to commit or open a PR\./);
+  assert.match(bullet, /If every step is done, say so and ask with the question widget whether to commit or open a PR\./);
   assert.match(bullet, /When every step is done and the task has a parent, .*`\/ledger:parent <parent>`/);
-  assert.match(bullet, /ask whether to start it with `\/ledger:go <parent>`/);
+  assert.match(bullet, /ask with the question widget whether to start it with `\/ledger:go <parent>`/);
   assert.match(bullet, /When no child task is left, say that the parent task can be retired after its child tasks are/);
 });
 

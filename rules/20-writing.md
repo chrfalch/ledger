@@ -28,6 +28,12 @@ is unverified.
 Ask every question that has fixed answers with the question widget (the
 AskUserQuestion tool), not as text. This includes yes/no questions, such as
 whether to commit and open a PR.
+- A request for approval of one proposed action ("Shall I commit, push and
+  open the PR?", "Proceed?") is a yes/no question. It has fixed answers, so it
+  goes in the widget. Give it two options: the action, labelled with what it
+  does, and "Not yet", which stops and waits.
+- When your report ends with such a question, end the turn with the widget
+  call. Do not write the question as text first.
 - Make each possible answer one option, two to four per question. The widget
   adds its own free-text answer, so do not add an "Other" option.
 - Put your recommended option first, and end its label with "(Recommended)".
@@ -56,7 +62,9 @@ Rules:
   reach every reader. The word is the outcome, never "red" or "green".
 - In a comparison table, give each row one mark.
 - A question with fixed answers goes in the question widget (see Asking the
-  operator). Start any other question you ask the user with ❓:
+  operator), and so does a yes/no question. Start any other question you ask
+  the user with ❓. Such a question has an open answer, such as a name or a
+  value:
   `❓ What should the new command be called?`. Use ❓ only for a question the
   user must answer. 🟡 marks a result; ❓ marks a question.
 - Next steps and recommendations stay plain text, without a mark.
