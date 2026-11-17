@@ -252,6 +252,21 @@ test('a successful retire of the finished task removes the row', async ($, on) =
   await ui.unmount()
 })
 
+test('a retire of the finished task through the Skill tool removes the row', async ($, on) => {
+  const { files } = world(on, DONE, { isRetirable: true })
+  await $.turn.complete(turnEnd)
+  const ui = await mountBand($)
+  expect(await ui.find({ key: 'retire' })).toBeDefined()
+
+  const ran = await $.tool.call({ tool: 'Skill', skill: 'ledger:retire', args: '' })
+
+  expect(ran.deny?.split('\n')[0]).toBe('**Retired fix-login**')
+  expect(files.has(LEDGER)).toBe(false)
+  await ui.redraw(props())
+  expect(await ui.find({ type: 'Button' })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('a retire that fails keeps the row', async ($, on) => {
   world(on, DONE)
   await $.turn.complete(turnEnd)

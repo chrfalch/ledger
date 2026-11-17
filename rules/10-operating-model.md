@@ -162,9 +162,9 @@ transcript is re-billed on every turn; the ledger is read once per fresh session
   the split into child tasks, the decisions that cross child tasks, and their
   order. Each child ledger holds its own plan and state. After each child
   task's review verdict or merge, update the parent ledger: cross-task
-  decisions, order, next child task. Ask the operator to retire each child task
-  when it merges. When every child task is retired, ask the operator to retire
-  the parent task.
+  decisions, order, next child task. Offer to retire each child task when it
+  merges. When every child task is retired, offer to retire the parent task.
+  Offer each retire in the end-of-task question (see "Resume from the ledger").
 - **Clear between cycles.** You cannot see your own context size and you cannot
   run `/clear`; the user does. So the trigger is structural and you announce it:
   whenever an implement→review cycle finishes **and more work remains**, update
@@ -197,12 +197,21 @@ transcript is re-billed on every turn; the ledger is read once per fresh session
   Do not re-read files or rerun tests to re-establish state; the ledger is the
   state. If every step is done, say so and ask with the question widget
   whether to commit or open a PR.
-  When the work is merged, or the operator says the task is finished, name
-  `/ledger:retire <slug>` for this task first. Name the next task only after
-  it. When every step is done and the task has a parent, also say which child
-  task starts next. Read it from `/ledger:parent <parent>`, and ask with the
-  question widget whether to start it with `/ledger:go <parent>`. When no child task is left, say that the parent task
-  can be retired after its child tasks are.
+  When the work is merged, or the operator says the task is finished, ask one
+  question in the question widget with `multiSelect` on. Its options:
+  retire this task; retire each other finished task, one option per slug;
+  start the next task with `/ledger:go`. When the task has a parent, the next
+  task is the child task that `/ledger:parent <parent>` names, and the option
+  is `/ledger:go <parent>`. When no child task is left, say that the parent
+  task can be retired after its child tasks are. A ticked option is the
+  operator's approval to run it. Run the ticked options in this order, not in
+  the order they were ticked:
+  1. Run `--dry-run` for each ticked retire, and clear the problems it names
+     while the session is still in the worktree. See "Archiving a ledger".
+  2. `ExitWorktree` with `keep`, when the session is in a worktree that a
+     retire removes.
+  3. Retire this task, then each other ticked task.
+  4. `/ledger:go` last, because it clears the session.
 - The old session stays resumable after `/clear`. If the ledger turns out to be
   missing something, resume the old session to recover it, write it to the
   ledger, and clear again. Do not stay in the old session to finish the work.
@@ -218,10 +227,20 @@ transcript is re-billed on every turn; the ledger is read once per fresh session
 
 Absolute. A worktree is disposable. Its ledger is the record of the task.
 
-- Retire a worktree with `/ledger:retire <slug>`. Ask the operator to type it.
-  A hook answers it, so you cannot invoke it yourself. It runs
+- Retire a worktree with `/ledger:retire <slug>`. It runs
   `bin/cc-worktree-retire`. With `--dry-run` it only shows what it would
   archive and remove. Uncommitted changes or an unmerged branch need `--force`.
+- You run a retire through the Skill tool only after the operator ticked it in
+  the end-of-task question. Never pass `--force`: the hook refuses it, and only
+  the operator types it. First run `/ledger:retire <slug> --dry-run`. Then
+  clear each problem it names:
+  - Uncommitted changes: commit the changes that belong to the task. Ask the
+    operator before you discard any change.
+  - A branch with no merged PR: do not retire it. Say what is missing, such as
+    an open PR or unpushed commits.
+  - A parent task with active child tasks: retire the finished child tasks
+    first. Do not retire the parent while a child task is not finished.
+  When the dry run shows no problem, run `/ledger:retire <slug>`.
 - `bin/cc-worktree-retire` copies `.claude/ledger.md` to
   `~/.claude/ledger-archive/<repo>/<YYYY-MM-DD>-<slug>.md`, checks the copy,
   then runs `git worktree remove`. Running it twice archives once. Before the

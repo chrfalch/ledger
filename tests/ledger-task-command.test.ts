@@ -167,12 +167,38 @@ test('the parent task rule states both directions', () => {
   assert.match(bullet, /This is a hard rule, not a preference\./);
 });
 
-test('a finished child task names the next child task of its parent on resume', () => {
+test('a finished task ends with one multi-select question for retire and the next task', () => {
   const bullet = read('rules/10-operating-model.md').match(/\*\*Resume from the ledger\.\*\*.*? - /)?.[0] ?? '';
   assert.match(bullet, /If every step is done, say so and ask with the question widget whether to commit or open a PR\./);
-  assert.match(bullet, /When every step is done and the task has a parent, .*`\/ledger:parent <parent>`/);
-  assert.match(bullet, /ask with the question widget whether to start it with `\/ledger:go <parent>`/);
+  assert.match(bullet, /question widget with `multiSelect` on/);
+  assert.match(bullet, /retire this task; retire each other finished task, one option per slug; start the next task with `\/ledger:go`/);
+  assert.match(bullet, /child task that `\/ledger:parent <parent>` names, and the option is `\/ledger:go <parent>`/);
   assert.match(bullet, /When no child task is left, say that the parent task can be retired after its child tasks are/);
+  assert.match(bullet, /A ticked option is the operator's approval to run it/);
+});
+
+test('ticked options run in a fixed order: dry runs, leave the worktree, retires, then /ledger:go', () => {
+  const bullet = read('rules/10-operating-model.md').match(/\*\*Resume from the ledger\.\*\*.*? - /)?.[0] ?? '';
+  const order = ['--dry-run', '`ExitWorktree` with `keep`', 'Retire this task, then each other ticked task', '`/ledger:go` last'].map(step => bullet.indexOf(step));
+  assert.ok(order.every(at => at >= 0), `missing step: ${JSON.stringify(order)}`);
+  assert.deepEqual([...order].sort((a, b) => a - b), order);
+});
+
+test('the agent retires without --force after a dry run', () => {
+  const archiving = read('rules/10-operating-model.md').match(/### Archiving a ledger.*?To find an archived ledger later/)?.[0] ?? '';
+  assert.match(archiving, /only after the operator ticked it in the end-of-task question/);
+  assert.match(archiving, /Never pass `--force`/);
+  assert.match(archiving, /First run `\/ledger:retire <slug> --dry-run`/);
+  assert.match(archiving, /Ask the operator before you discard any change/);
+  assert.match(archiving, /A branch with no merged PR: do not retire it/);
+  assert.match(archiving, /retire the finished child tasks first/);
+});
+
+test('no rule says only the operator runs a retire', () => {
+  for (const file of ['rules/10-operating-model.md', 'rules/90-builds.md']) {
+    assert.doesNotMatch(read(file), /retire[^.]*\. The operator types it\./, file);
+    assert.doesNotMatch(read(file), /\/ledger:retire <slug>`\. Ask the operator to type it/, file);
+  }
 });
 
 test('starting or resuming a task shows the operator its task tree', () => {

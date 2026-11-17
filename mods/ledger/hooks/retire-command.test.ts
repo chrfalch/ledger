@@ -732,3 +732,85 @@ test('/ledger:retire <slug> --dry-run of a parent whose children are all retired
   const { text } = await $.command.run({ command: 'ledger:retire', args: 'fast-steps --dry-run' })
   expect(text.split('\n').at(-1)).toBe('Run `/ledger:retire fast-steps` to retire it.')
 })
+
+/** Records each call that reaches the Skill tool, which would expand retire.md instead of retiring. */
+function skillTool(on: On): string[] {
+  const skills: string[] = []
+  on('tool.call', { tool: 'Skill' }, async (_, e) => {
+    skills.push(e.skill)
+    return { result: {} }
+  })
+  return skills
+}
+
+test('/ledger:retire <slug> through the Skill tool retires and answers with the text the typed command shows', async ($, on) => {
+  const calls = world(on, { cwd: REPO })
+  const skills = skillTool(on)
+
+  const ran = await $.tool.call({ tool: 'Skill', skill: 'ledger:retire', args: 'fast-steps' })
+
+  expect(ran.deny).toBe(
+    [
+      '**Retired fast-steps**',
+      '- archived /Users/me/.claude/ledger-archive/repo/2026-10-05-fix-login.md',
+      '- removed  /repo/.claude/worktrees/fix-login',
+      '- deleted  branch me/fix-login',
+    ].join('\n'),
+  )
+  expect(ranScript(calls).map(({ argv }) => argv.slice(2))).toEqual([[FIX_LOGIN, '--delete-branch', HEAD]])
+  expect(skills).toEqual([])
+})
+
+test('/ledger:retire <slug> --dry-run through the Skill tool shows the plan and retires nothing', async ($, on) => {
+  const calls = world(on, { cwd: REPO })
+  const skills = skillTool(on)
+
+  const ran = await $.tool.call({ tool: 'Skill', skill: 'ledger:retire', args: 'new-api --dry-run' })
+
+  expect(ran.deny?.split('\n')[0]).toBe('**Retire new-api** — nothing done yet')
+  expect(ranScript(calls)).toEqual([])
+  expect(skills).toEqual([])
+})
+
+test('/ledger:retire --dry-run through the Skill tool in a task worktree plans that task', async ($, on) => {
+  const calls = world(on, { cwd: `${FIX_LOGIN}/src`, ledgers: [ledgerOf(FIX_LOGIN)] })
+
+  const ran = await $.tool.call({ tool: 'Skill', skill: 'ledger:retire', args: '--dry-run' })
+
+  expect(ran.deny?.split('\n')[0]).toBe('**Retire fast-steps** — nothing done yet')
+  expect(ranScript(calls)).toEqual([])
+})
+
+test('/ledger:retire with a leading slash and no arguments through the Skill tool retires the task of the session folder', async ($, on) => {
+  const calls = world(on, { cwd: `${FIX_LOGIN}/src`, ledgers: [ledgerOf(FIX_LOGIN)] })
+
+  const ran = await $.tool.call({ tool: 'Skill', skill: '/ledger:retire' })
+
+  expect(ran.deny?.split('\n')[0]).toBe('**Retired fast-steps**')
+  expect(ranScript(calls)).toHaveLength(1)
+})
+
+// A retire waits for no turn end, unlike /ledger:go, so a subagent may run it as the main session does.
+test('/ledger:retire <slug> through the Skill tool from a subagent retires as from the main session', async ($, on) => {
+  const calls = world(on, { cwd: REPO })
+
+  const ran = await $.tool.call({ tool: 'Skill', skill: 'ledger:retire', args: 'fast-steps', agentId: 'a1' })
+
+  expect(ran.deny?.split('\n')[0]).toBe('**Retired fast-steps**')
+  expect(ranScript(calls)).toHaveLength(1)
+})
+
+for (const args of ['fast-steps --force', '--force fast-steps', '--force', '--dry-run --force', 'fast-steps  --force  --dry-run']) {
+  test(`/ledger:retire ${args} through the Skill tool is refused and runs nothing, because --force discards work`, async ($, on) => {
+    const calls = world(on, { cwd: REPO })
+    const skills = skillTool(on)
+
+    const ran = await $.tool.call({ tool: 'Skill', skill: 'ledger:retire', args })
+
+    expect(ran.deny).toBe(
+      `/ledger:retire runs only when the operator types it. Ask the operator to type \`/ledger:retire ${args.replace(/\s+/g, ' ')}\`.`,
+    )
+    expect(calls).toEqual([])
+    expect(skills).toEqual([])
+  })
+}

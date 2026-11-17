@@ -133,12 +133,12 @@ for (const command of ['ledger:retire', 'ledger:dashboard', 'ledger:close', 'led
   })
 }
 
-test('/ledger:retire through the Skill tool with a leading slash and no arguments names the bare command', async ($, on) => {
+test('/ledger:dashboard through the Skill tool with a leading slash and no arguments names the bare command', async ($, on) => {
   world(on)
 
-  const ran = await $.tool.call({ tool: 'Skill', skill: '/ledger:retire' })
+  const ran = await $.tool.call({ tool: 'Skill', skill: '/ledger:dashboard' })
 
-  expect(ran.deny).toContain('Ask the operator to type `/ledger:retire`.')
+  expect(ran.deny).toContain('Ask the operator to type `/ledger:dashboard`.')
 })
 
 for (const skill of ['ledger:update', 'ledger:task', 'other:parent']) {
