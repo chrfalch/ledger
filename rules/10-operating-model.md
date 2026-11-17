@@ -195,10 +195,11 @@ transcript is re-billed on every turn; the ledger is read once per fresh session
   status, in the parent's order. Mark the task this session works on. A task
   with no parent task and no child tasks has no tree; show nothing.
   Do not re-read files or rerun tests to re-establish state; the ledger is the
-  state. If every step is done, say so and ask whether to commit or open a PR.
+  state. If every step is done, say so and ask with the question widget
+  whether to commit or open a PR.
   When every step is done and the task has a parent, also say which child
-  task starts next. Read it from `/ledger:parent <parent>`, and ask whether
-  to start it with `/ledger:go <parent>`. When no child task is left, say that the parent task
+  task starts next. Read it from `/ledger:parent <parent>`, and ask with the
+  question widget whether to start it with `/ledger:go <parent>`. When no child task is left, say that the parent task
   can be retired after its child tasks are.
 - The old session stays resumable after `/clear`. If the ledger turns out to be
   missing something, resume the old session to recover it, write it to the
