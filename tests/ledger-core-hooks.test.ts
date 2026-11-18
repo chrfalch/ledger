@@ -972,7 +972,12 @@ test('a removal by the retire commands is allowed', (t) => {
 
   assertAllowed(gate(main, 'Bash', { command: `${BIN} retire task && git worktree remove ${task}` }, h));
   assertAllowed(gate(main, 'Bash', { command: `ledger retire task --force; rm -rf ${task}` }, h));
-  assertAllowed(gate(main, 'Bash', { command: `bin/cc-worktree-retire ${task}; rm -rf ${task}` }, h));
+});
+
+test('a removal that names the deleted cc-worktree-retire script is denied', (t) => {
+  const { h, main, task } = removal(t);
+
+  assert.equal(assertDenied(gate(main, 'Bash', { command: `bin/cc-worktree-retire ${task}; rm -rf ${task}` }, h)), removalReason(task));
 });
 
 test('a removal that names the worktree by a glob is denied, as bash expands the glob', (t) => {

@@ -4,8 +4,8 @@ import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { snapshot } from './helpers.js';
-import { archivedTask, backlogTask, git, home, ledger, ledgerText, lineWith, ok, repository, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { REPO, snapshot } from './helpers.js';
+import { archivedTask, backlogTask, git, home, ledger, ledgerText, lineWith, ok, repository, spawn, worktreeTask, type Ran } from './ledger-core-fixtures.js';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
@@ -659,6 +659,20 @@ test('buildFolderPrefix is cc-<folder>-<first 6 hex of sha1 of the real top fold
   const hash = createHash('sha1').update(worktree).digest('hex').slice(0, 6);
   const expected = path.join(derivedData(h), `cc-fix-login-${hash}-`);
   assert.equal(buildFolderPrefix(ledgerPaths(h), path.join(worktree, '.claude')), expected);
+});
+
+test('the build folder bin/cc-dd-path prints for a worktree has its buildFolderPrefix, and ledger retire deletes it', async (t) => {
+  const { buildFolderPrefix } = await import('../tools/ledger/worktrees.js');
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const worktree = worktreeOf(app, 'fix-login');
+  const printed = ok(spawn(h, worktree, path.join(REPO, 'bin/cc-dd-path'), ['Debug-sim'])).trim();
+  const prefix = buildFolderPrefix(ledgerPaths(h), path.join(worktree, '.claude'));
+  assert.ok(prefix !== undefined && printed.startsWith(prefix), `${printed} starts with ${prefix}`);
+  assert.ok(existsSync(printed));
+
+  ok(ledger(h, app, 'retire', 'fix-login'));
+  assert.equal(existsSync(printed), false);
 });
 
 test("ledger retire moves the worktree's own build folders to a trash folder and deletes them without waiting", (t) => {

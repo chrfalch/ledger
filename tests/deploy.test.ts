@@ -606,3 +606,51 @@ test('deploy links bin/ledger into ~/.claude/bin and wires the ledger hooks to i
     UserPromptSubmit: [`*: ${ledger} prompt-submit`, '*: "$HOME"/.claude/hooks/usage-pace.sh'],
   });
 });
+
+/** A ~/.claude/hooks the manifest fully lists: a link to a repo hook that is gone, a file of your own, and a link of your own. */
+function staleHooks(home: string) {
+  const hooks = path.join(home, '.claude/hooks');
+  const retired = path.join(hooks, 'retired-gate.sh');
+  const ownFile = path.join(hooks, 'my-own-hook.sh');
+  const ownLink = path.join(hooks, 'my-linked-hook.sh');
+  const ownTarget = path.join(home, 'my-hooks/my-linked-hook.sh');
+  mkdirSync(hooks, { recursive: true });
+  symlinkSync(path.join(REPO, 'hooks/retired-gate.sh'), retired);
+  writeFileSync(ownFile, '#!/bin/bash\n');
+  symlinkSync(ownTarget, ownLink);
+  writeFileSync(path.join(home, '.claude/.ledger-manifest'), `${[retired, ownFile, ownLink].join('\n')}\n`);
+  return { retired, ownFile, ownLink, ownTarget };
+}
+
+test('deploy removes a manifest hook link into the repo whose hook is gone, and keeps a file or a link of your own', (t) => {
+  const home = freshHome(t);
+  const { retired, ownFile, ownLink, ownTarget } = staleHooks(home);
+
+  const result = run(home, DEPLOY, '--no-codex', '--no-githooks');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(lstatSync(retired, { throwIfNoEntry: false }), undefined);
+  assert.equal(readFileSync(ownFile, 'utf8'), '#!/bin/bash\n');
+  assert.equal(readlinkSync(ownLink), ownTarget);
+  assert.ok(!readFileSync(path.join(home, '.claude/.ledger-manifest'), 'utf8').includes(retired));
+});
+
+test('--dry-run names a manifest hook link whose hook is gone, and removes nothing', (t) => {
+  const home = freshHome(t);
+  const { retired } = staleHooks(home);
+
+  const dry = run(home, DEPLOY, '--dry-run', '--no-codex', '--no-githooks');
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.deepEqual(dry.stdout.split('\n').filter((line) => line.startsWith('remove ')), ['remove   ~/.claude/hooks/retired-gate.sh   (no longer in the repo)']);
+  assert.ok(lstatSync(retired).isSymbolicLink());
+});
+
+test('the drift hook reports a deployed hook link whose hook left the repo', (t) => {
+  const home = freshHome(t);
+  const deployed = run(home, DEPLOY, '--no-githooks');
+  assert.equal(deployed.status, 0, deployed.stderr);
+  const drift = path.join(home, '.claude/hooks/deploy-drift.sh');
+  assert.equal(run(home, [drift]).stdout, '', 'a fresh deploy has no drift');
+
+  symlinkSync(path.join(REPO, 'hooks/retired-gate.sh'), path.join(home, '.claude/hooks/retired-gate.sh'));
+  assert.match(run(home, [drift]).stdout, /stale link: \.claude\/hooks\/retired-gate\.sh/);
+});

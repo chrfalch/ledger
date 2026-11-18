@@ -34,6 +34,10 @@ test('parse then serialize returns the same bytes: template, filled, CRLF, no fi
   }
 });
 
+test('the template has a Report section with only a hint, directly before Next step', () => {
+  assert.match(TEMPLATE, /\n## Report\n<[^\n]*>\n\n## Next step\n/);
+});
+
 test('the template has no slug, and every placeholder reads as not set', () => {
   const ledger = parseLedger(TEMPLATE);
   assert.equal(ledger.slug, undefined);
