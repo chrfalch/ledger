@@ -583,6 +583,26 @@ test('deploy installs usage hooks and preserves the prompt ledger hook', (t) => 
   const settings = JSON.parse(readFileSync(path.join(home, '.claude/settings.json'), 'utf8'));
   assert.equal(settings.statusLine.command, '"$HOME"/.claude/hooks/statusline.sh');
   const commands = settings.hooks.UserPromptSubmit.flatMap((entry: { hooks: { command: string }[] }) => entry.hooks.map((hook) => hook.command));
-  assert.ok(commands.includes('"$HOME"/.claude/hooks/ledger-list.sh prompt-submit'));
+  assert.ok(commands.includes('"$HOME"/.claude/bin/ledger hook prompt-submit'));
   assert.ok(commands.includes('"$HOME"/.claude/hooks/usage-pace.sh'));
+});
+
+test('deploy links bin/ledger into ~/.claude/bin and wires the ledger hooks to it, not to the bash scripts', (t) => {
+  const home = freshHome(t);
+  const result = run(home, DEPLOY, '--no-codex', '--no-githooks');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readlinkSync(path.join(home, '.claude/bin/ledger')), path.join(REPO, 'bin/ledger'));
+  type Entry = { matcher?: string; hooks: { command: string }[] };
+  const settings = JSON.parse(readFileSync(path.join(home, '.claude/settings.json'), 'utf8')) as { hooks: Record<string, Entry[]> };
+  const wired = Object.fromEntries(
+    Object.entries(settings.hooks).map(([event, entries]) => [event, entries.flatMap(({ matcher, hooks }) => hooks.map(({ command }) => `${matcher ?? '*'}: ${command}`))]),
+  );
+  const ledger = '"$HOME"/.claude/bin/ledger hook';
+  assert.deepEqual(wired, {
+    PreToolUse: ['Bash: "$HOME"/.claude/hooks/derived-data-gate.sh', `Write|Edit|MultiEdit|Bash: ${ledger} pre-tool-use`],
+    PermissionDenied: ['Bash|Read|Grep|Glob|NotebookRead: "$HOME"/.claude/hooks/denied-read-retry.sh'],
+    PreCompact: [`*: ${ledger} pre-compact`],
+    SessionStart: ['startup|resume|clear|fork: "$HOME"/.claude/hooks/deploy-drift.sh', `*: ${ledger} session-start`],
+    UserPromptSubmit: [`*: ${ledger} prompt-submit`, '*: "$HOME"/.claude/hooks/usage-pace.sh'],
+  });
 });

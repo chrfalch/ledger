@@ -338,6 +338,8 @@ export function deploy(opts: DeployOptions): number {
   }
   link(path.join(REPO, 'ledger.template.md'), path.join(claude, 'ledger.template.md'));
   link(path.join(REPO, 'bin/ledger'), path.join(home, '.local/bin/ledger'));
+  // The settings hooks run it by this path, so they need neither ~/.local/bin nor PATH.
+  link(path.join(REPO, 'bin/ledger'), path.join(claude, 'bin/ledger'));
   const onPath = (process.env.PATH ?? '').split(':').some((entry) => entry.replace(/\/+$/, '') === path.join(home, '.local/bin'));
   if (!onPath) {
     console.log('path     ~/.local/bin is not on PATH; add to your shell profile: export PATH="$HOME/.local/bin:$PATH"');

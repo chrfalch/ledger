@@ -1,8 +1,34 @@
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
+import { mainOfTaskWorktree } from './paths.js';
+
+let timeoutMs: number | undefined;
+const unanswered = new Set<string>();
+
+/**
+ * Stops each later git call of this process after `ms`. A folder whose call was stopped counts as no repository from
+ * then on and is not asked again, nor is any folder inside it, nor, for a task worktree, its main checkout and the
+ * other worktrees there. So a hanging repo costs one wait. For hooks, which must not stall Claude Code.
+ */
+export function limitGitCalls(ms: number): void {
+  timeoutMs = ms;
+}
+
+/** Whether a git call in `folder` or a folder that holds it was stopped by the limit of limitGitCalls. */
+export function gitTimedOut(folder: string): boolean {
+  for (let current = path.resolve(folder); ; current = path.dirname(current)) {
+    if (unanswered.has(current)) return true;
+    if (current === path.dirname(current)) return false;
+  }
+}
 
 function run(folder: string, args: string[]): { ok: boolean; stdout: string; stderr: string } {
-  const result = spawnSync('git', ['-C', folder, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  if (gitTimedOut(folder)) return { ok: false, stdout: '', stderr: `git did not answer in ${folder}` };
+  const result = spawnSync('git', ['-C', folder, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs });
+  if (result.error !== undefined && 'code' in result.error && result.error.code === 'ETIMEDOUT') {
+    const stopped = path.resolve(folder);
+    unanswered.add(mainOfTaskWorktree(stopped) ?? stopped);
+  }
   return { ok: result.status === 0, stdout: result.stdout ?? '', stderr: (result.stderr ?? '').trim() };
 }
 
@@ -16,10 +42,19 @@ const line = (folder: string, ...args: string[]): string | undefined => git(fold
 /** The git folder every worktree of the repo shares. */
 export const commonDir = (folder: string): string | undefined => line(folder, 'rev-parse', '--path-format=absolute', '--git-common-dir');
 
+/** The git folder of the checkout that holds `folder`: for a linked worktree, its own folder under the common dir. */
+export const gitDir = (folder: string): string | undefined => line(folder, 'rev-parse', '--absolute-git-dir');
+
 /** The main checkout of the repo that holds `folder`, or undefined outside a git repository. */
 export function mainCheckout(folder: string): string | undefined {
   const common = commonDir(folder);
   return common ? path.dirname(common) : undefined;
+}
+
+/** Whether `folder` is in a repo's main checkout, whose git folder is the one every worktree shares; false outside a git repository. */
+export function inMainCheckout(folder: string): boolean {
+  const own = line(folder, 'rev-parse', '--path-format=absolute', '--git-dir');
+  return own !== undefined && own === commonDir(folder);
 }
 
 /** The top folder of the checkout, main or linked, that holds `folder`. */

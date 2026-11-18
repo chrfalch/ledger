@@ -117,6 +117,46 @@ test('foreign entries keep their order and owned entries follow them', (t) => {
   ]);
 });
 
+const commandHook = (command: string) => ({ type: 'command', command });
+const commandsOf = (entries: unknown[]): string[] => (entries as { hooks: { command?: string }[] }[]).flatMap(({ hooks }) => hooks.map(({ command }) => command ?? ''));
+
+/** The hooks the policy wired before `ledger hook` replaced the bash ledger hooks. */
+const BASH_LEDGER_HOOKS = {
+  PreToolUse: [
+    { matcher: 'Bash', hooks: [commandHook(GATE), commandHook('"$HOME"/.claude/hooks/worktree-gate.sh')] },
+    { matcher: 'Write|Edit|MultiEdit|Bash', hooks: [commandHook('"$HOME"/.claude/hooks/ledger-gate.sh')] },
+  ],
+  PreCompact: [{ hooks: [commandHook('"$HOME"/.claude/hooks/ledger-list.sh pre-compact')] }],
+  SessionStart: [
+    { matcher: 'startup|resume|clear|fork', hooks: [commandHook('"$HOME"/.claude/hooks/deploy-drift.sh')] },
+    { hooks: [commandHook('"$HOME"/.claude/hooks/ledger-list.sh')] },
+  ],
+  UserPromptSubmit: [
+    { hooks: [commandHook('"$HOME"/.claude/hooks/ledger-list.sh prompt-submit')] },
+    { hooks: [commandHook('"$HOME"/.claude/hooks/usage-pace.sh')] },
+  ],
+};
+
+test('settings from the bash ledger hooks end with each ledger hook once, as ledger hook, and no duplicate gate', (t) => {
+  const out = applyToHooks(t, BASH_LEDGER_HOOKS);
+  const policy = readSettings(POLICY);
+  for (const event of Object.keys(BASH_LEDGER_HOOKS)) assert.deepEqual(hookEntries(out, event), hookEntries(policy, event), event);
+  assert.deepEqual(commandsOf(hookEntries(out, 'PreToolUse')), [GATE, '"$HOME"/.claude/bin/ledger hook pre-tool-use']);
+  assert.deepEqual(
+    commandsOf(hookEntries(out, 'UserPromptSubmit')).filter((command) => command.includes('ledger')),
+    ['"$HOME"/.claude/bin/ledger hook prompt-submit'],
+  );
+});
+
+test('removing the bash ledger hooks keeps your own hooks, also in an entry that held one of them', (t) => {
+  const mine = { matcher: 'Bash', hooks: [commandHook('echo mine')] };
+  const shared = { matcher: 'Edit', hooks: [commandHook('"$HOME"/.claude/hooks/ledger-gate.sh'), commandHook('echo also mine')] };
+  const out = applyToHooks(t, { PreToolUse: [mine, shared], UserPromptSubmit: [{ hooks: [commandHook('echo prompt')] }] });
+  const policy = readSettings(POLICY);
+  assert.deepEqual(hookEntries(out, 'PreToolUse'), [mine, { matcher: 'Edit', hooks: [commandHook('echo also mine')] }, ...hookEntries(policy, 'PreToolUse')]);
+  assert.deepEqual(hookEntries(out, 'UserPromptSubmit'), [{ hooks: [commandHook('echo prompt')] }, ...hookEntries(policy, 'UserPromptSubmit')]);
+});
+
 test('applying policy a second time reports no changes', (t) => {
   const home = freshHome(t);
   const target = path.join(home, '.claude/settings.json');

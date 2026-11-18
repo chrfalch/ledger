@@ -63,7 +63,7 @@ type RegistryEntry = { repo: string; slug: string; path: string; branch: string;
 
 const registryFile = (h: string): string => path.join(h, '.claude/ledgers.json');
 const readRegistry = (h: string): RegistryEntry[] => JSON.parse(readFileSync(registryFile(h), 'utf8'));
-const listJson = (h: string, cwd: string): ListedTask[] => JSON.parse(ok(ledger(h, cwd, 'list', '--json')));
+const listJson = (h: string, cwd: string): ListedTask[] => JSON.parse(ok(ledger(h, cwd, 'list', '--json'))).tasks;
 
 test('ledger --help lists list, archive, parent and deploy', (t) => {
   const stdout = ok(ledger(home(t), path.sep, '--help'));
@@ -132,6 +132,29 @@ test('ledger list --json gives one object per live task, newest first', (t) => {
   assert.equal(bySlug.get('idea')?.main, app);
   assert.equal(bySlug.get('parked-child')?.next, 'Then implement.');
   assert.equal(bySlug.get('epic')?.goal, 'Rewrite the ledger core.');
+});
+
+test('ledger list puts each child task under its parent, marked ↳ and indented per level, a backlog parent too; active children first', (t) => {
+  const h = home(t);
+  const app = repository(h, path.join(h, 'repos/app'));
+  const plan = backlogTask(h, app, { slug: 'plan', children: ['- step-a', '- step-b'] });
+  const stepA = backlogTask(h, app, { slug: 'step-a', parent: 'plan' });
+  const stepB = worktreeTask(h, app, { slug: 'step-b', parent: 'plan', children: ['- deep'] });
+  const deep = backlogTask(h, app, { slug: 'deep', parent: 'step-b' });
+  const solo = worktreeTask(h, app, { slug: 'solo' });
+  touch(deep, '2026-11-17T10:00:00Z');
+  touch(stepA, '2026-11-16T10:00:00Z');
+  touch(solo, '2026-11-15T10:00:00Z');
+  touch(stepB, '2026-11-14T10:00:00Z');
+  touch(plan, '2026-11-10T10:00:00Z');
+
+  const rows = ok(ledger(h, app, 'list')).trimEnd().split('\n').slice(3);
+  const names = rows.map((row) => /^app\s+(?:\s*↳ )?(\S+)/.exec(row)?.[1]);
+  assert.deepEqual(names, ['solo', 'plan', 'step-b', 'deep', 'step-a'], rows.join('\n'));
+  const arrow = (slug: string): number => lineWith(rows.join('\n'), `↳ ${slug}`).indexOf('↳');
+  assert.equal(lineWith(rows.join('\n'), ' plan ').includes('↳'), false);
+  assert.ok(arrow('deep') > arrow('step-b'), rows.join('\n'));
+  assert.equal(arrow('step-a'), arrow('step-b'));
 });
 
 test('without ~/.claude/ledgers.json, list finds the repos under ~/repos from any folder and rebuilds the registry', (t) => {

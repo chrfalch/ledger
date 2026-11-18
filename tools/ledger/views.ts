@@ -1,7 +1,7 @@
 import stringWidth from 'string-width';
 import { plainLine } from './format.js';
 import { repoName } from './paths.js';
-import type { ChildView, Task } from './tasks.js';
+import { inRepo, type ChildView, type Task } from './tasks.js';
 
 const TEXT_WIDTH = 80;
 
@@ -40,18 +40,50 @@ function parentCell(task: Task): string {
   return parent.main === undefined ? parent.slug : `${parent.slug} (${repoName(parent.main)})`;
 }
 
+/** The listed task that `task` names as its parent: a live one before an archive copy. */
+function listedParent(task: Task, tasks: Task[]): Task | undefined {
+  const parent = task.ledger.location.parent;
+  if (parent === undefined) return undefined;
+  const main = parent.main ?? task.main;
+  const named = tasks.filter((other) => other !== task && other.slug === parent.slug && (main === undefined ? other.repo === task.repo : inRepo(other, main)));
+  return named.find(({ place }) => place !== 'archive') ?? named[0];
+}
+
+/**
+ * `tasks` with each child task right after its parent, active children first, and `depth` levels below the top. A task
+ * whose parent is not listed stays at the top, in the order of `tasks`; so does a task in a cycle.
+ */
+function familyOrder(tasks: Task[]): { task: Task; depth: number }[] {
+  const parents = new Map(tasks.map((task) => [task, listedParent(task, tasks)]));
+  const isActive = (task: Task): number => Number(task.status === 'active');
+  const rows: { task: Task; depth: number }[] = [];
+  const placed = new Set<Task>();
+  const place = (task: Task, depth: number): void => {
+    if (placed.has(task)) return;
+    placed.add(task);
+    rows.push({ task, depth });
+    const children = tasks.filter((child) => parents.get(child) === task).sort((a, b) => isActive(b) - isActive(a));
+    for (const child of children) place(child, depth + 1);
+  };
+  for (const task of tasks) if (parents.get(task) === undefined) place(task, 0);
+  for (const task of tasks) place(task, 0);
+  return rows;
+}
+
+const nestedName = (slug: string, depth: number): string => (depth === 0 ? slug : `${'  '.repeat(depth - 1)}↳ ${slug}`);
+
 export function listView(tasks: Task[]): string {
   if (tasks.length === 0) return 'No live tasks. Retired tasks are listed by: ledger archive';
   const count = (status: string): number => tasks.filter((task) => task.status === status).length;
   const counts = [`${count('active')} active`, `${count('parked')} parked`, `${count('backlog')} backlog`];
-  const rows = tasks.map((task) => [task.repo, task.slug, task.status, parentCell(task), localDate(task.mtimeMs), truncate(task.ledger.next)]);
+  const rows = familyOrder(tasks).map(({ task, depth }) => [task.repo, nestedName(task.slug, depth), task.status, parentCell(task), localDate(task.mtimeMs), truncate(task.ledger.next)]);
   return [heading('Task ledgers', `${plural(tasks.length, 'task')}: ${counts.join(', ')}`), '', ...table(['repo', 'task', 'status', 'parent', 'updated', 'next'], rows)].join('\n');
 }
 
 export type ArchiveRow = { task: Task; match?: string };
 
 /** The first `- branch:` line as written, a placeholder included, as the old archive reader showed it. */
-const writtenBranch = (task: Task): string =>
+export const writtenBranch = (task: Task): string =>
   task.ledger.lines.map((line) => /^- branch:[ \t]*(.*)$/.exec(plainLine(line))?.[1].trim()).find((branch) => branch !== undefined) ?? '';
 
 /** `repo` is undefined for the archive of every repo, which adds a repo column. */

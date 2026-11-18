@@ -50,7 +50,7 @@ const inBacklog = (ledger) => path.dirname(path.dirname(ledger)) === backlogRoot
 
 const SLUG = /^[A-Za-z0-9._-]+$/;
 const CHILD = /^- ([A-Za-z0-9._-]+)(?: @ (\/\S*))?(?: \((retired|started) (\d{4}-\d\d-\d\d)\))?$/;
-// Same marker as parkedOf() in mods/ledger/hooks/ledger.ts.
+// Same marker as PARKED in tools/ledger/format.ts.
 const PARKED = /^Parked:[ \t]*\d{4}-\d{2}-\d{2}[ \t]*[—-]/;
 
 function fail(message) {
@@ -394,7 +394,7 @@ function childTime({ slug, main, retired }) {
   return file ? fs.statSync(file).mtimeMs : 0;
 }
 
-// The order of childOrder() in mods/ledger/hooks/ledger.ts: active first, then the others, each newest first by the time
+// The order of childrenOf() in tools/ledger/tasks.ts: active first, then the others, each newest first by the time
 // of the child's ledger, or its retire date once retired. A child with neither counts as oldest, and the stable sort keeps
 // their Children order.
 function ordered(parent) {

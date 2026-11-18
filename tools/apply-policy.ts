@@ -54,12 +54,32 @@ const takePolicy: MergeChild = (_key, _liveValue, policyValue) => policyValue;
 // whole rather than merged entry by entry.
 const ASSERTED_HOOK_EVENTS = new Set(['PreCompact', 'SessionStart']);
 
+// Earlier deploys wired these bash ledger hooks, which `ledger hook` replaced. They are removed
+// from any entry, also one with hooks of your own, so that no ledger hook runs twice.
+const RETIRED_HOOK_COMMANDS = new Set([
+  '"$HOME"/.claude/hooks/worktree-gate.sh',
+  '"$HOME"/.claude/hooks/ledger-gate.sh',
+  '"$HOME"/.claude/hooks/ledger-list.sh',
+  '"$HOME"/.claude/hooks/ledger-list.sh prompt-submit',
+  '"$HOME"/.claude/hooks/ledger-list.sh pre-compact',
+]);
+
+const isRetiredHook = (hook: unknown): boolean => isObject(hook) && typeof hook.command === 'string' && RETIRED_HOOK_COMMANDS.has(hook.command);
+
+/** `entry` without its retired hooks; undefined when none is left. */
+function withoutRetiredHooks(entry: unknown): unknown {
+  if (!isObject(entry) || !Array.isArray(entry.hooks) || !entry.hooks.some(isRetiredHook)) return entry;
+  const hooks = entry.hooks.filter((hook) => !isRetiredHook(hook));
+  return hooks.length === 0 ? undefined : { ...entry, hooks };
+}
+
 const mergeHookEvent: MergeChild = (event, liveEntries, policyEntries) => {
   if (ASSERTED_HOOK_EVENTS.has(event) || !Array.isArray(liveEntries) || !Array.isArray(policyEntries)) {
     return policyEntries;
   }
   const isOwned = (entry: unknown): boolean => policyEntries.some((ownedEntry) => isDeepStrictEqual(entry, ownedEntry));
-  return [...liveEntries.filter((entry) => !isOwned(entry)), ...policyEntries];
+  const kept = liveEntries.map(withoutRetiredHooks).filter((entry) => entry !== undefined && !isOwned(entry));
+  return [...kept, ...policyEntries];
 };
 
 function mergeKey(

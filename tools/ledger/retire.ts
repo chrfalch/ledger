@@ -5,6 +5,7 @@ import { fail } from './failure.js';
 import { folderEntries } from './files.js';
 import { isReadableSlug, parseLedger, type Child } from './format.js';
 import {
+  branchPrs,
   changedFiles,
   checkoutRoot,
   commitOf,
@@ -28,8 +29,11 @@ import { readLedger, saveLedger, today, type Context } from './write.js';
 
 type Ref = { slug: string; main: string };
 
-/** What git and gh tell about a worktree. `ahead` is undefined when git could not count, `mergedHeads` when gh could not tell. */
-export type BranchState = { branch?: string; head?: string; defaultBranch: string; ahead?: number; dirty: number; mergedHeads?: string[] };
+/**
+ * What git and gh tell about a worktree. `ahead` is undefined when git could not count, `mergedHeads` when gh could not
+ * tell. `openPr` is the number of the branch's open PR, asked for only when the branch is not merged.
+ */
+export type BranchState = { branch?: string; head?: string; defaultBranch: string; ahead?: number; dirty: number; mergedHeads?: string[]; openPr?: number };
 
 /**
  * Why the evidence cannot be archived whole. A link whose text leaves the folder dangles in the archive, where the folder
@@ -230,7 +234,7 @@ function stateFacts(folder: string, main: string, warnings: string[]): BranchSta
   const changes = changedFiles(folder) ?? fail(`Could not read the state of ${folder}: git status failed.`);
   const prs = branch === undefined ? [] : mergedPrHeads(folder, branch);
   if ('error' in prs) warnings.push(`${prs.error}. Merged PRs are unknown, so only the commit count decides whether the branch is merged.`);
-  return {
+  const state: BranchState = {
     ...(branch === undefined ? {} : { branch }),
     ...(head === undefined ? {} : { head }),
     defaultBranch,
@@ -238,6 +242,10 @@ function stateFacts(folder: string, main: string, warnings: string[]): BranchSta
     dirty: changes.length,
     ...('error' in prs ? {} : { mergedHeads: prs }),
   };
+  if (branch === undefined || isMerged(state)) return state;
+  const all = branchPrs(folder, branch);
+  const open = 'error' in all ? undefined : all.find(({ state: prState }) => prState === 'OPEN');
+  return open === undefined ? state : { ...state, openPr: open.number };
 }
 
 const NOTHING = 'Nothing was retired.';
@@ -471,29 +479,41 @@ function stepText(action: RetireAction): string | string[] | undefined {
   }
 }
 
-function branchLine({ branch, ahead, head, defaultBranch, mergedHeads }: BranchState): string {
-  const base = `origin/${defaultBranch}`;
-  const commits = ahead === undefined ? `commits ahead of ${base} unknown` : ahead === 0 ? `no commits ahead of ${base}` : `${plural(ahead, 'commit')} ahead of ${base}`;
-  const prs =
-    mergedHeads === undefined ? 'merged PRs unknown' : mergedHeads.length === 0 ? 'no merged PR' : head !== undefined && mergedHeads.includes(head) ? 'a merged PR ends at HEAD' : 'a merged PR ends at another commit';
-  return [branch ?? 'detached HEAD', commits, prs].join(' · ');
+/** Whether gh knows of a merged PR of the branch, and whether one ends at its HEAD. */
+export type MergedPr = 'unknown' | 'none' | 'at-head' | 'elsewhere';
+
+function mergedPr({ head, mergedHeads }: BranchState): MergedPr {
+  if (mergedHeads === undefined) return 'unknown';
+  if (mergedHeads.length === 0) return 'none';
+  return head !== undefined && mergedHeads.includes(head) ? 'at-head' : 'elsewhere';
 }
 
-export function planView(plan: RetirePlan): string {
-  const { task, worktree, blockers } = plan;
-  const forceable = blockers.filter(isForceable);
-  const never = blockers.filter((blocker) => !isForceable(blocker));
-  const steps = plan.actions.flatMap((action) => stepText(action) ?? []);
+const MERGED_PR_TEXT: Record<MergedPr, string> = {
+  unknown: 'merged PRs unknown',
+  none: 'no merged PR',
+  'at-head': 'a merged PR ends at HEAD',
+  elsewhere: 'a merged PR ends at another commit',
+};
+
+function branchLine({ branch, ahead, defaultBranch, mergedPr: pr }: NonNullable<RetireResult['worktree']>): string {
+  const base = `origin/${defaultBranch}`;
+  const commits = ahead === undefined ? `commits ahead of ${base} unknown` : ahead === 0 ? `no commits ahead of ${base}` : `${plural(ahead, 'commit')} ahead of ${base}`;
+  return [branch ?? 'detached HEAD', commits, MERGED_PR_TEXT[pr]].join(' · ');
+}
+
+export function planView({ slug, ledger, worktree, blockers, steps }: RetireResult): string {
+  const reasons = (forceable: boolean): string[] => blockers.filter((blocker) => blocker.forceable === forceable).map(({ reason }) => reason);
+  const [forceable, never] = [reasons(true), reasons(false)];
   return [
-    `Retire ${task.slug} · dry run, nothing changed`,
+    `Retire ${slug} · dry run, nothing changed`,
     ...(worktree === undefined
-      ? [`backlog   ${task.file}`]
-      : [`worktree  ${worktree.folder}`, `branch    ${branchLine(worktree.state)}`, `changes   ${worktree.state.dirty === 0 ? 'none' : plural(worktree.state.dirty, 'uncommitted change')}`]),
+      ? [`backlog   ${ledger}`]
+      : [`worktree  ${worktree.folder}`, `branch    ${branchLine(worktree)}`, `changes   ${worktree.dirty === 0 ? 'none' : plural(worktree.dirty, 'uncommitted change')}`]),
     '',
     'Steps:',
     ...steps.map((step, index) => `${index + 1}. ${step}`),
-    ...(forceable.length > 0 ? ['', `Retiring it needs --force: ${forceable.map(reasonOf).join(' and ')}.`] : []),
-    ...(never.length > 0 ? ['', `It cannot be retired, not even with --force: ${never.map(reasonOf).join(' and ')}.`] : []),
+    ...(forceable.length > 0 ? ['', `Retiring it needs --force: ${forceable.join(' and ')}.`] : []),
+    ...(never.length > 0 ? ['', `It cannot be retired, not even with --force: ${never.join(' and ')}.`] : []),
   ].join('\n');
 }
 
@@ -634,14 +654,82 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
 }
 
 /**
+ * A retire or its dry run. `steps` are the plan's steps as the dry run prints them; `done` the lines the retire printed.
+ * `archive` is where the ledger is archived; `parent` the task its Location names; `hint` the advice to retire that
+ * parent, which a retire gives only once the parent's line is marked.
+ */
+export type RetireResult = {
+  slug: string;
+  main: string;
+  place: 'worktree' | 'backlog';
+  ledger: string;
+  dryRun: boolean;
+  blocked: boolean;
+  needsForce: boolean;
+  blockers: { kind: Blocker['kind']; reason: string; forceable: boolean }[];
+  steps: string[];
+  warnings: string[];
+  done: string[];
+  archive?: string;
+  worktree?: { folder: string; branch?: string; defaultBranch: string; ahead?: number; dirty: number; mergedPr: MergedPr; merged: boolean; openPr?: number };
+  parent?: Ref;
+  hint?: string;
+};
+
+/**
  * `ledger retire [<slug>] [--dry-run] [--force]`. Exit 0 when retired or planned; exit 1, with nothing changed, when a
  * blocker stops it or the task cannot be found; exit 1 after the archive copy when the worktree cannot be removed.
+ * Lines and warnings go to `out` as they happen, and are also in the result.
  */
-export function retireTask(context: Context, slug: string | undefined, { dryRun, force }: { dryRun: boolean; force: boolean }): string {
-  const plan = planRetire(readRetire(context, slug), { force });
-  for (const warning of plan.warnings) consoleOutput.warn(warning);
-  if (dryRun) return planView(plan);
-  if (plan.blocked) fail(refusal(plan, force));
-  executeRetire(context, plan);
-  return '';
+export function retireTask(context: Context, slug: string | undefined, { dryRun, force }: { dryRun: boolean; force: boolean }, out: Output = consoleOutput): RetireResult {
+  const facts = readRetire(context, slug);
+  const plan = planRetire(facts, { force });
+  const done: string[] = [];
+  const warnings: string[] = [];
+  const recorded: Output = {
+    line: (text) => (done.push(text), out.line(text)),
+    warn: (text) => (warnings.push(text), out.warn(text)),
+  };
+  for (const warning of plan.warnings) recorded.warn(warning);
+  if (!dryRun) {
+    if (plan.blocked) fail(refusal(plan, force));
+    executeRetire(context, plan, recorded);
+  }
+  const { task, worktree } = plan;
+  const archive = plan.actions.flatMap((action) => (action.kind === 'archive' || action.kind === 'already-archived' ? [action.location] : [])).at(0);
+  const hint = plan.actions.flatMap((action) => (action.kind === 'hint' && (dryRun || done.includes(action.text)) ? [action.text] : []))[0];
+  const parent = task.ledger.location.parent;
+  return {
+    slug: task.slug,
+    main: facts.ref.main,
+    place: worktree === undefined ? 'backlog' : 'worktree',
+    ledger: task.file,
+    dryRun,
+    blocked: plan.blocked,
+    needsForce: plan.blockers.some(isForceable),
+    blockers: plan.blockers.map((blocker) => ({ kind: blocker.kind, reason: reasonOf(blocker), forceable: isForceable(blocker) })),
+    steps: plan.actions.flatMap((action) => stepText(action) ?? []),
+    warnings,
+    done,
+    ...(archive === undefined ? {} : { archive }),
+    ...(worktree === undefined
+      ? {}
+      : {
+          worktree: {
+            folder: worktree.folder,
+            ...(worktree.state.branch === undefined ? {} : { branch: worktree.state.branch }),
+            defaultBranch: worktree.state.defaultBranch,
+            ...(worktree.state.ahead === undefined ? {} : { ahead: worktree.state.ahead }),
+            dirty: worktree.state.dirty,
+            mergedPr: mergedPr(worktree.state),
+            merged: isMerged(worktree.state),
+            ...(worktree.state.openPr === undefined ? {} : { openPr: worktree.state.openPr }),
+          },
+        }),
+    ...(parent === undefined ? {} : { parent: { slug: parent.slug, main: parent.main ?? facts.ref.main } }),
+    ...(hint === undefined ? {} : { hint }),
+  };
 }
+
+/** What `ledger retire` prints on stdout once it is done; the lines of a retire went out as it ran. */
+export const retireText = (result: RetireResult): string => (result.dryRun ? planView(result) : '');

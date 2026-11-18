@@ -360,7 +360,7 @@ test('ledger park puts one marker first under Next step; unpark restores the exa
   const marker = `Parked: ${today()} — waiting for review`;
   assert.match(stdout, new RegExp(`${marker}`));
   assert.equal(read(file), inserted(before, '## Next step', marker));
-  const listed = JSON.parse(ok(ledger(h, app, 'list', '--json'))) as { slug: string; status: string }[];
+  const listed = (JSON.parse(ok(ledger(h, app, 'list', '--json'))) as { tasks: { slug: string; status: string }[] }).tasks;
   assert.equal(listed.find(({ slug }) => slug === 'epic')?.status, 'parked');
   ok(ledger(h, app, 'park', 'epic', '--reason', 'still waiting'));
   assert.equal(read(file), inserted(before, '## Next step', `Parked: ${today()} — still waiting`));

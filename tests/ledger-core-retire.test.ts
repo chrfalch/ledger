@@ -819,3 +819,22 @@ test('ledger retire asks gh for merged PRs by head branch and merged state, with
   assert.ok(limit !== undefined && Number(limit) >= 1000, prList);
   assert.equal(lines.some((line) => line.startsWith('repo view')), false, 'origin/HEAD is set, so gh is not asked for the default branch');
 });
+
+test('ledger retire --dry-run --json names the open PR of a branch that is not merged, and asks for none once it is', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  worktreeTask(h, app, { slug: 'shipped' });
+  const calls = path.join(h, 'gh-calls');
+  stubGh(h, `echo "$@" >> ${JSON.stringify(calls)}\ncase "$*" in *"--state all"*) echo '[{"state":"CLOSED","number":11},{"state":"OPEN","number":12}]' ;; *) echo '[]' ;; esac`);
+  git(h, worktreeOf(app, 'fix-login'), 'commit', '--quiet', '--allow-empty', '-m', 'work');
+
+  const open = JSON.parse(ledger(h, app, 'retire', 'fix-login', '--dry-run', '--json').stdout);
+  assert.equal(open.worktree.merged, false);
+  assert.equal(open.worktree.openPr, 12);
+
+  rmSync(calls);
+  const merged = JSON.parse(ledger(h, app, 'retire', 'shipped', '--dry-run', '--json').stdout);
+  assert.equal(merged.worktree.merged, true);
+  assert.equal(merged.worktree.openPr, undefined);
+  assert.equal(read(calls).includes('--state all'), false, read(calls));
+});

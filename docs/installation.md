@@ -157,14 +157,10 @@ commands:
   `~/.claude/ledger-archive/`, newest first. A term keeps the ledgers that
   contain it. `--all` lists the archive of every repo.
 - `/ledger:all` lists every task ledger on this machine, from every repo,
-  active, parked, backlog and archived, with its next step. `--scan` rebuilds that
-  list from disk.
+  active, parked, backlog and archived, with its next step.
 - `/ledger:parent [<slug>]` shows a parent task and each child task's status
   and next step. `<slug> add <child>` and `<slug> remove <child>` change its
   child tasks.
-- `/ledger:dashboard` starts a web page on this machine that lists every task
-  ledger, like `/ledger:all`, with buttons to park, unpark and retire a task.
-  `stop` stops it.
 - `/ledger:help` prints one line for each of these commands.
 
 `/ledger:worktrees prune <name>` deletes the build folders of one worktree.
@@ -232,28 +228,30 @@ repo edits need another deploy.
 
 ## The hooks
 
-Deploy asserts five hook events in `~/.claude/settings.json`. They run seven
-hook scripts from `hooks/`, excluding the status line:
+Deploy asserts five hook events in `~/.claude/settings.json`. They run four
+hook scripts from `hooks/`, excluding the status line, and `ledger hook
+<event>`. Deploy links `bin/ledger` to `~/.claude/bin/ledger` for these hooks.
+When its dependencies are not installed, `ledger hook` writes one line to
+stderr and lets the call through.
 
-- **SessionStart, `ledger-list.sh`** — reads the task ledger into the new
+- **SessionStart, `ledger hook session-start`** — reads the task ledger into the new
   session. It reads ledgers from linked worktrees, never from the main
   checkout. With several ledgers it prints a summary of each instead. This is
   what makes `/clear` then `go` work.
 - **SessionStart, `deploy-drift.sh`** — warns when `~/.claude` is behind this
   repo.
-- **UserPromptSubmit, `ledger-list.sh prompt-submit`** — names the session
+- **UserPromptSubmit, `ledger hook prompt-submit`** — names the session
   after the task when you type `go <slug>`. It replaces an empty title or the
   name of another task. A name you gave with `/rename` stays.
 - **UserPromptSubmit, `usage-pace.sh`** — adds routing guidance when Claude
   usage runs ahead of pace. If Codex is high too, asks the operator what to do.
-- **PreCompact, `ledger-list.sh pre-compact`** — tells the compaction pass that
+- **PreCompact, `ledger hook pre-compact`** — tells the compaction pass that
   the ledger is authoritative, and that its path and Next step must survive
   verbatim.
 - **PreToolUse, `derived-data-gate.sh`** — keeps one Xcode build folder per
   worktree and configuration.
-- **PreToolUse, `worktree-gate.sh`** — denies removing a worktree whose ledger
-  is not archived.
-- **PreToolUse, `ledger-gate.sh`** — denies writing a ledger in a main
+- **PreToolUse, `ledger hook pre-tool-use`** — denies removing a worktree
+  whose ledger is not archived, and denies writing a ledger in a main
   checkout.
 - **PermissionDenied, `denied-read-retry.sh`** — lets the model retry a denied
   call that only reads.

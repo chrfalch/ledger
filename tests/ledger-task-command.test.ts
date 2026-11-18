@@ -23,17 +23,17 @@ test('/ledger:task without a current ledger reads the new ledger and follows the
   assert.match(step8, /get the plan approved, then write the approved plan into the ledger/);
 });
 
-test('/ledger:task without a current ledger promotes the backlog task, then enters the worktree --promote printed', () => {
+test('/ledger:task without a current ledger starts the backlog task with ledger go, then enters the worktree it printed', () => {
   const step8 = read('mods/ledger/commands/task.md').match(/ 8\. If there is no current ledger.*/)?.[0] ?? '';
-  assert.match(step8, /without `--stack`, .*`--promote <slug>`.*EnterWorktree/i);
+  assert.match(step8, /without `--stack`, .*`bin\/ledger go <slug>`.*EnterWorktree/i);
   assert.doesNotMatch(step8, /Before that/);
-  assert.match(step8, /Set `path` to the path on the `worktree` line that `--promote` printed/);
+  assert.match(step8, /Set `path` to the path on the `worktree` line that `ledger go` printed/);
 });
 
 test('/ledger:task with a current ledger leaves the task in the backlog', () => {
   const step7 = read('mods/ledger/commands/task.md').match(/ 7\. If there is a current ledger.*? 8\. /)?.[0] ?? '';
   assert.match(step7, /under its Decisions/);
-  assert.doesNotMatch(step7, /--promote/);
+  assert.doesNotMatch(step7, /ledger go/);
 });
 
 test('/ledger:task describes both cases in its frontmatter', () => {
@@ -78,9 +78,10 @@ test('each document names the stored --base first when it describes where promot
   }
 });
 
-test('the README /ledger:all row names the Backlog section', () => {
+test('the README /ledger:all row describes the one table ledger list prints', () => {
   const row = read('README.md').match(/\| `\/ledger:all` \|[^|]*\|/)?.[0] ?? '';
-  assert.match(row, /active and archived, with its next step\. Backlog tasks follow in their own section, \*\*Backlog\*\*\./);
+  assert.match(row, /one table .*status: active, parked, backlog or retired\. The title line counts the live tasks: active, parked and backlog\./);
+  assert.doesNotMatch(row, /section/);
 });
 
 test('/ledger:task still hands over the start: line when a current ledger exists', () => {
@@ -220,7 +221,7 @@ test('/ledger:task makes the parent task first for a request with separately shi
   assert.match(split, /parent task's backlog ledger first, then the ledger of each child task/);
   assert.match(split, /attach each child task in the order they ship/);
   assert.match(split, /Write the split and the order into the parent ledger/);
-  assert.match(split, /`bin\/cc-ledger-parent add <parent> <child>`/);
+  assert.match(split, /`bin\/ledger parent <parent> add <child>`/);
   assert.match(split, /Never promote the parent task/);
   assert.match(split, /`\/ledger:go <parent>`/);
 });
@@ -230,11 +231,24 @@ test('/ledger:task selects LLP numbers in a separate step before running the scr
   assert.match(task, / 4\. Before running the script, check the task repo for `llp\/`\..*Pick the LLPs.* 5\. Run the script/);
 });
 
-test('/ledger:task keeps the base example without refs and shows an optional refs example', () => {
+test('/ledger:task runs bin/ledger task, which takes no --refs, and writes picked LLPs on the design refs line', () => {
   const task = readFileSync(path.join(REPO, 'mods/ledger/commands/task.md'), 'utf8');
-  const examples = task.split('\n').filter(line => line.includes('/bin/cc-task-new" <slug>'));
-  assert.equal(examples.length, 2);
-  assert.doesNotMatch(examples[0], /--refs/);
-  assert.match(examples[1], /--refs '0042,0042\.001'/);
-  assert.match(task, /optional.*--refs|--refs.*optional/i);
+  const examples = task.split('\n').filter(line => line.includes('/bin/ledger" task <slug>'));
+  assert.equal(examples.length, 1);
+  assert.doesNotMatch(task, /--refs/);
+  assert.match(task.replace(/\s+/g, ' '), /`- design refs:` line/);
+});
+
+test('/ledger:go makes a new task with bin/ledger task, then starts it with bin/ledger go', () => {
+  const go = read('mods/ledger/commands/go.md');
+  assert.match(go, /\/bin\/ledger" task <slug> --goal '<goal>'/);
+  assert.match(go, /`bin\/ledger go <slug>`/);
+  assert.doesNotMatch(go, /--promote|--refs/);
+  assert.match(go, /`- design refs:` line/);
+});
+
+test('no ledger mod command names a removed script', () => {
+  for (const file of ['go.md', 'task.md', 'update.md', 'close.md', 'next.md', 'park.md']) {
+    assert.doesNotMatch(read(`mods/ledger/commands/${file}`), /cc-task-new|cc-ledger-parent|cc-ledgers|cc-worktree-retire|cc-ledger-dashboard/, file);
+  }
 });
