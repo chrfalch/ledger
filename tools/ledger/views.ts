@@ -1,0 +1,90 @@
+import stringWidth from 'string-width';
+import { plainLine } from './format.js';
+import { repoName } from './paths.js';
+import type { ChildView, Task } from './tasks.js';
+
+const TEXT_WIDTH = 80;
+
+const pad = (text: string, width: number): string => text + ' '.repeat(Math.max(0, width - stringWidth(text)));
+
+/** One line per row, header first, each column as wide as its widest cell. */
+export function table(header: string[], rows: string[][]): string[] {
+  const lines = [header, ...rows];
+  const widths = header.map((_, column) => Math.max(...lines.map((row) => stringWidth(row[column] ?? ''))));
+  return lines.map((row) => widths.map((width, column) => pad(row[column] ?? '', width)).join('  ').trimEnd());
+}
+
+function truncate(text: string, width = TEXT_WIDTH): string {
+  if (stringWidth(text) <= width) return text;
+  let kept = '';
+  for (const { segment } of new Intl.Segmenter().segment(text)) {
+    if (stringWidth(`${kept}${segment}…`) > width) break;
+    kept += segment;
+  }
+  return `${kept}…`;
+}
+
+export const heading = (...parts: string[]): string => parts.join(' · ');
+
+export const plural = (count: number, one: string, many = `${one}s`): string => `${count} ${count === 1 ? one : many}`;
+
+const localDate = (ms: number): string => {
+  const date = new Date(ms);
+  return [date.getFullYear(), date.getMonth() + 1, date.getDate()].map((part) => String(part).padStart(2, '0')).join('-');
+};
+
+/** A parent in another repo is named with that repo's folder. */
+function parentCell(task: Task): string {
+  const parent = task.ledger.location.parent;
+  if (parent === undefined) return '';
+  return parent.main === undefined ? parent.slug : `${parent.slug} (${repoName(parent.main)})`;
+}
+
+export function listView(tasks: Task[]): string {
+  if (tasks.length === 0) return 'No live tasks. Retired tasks are listed by: ledger archive';
+  const count = (status: string): number => tasks.filter((task) => task.status === status).length;
+  const counts = [`${count('active')} active`, `${count('parked')} parked`, `${count('backlog')} backlog`];
+  const rows = tasks.map((task) => [task.repo, task.slug, task.status, parentCell(task), localDate(task.mtimeMs), truncate(task.ledger.next)]);
+  return [heading('Task ledgers', `${plural(tasks.length, 'task')}: ${counts.join(', ')}`), '', ...table(['repo', 'task', 'status', 'parent', 'updated', 'next'], rows)].join('\n');
+}
+
+export type ArchiveRow = { task: Task; match?: string };
+
+/** The first `- branch:` line as written, a placeholder included, as the old archive reader showed it. */
+const writtenBranch = (task: Task): string =>
+  task.ledger.lines.map((line) => /^- branch:[ \t]*(.*)$/.exec(plainLine(line))?.[1].trim()).find((branch) => branch !== undefined) ?? '';
+
+/** `repo` is undefined for the archive of every repo, which adds a repo column. */
+export function archiveView(rows: ArchiveRow[], repo: string | undefined, term: string, folder: string): string {
+  if (rows.length === 0) return term ? `No archived ledger in ${folder} contains "${term}".` : `No archived ledgers in ${folder}.`;
+  const contains = term ? ` that contain${rows.length === 1 ? 's' : ''} "${term}"` : '';
+  const count = `${plural(rows.length, 'ledger')}${contains}${rows.length === 1 ? '' : ', newest first'}`;
+  const header = ['date', ...(repo === undefined ? ['repo'] : []), 'task', 'branch', 'goal', ...(term ? ['match'] : [])];
+  const cells = rows.map(({ task, match }) => [
+    task.archived ?? '',
+    ...(repo === undefined ? [task.repo] : []),
+    task.slug,
+    writtenBranch(task),
+    truncate(task.ledger.goal),
+    ...(term ? [truncate(match ?? '')] : []),
+  ]);
+  return [heading('Archived ledgers', repo ?? 'every repo', count), '', ...table(header, cells)].join('\n');
+}
+
+/** A child in another repo is named `<slug>@<main>`, the form `ledger parent` takes. */
+const childName = (child: ChildView, parentMain: string): string => (child.main === parentMain ? child.slug : `${child.slug}@${child.main}`);
+
+export function parentView(parent: Task, parentMain: string, children: ChildView[]): string {
+  if (children.length === 0) return `${parent.slug} has no child tasks.`;
+  const active = children.filter(({ status }) => status === 'active').length;
+  const rows = children.flatMap((child) => [
+    [childName(child, parentMain), child.status, truncate(child.next)],
+    ...child.report.map((line) => ['', '', line.trimEnd()]),
+  ]);
+  return [
+    heading(`Parent task ${parent.slug}`, `${plural(children.length, 'child', 'children')}, ${active} active`),
+    ...(parent.ledger.goal ? [parent.ledger.goal] : []),
+    '',
+    ...table(['task', 'status', 'next'], rows),
+  ].join('\n');
+}

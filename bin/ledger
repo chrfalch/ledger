@@ -30,7 +30,7 @@ if (!existsSync(path.join(repo, 'node_modules/.package-lock.json'))) {
 import('tsx/esm/api')
   .then(({ register }) => {
     register();
-    return import(pathToFileURL(path.join(repo, 'tools/ledger-cli/cli.ts')).href);
+    return import(pathToFileURL(path.join(repo, 'tools/ledger/cli.ts')).href);
   })
   .then(({ main }) => main(process.argv.slice(2)))
   .then((code) => {

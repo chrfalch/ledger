@@ -1,0 +1,63 @@
+/** One ledger a store keeps. `location` is where it is, as a person reads it; messages print it as it is. */
+export type StoredLedger = {
+  repo: string;
+  name: string;
+  text: string;
+  mtimeMs: number;
+  birthtimeMs: number;
+  location: string;
+};
+
+/** Ledgers kept per repo folder, which is named after the main checkout's folder. */
+export interface LedgerCollection {
+  /** Where the ledger `name` of `repo` is or would be, as `StoredLedger.location` gives it. */
+  location(repo: string, name: string): string;
+  /** Where the ledgers of `repo` are, or without a repo, where the ledgers of every repo are; for messages only. */
+  repoLocation(repo?: string): string;
+  /** The repo folders, by name. */
+  repos(): string[];
+  /** The ledgers of one repo folder, in the order of their file names; none for an unknown repo. */
+  list(repo: string): StoredLedger[];
+  read(repo: string, name: string): StoredLedger | undefined;
+  /** The same as `read(repo, name) !== undefined`, without reading the text. */
+  has(repo: string, name: string): boolean;
+}
+
+/** Ledgers of tasks not started yet; the name is the slug. */
+export interface Backlog extends LedgerCollection {
+  write(repo: string, slug: string, text: string): void;
+  remove(repo: string, slug: string): void;
+}
+
+export type EvidenceState = 'none' | 'same' | 'differs';
+
+/** Copies of retired ledgers; the name is `<YYYY-MM-DD>-<slug>`. */
+export interface Archive extends LedgerCollection {
+  /**
+   * `evidenceFrom` is a folder whose files are copied to sit with the copy, under the same name. A name that is taken,
+   * or an evidence copy that is already there, throws before anything is written: an archive copy is never replaced.
+   * An evidence copy that does not match its folder afterwards throws too, and is left as it is.
+   */
+  write(repo: string, name: string, text: string, evidenceFrom?: string): void;
+  /**
+   * The evidence archived with `name` against the folder `from`: 'none' when neither holds any, 'same' when both hold
+   * the same files, folders and symbolic links (links by their text), 'differs' otherwise. A missing or empty folder
+   * holds none.
+   */
+  evidenceState(repo: string, name: string, from?: string): EvidenceState;
+  /** Whether a copy or an evidence folder, even an empty one, already uses `name`; write refuses such a name. */
+  nameTaken(repo: string, name: string): boolean;
+}
+
+/** The text of the registry, a cache that a rebuild from the ledgers can always replace. */
+export interface Registry {
+  read(): string | undefined;
+  write(text: string): void;
+}
+
+/** Where backlog ledgers, archive copies and the registry are kept. A worktree's .claude/ledger.md is not in it. */
+export interface LedgerStore {
+  backlog: Backlog;
+  archive: Archive;
+  registry: Registry;
+}

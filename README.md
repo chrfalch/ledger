@@ -87,20 +87,32 @@ to your shell profile:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-The `ledger` command runs some `/ledger` commands without a Claude Code
-session. It also runs deploy.
+The `ledger` command reads and changes the task ledgers from a terminal,
+without a Claude Code session. It also runs deploy. `list`, `archive`,
+`parent <slug>`, `worktrees` and `worktrees derived-data` only read. `task`,
+`go`, `park`, `unpark`, `retire` and the `parent` actions change ledgers; each
+edit changes only the lines it names.
 
 | You type | What happens |
 |---|---|
+| `ledger list [--json]` | Lists the tasks that are not retired, in every repo it knows: active, parked and backlog. It reads the status from the ledgers on disk. |
+| `ledger archive [term] [--all]` | Lists this repo's archived ledgers, newest first. A term keeps only the ledgers that contain it, in any case. `--all` lists the archive of every repo. |
+| `ledger parent <slug> [--json]` | Shows a parent task and the status of each child task. Use `<slug>@<path>` for a parent in the repo at `<path>`. |
+| `ledger parent <slug> add <child>` | Makes `<child>` a child task of `<slug>`. It writes `- parent:` in the child's ledger and a line under `## Children` in the parent's. A child in another repo is `<child>@<path>`. It refuses a task as its own parent, a child that has another parent, a cycle, and a retired child. |
+| `ledger parent <slug> remove <child>` | Removes the link again. A `## Children` section with no child left is removed too. |
+| `ledger parent <slug> start <child>` | Marks the child's line `(started <date>)`. Text written after the line's name stays. |
+| `ledger parent <slug> next` | Prints the chain from the parent to its first child task that is still in the backlog, such as `epic part`. It prints nothing when no such child is left. |
+| `ledger task <slug> [--goal <text>]` | Writes a backlog ledger, `~/.claude/ledger-backlog/<repo>/<slug>.md`, from `~/.claude/ledger.template.md`, and prints the `start:` line. In a worktree with a ledger, it adds a line under that ledger's `## Decisions` that names the new task. `--stack` makes the branch and worktree at once, on top of the current branch. `--repo <path>` writes the task for the repo at `<path>`. |
+| `ledger task --here [<slug>]` | Gives the current linked worktree a ledger. Without a slug, the task takes the branch name without its owner prefix. It prints no `start:` line. |
+| `ledger go <slug> [--repo <path>]` | Starts a backlog task: it makes the branch and the worktree `.claude/worktrees/<slug>`, and moves the ledger into it with the worktree, branch and base filled in. The branch starts at the ledger's `- base:` when it names one, else at the default branch. |
+| `ledger park <slug> --reason <text>` | Marks a task parked: `Parked: <date> — <reason>` becomes the first line under `## Next step`. The reason is required. |
+| `ledger unpark <slug>` | Removes the parked mark. |
+| `ledger retire [<slug>] [--dry-run] [--force]` | Retires a task. Without a slug, it retires the task of the worktree you are in. It copies the ledger to `~/.claude/ledger-archive/<repo>/<date>-<slug>.md`, and `.claude/evidence/` to the folder of the same name. Then it removes the worktree, or the backlog ledger. It marks the task `(retired <date>)` in its parent and copies its `## Report` to the parent's `## Child reports`. It deletes the branch when the branch is merged: no commits ahead of the default branch, or a merged PR that ends at HEAD. Uncommitted changes, an unmerged branch and child tasks that are not retired each need `--force`. Evidence that cannot be archived whole stops it even with `--force`: a `.claude/evidence` that is not a folder or cannot be read, a symbolic link in it that leaves it, or an archive copy whose evidence differs. `--dry-run` prints the checks and steps; it fetches origin's default branch and changes nothing else. It exits 1 when a check stops it. |
+| `ledger worktrees` | Shows each linked worktree of this repo: size, last commit, uncommitted files, ledger and PR, largest first. |
+| `ledger worktrees prune <name>\|--all [--dry-run]` | Deletes the git-ignored build folders (`.build`, `.expo-prebuild`, `.cache`, `build`, `.DerivedData`) and the worktree's own Xcode build folders, each of 0.05 GB or more. It never deletes anything in `.claude`, `node_modules` or `Pods`. `--dry-run` only lists the folders. It exits 1 when a folder could not be deleted. |
+| `ledger worktrees derived-data` | Groups the folders in `~/Library/Developer/Xcode/DerivedData` by the project they were built from. |
+| `ledger worktrees prune-orphans [--dry-run]` | Deletes the DerivedData folders whose project is gone from a connected disk. |
 | `ledger deploy [options]` | Runs `bin/deploy` from this repo. The options pass through, so `ledger deploy --dry-run` prints every change and writes nothing. |
-| `ledger all [--scan]` | Lists every registered task and the backlog, like `/ledger:all`. `--scan` first rebuilds the list from the ledgers on disk. |
-| `ledger archive [term] [--all]` | Lists this repo's archived ledgers, newest first, like `/ledger:archive`. A term keeps only the ledgers that contain it, in any case. `--all` lists the archive of every repo. |
-| `ledger parent [slug]` | Shows a parent task and its child tasks, like `/ledger:parent`. Without a slug, it shows the family of the task in the current folder. |
-| `ledger worktrees` | Lists this repo's linked worktrees, largest first, like `/ledger:worktrees`. |
-| `ledger worktrees prune <name> [--dry-run]` | Deletes the build folders of one linked worktree, like `/ledger:worktrees prune`. It keeps `node_modules`, `Pods` and `.claude` folders. `--dry-run` only lists the folders. |
-| `ledger worktrees prune --all [--dry-run]` | Deletes the build folders of every linked worktree, like `/ledger:worktrees prune --all`. It never touches the main checkout. A worktree that fails is reported, and the others are still pruned. `--dry-run` only lists the folders. |
-| `ledger worktrees derived-data` | Lists the folders in Xcode DerivedData, grouped by the project they were built from, like `/ledger:worktrees derived-data`. |
-| `ledger worktrees prune-orphans [--dry-run]` | Deletes the DerivedData folders whose project no longer exists on disk, like `/ledger:worktrees prune-orphans`. `--dry-run` only lists the folders. |
 | `ledger help [command]` | Prints help for `ledger`, or for one of its commands. |
 
 ## Commands
@@ -345,7 +357,7 @@ githooks/                 the git hook dispatcher that deploy installs
 tools/                    the deploy code, its wizard and CLI, the settings merge and the rule filter
 tests/                    the tests for tools/, bin/ and hooks/
 bin/deploy                installs everything above
-bin/ledger                the terminal command: the read-only /ledger commands, and deploy
+bin/ledger                the terminal command: lists tasks, the archive and parents; writes task, go, park, unpark and parent changes; retires tasks; shows and prunes worktrees; runs deploy
 bin/cc-dd-path            prints the shared Xcode build folder for a worktree
 bin/cc-task-new           writes a backlog ledger, or makes a task's branch and worktree
 bin/cc-worktree-retire    archives a worktree's ledger, then removes the worktree; or archives, then deletes a backlog ledger
