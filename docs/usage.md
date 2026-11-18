@@ -215,12 +215,11 @@ outlive the task move to a rule file or memory. A ledger that keeps growing
 past the limit anyway is a sign that the work is too big for one task. Split
 it into a parent task with child tasks; see [Parent tasks](#parent-tasks).
 
-In repos with `llp/`, `/ledger:task` picks the design documents the task
-touches and passes their numbers to `bin/cc-task-new --refs '0042,0042.001'`.
-The script validates each number and writes `design refs` with the word LLP
-before each number, or `none` when no refs are passed. Without `llp/`, it
-omits the line and refuses `--refs`. Ledgers stay local; durable decisions go in LLP documents
-committed with the code.
+In repos with `llp/`, `ledger task` writes the line `- design refs: none`.
+`/ledger:task` then picks the design documents the task touches and writes
+their numbers on that line. Without `llp/`, the ledger has no such line.
+Ledgers stay local; durable decisions go in LLP documents committed with the
+code.
 
 ### What does not go in it
 
@@ -328,8 +327,8 @@ child task with its own `/ledger:task`. Then attach each child task:
 ```
 
 The orchestrator attaches child tasks itself. It runs
-`bin/cc-ledger-parent add <parent> <child>` from the ledger repo, in a
-folder inside the task's repo. Retiring a task stays with you.
+`ledger parent <parent> add <child>` in a folder inside the task's repo.
+Retiring a task stays with you.
 
 A task becomes a parent task when its first child task is attached. There is
 no flag that starts a task as a child task.
@@ -438,14 +437,14 @@ Two tasks with the same slug in two repositories are two tasks. The command
 refuses a link to another repository when the path of either main checkout has
 a space or another whitespace character.
 
-To make the child task in the other repository, run `bin/cc-task-new` with
+To make the child task in the other repository, run `ledger task` with
 `--repo <path>`. It makes the backlog task as if you ran it in that repository.
-`--repo` also works with `--promote`. It does not work with `--here` or
+`ledger go` also takes `--repo`. `--repo` does not work with `--here` or
 `--stack`, because both build on the current worktree.
 
 `/ledger:go <parent>` can pick a child task in another repository. It then
-promotes that task there, with `cc-task-new --repo <main checkout> --promote
-<child>`, marks it started, and names its new worktree. The session stays where
+starts that task there, with `ledger go <child> --repo <main checkout>`, marks
+it started, and names its new worktree. The session stays where
 it is and is not cleared, because `EnterWorktree` enters only worktrees of the
 session's own repository. The message says that this session sends a subagent
 to work in the new worktree, by its absolute path. The operator can also open a
@@ -453,15 +452,15 @@ session there and type `go <child>`.
 
 The parent session does the work of such child tasks through subagents:
 
-1. It promotes each child task in its own repository, with `/ledger:go
-   <parent>` or with `bin/cc-task-new --repo <path> --promote <child>`. Both
-   name the new worktree.
+1. It starts each child task in its own repository, with `/ledger:go
+   <parent>` or with `ledger go <child> --repo <path>`. Both name the new
+   worktree.
 2. It sends one subagent per child task. The subagent gets the absolute path
    of that worktree, and works only in that path.
 3. When a child task is done, its subagent writes `## Report` in the child
    ledger. See [Child reports](#child-reports).
 
-`/ledger:parent`, `/ledger` at session start and `bin/cc-ledger-parent next`
+`/ledger:parent`, `/ledger` at session start and `ledger parent <parent> next`
 show such a child task as `<child> @ <main checkout>` or `<child>@<main checkout>`.
 At session start, the status of a parent or child task in another repository
 is looked up in that repository. A lookup that takes more than 3 seconds shows
@@ -489,7 +488,7 @@ the outcome, the PR link, and what the parent task must know. The template's
 hint line in angle brackets is not a report.
 
 `/ledger:parent <parent>` prints the report of each child task under its line.
-`bin/cc-ledger-parent show <parent>` does the same. With `--json`, each child
+`ledger parent <parent>` does the same. With `--json`, each child
 task has a `report` list, which is empty when there is no report.
 
 Retiring a child task copies its report into the parent ledger, under
@@ -509,11 +508,9 @@ Merged upstream in PR #301. Release 2.1 is needed before the app can update.
 
 A retired child task has no ledger, so `/ledger:parent` reads its report from
 this copy. A child task with no report gets a warning, and the retire still
-goes on. To copy a report by hand, or to replace a copy, run
-`bin/cc-ledger-parent report <parent> [--main <parent-path>] <child> <child-ledger>`
-in the child task's repository. It replaces the copy of that child task, if
-there is one. A copied line that starts with `#` gets a `\` in front, so it
-cannot start a section of the parent ledger. `/ledger:parent` shows the line
+goes on. A second copy for the same child task replaces the first. A copied
+line that starts with `#` gets a `\` in front, so it cannot start a section of
+the parent ledger. `/ledger:parent` shows the line
 without the `\`.
 
 #### Example: one change in many forked libraries
@@ -526,12 +523,12 @@ library is one child task.
 2. For each library, make a child task in its fork, and link it to the parent:
 
    ```
-   bin/cc-task-new async-storage --repo ~/forks/async-storage --goal 'Support the new architecture.'
-   bin/cc-ledger-parent add rn-new-arch async-storage@$HOME/forks/async-storage
+   ledger task async-storage --repo ~/forks/async-storage --goal 'Support the new architecture.'
+   ledger parent rn-new-arch add async-storage@$HOME/forks/async-storage
    ```
 
-3. Promote each child task:
-   `bin/cc-task-new --repo ~/forks/async-storage --promote async-storage`.
+3. Start each child task:
+   `ledger go async-storage --repo ~/forks/async-storage`.
 4. The parent session sends one subagent per library. Each subagent gets the
    absolute path of its library's worktree.
 5. Each subagent writes `## Report` in its child ledger when its change is done.

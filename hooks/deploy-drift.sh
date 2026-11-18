@@ -37,6 +37,11 @@ done
 for f in "$repo"/hooks/*.sh; do
   if [ -e "$f" ]; then check "$f" "$claude/hooks/$(basename "$f")"; fi
 done
+for f in "$claude"/hooks/*.sh; do
+  if [ -L "$f" ] && [ "$(readlink "$f")" = "$repo/hooks/$(basename "$f")" ] && [ ! -e "$f" ]; then
+    add "stale link: ${f#"$HOME"/}"
+  fi
+done
 
 if command -v jq >/dev/null 2>&1; then
   keys=$(jq -r -n \

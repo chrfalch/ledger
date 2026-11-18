@@ -155,7 +155,7 @@ without a prompt box, such as SDK hosts, still show them.
 | `/ledger` | Prints each task ledger's goal, current step and next step. A parent task in this repo's backlog is listed too, marked `(backlog)`, with its child tasks under it; so is that task's own parent task in the backlog. Other backlog tasks are not listed. |
 | `/ledger <name>` | Prints each ledger whose name contains `<name>`, in any case. More than one ledger can match. |
 | `/ledger:help` | Prints one line for each `/ledger` command. |
-| `/ledger:task <description>` | Starts a separate task. The agent picks a short name, writes the goal, and runs `bin/cc-task-new`. The script writes a ledger with the goal filled in to the backlog, `~/.claude/ledger-backlog/<repo>/<name>.md`, with no branch or worktree yet. When no task is open, the session moves into the new worktree and continues there. The agent makes that branch and worktree at once, the same way `/ledger:go` does. When another task is open, the ledger stays in the backlog, and the reply ends with a `start:` line, `/ledger:go <name>`. Type it to clear the session and continue in the new task. Either way, you do not open a new terminal. `--stack` makes the branch and worktree at once, on top of the current branch. |
+| `/ledger:task <description>` | Starts a separate task. The agent picks a short name, writes the goal, and runs `ledger task`. The command writes a ledger with the goal filled in to the backlog, `~/.claude/ledger-backlog/<repo>/<name>.md`, with no branch or worktree yet. When no task is open, the session moves into the new worktree and continues there. The agent makes that branch and worktree at once, the same way `/ledger:go` does. When another task is open, the ledger stays in the backlog, and the reply ends with a `start:` line, `/ledger:go <name>`. Type it to clear the session and continue in the new task. Either way, you do not open a new terminal. `--stack` makes the branch and worktree at once, on top of the current branch. |
 | `/ledger:task --here [<slug>]` | Gives the linked worktree this session is in a ledger, instead of a new worktree. Without a slug, the task takes the branch name without its owner prefix. It refuses the main checkout and a worktree that already has a ledger. The reply is the path of the new ledger. |
 | `/ledger:update` | Writes the step status, the subagent reports, the decisions and the next step to the task's ledger. After an implement-and-review cycle with work left, the reply is the clear point line. Otherwise it says only that the ledger is updated. With no ledger in the working directory, the agent creates nothing and tells you to use `/ledger:task`. |
 | `/ledger:close` | Writes the ledger the same way, then clears the session. Type `go` later to continue. It never starts a task: with no ledger in the worktree, it prints why and does nothing. |
@@ -196,10 +196,10 @@ without a prompt box, such as SDK hosts, still show them.
 A build folder whose project is on a disk that is not connected goes in its own
 group, **Disk not connected**, and is never deleted.
 
-To remove a finished worktree, use `bin/cc-worktree-retire <worktree>`. It
-archives the ledger first, then removes the worktree and its Xcode build
-folders. Given a backlog ledger, `~/.claude/ledger-backlog/<repo>/<slug>.md`,
-it archives that ledger, then deletes it.
+To remove a finished worktree, use `/ledger:retire <slug>` or
+`ledger retire <slug>`. It archives the ledger first, then removes the
+worktree and its Xcode build folders. For a task in the backlog, it archives
+the ledger, then deletes it from `~/.claude/ledger-backlog/<repo>/`.
 
 ## Install
 
@@ -355,11 +355,8 @@ githooks/                 the git hook dispatcher that deploy installs
 tools/                    the deploy code, its wizard and CLI, the settings merge and the rule filter
 tests/                    the tests for tools/, bin/ and hooks/
 bin/deploy                installs everything above
-bin/ledger                the terminal command: lists tasks, the archive and parents; writes task, go, park, unpark and parent changes; retires tasks; shows and prunes worktrees; runs deploy
+bin/ledger                the terminal command: lists tasks, the archive and parents; writes task, go, park, unpark and parent changes; retires tasks; shows and prunes worktrees; runs deploy; keeps ~/.claude/ledgers.json, the list of every task ledger
 bin/cc-dd-path            prints the shared Xcode build folder for a worktree
-bin/cc-task-new           writes a backlog ledger, or makes a task's branch and worktree
-bin/cc-worktree-retire    archives a worktree's ledger, then removes the worktree; or archives, then deletes a backlog ledger
-bin/cc-ledgers            keeps ~/.claude/ledgers.json, the list of every task ledger
 CONTRIBUTING.md           forking, what to send back, what must never be committed
 ```
 

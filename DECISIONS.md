@@ -951,3 +951,21 @@ values are the same. These details change:
 Our policy, settings and rule files contain none of these cases. Old and new
 output parsed equal in every test case, and the rule markdown was
 byte-identical.
+
+## 2026-11-18 — The old ledger scripts are deleted
+
+The `ledger` command and the `ledger hook <event>` hooks do the work of the old
+scripts. No setting or command ran the old scripts. They are deleted:
+`bin/cc-task-new`, `bin/cc-worktree-retire`, `bin/cc-ledger-parent`,
+`bin/cc-ledgers`, `bin/lib/` and the hooks `ledger-gate.sh`, `ledger-list.sh`
+and `worktree-gate.sh`. Their tests are deleted too. The worktree removal gate
+no longer lets a command that names `cc-worktree-retire` through.
+
+Deploy links each `hooks/*.sh` into `~/.claude/hooks`. A deleted hook left a
+broken link there. Deploy now removes a link in `~/.claude/hooks` when its
+manifest lists the link, the link points into the repo's `hooks/`, and this
+deploy did not write it. A file or a link of your own stays. The drift hook
+reports such a link as stale.
+
+`tools/apply-policy.ts` keeps its list of the old hook commands. It removes
+them from a `settings.json` that an earlier deploy wrote.

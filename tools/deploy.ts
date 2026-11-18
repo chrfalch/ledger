@@ -190,6 +190,7 @@ export function deploy(opts: DeployOptions): number {
   const home = homedir();
   const claude = path.join(home, '.claude');
   const rules = path.join(claude, 'rules');
+  const hooks = path.join(claude, 'hooks');
   const manifest = path.join(claude, '.ledger-manifest');
   const backup = path.join(claude, 'backups', `deploy-${command('date', ['+%Y-%m-%d-%H%M%S'])}`);
   const githooks = path.join(home, '.config/git/hooks');
@@ -363,10 +364,15 @@ export function deploy(opts: DeployOptions): number {
   const skipped = ALL_AGENTS.filter((agent) => !agents.includes(agent));
   if (skipped.length) console.log(`agents   not deployed: ${skipped.join(' ')}`);
   for (const filename of oldWrote) {
-    if (filename.startsWith(`${rules}/`) && !wrote.includes(filename)) {
-      if (!opts.dry) command('rm', ['-f', filename]);
-      console.log(opts.dry ? `remove   ${short(filename)}   (no longer selected)` : `removed  ${short(filename)}`);
-    }
+    if (wrote.includes(filename)) continue;
+    const rule = filename.startsWith(`${rules}/`);
+    // Deploy writes hooks only as links into the repo; a file or a link of your own in their place is left alone.
+    const hookLink = filename.startsWith(`${hooks}/`)
+      && lstatSync(filename, { throwIfNoEntry: false })?.isSymbolicLink()
+      && readlinkSync(filename).startsWith(path.join(REPO, 'hooks/'));
+    if (!rule && !hookLink) continue;
+    if (!opts.dry) command('rm', ['-f', filename]);
+    console.log(opts.dry ? `remove   ${short(filename)}   (${rule ? 'no longer selected' : 'no longer in the repo'})` : `removed  ${short(filename)}`);
   }
   if (!opts.dry) {
     writeFileSync(manifest, `${wrote.join('\n')}\n`);

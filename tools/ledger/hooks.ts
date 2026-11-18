@@ -310,7 +310,7 @@ function expandGlob(word: string, cwd: string): string[] {
   return existing.length > 0 ? existing : [word];
 }
 
-const RETIRE_COMMANDS = ['ledger retire', 'cc-worktree-retire'];
+const RETIRE_COMMANDS = ['ledger retire'];
 const REMOVALS = ['worktree remove', 'rm -rf', 'rm -fr'];
 
 /** Denies a Bash removal of a folder whose ledger no archive copy names as its worktree. */

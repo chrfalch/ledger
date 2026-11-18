@@ -12,8 +12,8 @@ No task is open. You are in the main checkout.
 
 **You:** `/ledger:task Fix: expo-image clearDiskCache() does not delete cached files on Android`
 
-No task is open, so the task starts at once. The agent runs `bin/cc-task-new`,
-which prints:
+No task is open, so the task starts at once. The agent runs `ledger task`, then
+`ledger go`, which prints:
 
 ```
 worktree ~/repos/expo/expo/.claude/worktrees/image-clear-disk-cache
