@@ -20,39 +20,13 @@
 - On `model_not_found`, upgrade with `brew upgrade codex`.
 <!-- /needs -->
 <!-- needs: gpt-6.2-astra -->
-- Astra wrappers never run below high.
-<!-- /needs -->
-<!-- needs: gpt-6.2-astra -->
 - ⚠ Astra: `approval_policy = "on-request"`, set globally in `~/.codex/config.toml`.
   Never `--full-auto`, never
   `approval_policy = "never"`. Reviews `-s read-only`. Log tool results with a
   `post_tool_use` hook.
 <!-- /needs -->
 <!-- needs: codex, codex-runner -->
-- Every Codex run goes through a wrapper agent. The orchestrator
-  never runs `codex exec` or `codex review` itself, not even in the background.
-  A direct run shows "0 agents" in the UI, and no agent owns it. A wrapper is a
-  thin Claude agent, `model: 'claude-haiku-5-5'`, `effort: 'low'`. It writes a
-  self-contained Codex prompt, runs it through Bash, and returns a `schema`
-  report. The UI shows only the wrapper's model, so name the engine with a
-  prefix: `gpt-6.2:` for Sol and Astra, `gpt-6:` for Luna. In an Agent call,
-  start `description` with the prefix. In a workflow, use the same wrappers and
-  put the prefix in `label`.
-<!-- /needs -->
-<!-- needs: codex, codex-runner, sol-implementer -->
-  - `sol-implementer` wraps volume implementation on gpt-6.2-sol.
-<!-- /needs -->
-<!-- needs: codex, codex-runner, astra-implementer -->
-  - `astra-implementer` wraps hard implementation on gpt-6.2-astra. Example
-    workflow label: `{label: 'gpt-6.2:astra-impl-sync-engine'}`.
-<!-- /needs -->
-<!-- needs: codex, codex-runner, astra-reviewer -->
-  - `astra-reviewer` wraps independent review on gpt-6.2-astra.
-<!-- /needs -->
-<!-- needs: codex, codex-runner -->
-  - `codex-runner` wraps all read-only Codex work (`codex exec -s read-only`,
-    with a self-contained prompt): investigation on gpt-6.2-sol and batch work
-    on gpt-6-luna. Example description: `gpt-6.2: investigate the sync crash`.
+- Every Codex run goes through a wrapper agent. The orchestrator never runs `codex exec` or `codex review` itself, not even in the background.
 <!-- /needs -->
 <!-- needs: codex -->
 - Inside a wrapper, a Codex run can exceed Bash's 10-minute foreground limit. The

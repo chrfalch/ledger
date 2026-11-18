@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -8,7 +8,7 @@ import { buildRules } from '../tools/build-rules.js';
 import { ALL_AGENTS, CODEX_AGENTS, MODELS } from '../tools/deploy.js';
 import { REPO } from './helpers.js';
 
-const LIST_GATED_RULES = ['40-model-routing.md', '50-fleet-reference.md', '60-subagent-mechanics.md'];
+const LIST_GATED_RULES = ['40-model-routing.md', '60-subagent-mechanics.md'];
 const GATED_RULES = ['10-operating-model.md', '20-writing.md', ...LIST_GATED_RULES];
 
 // Mirrors the feature list deploy() passes to buildRules for a filtered deploy.
@@ -70,4 +70,248 @@ for (const agent of ['researcher', 'sol-implementer']) {
 
 test('rules rendered for --agents codex-runner keep the wrapper-only Codex rule', (t) => {
   assert.match(render(t, deployFeatures({ agents: ['codex-runner'] })).get('60-subagent-mechanics.md') ?? '', WRAPPER_RULE);
+});
+
+const RULES = path.join(REPO, 'rules');
+
+function ruleSources(): Map<string, string> {
+  const names = readdirSync(RULES).filter((name) => name.endsWith('.md')).sort();
+  return new Map(names.map((name) => [name, readFileSync(path.join(RULES, name), 'utf8')]));
+}
+
+function ruleSource(name: string): string {
+  return readFileSync(path.join(RULES, name), 'utf8');
+}
+
+/** The section that starts at `heading` and ends before the next heading of the same or a higher level. */
+function section(text: string, heading: string): string {
+  const lines = text.split('\n');
+  const start = lines.indexOf(heading);
+  assert.notEqual(start, -1, `no "${heading}" heading`);
+  const level = heading.indexOf(' ');
+  const end = lines.findIndex((line, index) => index > start && /^#+ /.test(line) && line.indexOf(' ') <= level);
+  return lines.slice(start, end === -1 ? undefined : end).join('\n');
+}
+
+function tableHeaderCells(line: string): string {
+  return line.split('|').map((cell) => cell.replace(/`/g, '').trim().toLowerCase()).filter(Boolean).join('|');
+}
+
+/** Rule 10 with each run of whitespace collapsed to one space, so a check can span wrapped lines. */
+function flatRule10(): string {
+  return ruleSource('10-operating-model.md').replace(/\s+/g, ' ');
+}
+
+const CLEAR_POINT = 'Clear point. Ledger updated. Type `/ledger:next` to clear the session and continue, or `/ledger:close` to clear it and stop.';
+
+test('the ledger sections of rule 10 state policy in 300 to 550 words and point to ledger --help', () => {
+  const text = ruleSource('10-operating-model.md');
+  const sections = ['### Checkpoint gate', '### Archiving a ledger', '## Compact Instructions'].map((heading) => section(text, heading)).join('\n');
+  const words = sections.split(/\s+/).filter(Boolean).length;
+  assert.ok(words >= 300 && words <= 550, `the three sections hold ${words} words`);
+  assert.match(sections, /`ledger --help`/);
+});
+
+test('rule 10 keeps the exact clear-point sentence', () => {
+  assert.ok(flatRule10().includes(CLEAR_POINT));
+});
+
+/** The sentences of the three ledger sections of rule 10, without headings and list markers. */
+function ledgerSentences(): string[] {
+  const text = ruleSource('10-operating-model.md');
+  const prose = ['### Checkpoint gate', '### Archiving a ledger', '## Compact Instructions']
+    .map((heading) => section(text, heading))
+    .join('\n')
+    .split('\n')
+    .filter((line) => !line.startsWith('#'))
+    .map((line) => line.replace(/^\s*(-|\d+\.)\s+/, '').replace(/\*\*/g, ''))
+    .join(' ');
+  return prose.split(/(?<=[.!?]"?)\s+/).map((sentence) => sentence.trim()).filter(Boolean);
+}
+
+test('each sentence of the ledger sections of rule 10 is under 20 words', () => {
+  const long = ledgerSentences().filter((sentence) => sentence.split(/\s+/).length >= 20);
+  assert.deepEqual(long, []);
+});
+
+test('rule 10 accepts and finishes after the last review verdict, with no clear point', () => {
+  assert.match(flatRule10(), /After the last review verdict, accept; no clear point\./);
+});
+
+test('rule 10 tells the operator how to clear when /ledger:next cannot', () => {
+  assert.match(flatRule10(), /If `\/ledger:next` or `\/ledger:close` fails to clear, tell the operator to type `\/clear`, then `go`\./);
+});
+
+test('rule 10 states each ledger rule in exact words', () => {
+  const rule = flatRule10();
+  for (const sentence of [
+    "The ledger lives in the task's worktree at `.claude/ledger.md`, never in the main checkout.",
+    'Keep cited files small, in its `.claude/evidence/`, never in the session scratchpad.',
+    'Keep the ledger under ~4k tokens.',
+    'Never pass `--force`.',
+    'Never remove or delete a worktree whose ledger is unarchived.',
+    'With `llp/` in the repo, durable design decisions go in an LLP document in the same PR.',
+    "A ticked option is the operator's approval to run it.",
+  ]) {
+    assert.ok(rule.includes(sentence), `rule 10 lacks: ${sentence}`);
+  }
+  assert.ok(ruleSource('10-operating-model.md').split('\n').includes('## Compact Instructions'));
+});
+
+test('rule 10 writes every /ledger:go, /ledger:parent, /ledger:task and /ledger:retire with its argument', () => {
+  const rule = ruleSource('10-operating-model.md');
+  assert.doesNotMatch(rule, /`\/ledger:(go|parent|task|retire)`/);
+  assert.match(rule.replace(/\s+/g, ' '), /`\/ledger:task <what the task is>`/);
+  assert.doesNotMatch(rule, /"go <slug>"/);
+});
+
+test('rule 40 keeps the rows of deployed agents whose lines HEAD did not gate on a model', (t) => {
+  const features = [...ALL_AGENTS, 'opus-5.5', 'gpt-6.2-sol', 'haiku-5.5', 'codex', 'argent', 'gh-stack'];
+  const routing = render(t, features).get('40-model-routing.md') ?? '';
+  for (const agent of ['researcher', 'runner', 'ui-runner', 'opus-implementer', 'sol-implementer', 'reviewer', 'codex-runner']) {
+    assert.match(routing, new RegExp(`^\\| ${agent} `, 'm'), `no ${agent} row`);
+  }
+  for (const agent of ['fable-implementer', 'astra-implementer', 'astra-reviewer']) {
+    assert.doesNotMatch(routing, new RegExp(`^\\| ${agent} `, 'm'), `${agent} row without its model`);
+  }
+});
+
+/** Every rule file rendered for `features`, by file name. */
+function renderAll(t: TestContext, features: string[]): Map<string, string> {
+  const out = mkdtempSync(path.join(tmpdir(), 'ledger-rules-all-'));
+  t.after(() => rmSync(out, { recursive: true, force: true }));
+  t.mock.method(console, 'log', () => {});
+  assert.equal(buildRules({ src: RULES, out, features: features.join(',') }), 0);
+  return new Map(readdirSync(out).map((name) => [name, readFileSync(path.join(out, name), 'utf8')]));
+}
+
+for (const models of [['opus-5.5', 'sonnet-5.5'], ['opus-5.5', 'gpt-6.2-sol', 'haiku-5.5']]) {
+  test(`with all agents and models ${models.join(',')}, no rule names an agent that rule 40 has no row for`, (t) => {
+    const rules = renderAll(t, [...ALL_AGENTS, ...models, 'codex', 'argent', 'gh-stack']);
+    const routing = rules.get('40-model-routing.md') ?? '';
+    const rowless = ALL_AGENTS.filter((agent) => !new RegExp(`^\\| ${agent} `, 'm').test(routing));
+    assert.ok(rowless.includes('astra-reviewer'));
+    for (const [name, text] of rules) {
+      assert.deepEqual(namedAgents(text).filter((agent) => rowless.includes(agent)), [], `rules/${name}`);
+    }
+  });
+}
+
+test('rule 10 sends reviews to reviewer, and astra-reviewer after it, only where both are deployed', (t) => {
+  const reviews = 'Reviews go to `reviewer`.';
+  const astraAfter = '`astra-reviewer` reviews after `reviewer` on critical work.';
+  const full = render(t, deployFeatures({})).get('10-operating-model.md') ?? '';
+  assert.ok(full.includes(reviews));
+  assert.ok(full.includes(astraAfter));
+  const astraOnly = render(t, deployFeatures({ agents: ['astra-reviewer'] })).get('10-operating-model.md') ?? '';
+  assert.ok(!astraOnly.includes(reviews) && !astraOnly.includes(astraAfter));
+});
+
+test('rule 30 points to ledger parent --help for making a parent task', () => {
+  const stacks = ruleSource('30-stacked-prs.md');
+  assert.doesNotMatch(stacks, /Checkpoint gate says how/);
+  assert.match(stacks, /`ledger parent --help`/);
+});
+
+test('the ui-runner row of rule 40 needs argent', (t) => {
+  const withArgent = render(t, deployFeatures({})).get('40-model-routing.md') ?? '';
+  const withoutArgent = render(t, deployFeatures({}).filter((feature) => feature !== 'argent')).get('40-model-routing.md') ?? '';
+  assert.match(withArgent, /^\| ui-runner /m);
+  assert.doesNotMatch(withoutArgent, /^\| ui-runner /m);
+});
+
+test('rule 10 says what a pipeline boundary is where it asks for a ledger update', () => {
+  assert.match(flatRule10(), /Update the ledger with `\/ledger:update` at every pipeline boundary\. The boundaries are after plan approval, after red tests, after each implementer report and after each review verdict\./);
+});
+
+test('rule 10 keeps durable facts out of the ledger', () => {
+  assert.match(flatRule10(), /A fact still true next week goes in a rule file or auto memory, not the ledger\./);
+});
+
+test('rule 10 sends one subagent per child task in another repo', () => {
+  const rule = flatRule10();
+  assert.match(rule, /Send a child task in another repo to its own subagent, with that worktree's absolute path\./);
+  assert.match(rule, /`EnterWorktree` cannot enter another repo\./);
+});
+
+test('rule 10 updates the parent ledger after each child task verdict or merge', () => {
+  assert.match(flatRule10(), /After each child task's review verdict or merge, update the parent ledger\./);
+});
+
+test('no rule names the retired ledger scripts or the dashboard', () => {
+  for (const [name, text] of ruleSources()) {
+    const hits = text.split('\n').filter((line) => /\b(cc-task-new|cc-worktree-retire|cc-ledger-parent|cc-ledgers|cc-ledger-dashboard)\b|bin\/lib\b|dashboard/i.test(line));
+    assert.deepEqual(hits, [], `rules/${name}`);
+  }
+});
+
+test('no rule maps a gate to its agent with "That context is"', () => {
+  for (const [name, text] of ruleSources()) assert.doesNotMatch(text, /That context is/, `rules/${name}`);
+});
+
+const PIPELINE = 'Pipeline: investigate → resolve ambiguity → plan → ledger → red tests → implement (effort stated) → verify (runner) → review (reviewer) → clear point if more remains → you accept.';
+
+test('the rules hold exactly one pipeline line, in rule 40, with its stages and agents in order', () => {
+  const pipelines = [...ruleSources()].flatMap(([name, text]) => text.split('\n').filter((line) => line.startsWith('Pipeline:')).map((line) => `${name}: ${line}`));
+  assert.equal(pipelines.length, 1, pipelines.join('\n'));
+  const lines = ruleSource('40-model-routing.md').split('\n');
+  const start = lines.findIndex((line) => line.startsWith('Pipeline:'));
+  const end = lines.findIndex((line, index) => index > start && (!line.trim() || line.startsWith('<!--')));
+  assert.equal(lines.slice(start, end).join(' ').replace(/\s+/g, ' '), PIPELINE);
+});
+
+test('the full rule 40 render holds every agent row of the former fleet reference rule', (t) => {
+  assert.equal(existsSync(path.join(RULES, '50-fleet-reference.md')), false);
+  assert.ok(!GATED_RULES.includes('50-fleet-reference.md'));
+  const routing = render(t, deployFeatures({})).get('40-model-routing.md') ?? '';
+  const rows = readFileSync(path.join(REPO, 'tests/fixtures/fleet-reference-rows.md'), 'utf8').trim().split('\n');
+  assert.equal(rows.length, ALL_AGENTS.length);
+  for (const row of rows) assert.ok(routing.split('\n').includes(row), `rule 40 lacks the row: ${row}`);
+});
+
+test('the Fable bullet of rule 40 forbids untrusted input and security- or biology-adjacent work', () => {
+  const lines = ruleSource('40-model-routing.md').split('\n');
+  const arrow = lines.findIndex((line) => line.includes('→ `fable-implementer`'));
+  assert.notEqual(arrow, -1, 'no Fable bullet');
+  let start = arrow;
+  while (start > 0 && !lines[start].startsWith('  - ')) start--;
+  const end = lines.findIndex((line, index) => index > start && (line.startsWith('  - ') || line.startsWith('- ') || line.startsWith('<!--')));
+  const bullet = lines.slice(start, end).join(' ').replace(/\s+/g, ' ');
+  assert.ok(bullet.includes('Never untrusted input, never security- or biology-adjacent work.'), bullet);
+});
+
+/** The line after the Codex wrapper rule when it continues the rule, or why the rule is missing. */
+function wrapperRuleContinuation(text: string): string | undefined {
+  const lines = text.split('\n');
+  const index = lines.findIndex((line) => WRAPPER_RULE.test(line));
+  if (index === -1) return 'no Codex wrapper rule';
+  const next = lines[index + 1] ?? '';
+  return next.trim() === '' || /^<!--\s*\/needs\s*-->\s*$/.test(next) || next.startsWith('- ') ? undefined : next;
+}
+
+test('the wrapper-rule check rejects a rule that continues on an indented line', () => {
+  const probe = '<!-- needs: codex -->\n- Every Codex run goes through a wrapper agent.\n  The orchestrator never runs it.\n<!-- /needs -->\n';
+  assert.equal(wrapperRuleContinuation(probe), '  The orchestrator never runs it.');
+  assert.equal(wrapperRuleContinuation(probe.replace('\n  The orchestrator never runs it.', '')), undefined);
+});
+
+test('the Codex wrapper rule in the rule 60 source is one line of short sentences', () => {
+  const text = ruleSource('60-subagent-mechanics.md');
+  assert.equal(wrapperRuleContinuation(text), undefined);
+  const line = text.split('\n').find((candidate) => WRAPPER_RULE.test(candidate)) ?? '';
+  for (const sentence of line.replace(/^- /, '').split(/(?<=\.)\s+/)) {
+    assert.ok(sentence.split(/\s+/).length < 20, `sentence of 20 words or more: ${sentence}`);
+  }
+});
+
+test('docs/fleet.md links to rules 10 and 40 instead of copying the agent table', () => {
+  const fleet = readFileSync(path.join(REPO, 'docs/fleet.md'), 'utf8');
+  assert.match(fleet, /\]\(\.\.\/rules\/40-model-routing\.md\)/);
+  assert.match(fleet, /\]\(\.\.\/rules\/10-operating-model\.md\)/);
+  assert.doesNotMatch(fleet, /every task passes/i);
+  const agentHeader = ruleSource('40-model-routing.md').split('\n').find((line) => /^\|\s*agent\s*\|/i.test(line));
+  assert.ok(agentHeader, 'rule 40 has no agent table');
+  const fleetLines = fleet.split('\n');
+  assert.ok(!fleetLines.includes(agentHeader), 'docs/fleet.md holds the agent-table header of rule 40');
+  assert.ok(!fleetLines.filter((line) => line.startsWith('|')).map(tableHeaderCells).includes(tableHeaderCells(agentHeader)), 'docs/fleet.md copies the agent table of rule 40');
 });
