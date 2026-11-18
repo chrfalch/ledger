@@ -11,10 +11,6 @@
           {
             "type": "command",
             "command": "\"$HOME\"/.claude/hooks/derived-data-gate.sh"
-          },
-          {
-            "type": "command",
-            "command": "\"$HOME\"/.claude/hooks/worktree-gate.sh"
           }
         ]
       },
@@ -23,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME\"/.claude/hooks/ledger-gate.sh"
+            "command": "\"$HOME\"/.claude/bin/ledger hook pre-tool-use"
           }
         ]
       }
@@ -44,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME\"/.claude/hooks/ledger-list.sh pre-compact"
+            "command": "\"$HOME\"/.claude/bin/ledger hook pre-compact"
           }
         ]
       }
@@ -63,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME\"/.claude/hooks/ledger-list.sh"
+            "command": "\"$HOME\"/.claude/bin/ledger hook session-start"
           }
         ]
       }
@@ -73,7 +69,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME\"/.claude/hooks/ledger-list.sh prompt-submit"
+            "command": "\"$HOME\"/.claude/bin/ledger hook prompt-submit"
           }
         ]
       },

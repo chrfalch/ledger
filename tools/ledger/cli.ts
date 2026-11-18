@@ -1,22 +1,51 @@
-import { Command, CommanderError } from 'commander';
+import { Argument, Command, CommanderError } from 'commander';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fail, Failure } from './failure.js';
+import { exists } from './files.js';
+import { planProgress } from './format.js';
 import { mainCheckout } from './git.js';
 import { fileStore } from './file-store.js';
-import { ledgerPaths, repoName } from './paths.js';
+import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookEvent } from './hooks.js';
+import { ledgerPaths, realPath, repoName } from './paths.js';
 import { loadTasks } from './registry.js';
-import { retireTask } from './retire.js';
-import { derivedDataView, pruneOrphans, pruneWorktrees, worktreesTable, type PruneReport } from './worktrees.js';
+import { retireTask, retireText } from './retire.js';
+import {
+  autoPrune,
+  derivedDataView,
+  listWorktrees,
+  pruneOrphans,
+  prunedFields,
+  pruneReport,
+  pruneWorktrees,
+  worktreesView,
+  type PruneReport,
+} from './worktrees.js';
 import { archivedTasks, childrenOf, taskRef, theTask, type Task } from './tasks.js';
-import { archiveView, listView, parentView, type ArchiveRow } from './views.js';
-import { changeParent, createTask, goTask, parkTask, unparkTask, type Context, type TaskOptions } from './write.js';
+import { archiveView, listView, parentView, writtenBranch, type ArchiveRow } from './views.js';
+import {
+  changeParent,
+  createdText,
+  createTask,
+  goTask,
+  goText,
+  parentChangeText,
+  parkTask,
+  parkText,
+  unparkTask,
+  unparkText,
+  type Context,
+  type TaskOptions,
+} from './write.js';
 
 const newestFirst = (a: Task, b: Task): number => b.mtimeMs - a.mtimeMs;
 
 function listed(task: Task) {
-  const parent = task.ledger.location.parent;
+  const { ledger } = task;
+  const parent = ledger.location.parent;
   const parentMain = parent?.main ?? task.main;
   return {
     slug: task.slug,
@@ -27,17 +56,30 @@ function listed(task: Task) {
     branch: task.branch ?? '',
     ...(parent === undefined ? {} : { parent: { slug: parent.slug, ...(parentMain === undefined ? {} : { main: parentMain }) } }),
     updated: new Date(task.mtimeMs).toISOString(),
-    goal: task.ledger.goal,
-    next: task.ledger.next,
+    goal: ledger.goal,
+    next: ledger.next,
+    ...planProgress(ledger),
+    ...(ledger.parked === undefined ? {} : { parked: { date: ledger.parked.date, reason: ledger.parked.reason } }),
+    ...(task.archived === undefined ? {} : { archived: task.archived }),
   };
 }
 
-function list(context: Context, json: boolean): string {
+/**
+ * `value` with every `main` field at any depth as its real path. A ledger may name its repo through a symbolic link or
+ * with a trailing slash, and the ledger plugin, which cannot resolve a path, compares mains as strings.
+ */
+function realMains<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(realMains) as T;
+  if (typeof value !== 'object' || value === null) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, field]) => [key, key === 'main' && typeof field === 'string' ? realPath(field) : realMains(field)])) as T;
+}
+
+/** The tasks of every known repo, newest first; retired ones only with `archived`. */
+function list(context: Context, archived: boolean): Task[] {
   const here = mainCheckout(context.cwd);
-  const tasks = loadTasks(context, here === undefined ? [] : [here])
-    .filter((task) => task.place !== 'archive')
+  return loadTasks(context, here === undefined ? [] : [here])
+    .filter((task) => archived || task.place !== 'archive')
     .sort(newestFirst);
-  return json ? JSON.stringify(tasks.map(listed), null, 2) : listView(tasks);
 }
 
 function firstMatch(task: Task, term: string): string | undefined {
@@ -45,7 +87,10 @@ function firstMatch(task: Task, term: string): string | undefined {
   return task.ledger.lines.find((line) => line.toLowerCase().includes(needle))?.trim();
 }
 
-function archive({ paths, cwd, store }: Context, term: string, everyRepo: boolean): string {
+/** `repo` is undefined for the archive of every repo. */
+type ArchiveList = { repo?: string; term: string; folder: string; rows: ArchiveRow[] };
+
+function archive({ cwd, store }: Context, term: string, everyRepo: boolean): ArchiveList {
   const main = everyRepo ? undefined : (mainCheckout(cwd) ?? fail(`Could not tell which repo ${cwd} is in. It is not inside a git repository. Add --all to list the archive of every repo.`));
   const repo = main === undefined ? undefined : repoName(main);
   const rows: ArchiveRow[] = archivedTasks(store, repo).flatMap((task) => {
@@ -55,18 +100,62 @@ function archive({ paths, cwd, store }: Context, term: string, everyRepo: boolea
   });
   const date = ({ task }: ArchiveRow): string => task.archived ?? '';
   rows.sort((a, b) => date(b).localeCompare(date(a)) || b.task.mtimeMs - a.task.mtimeMs || a.task.slug.localeCompare(b.task.slug));
-  const folder = `${paths.tilde(store.archive.repoLocation(repo))}/`;
-  return archiveView(rows, repo, term, folder);
+  return { ...(repo === undefined ? {} : { repo }), term, folder: store.archive.repoLocation(repo), rows };
 }
 
-function parent(context: Context, name: string, json: boolean): string {
+const archiveFields = ({ repo, term, folder, rows }: ArchiveList) => ({
+  repo: repo ?? null,
+  term,
+  folder,
+  ledgers: rows.map(({ task, match }) => ({
+    date: task.archived ?? '',
+    repo: task.repo,
+    slug: task.slug,
+    path: task.file,
+    branch: writtenBranch(task),
+    goal: task.ledger.goal,
+    ...(match === undefined ? {} : { match }),
+  })),
+});
+
+function parent(context: Context, name: string) {
   const ref = taskRef(context.cwd, name);
   const { main } = ref;
   const tasks = loadTasks(context, [main]);
   const task = theTask(tasks, ref);
-  const children = childrenOf(task, main, tasks);
-  if (!json) return parentView(task, main, children);
-  return JSON.stringify({ slug: task.slug, main, goal: task.ledger.goal, children }, null, 2);
+  return { task, main, children: childrenOf(task, main, tasks) };
+}
+
+/**
+ * The ledgers a session in `folder` works on, as `ledger hook session-start` finds them; none when the folder is gone.
+ * `main` is the main checkout of the repo that holds the folder.
+ */
+function session(folder: string) {
+  if (!exists(folder)) return { folder, removed: true, own: false, ledgers: [] };
+  const found = sessionLedgers(folder);
+  const title = sessionTitle(found);
+  const main = mainCheckout(folder);
+  return {
+    folder,
+    removed: false,
+    ...(main === undefined ? {} : { main }),
+    own: found.own,
+    ...(title === undefined ? {} : { title }),
+    ledgers: found.tasks.map((task) => ({
+      ...listed(task),
+      children: task.ledger.children.map(({ slug, main, mark }) => ({
+        slug,
+        ...((main ?? task.main) === undefined ? {} : { main: main ?? task.main }),
+        ...(mark === undefined ? {} : { mark }),
+      })),
+    })),
+  };
+}
+
+/** The ledger of the linked worktree that holds `cwd`, if it has one. */
+function ownLedger(cwd: string): string | undefined {
+  const { tasks, own } = sessionLedgers(cwd);
+  return own && tasks.length === 1 ? tasks[0].file : undefined;
 }
 
 function deploy(args: string[]): number {
@@ -83,14 +172,24 @@ function deploy(args: string[]): number {
   return result.status ?? 1;
 }
 
+const JSON_HELP = 'print one JSON object: {"ok":true,...} or {"ok":false,"error":"..."}';
+
 /** Runs the `ledger` command line `argv`, without the node and script paths, and returns its exit code. */
 export async function main(argv: string[]): Promise<number> {
   const paths = ledgerPaths(process.env.HOME || homedir());
   const cwd = process.cwd();
   const context: Context = { paths, cwd, store: fileStore(paths) };
+  // From argv rather than the parsed options, so a command line commander refuses still gets a JSON answer.
+  const json = argv.includes('--json');
   let exitCode = 0;
   const print = (text: string): void => {
     if (text !== '') console.log(text);
+  };
+  const printJson = (fields: object, error?: string): void => console.log(JSON.stringify(error === undefined ? { ok: true, ...fields } : { ok: false, error, ...fields }, null, 2));
+  /** The result as JSON with --json, else as the text `view` makes of it. */
+  const show = <T extends object>(result: T, view: (result: T) => string): void => (json ? printJson(result) : print(view(result)));
+  const warn = (warnings: string[]): void => {
+    if (!json) for (const warning of warnings) console.error(`warning: ${warning}`);
   };
   /** A folder skipped by a safety rule is no failure; one that could not be deleted is. */
   const printPruned = ({ text, failed }: PruneReport): void => {
@@ -102,21 +201,31 @@ export async function main(argv: string[]): Promise<number> {
   program
     .command('list')
     .description('List the live tasks of every known repo: active, parked and backlog. Retired tasks are in ledger archive.')
-    .option('--json', 'print the tasks as JSON')
-    .action(({ json = false }: { json?: boolean }) => console.log(list(context, json)));
+    .option('--archived', 'list the retired tasks too')
+    .option('--json', JSON_HELP)
+    .action(({ archived = false }: { archived?: boolean }) => {
+      const tasks = list(context, archived);
+      if (json) printJson({ tasks: realMains(tasks.map(listed)) });
+      else console.log(listView(tasks));
+    });
   program
     .command('archive')
     .description("List this repo's archived ledgers, newest first.")
     .argument('[term]', 'keep only the ledgers that contain this text, in any case')
     .option('--all', 'list the archive of every repo')
-    .action((term: string | undefined, { all = false }: { all?: boolean }) => console.log(archive(context, term ?? '', all)));
+    .option('--json', JSON_HELP)
+    .action((term: string | undefined, { all = false }: { all?: boolean }) => {
+      const found = archive(context, term ?? '', all);
+      if (json) printJson(archiveFields(found));
+      else console.log(archiveView(found.rows, found.repo, found.term, `${paths.tilde(found.folder)}/`));
+    });
   program
     .command('parent')
     .description('Show a parent task and the status of each child task, or change its children.')
     .argument('<slug>', 'the parent task in this repo, or <slug>@<path> for the repo at <path>')
     .argument('[action]', 'add or remove links a child or drops it; start marks a child started; next prints the first child still in the backlog')
     .argument('[child]', 'the child task for add, remove and start, as <slug> or <slug>@<path>')
-    .option('--json', 'print the parent and its children as JSON, when no action is given')
+    .option('--json', JSON_HELP)
     .addHelpText(
       'after',
       [
@@ -130,10 +239,16 @@ export async function main(argv: string[]): Promise<number> {
         '  ledger parent epic next            print the chain from epic to its first child still in the backlog',
       ].join('\n'),
     )
-    .action((slug: string, action: string | undefined, child: string | undefined, { json = false }: { json?: boolean }) => {
-      if (action === undefined) return console.log(parent(context, slug, json));
-      if (json) fail('--json only goes with showing a parent: ledger parent <slug> --json');
-      print(changeParent(context, slug, action, child));
+    .action((slug: string, action: string | undefined, child: string | undefined) => {
+      if (action === undefined) {
+        const { task, main: repo, children } = parent(context, slug);
+        if (json) printJson({ slug: task.slug, main: repo, goal: task.ledger.goal, children });
+        else console.log(parentView(task, repo, children));
+        return;
+      }
+      const change = changeParent(context, slug, action, child);
+      if (!json && change.action === 'next' && change.chain.length === 0) console.error(`No child task of ${change.parent.slug} is left in the backlog.`);
+      show(change, (done) => parentChangeText(context, done));
     });
   program
     .command('task')
@@ -143,26 +258,35 @@ export async function main(argv: string[]): Promise<number> {
     .option('--stack', 'make the worktree and branch at once, on top of the current branch')
     .option('--here', 'add a ledger to this linked worktree instead; prints no start line')
     .option('--repo <path>', 'write the task for the repo that holds <path>')
-    .action((slug: string | undefined, options: TaskOptions) => print(createTask(context, slug, options)));
+    .option('--json', JSON_HELP)
+    .action((slug: string | undefined, options: TaskOptions) => show(createTask(context, slug, options), createdText));
   program
     .command('go')
     .description(
-      "Start a backlog task: make its worktree and branch, and move its ledger there. The branch starts at the ledger's \"- base:\" when it names one, else at the default branch.",
+      "Start a task: a parent starts its first child still in the backlog; a backlog task gets its worktree and branch, and its ledger moves there; a task with a worktree is only gone to. Then its parked mark is removed and its parent marks it started. The branch starts at the ledger's \"- base:\" when it names one, else at the default branch.",
     )
-    .argument('<slug>', 'the backlog task')
+    .argument('<slug>', 'the task')
     .option('--repo <path>', 'start the task of the repo that holds <path>')
-    .action((slug: string, { repo }: { repo?: string }) => print(goTask(context, slug, repo)));
+    .option('--json', JSON_HELP)
+    .action((slug: string, { repo }: { repo?: string }) => {
+      const started = goTask(context, slug, repo);
+      warn(started.warnings);
+      if (json) printJson(realMains(started));
+      else print(goText(context, started));
+    });
   program
     .command('park')
     .description('Mark a task parked: a "Parked: <date> — <reason>" line first under ## Next step.')
     .argument('<slug>', 'the task in this repo, or <slug>@<path> for the repo at <path>')
     .requiredOption('--reason <text>', 'why the task waits')
-    .action((slug: string, { reason }: { reason: string }) => print(parkTask(context, slug, reason)));
+    .option('--json', JSON_HELP)
+    .action((slug: string, { reason }: { reason: string }) => show(parkTask(context, slug, reason), parkText));
   program
     .command('unpark')
     .description('Remove the parked mark from a task.')
     .argument('<slug>', 'the task in this repo, or <slug>@<path> for the repo at <path>')
-    .action((slug: string) => print(unparkTask(context, slug)));
+    .option('--json', JSON_HELP)
+    .action((slug: string) => show(unparkTask(context, slug), unparkText));
   program
     .command('retire')
     .description(
@@ -171,11 +295,18 @@ export async function main(argv: string[]): Promise<number> {
     .argument('[slug]', "the task in this repo; by default the task of the worktree you are in")
     .option('--dry-run', 'print what would be checked and done; it fetches the default branch from origin, and changes nothing else')
     .option('--force', 'retire it anyway with uncommitted changes, an unmerged branch or active children')
-    .action((slug: string | undefined, { dryRun = false, force = false }: { dryRun?: boolean; force?: boolean }) => print(retireTask(context, slug, { dryRun, force })));
+    .option('--json', JSON_HELP)
+    .action((slug: string | undefined, { dryRun = false, force = false }: { dryRun?: boolean; force?: boolean }) => {
+      const silent = { line: () => {}, warn: () => {} };
+      show(json ? retireTask(context, slug, { dryRun, force }, silent) : retireTask(context, slug, { dryRun, force }), retireText);
+    });
   const worktrees = program
     .command('worktrees')
     .description("Show each linked worktree of this repo with its size, last commit, uncommitted files, ledger and PR, largest first; or prune its build folders.");
-  worktrees.command('table', { isDefault: true, hidden: true }).action(() => console.log(worktreesTable(context)));
+  worktrees
+    .command('table', { isDefault: true, hidden: true })
+    .option('--json', JSON_HELP)
+    .action(() => show(listWorktrees(context), worktreesView));
   worktrees
     .command('prune')
     .description(
@@ -184,7 +315,15 @@ export async function main(argv: string[]): Promise<number> {
     .argument('[name]', 'the linked worktree, by its folder name')
     .option('--all', 'prune every linked worktree')
     .option('--dry-run', 'only list the folders')
-    .action((name: string | undefined, { all = false, dryRun = false }: { all?: boolean; dryRun?: boolean }) => printPruned(pruneWorktrees(context, name, { all, dryRun })));
+    .option('--json', JSON_HELP)
+    .action((name: string | undefined, { all = false, dryRun = false }: { all?: boolean; dryRun?: boolean }) => {
+      const run = pruneWorktrees(context, name, { all, dryRun });
+      if (!json) return printPruned(pruneReport(run));
+      const fields = run.worktrees.map(prunedFields);
+      const problems = fields.flatMap(({ error, failures }) => [...(error === undefined ? [] : [error]), ...failures]);
+      if (problems.length > 0) exitCode = 1;
+      printJson({ all, dryRun, worktrees: fields }, problems.length > 0 ? problems.join('\n') : undefined);
+    });
   worktrees
     .command('derived-data')
     .description("Group the folders in ~/Library/Developer/Xcode/DerivedData by the project they were built from: this repo's main checkout, a linked worktree, elsewhere, or gone.")
@@ -194,6 +333,37 @@ export async function main(argv: string[]): Promise<number> {
     .description('Delete the DerivedData folders whose project is gone from a connected disk.')
     .option('--dry-run', 'only list the folders')
     .action(({ dryRun = false }: { dryRun?: boolean }) => printPruned(pruneOrphans(context, dryRun)));
+  program
+    .command('auto-prune')
+    .description(
+      `Prune the build folders of a finished task's linked worktree once, in the background, and mark it with .claude/build-folders-pruned; a task whose plan is reopened loses the mark. Prints a line only when it did something; a folder with no ledger of its own is outcome no-ledger.`,
+    )
+    .argument('[ledger]', 'the task ledger; by default the one of the linked worktree you are in')
+    .option('--json', JSON_HELP)
+    .action((ledger: string | undefined) => {
+      // Claude Code runs this at every turn end, also in a session that has no ledger; that is no failure.
+      const file = ledger === undefined ? ownLedger(cwd) : path.resolve(cwd, ledger);
+      if (file === undefined) return show({ outcome: 'no-ledger', folder: cwd, finished: false }, () => '');
+      show(autoPrune(context, file), (result) => result.message ?? '');
+    });
+  program
+    .command('session')
+    .description('Print the ledgers a Claude Code session in a folder works on, as the session-start hook finds them: one path per line.')
+    .argument('[folder]', 'the session folder; by default the one you are in')
+    .option('--json', JSON_HELP)
+    .action((folder: string | undefined) => show(realMains(session(folder === undefined ? cwd : path.resolve(cwd, folder))), ({ ledgers }) => ledgers.map(({ path: file }) => file).join('\n')));
+  program
+    .command('hook')
+    .description('Answer a Claude Code hook: read its JSON input on stdin and print the hook output. For settings.json, not for a person.')
+    .addArgument(new Argument('<event>', 'the hook event').choices(HOOK_EVENTS))
+    .action((event: HookEvent) => {
+      try {
+        process.stdout.write(answerHook(event, readFileSync(0, 'utf8'), { ...context, ledgerBin: fileURLToPath(new URL('../../bin/ledger', import.meta.url)) }));
+      } catch (error) {
+        // Exit 0 with no output: Claude Code then allows the tool call and injects nothing. Exit 2 would block the tool call.
+        console.error(`ledger hook ${event}: ${(error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ')}`);
+      }
+    });
   program
     .command('deploy')
     .description('Run bin/deploy from this repo; options pass through.')
@@ -207,12 +377,18 @@ export async function main(argv: string[]): Promise<number> {
   try {
     await program.parseAsync(argv, { from: 'user' });
   } catch (error) {
-    if (error instanceof CommanderError) return error.exitCode;
-    if (error instanceof Failure) {
-      console.error(error.message);
+    if (error instanceof CommanderError) {
+      if (json && error.exitCode !== 0) printJson({}, error.message);
       return error.exitCode;
     }
-    throw error;
+    if (error instanceof Failure) {
+      if (json) printJson({}, error.message);
+      else console.error(error.message);
+      return error.exitCode;
+    }
+    if (!json) throw error;
+    printJson({}, error instanceof Error ? error.message : String(error));
+    return 1;
   }
   return exitCode;
 }

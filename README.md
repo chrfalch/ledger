@@ -122,8 +122,8 @@ of every command that a plugin writes as a markdown file, so a plain `/task`
 does not exist.
 
 A hook answers `/ledger`, `/ledger:help`, `/ledger:worktrees`,
-`/ledger:retire`, `/ledger:archive`, `/ledger:all`, `/ledger:parent` and
-`/ledger:dashboard` directly, without a model turn. Most of them only print.
+`/ledger:retire`, `/ledger:archive`, `/ledger:all` and `/ledger:parent`
+directly, without a model turn. Most of them only print.
 `/ledger:retire` and the three prune forms of `/ledger:worktrees` delete files.
 Add `--dry-run` to see what they would delete first. The other commands run a
 model turn, for example to write a ledger, start a task, or switch to one.
@@ -191,10 +191,7 @@ without a prompt box, such as SDK hosts, still show them.
 | `/ledger:worktrees derived-data` | Lists every folder in `~/Library/Developer/Xcode/DerivedData` with its size. It groups them by where the project is: the main checkout, a linked worktree, another location, or gone. Folders with no source project, and shared caches, have their own groups. |
 | `/ledger:worktrees prune-orphans` | Deletes the DerivedData folders whose project no longer exists. It never deletes shared caches or folders without a recorded project. |
 | `/ledger:worktrees prune-orphans --dry-run` | Lists those folders. It deletes nothing. |
-| `/ledger:all` | Prints a table of every task ledger on the machine, from every repo, active and archived, with its next step. Backlog tasks follow in their own section, **Backlog**. A parked task shows as `parked`. A child task follows its parent, also when the parent is in another repo. The list lives in `~/.claude/ledgers.json`. A new task, a retire and each session start add to it. |
-| `/ledger:all --scan` | Rebuilds `~/.claude/ledgers.json` from the ledgers under `~/repos` and `~/issues` and the archive in `~/.claude/ledger-archive/`, then prints the table. |
-| `/ledger:dashboard` | Starts a web page on this machine with the `/ledger:all` list, filters by repo and status, and a search of every ledger's text. You can select more than one status; with none selected it shows every task. A child task comes right after its parent, marked `↳`; a child that is not right under its parent, for example because a filter hides the parent, shows the parent's name, and a click on it opens the parent when its ledger is found. Click a task to read its ledger. Its buttons copy `go <slug>`, park and unpark the task, and retire it after a preview. It prints the page's address, which holds a new access key each start. It keeps running after the session ends. |
-| `/ledger:dashboard stop` | Stops the dashboard. |
+| `/ledger:all` | Prints one table of every task ledger on the machine, from every repo, newest first, with its parent and next step. A status column gives each task's status: active, parked, backlog or retired. The title line counts the live tasks: active, parked and backlog. A child task follows its parent as `↳ <child>`, also when the parent is in another repo. `~/.claude/ledgers.json` names the repos to read; each run brings it in line with the ledgers on disk. |
 
 A build folder whose project is on a disk that is not connected goes in its own
 group, **Disk not connected**, and is never deleted.
@@ -302,8 +299,9 @@ file instead of in the conversation. It ships five things:
   lanes, each pinned to a model.
 - **A task ledger** — a small file that holds the task state, so a session can
   be cleared and restarted without losing anything.
-- **Seven hook scripts across five hook events** — they put the ledger back
-  into context when a session starts, and protect it when a session compacts.
+- **Four hook scripts and `ledger hook` across five hook events** — they put
+  the ledger back into context when a session starts, and protect it when a
+  session compacts.
   They block writes that would put a ledger in the wrong place or lose it, and
   Xcode builds into a wrong folder. They warn when the deployed config is old,
   and allow a retry of a denied read-only call. Usage pace warns when Claude
@@ -352,7 +350,7 @@ settings.policy.json      Claude Code keys this repo asserts
 codex/policy.toml         Codex keys this repo asserts
 mods/ledger/              the /ledger command and its /ledger: commands, /ledger:worktrees included (a Claude Code plugin)
 .claude-plugin/           marketplace.json, which lists the plugins in mods/ for Claude Code
-hooks/                    the seven hook scripts and status line that deploy installs
+hooks/                    the hook scripts and status line that deploy installs
 githooks/                 the git hook dispatcher that deploy installs
 tools/                    the deploy code, its wizard and CLI, the settings merge and the rule filter
 tests/                    the tests for tools/, bin/ and hooks/

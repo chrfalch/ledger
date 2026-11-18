@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Shows the task ledgers from a terminal. CommonJS like bin/cc-ledger-dashboard, so the version
-// check runs before Node refuses an extensionless file in a "type": "module" package.
+// Shows the task ledgers from a terminal. CommonJS, so the version check runs before Node
+// refuses an extensionless file in a "type": "module" package.
 // Usage: ledger --help
 'use strict';
 const { spawnSync } = require('node:child_process');
@@ -19,6 +19,11 @@ const repo = path.dirname(path.dirname(realpathSync(__filename)));
 
 // npm writes this file last, so its absence also catches an interrupted install.
 if (!existsSync(path.join(repo, 'node_modules/.package-lock.json'))) {
+  // A hook must not stall Claude Code on an install, and fails open as tools/ledger/hooks.ts does: exit 0, no stdout.
+  if (process.argv[2] === 'hook') {
+    console.error(`ledger hook ${process.argv[3] ?? ''}: dependencies are not installed. Run npm ci in ${repo}.`);
+    process.exit(0);
+  }
   const npm = spawnSync('npm', ['ci', '--silent'], { cwd: repo, stdio: ['ignore', process.stderr, 'inherit'] });
   if (npm.error) {
     console.error(`ledger: ${npm.error.message}`);

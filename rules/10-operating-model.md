@@ -157,7 +157,7 @@ transcript is re-billed on every turn; the ledger is read once per fresh session
   in another repo that is not retired
   there blocks the parent's retire, and so does one that is missing. Session
   start shows the status from the other repo, or `unknown` when the lookup is
-  slow. `/ledger:all` and the dashboard show the child task under its parent.
+  slow. `/ledger:all` shows the child task under its parent.
 - **Keep the parent ledger current.** The parent ledger holds the overall goal,
   the split into child tasks, the decisions that cross child tasks, and their
   order. Each child ledger holds its own plan and state. After each child

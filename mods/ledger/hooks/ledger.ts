@@ -1,348 +1,88 @@
-type Row = { number: string; step: string; status: string }
+type Ref = { slug: string; main: string }
 
-type Parked = { date: string; reason: string }
-
-/** A line of a parent's Children section, as bin/cc-ledger-parent writes it. `main` is set for a child in another repository. */
-type ChildLine = { slug: string; main?: string; retired?: string; started?: string }
-
-/** How a ledger names a task in another repository: by its slug and that repository's main checkout. */
-export const taskName = ({ slug, main }: { slug: string; main?: string }): string => (main ? `${slug} @ ${main}` : slug)
-
-/** A task name as bin/cc-ledger-parent takes it as an argument: `<slug>@<main>` for a task in another repository. */
-export const taskArgument = (name: string): string => name.replace(' @ ', '@')
-
-/** A task as `cc-ledger-parent next` prints it: `<slug>@<main>` for a task in another repository. A slug has no `@`. */
-export function parseTaskArgument(argument: string): { slug: string; main?: string } {
-  const at = argument.indexOf('@')
-  return at === -1 ? { slug: argument } : { slug: argument.slice(0, at), main: argument.slice(at + 1) }
-}
-
-export type LedgerSummary = {
+/** A task as `ledger list --json` and `ledger session --json` give it; only the fields the mod reads. */
+export type ListedTask = {
   slug: string
-  editedMs: number
+  main?: string
+  status: string
+  path: string
   goal: string
-  current: Row | 'all done' | null
   next: string
-  parked?: Parked
-  /** The parent's slug, or `<slug> @ <main>` for a parent in another repository, which matches no slug of this one. */
-  parent?: string
-  children?: ChildLine[]
-  /** A ledger in ~/.claude/ledger-backlog/, shown because it is a parent of a listed task. */
-  isBacklog?: true
+  current: { number: string; step: string; status: string } | null
+  finished: boolean
+  parent?: { slug: string; main?: string }
+  parked?: { date: string; reason: string }
 }
 
-const FINISHED = /^(done|accepted|reviewed|dropped|skipped)\b/i
+/** `<slug>`, or `<slug>@<main>` for a task in another repo than `here`: the form bin/ledger takes and the operator types. */
+export const taskName = ({ slug, main }: Ref, here: string | undefined): string => (main === here ? slug : `${slug}@${main}`)
 
-// Location and Children are matched exactly, as bin/cc-ledger-parent does; other headings carry a suffix such as "(approved …)".
-function section(text: string, heading: string, exact = false): string[] {
-  const lines = text.split('\n')
-  const start = lines.findIndex(line => (exact ? line.trimEnd() === `## ${heading}` : line.startsWith(`## ${heading}`)))
-  if (start === -1) return []
-  const rest = lines.slice(start + 1)
-  const end = rest.findIndex(line => line.startsWith('## '))
-  return end === -1 ? rest : rest.slice(0, end)
-}
-
-function firstLine(lines: string[]): string {
-  return lines.map(line => line.trim()).find(line => line !== '') ?? ''
-}
-
-function currentStep(planLines: string[]): Row | 'all done' | null {
-  const rows: Row[] = planLines
-    .filter(line => line.trim().startsWith('|'))
-    .map(line => line.split('|').slice(1, -1).map(cell => cell.trim()))
-    .map(([number = '', step = '', status = '']) => ({ number, step, status }))
-    .filter(row => /^\d+$/.test(row.number))
-  if (rows.length === 0) return null
-  return rows.find(row => !FINISHED.test(row.status)) ?? 'all done'
-}
-
-const NEXT_STEP = '## Next step'
-const PARKED = /^Parked:[ \t]*(\d{4}-\d{2}-\d{2})[ \t]*[—-][ \t]*(.*)$/
-
-function parkedOf(line: string): Parked | null {
-  const match = PARKED.exec(line.trim())
-  return match ? { date: match[1] ?? '', reason: match[2]?.trim() ?? '' } : null
-}
-
-function parentOf(text: string): string | undefined {
-  return section(text, 'Location', true)
-    .map(line => line.trimEnd().match(/^- parent:[ \t]*(\S+(?: @ \/\S*)?)$/)?.[1])
-    .find(value => value !== undefined && !value.startsWith('<'))
-}
-
-const CHILD = /^- ([A-Za-z0-9._-]+)(?: @ (\/\S*))?(?: \((retired|started) (\d{4}-\d\d-\d\d)\))?$/
-
-function childrenOf(text: string): ChildLine[] {
-  return section(text, 'Children', true).flatMap(line => {
-    const [, slug, main, mark, date = ''] = line.trim().match(CHILD) ?? []
-    if (!slug) return []
-    return [{ slug, ...(main && { main }), ...(mark === 'retired' && { retired: date }), ...(mark === 'started' && { started: date }) }]
-  })
-}
-
-export function summarize(text: string, fallbackSlug: string, editedMs: number): LedgerSummary {
-  const title = text.match(/^# Task ledger[ \t]*[—-][ \t]*(.*)$/m)
-  const nextStep = section(text, 'Next step')
-  const parked = parkedOf(firstLine(nextStep))
-  const parent = parentOf(text)
-  const children = childrenOf(text)
-  return {
-    slug: title?.[1]?.trim() || fallbackSlug,
-    editedMs,
-    goal: firstLine(section(text, 'Goal')),
-    current: currentStep(section(text, 'Plan')),
-    next: firstLine(nextStep.filter(line => parkedOf(line) === null)),
-    ...(parked && { parked }),
-    ...(parent && { parent }),
-    ...(children.length > 0 && { children }),
-  }
-}
-
-export type Grouped<T> = { item: T; children: Grouped<T>[] }
-
-/**
- * Puts each item under the first listed item its parent key names, at any depth. The top level keeps the order of `items`,
- * and so do the children of each item, unless `compareChildren` sorts them.
- * An item whose parent is not listed stays at the top, and so does each item of a cycle, with its other children under it.
- */
-export function groupByParent<T>(
-  items: T[],
-  key: (item: T) => string,
-  parentKey: (item: T) => string | undefined,
-  compareChildren: (a: T, b: T) => number = () => 0,
-): Grouped<T>[] {
-  const first = new Map<string, T>()
-  for (const item of items) if (!first.has(key(item))) first.set(key(item), item)
-  const listedParent = (item: T) => {
-    const parent = parentKey(item)
-    return parent !== undefined && parent !== key(item) && first.has(parent) ? parent : undefined
-  }
-  const isInCycle = (item: T) => {
-    const seen = new Set<string>()
-    for (let parent = listedParent(item); parent !== undefined && !seen.has(parent); ) {
-      if (parent === key(item)) return true
-      seen.add(parent)
-      const next = first.get(parent)
-      parent = next && listedParent(next)
-    }
-    return false
-  }
-  const isTop = (item: T) => listedParent(item) === undefined || isInCycle(item)
-  const group = (item: T): Grouped<T> => ({
-    item,
-    children: first.get(key(item)) === item ? items.filter(child => !isTop(child) && listedParent(child) === key(item)).sort(compareChildren).map(group) : [],
-  })
-  return items.filter(isTop).map(group)
-}
-
-/** A registry entry as far as its family goes. `main` is its main checkout, which older registry entries lack. */
-type FamilyEntry = { repo: string; slug: string; main?: string; parent?: string; parentMain?: string }
-
-/**
- * Whether `task` is the parent `child` names. A parent with `parentMain` is in that main checkout; any other is in the
- * child's own: the same main checkout, or the same repo name when either entry has none recorded.
- */
-export function isParentOf(task: FamilyEntry, child: FamilyEntry): boolean {
-  if (child.parent === undefined || task.slug !== child.parent) return false
-  if (child.parentMain !== undefined) return task.main === child.parentMain
-  return task.main !== undefined && child.main !== undefined ? task.main === child.main : task.repo === child.repo
-}
-
-/** The order of a parent's child tasks: the active ones first, then the others, each newest first. */
-export const childOrder =
-  <T>(isActive: (item: T) => boolean, time: (item: T) => number) =>
-  (a: T, b: T): number =>
-    Number(isActive(b)) - Number(isActive(a)) || time(b) - time(a)
-
-export const isoDate = (date: Date): string =>
-  [date.getFullYear(), date.getMonth() + 1, date.getDate()].map(part => String(part).padStart(2, '0')).join('-')
-
-export function parkMarker(today: Date, reason: string): string {
-  return `Parked: ${isoDate(today)} — ${reason.trim().split(/\s+/).join(' ')}`
-}
-
-/** Removes every parked marker under Next step, and reports the first. */
-export function unpark(text: string): { text: string; parked: Parked | null } {
-  const lines = text.split('\n')
-  const start = lines.findIndex(line => line.startsWith(NEXT_STEP))
-  if (start === -1) return { text, parked: null }
-  const rest = lines.slice(start + 1)
-  const end = rest.findIndex(line => line.startsWith('## '))
-  const body = end === -1 ? rest : rest.slice(0, end)
-  const parked = body.map(parkedOf).find(marker => marker !== null) ?? null
-  if (parked === null) return { text, parked }
-  const kept = body.filter(line => parkedOf(line) === null)
-  return { text: [...lines.slice(0, start + 1), ...kept, ...(end === -1 ? [] : rest.slice(end))].join('\n'), parked }
-}
-
-/** Puts the marker first under Next step, replacing any earlier marker, and adds the section when there is none. */
-export function park(text: string, marker: string): string {
-  const unparked = unpark(text).text
-  const lines = unparked.split('\n')
-  const start = lines.findIndex(line => line.startsWith(NEXT_STEP))
-  if (start === -1) return `${unparked.replace(/\n*$/, '')}\n\n${NEXT_STEP}\n${marker}\n`
-  return [...lines.slice(0, start + 1), marker, ...lines.slice(start + 1)].join('\n')
-}
-
-export const PARK_USAGE =
-  'Usage: /ledger:park [<slug>] <reason>. Without a slug it writes this task\'s ledger, parks it and clears the session. Run /ledger to see each slug.'
-
-export function formatTime(ms: number): string {
-  const date = new Date(ms)
-  const two = (value: number) => String(value).padStart(2, '0')
-  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())} ${two(date.getHours())}:${two(date.getMinutes())}`
-}
-
-function formatStep({ current, parked }: LedgerSummary): string {
+function stepLine({ current, finished, parked }: ListedTask): string | undefined {
   if (parked) return `**Parked:** ${parked.date} — ${parked.reason}`
-  if (current === null) return ''
-  if (current === 'all done') return '**Now:** all plan steps done'
-  return `**Now:** step ${current.number} · ${current.step} — *${current.status}*`
+  if (finished) return '**Now:** all plan steps done'
+  return current ? `**Now:** step ${current.number} · ${current.step} — *${current.status}*` : undefined
 }
 
-function fields(ledger: LedgerSummary): string[] {
-  return [ledger.goal && `**Goal:** ${ledger.goal}`, formatStep(ledger), ledger.next && `**Next:** ${ledger.next}`].filter(field => field !== '')
-}
-
-const title = (ledger: LedgerSummary): string => (ledger.isBacklog ? `${ledger.slug} (backlog)` : ledger.slug)
-
-function childLines(children: Grouped<LedgerSummary>[], indent: string): string[] {
-  if (children.length === 0) return []
-  return [
-    `${indent}- **Children:**`,
-    ...children.flatMap(({ item, children: grandchildren }) => [
-      `${indent}  - **${title(item)}** · edited ${formatTime(item.editedMs)}`,
-      ...fields(item).map(field => `${indent}    - ${field}`),
-      ...childLines(grandchildren, `${indent}    `),
-    ]),
-  ]
-}
-
-export function format(ledger: LedgerSummary, children: Grouped<LedgerSummary>[] = []): string {
-  return [
-    `#### ${title(ledger)} · edited ${formatTime(ledger.editedMs)}`,
-    ...fields(ledger).map(field => `- ${field}`),
-    ...(ledger.parent ? [`- **Parent:** ${ledger.parent}`] : []),
-    ...childLines(children, ''),
-  ].join('\n')
-}
-
-export function formatAll(ledgers: LedgerSummary[]): string {
-  const groups = groupByParent(
-    ledgers,
-    ledger => ledger.slug,
-    ledger => ledger.parent,
-    childOrder(ledger => !ledger.isBacklog && !ledger.parked, ledger => ledger.editedMs),
-  )
-  const order = groups.some(({ children }) => children.length > 0) ? 'newest first, children under their parent' : 'newest first'
-  const count = ledgers.length === 1 ? '1 ledger' : `${ledgers.length} ledgers, ${order}`
-  return [`**Task ledgers** · ${count}`, ...groups.map(({ item, children }) => format(item, children))].join('\n\n')
-}
-
-export function ledgerPaths(stdout: string): string[] {
-  return stdout
-    .split('\n')
-    .map(line => line.trim())
-    .filter(line => line !== '')
-}
-
-export function folderSlug(ledgerPath: string): string {
-  return ledgerPath.split('/').at(-3) ?? ''
-}
-
-export type ActiveLedger = { kind: 'none' } | { kind: 'one'; path: string } | { kind: 'several'; paths: string[] }
-
-const LEDGER_SUFFIX = '/.claude/ledger.md'
-
-export function activeLedger(paths: string[], cwd: string): ActiveLedger {
-  const matches = paths.filter(path => {
-    const root = path.slice(0, -LEDGER_SUFFIX.length)
-    return path.endsWith(LEDGER_SUFFIX) && (cwd === root || cwd.startsWith(`${root}/`))
+/** The /ledger view of the ledgers a session works on. */
+export function formatLedgers(ledgers: ListedTask[]): string {
+  const count = ledgers.length === 1 ? '1 ledger' : `${ledgers.length} ledgers`
+  const blocks = ledgers.map(ledger => {
+    const fields = [ledger.goal && `**Goal:** ${ledger.goal}`, stepLine(ledger), ledger.next && `**Next:** ${ledger.next}`, ledger.parent && `**Parent:** ${ledger.parent.slug}`]
+    return [`#### ${ledger.slug} · ${ledger.status}`, ...fields.filter(field => field).map(field => `- ${field}`)].join('\n')
   })
-  const [only] = matches
-  if (only === undefined) return { kind: 'none' }
-  return matches.length === 1 ? { kind: 'one', path: only } : { kind: 'several', paths: matches }
+  return [`**Task ledgers** · ${count}`, ...blocks].join('\n\n')
 }
 
 const UNCHANGED = 'Nothing was written, and the session was not cleared.'
 
-export function noLedgerMessage(cwd: string): string {
-  return `No task ledger found for ${cwd}. ${UNCHANGED} Run this command from the task's worktree, or start a task with /ledger:task.`
-}
+// bin/ledger errors may end without a period.
+const sentence = (text: string): string => text.replace(/[.\s]*$/, '.')
 
-export function severalLedgersMessage(cwd: string, slugs: string[], outcome = UNCHANGED): string {
-  return `Several task ledgers hold ${cwd}: ${slugs.join(', ')}. ${outcome} Run this command from a task worktree that is not inside another one.`
-}
+export const noLedgerMessage = (cwd: string): string =>
+  `No task ledger found for ${cwd}. ${UNCHANGED} Run this command from the task's worktree, or start a task with /ledger:task.`
 
-export function removedFolderMessage(folder: string): string {
-  return `The session folder ${folder} no longer exists, so this session has no task ledger. ${UNCHANGED} Continue another task with /ledger:go <slug>, or run /ledger:close.`
-}
+export const removedFolderMessage = (folder: string): string =>
+  `The session folder ${folder} no longer exists, so this session has no task ledger. ${UNCHANGED} Continue another task with /ledger:go <slug>, or run /ledger:close.`
 
-export function lookupFailedMessage(error: string): string {
-  return `Could not check this task's ledger. ${error} ${UNCHANGED}`
-}
+export const lookupFailedMessage = (error: string): string => `Could not check this task's ledger. ${sentence(error)} ${UNCHANGED}`
 
-/**
- * A child task as `cc-ledger-parent show --json` reports it. `main` is set for a child in another repository than its parent.
- * `report` is the child's ## Report, one entry per line; a script from before reports leaves it out.
- */
-export type ChildStatus = { slug: string; main?: string; status: string; next: string; report?: string[] }
+export const startFailedMessage = (target: string, error: string): string => `Could not start task ${target}. ${sentence(error)} ${UNCHANGED}`
 
-export type Family = { parent?: string; children?: ChildStatus[] }
-
-const statusList = (children: ChildStatus[]): string => children.map(child => `${taskName(child)} (${child.status})`).join(', ')
-
-export type GoFields = {
-  parked?: Parked | null
-  family?: Family
-  promotedWorktree?: string
-  /** The slugs from the parent task the operator named down to the child task /ledger:go picked. */
-  picked?: string[]
-  /** The ledger in which /ledger:go marked the task started. */
-  marked?: string
-  warnings?: string[]
-  /** No task has the slug yet: go.md creates it. */
-  isNew?: true
-}
-
-// One field per line, because a slug and a path can both hold spaces. go.md reads this format.
-export function goArgs(
-  target: string,
-  ledgerPath: string | undefined,
-  { parked, family = {}, promotedWorktree, picked, marked, warnings = [], isNew }: GoFields = {},
-): string {
-  const fields = [`task: ${target}`, `ledger: ${ledgerPath ?? 'none'}`]
-  if (isNew) fields.push('new: yes')
-  if (parked) fields.push(`parked: ${parked.date} — ${parked.reason}`)
-  if (family.parent) fields.push(`parent: ${family.parent}`)
-  if (family.children?.length) fields.push(`children: ${statusList(family.children)}`)
-  if (promotedWorktree) fields.push(`promoted: ${promotedWorktree}`)
-  if (picked) fields.push(`picked: ${picked.join(' > ')}`)
-  if (marked) fields.push(`marked: ${marked}`)
-  for (const warning of warnings) fields.push(`warning: ${warning}`)
-  return fields.join('\n')
-}
-
-export const isGoArgs = (args: string): boolean => /^task: [^\n]*\nledger: /.test(args)
-
-export const worktreeWithoutLedgerMessage = (word: string, worktree: string): string =>
-  `${word} names the worktree ${worktree}, which has no task ledger. ${UNCHANGED} To give it one, type /ledger:task --here in a session there.`
-
-export const worktreeTaskMessage = (word: string, worktree: string, slug: string): string =>
-  `${word} names the worktree ${worktree}, task ${slug}. ${UNCHANGED} Type /ledger:park ${slug} <reason>.`
-
-export function parkArgs(slug: string, ledgerPath: string, reason: string): string {
-  return [`task: ${slug}`, `ledger: ${ledgerPath}`, `reason: ${reason}`].join('\n')
-}
+export const parkFailedMessage = (slug: string, error: string): string => `/ledger:park could not mark ${slug} parked: ${sentence(error)} The session was not cleared.`
 
 export const GO_USAGE = 'Usage: /ledger:go <slug>. Run /ledger to see the slug of each task.'
+
+export const PARK_USAGE =
+  "Usage: /ledger:park [<slug>] <reason>. Without a slug it writes this task's ledger, parks it and clears the session. Run /ledger to see each slug."
+
+export const PARENT_USAGE = 'Usage: /ledger:parent <slug> [add|remove <child>]. Run /ledger:all to see the slug of each task.'
 
 export const GO_FROM_SUBAGENT = `Only the main session can switch tasks with /ledger:go. ${UNCHANGED}`
 
 export function slugExpectedMessage(args: string): string {
   const slug = /^task: (.*)/.exec(args)?.[1] ?? '<slug>'
   return `/ledger:go takes a task slug, such as ${slug}, not the task: and ledger: lines it writes itself. ${UNCHANGED}`
+}
+
+/** A slug never holds whitespace, so a target with whitespace before any @ is a task description. */
+export const isDescription = (target: string): boolean => /\s/.test(target.split('@')[0] ?? '')
+
+/** A slug `ledger task` accepts for a new task. */
+export const isNewSlug = (target: string): boolean => /^[a-z0-9][a-z0-9-]*$/.test(target)
+
+export const descriptionMessage = (description: string): string =>
+  `/ledger:go takes a task slug, such as fix-login, not a description. To make a new task from a description, use /ledger:task ${sentence(description)} ${UNCHANGED}`
+
+export const notCreatedMessage = (slug: string): string =>
+  `/ledger:go did not create task ${slug}, so the session was not cleared. Run /ledger:task, or /ledger:go ${slug} again.`
+
+export const notCheckedMessage = (slug: string, error: string): string =>
+  `/ledger:go could not check whether task ${slug} was made: ${sentence(error)} The session was not cleared. Run /ledger:go ${slug} again.`
+
+/** The `ledger go` arguments for a target as /ledger:go takes it: `<slug>`, or `<slug>@<path>` for the repo that holds <path>. */
+export function goCommand(target: string): string[] {
+  const at = target.indexOf('@')
+  return at === -1 ? ['go', target] : ['go', target.slice(0, at), '--repo', target.slice(at + 1)]
 }
 
 const armedTurn = {
@@ -352,152 +92,110 @@ const armedTurn = {
   park: (slug: string) => `parks task ${slug} and clears the session`,
 }
 
-export function oneSwitchPerTurnMessage(armed: { mode: keyof typeof armedTurn; slug: string }, target: string): string {
-  return `This turn already ${armedTurn[armed.mode](armed.slug)}, so /ledger:go ${target} was not started and nothing was written. A turn switches tasks only once: run /ledger:go ${target} after the session clears.`
+export const oneSwitchPerTurnMessage = (armed: { mode: keyof typeof armedTurn; slug: string }, target: string): string =>
+  `This turn already ${armedTurn[armed.mode](armed.slug)}, so /ledger:go ${target} was not started and nothing was written. A turn switches tasks only once: run /ledger:go ${target} after the session clears.`
+
+/** What `ledger go` did, as go.md reads it. `parent` and `children` name tasks as the operator types them. */
+export type GoFields = {
+  isNew?: true
+  unparked?: { date: string; reason: string }
+  parent?: string
+  /** Each child task of the started task, with its status: `fix-login (active)`. */
+  children?: string[]
+  promoted?: string
+  /** The tasks from the one the operator named down to the child task that was started. */
+  picked?: string[]
+  marked?: string
+  warnings?: string[]
 }
 
+// One field per line, because a path can hold spaces. go.md reads this format.
+export function goArgs(target: string, ledger: string | undefined, { isNew, unparked, parent, children = [], promoted, picked, marked, warnings = [] }: GoFields): string {
+  return [
+    `task: ${target}`,
+    `ledger: ${ledger ?? 'none'}`,
+    ...(isNew ? ['new: yes'] : []),
+    ...(unparked ? [`parked: ${unparked.date} — ${unparked.reason}`] : []),
+    ...(parent ? [`parent: ${parent}`] : []),
+    ...(children.length > 0 ? [`children: ${children.join(', ')}`] : []),
+    ...(promoted ? [`promoted: ${promoted}`] : []),
+    ...(picked ? [`picked: ${picked.join(' > ')}`] : []),
+    ...(marked ? [`marked: ${marked}`] : []),
+    ...warnings.map(warning => `warning: ${warning}`),
+  ].join('\n')
+}
+
+export const isGoArgs = (args: string): boolean => /^task: [^\n]*\nledger: /.test(args)
+
+export const parkArgs = (slug: string, ledger: string, reason: string): string => [`task: ${slug}`, `ledger: ${ledger}`, `reason: ${reason}`].join('\n')
+
 /** What /ledger:go did before the Skill call was denied, or the denial alone when it did nothing. */
-export function goDeniedMessage(target: string, { promotedWorktree, parked, marked }: GoFields, denial: string): string {
+export function goDeniedMessage(target: string, { promoted, unparked, marked }: GoFields, denial: string): string {
   const done = [
-    ...(promotedWorktree ? [`Promoted backlog task ${target}: its branch, worktree and ledger are at ${promotedWorktree}.`] : []),
-    ...(parked ? [`Removed the parked marker from ${target}.`] : []),
+    ...(promoted ? [`Promoted backlog task ${target}: its branch, worktree and ledger are at ${promoted}.`] : []),
+    ...(unparked ? [`Removed the parked marker from ${target}.`] : []),
     ...(marked ? [`Marked ${target} started in ${marked}.`] : []),
   ]
   if (done.length === 0) return denial
   return `${done.join(' ')} Then the Skill call was denied: ${sentence(denial)} The session was not cleared.`
 }
 
-type TaskName = { slug: string; parent?: string }
+type StartedElsewhere = { slug: string; main: string; worktree: string; promoted: boolean; chain: Ref[]; marked?: { ledger: string }; warnings: string[] }
 
-function taskList(tasks: TaskName[]): string {
-  const groups = groupByParent(tasks, task => task.slug, task => task.parent)
-  const nested = ({ item, children }: Grouped<TaskName>): string =>
-    children.length > 0 ? `${item.slug} (children: ${children.map(nested).join(', ')})` : item.slug
-  const name = (group: Grouped<TaskName>) => (group.children.length === 0 && group.item.parent ? `${group.item.slug} (parent: ${group.item.parent})` : nested(group))
-  return groups.map(name).join(', ')
-}
-
-export function unknownTaskMessage(target: string, tasks: TaskName[], outcome = UNCHANGED): string {
-  return `No task ledger is named "${target}". ${outcome} Task ledgers: ${taskList(tasks) || 'none'}.`
-}
-
-// Script errors have no final period.
-const sentence = (text: string): string => text.replace(/[.\s]*$/, '.')
-
-/** A slug never holds whitespace, so a target with whitespace before any @ is a task description. */
-export const isDescription = (target: string): boolean => /\s/.test(target.split('@')[0] ?? '')
-
-/** A slug cc-task-new accepts for a new task. */
-export const isNewSlug = (target: string): boolean => /^[a-z0-9][a-z0-9-]*$/.test(target)
-
-export const notCreatedMessage = (slug: string): string =>
-  `/ledger:go did not create task ${slug}, so the session was not cleared. Run /ledger:task, or /ledger:go ${slug} again.`
-
-export function descriptionMessage(description: string): string {
-  return `/ledger:go takes a task slug, such as fix-login, not a description. To make a new task from a description, use /ledger:task ${sentence(description)} ${UNCHANGED}`
-}
-
-export function promoteFailedMessage(target: string, error: string): string {
-  return `Could not start backlog task ${target}. ${sentence(error)} ${UNCHANGED}`
-}
-
-export function promotedThenFailedMessage(target: string, worktree: string, error: string): string {
-  return `Promoted backlog task ${target}: its branch, worktree and ledger are at ${worktree}. Then this failed: ${sentence(error)} The session was not cleared.`
-}
-
-type StartedElsewhere = { child: string; parent: string; main: string; worktree: string; marked?: string; warnings: string[] }
-
-/** /ledger:go picked a child task in another repository and promoted it there. The session cannot follow it. */
-export function startedElsewhereMessage({ child, parent, main, worktree, marked, warnings }: StartedElsewhere): string {
+/** `ledger go` started a task of another repo: one the operator named, or a child task it picked. The session cannot follow it. */
+export function startedElsewhereMessage({ slug, main, worktree, promoted, chain, marked, warnings }: StartedElsewhere): string {
+  const parent = chain.at(-2)?.slug
+  const task = parent === undefined ? `Task ${slug} belongs` : `Picked child task ${slug} of ${parent}. It belongs`
+  const where = promoted ? `so it was started there: its branch, worktree and ledger are at ${worktree}.` : `and its worktree is at ${worktree}.`
   return [
-    `Picked child task ${child} of ${parent}. It belongs to the repository at ${main}, so it was promoted there: its branch, worktree and ledger are at ${worktree}.`,
-    ...(marked ? [`Marked ${child} started in ${marked}.`] : []),
+    `${task} to the repo at ${main}, ${where}`,
+    ...(marked ? [`Marked ${slug} started in ${marked.ledger}.`] : []),
     ...warnings,
-    `The session was not cleared and stays here, because a session cannot move to another repository. To continue in ${child}, this session sends a subagent to work in ${worktree}, by its absolute path. The operator can also open a session there and type go ${child}.`,
+    `The session was not cleared and stays here, because a session cannot move to another repo. To continue in ${slug}, this session sends a subagent to work in ${worktree}, by its absolute path. The operator can also open a session there and type go ${slug}.`,
   ].join(' ')
 }
 
-export function noChildToStartMessage(target: string, children: ChildStatus[] | { error: string }): string {
-  const listed = 'error' in children ? `Its child tasks could not be listed: ${sentence(children.error)}` : `Child tasks: ${statusList(children)}.`
-  return `Backlog task ${target} has no child task left to start. ${listed} ${UNCHANGED} A parent task in the backlog stays there: continue in a child task with /ledger:go <child>, or add one with /ledger:parent ${target} add <child>.`
+/**
+ * What `ledger retire --dry-run` tells of a task's branch, and what stops the retire; unknown when the dry run failed or
+ * the task has no worktree.
+ */
+export type BranchFacts = { merged: boolean; openPr?: number; blockedBy: string[] } | undefined
+
+export function retireHint(slug: string, branch: BranchFacts): string {
+  if (branch?.merged && branch.blockedBy.length > 0)
+    return `Task ${slug} is finished and merged, but it cannot be retired yet: ${branch.blockedBy.join('; ')}. Run \`/ledger:retire ${slug} --dry-run\` to see the details.`
+  if (branch?.merged) return `Task ${slug} is finished and merged. Retire it with \`/ledger:retire ${slug}\`.`
+  if (branch?.openPr !== undefined) return `Task ${slug} is finished, and its PR #${branch.openPr} is still open. After it merges, run \`/ledger:retire ${slug}\`.`
+  return `Task ${slug} is finished. Run \`/ledger:retire ${slug} --dry-run\` to see whether it can be retired, then \`/ledger:retire ${slug}\`.`
 }
 
-export function pickFailedMessage(target: string, error: string): string {
-  return `Could not pick a child task of backlog task ${target} to start: ${sentence(error)} ${UNCHANGED}`
-}
-
-export const pickFailedWarning = (target: string, error: string): string =>
-  `Could not pick a child task of ${target} to start, so this continues in ${target}: ${sentence(error)}`
-
-export const markFailedWarning = (child: string, parent: string, error: string): string =>
-  `Could not mark ${child} started in its parent ${parent}: ${sentence(error)}`
-
-export function otherRepositoryMessage(target: string, repo: string, main: string): string {
-  return `Backlog task ${target} belongs to the ${repo} repository, with its main checkout at ${main}. ${UNCHANGED} Run /ledger:go ${target} from a session in that repository.`
-}
-
-export function backlogUncheckedMessage(target: string, tasks: TaskName[], error: string, outcome = UNCHANGED): string {
-  return `${unknownTaskMessage(target, tasks, outcome)} The backlog could not be checked: ${sentence(error)}`
-}
-
-export function unparkFailedMessage(target: string, error: string): string {
-  return `Could not remove the parked marker from ${target}. ${error} ${UNCHANGED}`
-}
-
-export function sharedSlugMessage(target: string, paths: string[], outcome = UNCHANGED): string {
-  return `Several task ledgers are named "${target}": ${paths.join(', ')}. ${outcome} Give each task its own slug in its ledger's title.`
-}
-
-/** A task branch: commits ahead of origin's default branch, and every PR from it as `gh pr list --state all` lists them. */
-export type BranchState = { ahead: number; prs: { state: string; number: number }[] }
-
-/** The line shown after a finished task's session clears. `null` means git or gh could not tell whether the branch is merged. */
-export function retireHint(slug: string, branch: BranchState | null): string {
-  const finished = `Task ${slug} is finished`
-  if (branch && (branch.ahead === 0 || branch.prs.some(pr => pr.state === 'MERGED'))) {
-    return `${finished} and merged. Retire it with \`/ledger:retire ${slug}\`.`
-  }
-  const open = branch?.prs.find(pr => pr.state === 'OPEN')
-  if (open) return `${finished}. After PR #${open.number} merges, run \`/ledger:retire ${slug}\`.`
-  return `${finished}. Run \`/ledger:retire ${slug} --dry-run\` to see what blocks retiring it.`
-}
-
-/** The line shown after a finished child task's retire line. `parent` and `child` are named as the operator types them; `child` is `null` when none is left to start. */
-export function nextChildHint(parent: string, child: string | null): string {
-  if (child === null) return `Parent ${parent} has no child task left to start.`
-  return `Parent ${parent} has a child task that has not started: ${child}. Start it with \`/ledger:go ${parent}\`.`
-}
-
-// The retire is already done, so a failed lookup only points to /ledger:parent instead of failing.
-export function retiredChildHint(parent: string, chain: string[] | { error: string }): string {
-  if ('error' in chain) return `Could not look up the next child task of ${parent}: ${sentence(chain.error)} Run \`/ledger:parent ${parent}\` to see its child tasks.`
-  const child = chain.at(-1)
-  // /ledger:retire takes a slug of this repository only, so the parent is named, not a command for it.
-  return child === undefined ? `${nextChildHint(parent, null)} Retire ${parent} once each of its child tasks is retired.` : nextChildHint(parent, child)
-}
+/** `parent` and `child` as the operator types them; `child` is undefined when none is left to start. */
+export const nextChildHint = (parent: string, child: string | undefined): string =>
+  child === undefined
+    ? `Parent ${parent} has no child task left to start.`
+    : `Parent ${parent} has a child task that has not started: ${child}. Start it with \`/ledger:go ${parent}\`.`
 
 export function typedOnlyMessage(command: string, args: string): string {
   const typed = [`/${command}`, args.trim().replace(/\s+/g, ' ')].filter(part => part !== '').join(' ')
   return `/${command} runs only when the operator types it. Ask the operator to type \`${typed}\`.`
 }
 
-export function skillFailedMessage(command: string, error: string): string {
-  return `/${command} failed: ${sentence(error)} Ask the operator to type it.`
-}
+export const SCAN_DROPPED = 'Ignored --scan: /ledger:all reads the ledgers of every known repo from disk each time, and brings ~/.claude/ledgers.json in line with them.'
+
+export const skillFailedMessage = (command: string, error: string): string => `/${command} failed: ${sentence(error)} Ask the operator to type it.`
 
 export const HELP = [
-  "- `/ledger` — Show each task ledger's goal, current step and next step. A parent task in this repo's backlog is shown too, marked (backlog). `/ledger <name>` shows one.",
+  "- `/ledger` — Show the goal, current step and next step of each task ledger this session works on: its own, or in a main checkout those of every linked worktree. `/ledger <name>` shows those whose slug holds <name>.",
   '- `/ledger:task` — Add a separate task to the backlog: a ledger only, with no branch or worktree yet. `/ledger:go <slug>` starts it. With no current ledger, it starts the task at once and continues in this session. `--here` adds a ledger to this worktree instead.',
   "- `/ledger:update` — Write the latest results to this task's ledger. Without one, it points to `/ledger:task`.",
   "- `/ledger:next` — Write this task's ledger, clear the session, and continue from the next step. When every step is done, it first says how to retire the task. For a child task, it also names the next child task of its parent that has not started.",
   "- `/ledger:close` — Write this task's ledger, then clear the session.",
-  "- `/ledger:go <slug>` — Write this task's ledger, clear the session, and continue in the task named <slug>. When no task has that name, the agent first makes it, with a goal written from the conversation. A backlog task first gets its branch and worktree, which works only from a session in its repository. A child task is marked started in its parent ledger. A parent task starts its first child task not yet started instead; a parent task in the backlog with none left stays there. A child task in another repository gets its worktree there, and the session stays here. When every step of this task is done, it first says how to retire it.",
+  "- `/ledger:go <slug>` — Write this task's ledger, clear the session, and continue in the task named <slug>. When no task has that name, the agent first makes it, with a goal written from the conversation. A backlog task first gets its branch and worktree, which works only from a session in its repository. A child task is marked started in its parent ledger. A parent task starts its first child task not yet started instead; a parent task in the backlog with none left stays there. A child task in another repository gets its worktree there, and the session stays here; so does a task named `<slug>@<path>`, of the repository that holds <path>. When every step of this task is done, it first says how to retire it.",
   "- `/ledger:park [<slug>] <reason>` — Mark a task parked. Without a slug it writes this task's ledger, parks it, then clears the session.",
-  "- `/ledger:parent [<slug>]` — Show a parent task and each child's status and next step; without a slug, this task or its parent. `<slug> add <child>` and `<slug> remove <child>` change its children. `<slug>@<path>` names a task in the repository that holds <path>.",
-  "- `/ledger:worktrees` — Show each linked git worktree's size, last commit, dirty files, ledger and PR. `prune <name>` deletes the build folders of one worktree, and `prune --all` those of every linked worktree; `--dry-run` only lists them. When every step of a task is done, the turn's end deletes the build folders of its worktree, once per finish.",
-  "- `/ledger:retire [<slug>]` — Archive a task's ledger, remove its worktree, and delete its branch when all of its commits are merged. A backlog task of this repo has no worktree or branch: its ledger is archived, then deleted. `--dry-run` only shows what it would do. Uncommitted changes, unmerged work and active child tasks need `--force`. A child task is marked retired in its parent ledger, also in another repo; a child task in another repo blocks its parent until it is retired there.",
+  "- `/ledger:parent <slug>` — Show a parent task and each child's status and next step. `<slug> add <child>` and `<slug> remove <child>` change its children. `<slug>@<path>` names a task in the repository that holds <path>.",
+  "- `/ledger:worktrees` — Show each linked git worktree's size, last commit, dirty files, ledger and PR. `prune <name>` deletes the build folders of one worktree, and `prune --all` those of every linked worktree; `--dry-run` only lists them. `derived-data` groups the Xcode build folders by project, and `prune-orphans` deletes those whose project is gone. When every step of a task is done, the turn's end deletes the build folders of its worktree, once per finish.",
+  "- `/ledger:retire [<slug>]` — Archive a task's ledger, remove its worktree, and delete its branch when all of its commits are merged. A backlog task of this repo has no worktree or branch: its ledger is archived, then deleted. `--dry-run` only shows what it would do. Uncommitted changes, unmerged work and active child tasks need `--force`. A child task is marked retired in its parent ledger, also in another repo.",
   "- `/ledger:archive [<term>]` — List this repo's archived ledgers, newest first; a term keeps those that contain it, and `--all` lists every repo.",
-  '- `/ledger:all` — Show every task ledger on this machine, active, backlog and archived, each child task under its parent, also across repos; `--scan` rebuilds the list from disk.',
-  '- `/ledger:dashboard` — Start a web page on this machine that lists every task ledger, with search, details, park and retire. It keeps running after the session ends; `stop` stops it.',
+  '- `/ledger:all` — Show every task ledger on this machine, from every repository: active, backlog and archived, each with its parent and next step.',
   '- `/ledger:help` — Show this list.',
 ].join('\n')

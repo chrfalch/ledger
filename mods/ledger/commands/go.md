@@ -39,13 +39,13 @@ ledger steps below still apply.
    then what done looks like.
 3. Check the task repo for `llp/`. If it exists, read its file names and
    `llp/current/` if present; `llp/current/` is background only. Read the
-   titles of the likely documents. Pick the LLPs the task touches and pass
-   their numbers with `--refs '0042,0042.001'`. Each number must name a file
-   directly in `llp/`, as `llp/<number>-*.md`. If none match, pass nothing.
-4. Run the script from the ledger repo. The repo is two directories above the
-   real path of `~/.claude/rules/10-operating-model.md`. `<slug>` is the
+   titles of the likely documents. Pick the LLPs the task touches. Each number
+   must name a file directly in `llp/`, as `llp/<number>-*.md`. If none match,
+   pick nothing.
+4. Run `bin/ledger` from the ledger repo. The repo is two directories above
+   the real path of `~/.claude/rules/10-operating-model.md`. `<slug>` is the
    `task:` value. Put the goal in single quotes, and write each `'` inside it
-   as `'\''`. Add `--refs` only when new-task step 3 picked LLPs:
+   as `'\''`:
 
    ```bash
    f=~/.claude/rules/10-operating-model.md
@@ -53,19 +53,23 @@ ledger steps below still apply.
      l=$(readlink "$f")
      case "$l" in /*) f="$l" ;; *) f="$(dirname "$f")/$l" ;; esac
    done
-   "$(cd -P "$(dirname "$f")/.." && pwd)/bin/cc-task-new" <slug> --goal '<goal>' --refs '0042,0042.001'
+   "$(cd -P "$(dirname "$f")/.." && pwd)/bin/ledger" task <slug> --goal '<goal>'
    ```
 
-5. Run the same script with `--promote <slug>` and nothing else. It makes the
-   worktree and branch. Do not move this session into the worktree: the next
-   session does.
-6. If the first script fails, nothing was made. Reply with its error and
-   stop: the session does not clear. If only `--promote` fails, the backlog
-   ledger exists, so the session still clears, and the next session tries the
-   promotion again. Then still do new-task step 7 and the ledger steps, and
-   put the error in your reply.
-7. If `ledger:` is not `none`, add one line under that ledger's Decisions that
-   names the new task, together with the ledger steps below.
+5. Run the same `bin/ledger` as `bin/ledger go <slug>`, with nothing else. It
+   makes the worktree and branch. Do not move this session into the worktree:
+   the next session does.
+6. If new-task step 3 picked LLPs, write their numbers, comma-separated, on
+   the `- design refs:` line of the new ledger. Its path is on the `ledger`
+   line that the last `bin/ledger` run printed. Use Edit.
+7. If `ledger task` fails, nothing was made. Reply with its error and stop:
+   the session does not clear. If only `ledger go` fails, the backlog ledger
+   exists, so the session still clears, and the next session tries to start
+   it again. Then still do the ledger steps, and put the error in your reply.
+8. If `ledger:` is not `none` and `ledger task` printed no `noted` line, add
+   one line under that ledger's Decisions that names the new task, together
+   with the ledger steps below. A `noted` line means the script already wrote
+   that line.
 
 If `ledger:` is `none`, this session has no task ledger. Write nothing, do not
 create one, and only do ledger step 4. Otherwise, update the file at that
@@ -88,7 +92,7 @@ ledger steps:
    operator types nothing. Do not show `go <task>` or any other command for
    the operator to type. Do not ask the operator to run `/clear`. If there is a `new:` line, add one line
    before it: the task was made, and its worktree is at the path on the
-   `worktree` line that `--promote` printed. If `--promote` failed, say
+   `worktree` line that `ledger go` printed. If `ledger go` failed, say
    instead that the task is in the backlog. If there is a `parked:` line, add
    one line before it: the task was parked on that date, the reason, and that it is no
    longer parked. If there is a `parent:` line, add one line before it that

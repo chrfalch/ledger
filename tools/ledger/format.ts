@@ -92,6 +92,26 @@ export function parseLedger(text: string): Ledger {
 
 export const serializeLedger = (ledger: Ledger): string => ledger.lines.join('\n');
 
+export type PlanStep = { number: string; step: string; status: string };
+
+/** `current` is the first plan row not finished; `finished` holds when the plan has rows and every one is finished. */
+export type PlanProgress = { current: PlanStep | null; finished: boolean };
+
+const FINISHED_STEP = /^(done|accepted|reviewed|dropped|skipped)\b/i;
+
+/** The numbered rows of the ## Plan table, read as the ledger plugin reads them. */
+export function planProgress({ lines, sections }: Ledger): PlanProgress {
+  const plan = findSection(sections, 'Plan');
+  const rows = (plan === undefined ? [] : lines.slice(plan.start + 1, plan.end))
+    .map(plainLine)
+    .filter((line) => line.trim().startsWith('|'))
+    .map((line) => line.split('|').slice(1, -1).map((cell) => cell.trim()))
+    .map(([number = '', step = '', status = '']) => ({ number, step, status }))
+    .filter(({ number }) => /^\d+$/.test(number));
+  const current = rows.find(({ status }) => !FINISHED_STEP.test(status)) ?? null;
+  return { current, finished: rows.length > 0 && current === null };
+}
+
 /** The fence run that opens a CommonMark code fence; a backtick fence's info text holds no backtick. */
 function openingFence(line: string): string | undefined {
   const [, run, info] = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line) ?? [];

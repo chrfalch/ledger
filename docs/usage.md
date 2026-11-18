@@ -174,10 +174,9 @@ started and says to start it with `/ledger:go <parent>`, or says that the parent
 has no child task left to start.
 
 A session sees only the ledgers of its own repo. `/ledger:all` lists every task
-ledger on the machine, from every repo, with its next step. `/ledger:all --scan`
-rebuilds that list from the ledgers on disk. Backlog tasks have their own
-section, and the title line counts the tasks, the active ones and the backlog
-ones.
+ledger on the machine, from every repo, with its next step. It prints one table
+with a status column: active, parked, backlog or retired. The title line counts
+the live tasks: active, parked and backlog.
 
 A backlog task is one that `/ledger:task` wrote and that has no worktree yet.
 The SessionStart hook does not show backlog tasks. `/ledger:go <name>` starts
@@ -346,7 +345,7 @@ ledger.
   the source of truth.
 - The parent ledger gets `- <child>` under `## Children`.
 - The child's entry in `~/.claude/ledgers.json` gets a `parent` field.
-  `/ledger:all --scan` rebuilds it from the ledger text.
+  Each `/ledger:all` rebuilds it from the ledger text.
 
 `/ledger:parent <parent> remove <child>` undoes all three. The command refuses
 a relation that breaks one of these rules:
@@ -374,21 +373,21 @@ When no child task is left to start, the command continues in the parent task
 if the parent task has a worktree. A parent task in the backlog stays there:
 the command lists its child tasks with their status, and changes nothing.
 
-Both steps run `bin/cc-ledger-parent`: `start <parent> <child>` writes the
-mark, and `next <parent>` prints the child task to start.
+Both steps run the `ledger` command. `ledger go <name>` writes the mark and
+picks the child task to start. `ledger parent <parent> next` prints the child
+task that starts next.
 
 `/ledger:parent <parent>` prints the parent task, then one line per direct
 child task: its name, its status (`active`, `parked`, `retired` or `missing`)
-and its next step. Without a name, it shows the current task when it has child tasks, or
-else the current task's parent task.
+and its next step. Without a name, it prints how to use the command and
+changes nothing. `/ledger:all` shows the name of each task.
 
 The other commands show the relation too:
 
 | Where | A parent task | A child task |
 |---|---|---|
-| `/ledger` | `- **Children:**`, then each child task with its goal, step and next step. A parent task in the backlog of this repo is listed too, as `<parent> (backlog)`, and so is a parent task active in another worktree of this repo; the same holds for the parent of that parent, and so on | Under its parent task, one indent deeper for each level; shows `- **Parent:** <parent>` when the parent is not listed |
-| `/ledger:all` | Its child tasks follow it as `↳ <child>`, one indent deeper for each level | `<child> (parent: <parent>)` when the parent is not listed |
-| `/ledger:go` with an unknown name | `<parent> (children: <a>, <b> (children: <c>))` | `<child> (parent: <parent>)` when the parent is not listed |
+| `/ledger` | Nothing about its child tasks. It shows only the ledgers of this session | `- **Parent:** <parent>` under its goal, step and next step |
+| `/ledger:all` | Its child tasks follow it as `↳ <child>`, one indent deeper for each level. Active child tasks come first | Its parent task in the `parent` column. A parent in another repo shows that repo's folder name, as `<parent> (<folder>)` |
 | `/ledger:go <name>` | Starts its first child task not yet started, and names it. With none left, a line that lists its child tasks with their status | A line that names its parent task; marks the child task started |
 | `/ledger:worktrees`, ledger column | `parent of <n>`, where n counts the child tasks not retired | `child of <parent>` |
 | Session start | `Child task: <child> (<status>).` or `Child task: <child> (retired YYYY-MM-DD).`, one line per child task | `Parent task: <parent> (<status>).` |
@@ -468,7 +467,7 @@ At session start, the status of a parent or child task in another repository
 is looked up in that repository. A lookup that takes more than 3 seconds shows
 `unknown`.
 
-`/ledger:all` and the dashboard group a family by main checkout. A child task
+`/ledger:all` groups a family by main checkout. A child task
 comes right after its parent task, also when the parent is in another
 repository. Two repositories with the same folder name are two families.
 
@@ -539,41 +538,6 @@ library is one child task.
 6. `/ledger:parent rn-new-arch` shows each library with its status and report.
 7. Retire each child task when its PR merges. Its report stays in the parent
    ledger, under `## Child reports`.
-
-### The dashboard
-
-`/ledger:dashboard` starts a web page on this machine that shows every task
-ledger, the same list as `/ledger:all`. The page starts with a list of the
-repositories. Each one shows its number of tasks and how many have each status.
-Click a repository to see its tasks. You can filter them by status, and search
-the text of their ledgers. You can select more than one status; the list then
-shows the tasks with any of them. With no status selected, it shows every task.
-A child task comes right after its parent task, with a `↳` before its name,
-as in `/ledger:all`. A child that is not right under its parent stays in the
-list as a normal row and shows `parent: <name>`. This happens when a filter
-hides the parent, and for a child of a child. Click that name to read the
-parent's ledger. When the parent's ledger is not found, the name is plain text.
-**All repositories** goes back to the list, and so does the browser's Back
-button. The address names the open repository and the selected statuses, so a
-reload, Back and Forward show them again. The status filter stays when you open
-another repository. A selected status that this repository has no tasks with
-does not filter here; it filters again in a repository that has it.
-Click a task to read its ledger, its worktree, its branch and its PRs. Its
-buttons copy `go <name>`, park a task with a reason, remove the parked mark,
-and retire a task. Retire first shows what it would do and waits for a second
-click. When the task has uncommitted changes or an unmerged branch, that click
-is **Retire anyway (--force)**. These are the same rules as `/ledger:retire`.
-The dashboard refuses to retire a task in the backlog, because it has no
-worktree yet.
-
-The command prints an address like `http://127.0.0.1:<port>/#key=<key>`. Open
-it in a browser. The key in the address is the password for the page: each
-start makes a new one, and the server refuses every request without it. The
-server answers only on this machine.
-
-The dashboard keeps running after the Claude Code session ends. Type
-`/ledger:dashboard` again to see its address. Type `/ledger:dashboard stop` to
-stop it. Its log is `~/.claude/ledger-dashboard.log`.
 
 ## The clear loop, in short
 

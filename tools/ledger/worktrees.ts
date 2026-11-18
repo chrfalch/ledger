@@ -3,12 +3,13 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fail } from './failure.js';
-import { folderEntries, isFolder } from './files.js';
-import { branchPrs, changedFiles, checkoutRoot, ignoredPaths, lastCommitDate, mainCheckout, worktrees, type Worktree } from './git.js';
+import { exists, folderEntries, isFolder, readTimedText, writeAtomic } from './files.js';
+import { parseLedger, planProgress } from './format.js';
+import { branchPrs, changedFiles, checkoutRoot, gitDir, ignoredPaths, lastCommitDate, mainCheckout, worktrees, type PullRequest, type Worktree } from './git.js';
 import { samePath, worktreeLedger, type LedgerPaths } from './paths.js';
 import { findTasks, locateChild, namedChildren, type Task } from './tasks.js';
 import { heading, plural, table } from './views.js';
-import type { Context } from './write.js';
+import { today, type Context } from './write.js';
 
 const BUILD_FOLDER_NAMES = new Set(['.build', '.expo-prebuild', '.cache', 'build', '.DerivedData']);
 
@@ -57,20 +58,39 @@ export function ownXcodeFolders(paths: LedgerPaths, folder: string): string[] {
  * at once. The trash name starts with a dot, so it never matches a build folder prefix.
  */
 export function deleteInBackground(folders: string[], trashParent: string): void {
-  let trash: string | undefined;
-  for (const folder of folders) {
-    try {
-      trash ??= mkdtempSync(path.join(trashParent, '.cc-trash-'));
-      renameSync(folder, path.join(trash, path.basename(folder)));
-    } catch {
-      rmSync(folder, { recursive: true, force: true });
-    }
-  }
-  if (trash === undefined) return;
-  const folder = trash;
-  spawn('rm', ['-rf', '--', folder], { detached: true, stdio: 'ignore' })
-    .on('error', (error) => console.error(`warning: rm could not start, so ${folder} is left behind (${error.message}). Delete it by hand.`))
-    .unref();
+  const trash = trashCan();
+  for (const folder of folders) trash.move(folder, trashParent);
+  trash.empty();
+}
+
+/**
+ * Moves folders into trash folders in their trash parent, then deletes every trash folder with one background rm. A
+ * folder that cannot be moved is deleted at once. Two build folders can share a name, so the second gets another trash folder.
+ */
+function trashCan(): { move: (folder: string, trashParent: string) => void; empty: () => void } {
+  const trashes: string[] = [];
+  return {
+    move(folder, trashParent) {
+      const name = path.basename(folder);
+      try {
+        let trash = trashes.find((known) => path.dirname(known) === trashParent && !existsSync(path.join(known, name)));
+        if (trash === undefined) {
+          trash = mkdtempSync(path.join(trashParent, '.cc-trash-'));
+          trashes.push(trash);
+        }
+        renameSync(folder, path.join(trash, name));
+      } catch {
+        rmSync(folder, { recursive: true, force: true });
+      }
+    },
+    empty() {
+      const folders = trashes.splice(0);
+      if (folders.length === 0) return;
+      spawn('rm', ['-rf', '--', ...folders], { detached: true, stdio: 'ignore' })
+        .on('error', (error) => console.error(`warning: rm could not start, so ${folders.join(', ')} ${folders.length === 1 ? 'is' : 'are'} left behind (${error.message}). Delete by hand.`))
+        .unref();
+    },
+  };
 }
 
 /** du counts blocks in use; it exits non-zero when it cannot read some file, yet still prints the total of what it could. */
@@ -106,40 +126,70 @@ function repoOf(cwd: string): Repo {
 
 const nameOf = ({ path: folder }: Worktree): string => path.basename(folder);
 
-function ledgerCell(task: Task | undefined, tasks: Task[], main: string): string {
-  if (task === undefined) return 'no';
+/** A worktree's ledger: `activeChildren` when it lists children, counting those not retired; `parent` as its Location names it. */
+export type WorktreeLedger = { slug: string; path: string; activeChildren?: number; parent?: string };
+
+/** A value git or du could not read is left out; `pr` is null for no PR and left out when gh could not tell. */
+export type WorktreeRow = { name: string; path: string; branch?: string; sizeGb?: number; lastCommit?: string; dirty?: number; ledger: WorktreeLedger | null; pr?: PullRequest | null };
+
+/** The rows are largest first; `prError` says why gh could not tell the PRs. */
+export type WorktreesList = { main: string; worktrees: WorktreeRow[]; totalGb: number; prError?: string };
+
+function worktreeLedgerOf(task: Task, tasks: Task[], main: string): WorktreeLedger {
   const children = namedChildren(task, tasks);
-  if (children.length > 0) {
-    const parent = { slug: task.slug, main };
-    const active = children.filter((line) => locateChild(tasks, { slug: line.slug, main: line.main ?? main }, parent)?.status !== 'retired');
-    return `parent of ${active.length}`;
-  }
   const parent = task.ledger.location.parent;
-  return parent === undefined ? 'yes' : `child of ${parent.slug}`;
+  const self = { slug: task.slug, main };
+  return {
+    slug: task.slug,
+    path: task.file,
+    ...(children.length === 0 ? {} : { activeChildren: children.filter((line) => locateChild(tasks, { slug: line.slug, main: line.main ?? main }, self)?.status !== 'retired').length }),
+    ...(parent === undefined ? {} : { parent: parent.slug }),
+  };
+}
+
+function ledgerCell(ledger: WorktreeLedger | null): string {
+  if (ledger === null) return 'no';
+  if (ledger.activeChildren !== undefined) return `parent of ${ledger.activeChildren}`;
+  return ledger.parent === undefined ? 'yes' : `child of ${ledger.parent}`;
 }
 
 /** `ledger worktrees`: each linked worktree with its size, last commit, uncommitted files, ledger and PR, largest first. */
-export function worktreesTable({ store, cwd }: Context): string {
+export function listWorktrees({ store, cwd }: Context): WorktreesList {
   const { main, linked } = repoOf(cwd);
-  if (linked.length === 0) return 'No linked worktrees.';
-  const tasks = findTasks(store, [main]);
+  const tasks = linked.length === 0 ? [] : findTasks(store, [main]);
   let prError: string | undefined;
-  const rows = linked.map((worktree) => {
+  const rows = linked.map((worktree): WorktreeRow => {
     const prs = worktree.branch === undefined ? [] : branchPrs(worktree.path, worktree.branch);
     if ('error' in prs) prError ??= prs.error;
-    const pr = 'error' in prs ? '?' : prs[0] === undefined ? 'none' : `${prs[0].state} #${prs[0].number}`;
     const task = tasks.find(({ place, file }) => place === 'worktree' && samePath(file, worktreeLedger(worktree.path)));
     const size = sizeGb(worktree.path);
-    const cells = [nameOf(worktree), gbText(size), lastCommitDate(worktree.path) ?? '?', String(changedFiles(worktree.path)?.length ?? '?'), ledgerCell(task, tasks, main), pr];
-    return { cells, size: size ?? -1 };
+    const lastCommit = lastCommitDate(worktree.path);
+    const dirty = changedFiles(worktree.path)?.length;
+    return {
+      name: nameOf(worktree),
+      path: worktree.path,
+      ...(worktree.branch === undefined ? {} : { branch: worktree.branch }),
+      ...(size === undefined ? {} : { sizeGb: size }),
+      ...(lastCommit === undefined ? {} : { lastCommit }),
+      ...(dirty === undefined ? {} : { dirty }),
+      ledger: task === undefined ? null : worktreeLedgerOf(task, tasks, main),
+      ...('error' in prs ? {} : { pr: prs[0] ?? null }),
+    };
   });
-  rows.sort((a, b) => b.size - a.size);
-  const total = rows.reduce((sum, { size }) => sum + Math.max(size, 0), 0);
-  const count = linked.length === 1 ? '1 worktree' : `${linked.length} worktrees, largest first`;
+  rows.sort((a, b) => (b.sizeGb ?? -1) - (a.sizeGb ?? -1));
+  const totalGb = rows.reduce((sum, { sizeGb: size }) => sum + (size ?? 0), 0);
+  return { main, worktrees: rows, totalGb, ...(prError === undefined ? {} : { prError }) };
+}
+
+export function worktreesView({ worktrees: rows, totalGb, prError }: WorktreesList): string {
+  if (rows.length === 0) return 'No linked worktrees.';
+  const count = rows.length === 1 ? '1 worktree' : `${rows.length} worktrees, largest first`;
+  const prCell = (pr: PullRequest | null | undefined): string => (pr === undefined ? '?' : pr === null ? 'none' : `${pr.state} #${pr.number}`);
+  const cells = rows.map((row) => [row.name, gbText(row.sizeGb), row.lastCommit ?? '?', String(row.dirty ?? '?'), ledgerCell(row.ledger), prCell(row.pr)]);
   return [
-    heading('Worktrees', count, `${total.toFixed(1)} GB total`),
+    heading('Worktrees', count, `${totalGb.toFixed(1)} GB total`),
     '',
-    ...table(['worktree', 'size GB', 'last commit', 'dirty', 'ledger', 'PR'], rows.map(({ cells }) => cells)),
+    ...table(['worktree', 'size GB', 'last commit', 'dirty', 'ledger', 'PR'], cells),
     ...(prError === undefined ? [] : ['', `PR is ? because ${prError}`]),
   ].join('\n');
 }
@@ -175,7 +225,9 @@ export type PruneReport = { text: string; failed: boolean };
 
 const report = (text: string | string[], failed = false): PruneReport => ({ text: Array.isArray(text) ? text.join('\n') : text, failed });
 
-function deleteFolders(folders: Folder[], problemOf: (folder: Folder) => string | undefined): Pruned {
+const removeNow = (folder: string): void => rmSync(folder, { recursive: true, force: true });
+
+function deleteFolders(folders: Folder[], problemOf: (folder: Folder) => string | undefined, remove = removeNow): Pruned {
   const deleted: Folder[] = [];
   const skipped: string[] = [];
   const failures: string[] = [];
@@ -186,7 +238,7 @@ function deleteFolders(folders: Folder[], problemOf: (folder: Folder) => string 
       continue;
     }
     try {
-      rmSync(folder.path, { recursive: true, force: true });
+      remove(folder.path);
       deleted.push(folder);
     } catch (error) {
       failures.push(`Could not delete ${folder.label}: ${error instanceof Error ? error.message : String(error)}`);
@@ -196,7 +248,7 @@ function deleteFolders(folders: Folder[], problemOf: (folder: Folder) => string 
 }
 
 /** The git-ignored build folders and own Xcode folders of the linked worktree at `root` of at least 0.05 GB; deleted unless `dryRun`. */
-function pruneBuildFolders(paths: LedgerPaths, root: string, dryRun: boolean): Pruned {
+function pruneBuildFolders(paths: LedgerPaths, root: string, dryRun: boolean, remove = removeNow): Pruned {
   const ignored = ignoredPaths(root);
   if (ignored === undefined) return { error: `Could not read the ignored files of ${path.basename(root)}: git status failed.` };
   const inWorktree = ignored
@@ -208,10 +260,13 @@ function pruneBuildFolders(paths: LedgerPaths, root: string, dryRun: boolean): P
   const prefix = path.basename(buildFolderPrefix(paths, root) ?? '');
   const folders = [...inWorktree, ...xcode].filter(({ sizeGb: size }) => size === undefined || size >= PRUNE_FLOOR_GB);
   if (dryRun || folders.length === 0) return { planned: folders };
-  return deleteFolders(folders, ({ path: folder }) =>
-    folder.startsWith(`${root}${path.sep}`)
-      ? deletionProblem(folder, root, outsideKept)
-      : deletionProblem(folder, paths.derivedData, (inside) => inside.length === 1 && prefix !== '' && isOwnXcodeFolder(inside[0], prefix)),
+  return deleteFolders(
+    folders,
+    ({ path: folder }) =>
+      folder.startsWith(`${root}${path.sep}`)
+        ? deletionProblem(folder, root, outsideKept)
+        : deletionProblem(folder, paths.derivedData, (inside) => inside.length === 1 && prefix !== '' && isOwnXcodeFolder(inside[0], prefix)),
+    remove,
   );
 }
 
@@ -229,13 +284,36 @@ function prunedLines(title: string, pruned: Pruned): string[] {
 
 export type PruneOptions = { all: boolean; dryRun: boolean };
 
-/** `ledger worktrees prune <name>|--all [--dry-run]`. */
-export function pruneWorktrees({ paths, cwd }: Context, name: string | undefined, { all, dryRun }: PruneOptions): PruneReport {
+type WorktreePruned = { name: string; path: string; pruned: Pruned };
+
+/** A prune of one linked worktree, or of each with `all`. */
+export type PruneRun = PruneOptions & { worktrees: WorktreePruned[] };
+
+/** `ledger worktrees prune <name>|--all [--dry-run]`. A single worktree whose ignored files git cannot read fails. */
+export function pruneWorktrees({ paths, cwd }: Context, name: string | undefined, { all, dryRun }: PruneOptions): PruneRun {
   if ((name === undefined) === !all) fail('Give either a worktree name or --all: ledger worktrees prune <name>|--all [--dry-run]');
   const { linked } = repoOf(cwd);
+  const matches = all ? linked : linked.filter((worktree) => nameOf(worktree) === name);
+  if (!all && matches.length === 0) fail(`No linked worktree named "${name}". Worktrees: ${linked.map(nameOf).join(', ') || 'none'}`);
+  if (!all && matches.length > 1) fail(`Two or more linked worktrees are named "${name}": ${matches.map(({ path: folder }) => folder).join(', ')}`);
+  const worktrees = matches.map((worktree) => ({ name: nameOf(worktree), path: worktree.path, pruned: pruneBuildFolders(paths, worktree.path, dryRun) }));
+  const [single] = worktrees;
+  if (!all && 'error' in single.pruned) fail(single.pruned.error);
+  return { all, dryRun, worktrees };
+}
+
+/** A prune as plain fields: `folders` are those planned on a dry run, else those deleted. */
+export type PrunedFields = { name: string; path: string; folders: Folder[]; skipped: string[]; failures: string[]; error?: string };
+
+export function prunedFields({ name, path: folder, pruned }: WorktreePruned): PrunedFields {
+  if ('error' in pruned) return { name, path: folder, folders: [], skipped: [], failures: [], error: pruned.error };
+  if ('planned' in pruned) return { name, path: folder, folders: pruned.planned, skipped: [], failures: [] };
+  return { name, path: folder, folders: pruned.deleted, skipped: pruned.skipped, failures: pruned.failures };
+}
+
+export function pruneReport({ all, dryRun, worktrees: results }: PruneRun): PruneReport {
   if (all) {
-    if (linked.length === 0) return report('No linked worktrees.');
-    const results = linked.map((worktree) => ({ name: nameOf(worktree), pruned: pruneBuildFolders(paths, worktree.path, dryRun) }));
+    if (results.length === 0) return report('No linked worktrees.');
     if (results.every(({ pruned }) => 'planned' in pruned && pruned.planned.length === 0)) return report('Nothing to prune in any linked worktree.');
     const planned = results.flatMap(({ pruned }) => ('planned' in pruned ? pruned.planned : []));
     const deleted = results.flatMap(({ pruned }) => ('deleted' in pruned ? pruned.deleted : []));
@@ -246,16 +324,105 @@ export function pruneWorktrees({ paths, cwd }: Context, name: string | undefined
     ];
     return report(lines, results.some(({ pruned }) => hasFailed(pruned)));
   }
-  const matches = linked.filter((worktree) => nameOf(worktree) === name);
-  if (matches.length === 0) fail(`No linked worktree named "${name}". Worktrees: ${linked.map(nameOf).join(', ') || 'none'}`);
-  if (matches.length > 1) fail(`Two or more linked worktrees are named "${name}": ${matches.map(({ path: folder }) => folder).join(', ')}`);
-  const pruned = pruneBuildFolders(paths, matches[0].path, dryRun);
-  if ('error' in pruned) fail(pruned.error);
+  const [{ name, pruned }] = results;
+  if ('error' in pruned) return report(pruned.error, true);
   if ('planned' in pruned) {
     if (pruned.planned.length === 0) return report(`Nothing to prune in ${name}.`);
     return report([heading(`Prune ${name}`, 'dry run', `${totalGb(pruned.planned)} GB in ${folderCount(pruned.planned)}`), '', ...folderTable(pruned.planned), '', ...KEPT_NOTES, `Run ledger worktrees prune ${name} to delete them.`]);
   }
   return report(prunedLines(`Pruned ${name}`, pruned), hasFailed(pruned));
+}
+
+/** In a worktree's .claude folder: its finished task was pruned, or the prune failed, so nothing is tried again until the task is reopened. */
+export const PRUNED_MARKER = 'build-folders-pruned';
+
+/**
+ * What auto-prune did: `unchanged` when the marker already matches the task, `unmarked` when a reopened task lost its
+ * marker, `pruned` or `failed` for a finished task, `not-linked` for a ledger outside a linked worktree. `message` is the
+ * line to show, when there is one; `folders` were deleted, `failures` could not be.
+ */
+export type AutoPruneResult = {
+  ledger: string;
+  worktree: string;
+  marker: string;
+  finished: boolean;
+  outcome: 'unchanged' | 'unmarked' | 'pruned' | 'failed' | 'not-linked';
+  folders?: Folder[];
+  failures?: string[];
+  error?: string;
+  message?: string;
+};
+
+const isLinkedWorktree = (folder: string): boolean => {
+  const main = mainCheckout(folder);
+  return main !== undefined && worktrees(main).slice(1).some(({ path: linked }) => samePath(linked, folder));
+};
+
+/**
+ * Where a folder's trash goes so a turn's end does not wait for the delete: the worktree's git dir, which is outside its
+ * tree, so the trash never shows in its status. On another disk a move would be a copy, so the trash then goes beside it.
+ */
+function trashParent(folder: string, worktreeGitDir: string | undefined): string {
+  try {
+    if (worktreeGitDir !== undefined && statSync(folder).dev === statSync(worktreeGitDir).dev) return worktreeGitDir;
+  } catch {}
+  return path.dirname(folder);
+}
+
+/**
+ * Prunes the build folders of the linked worktree of `ledger` once each time its plan is finished, and marks it with
+ * PRUNED_MARKER; reopening the task drops the mark. A failed prune is marked too, so it is reported once.
+ */
+export function autoPrune({ paths }: Context, ledger: string): AutoPruneResult {
+  const text = readTimedText(ledger, { followLinks: true })?.text ?? fail(`No ledger to read at ${ledger}.`);
+  const { finished } = planProgress(parseLedger(text));
+  const worktree = path.dirname(path.dirname(ledger));
+  const name = path.basename(worktree);
+  const marker = path.join(worktree, '.claude', PRUNED_MARKER);
+  const facts = { ledger, worktree, marker, finished };
+  if (finished === exists(marker)) return { ...facts, outcome: 'unchanged' };
+  if (!finished) {
+    rmSync(marker, { force: true });
+    return { ...facts, outcome: 'unmarked' };
+  }
+  if (!isLinkedWorktree(worktree)) return { ...facts, outcome: 'not-linked' };
+  let pruned: Pruned;
+  const trash = trashCan();
+  try {
+    const own = gitDir(worktree);
+    pruned = pruneBuildFolders(paths, worktree, false, (folder) => trash.move(folder, trashParent(folder, own)));
+  } catch (error) {
+    pruned = { error: error instanceof Error ? error.message : String(error) };
+  } finally {
+    trash.empty();
+  }
+  const date = today();
+  const result: AutoPruneResult =
+    'error' in pruned
+      ? { ...facts, outcome: 'failed', error: pruned.error, message: `Did not prune ${name}. ${pruned.error}` }
+      : { ...facts, outcome: 'pruned', ...prunedOf(pruned, name) };
+  const note =
+    result.outcome === 'failed'
+      ? `ledger auto-prune could not prune the build folders of this worktree on ${date}, when its task was finished:\n${result.error}\nWhile this file exists, it does not try again. Run \`ledger worktrees prune ${name}\` to prune by hand.\n`
+      : `ledger auto-prune pruned the build folders of this worktree on ${date}, because its task was finished. While this file exists, it does not prune them again.\n`;
+  try {
+    writeAtomic(marker, note);
+  } catch (error) {
+    result.message = `${result.message} Could not write ${marker}: ${error instanceof Error ? error.message : String(error)}. The next run tries ${name} again.`;
+  }
+  return result;
+}
+
+function prunedOf(pruned: Exclude<Pruned, { error: string }>, name: string): Pick<AutoPruneResult, 'folders' | 'failures' | 'message'> {
+  if ('planned' in pruned) return { folders: [], failures: [], message: `The task is finished, and ${name} has no build folders to prune.` };
+  const left = pruned.failures.length;
+  const line = `Pruned the build folders of ${name}, because its task is finished: ${freed(pruned.deleted)}.`;
+  const failures = [...pruned.skipped, ...pruned.failures];
+  return {
+    folders: pruned.deleted,
+    failures,
+    message: left === 0 ? line : `${line} ${left === 1 ? '1 folder was' : `${left} folders were`} not deleted; run \`ledger worktrees prune ${name}\` to see why.`,
+  };
 }
 
 type Group = { kind: 'main' } | { kind: 'worktree'; name: string } | { kind: 'other' } | { kind: 'disk-not-connected' } | { kind: 'orphan' } | { kind: 'no-source' } | { kind: 'cache' };

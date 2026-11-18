@@ -36,14 +36,14 @@ export function mainOfTaskWorktree(worktree: string): string | undefined {
   return path.basename(worktrees) === 'worktrees' && path.basename(claude) === '.claude' ? path.dirname(claude) : undefined;
 }
 
-/** A ledger may name a folder through a symbolic link or with a trailing slash, and the folder may be gone. */
-export function samePath(a: string, b: string): boolean {
-  const real = (file: string): string => {
-    try {
-      return realpathSync(file);
-    } catch {
-      return path.resolve(file);
-    }
-  };
-  return a === b || real(a) === real(b);
+/** The folder may be gone; then its resolved path stands in. */
+export function realPath(file: string): string {
+  try {
+    return realpathSync(file);
+  } catch {
+    return path.resolve(file);
+  }
 }
+
+/** A ledger may name a folder through a symbolic link or with a trailing slash, and the folder may be gone. */
+export const samePath = (a: string, b: string): boolean => a === b || realPath(a) === realPath(b);
