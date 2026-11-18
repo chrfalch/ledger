@@ -28,13 +28,52 @@ design, copy. Rationale and benchmarks: `~/.claude/notes/model-routing-rationale
 | fable-5.2   | 4    | 10           | 9     | hardest judged work; xhigh/max only    |
 <!-- /needs -->
 
+| agent             | engine      | effort          | answers                                    | never does                                            |
+|-------------------|-------------|-----------------|--------------------------------------------|-------------------------------------------------------|
+<!-- needs: researcher -->
+| researcher        | opus-5.5    | medium          | *why* — root cause, relevant code surface  | fix, plan, edit                                       |
+<!-- /needs -->
+<!-- needs: runner -->
+| runner            | sonnet-5.5  | —               | *what happened* — build/test verdicts      | fix (beyond trivial retry), dump raw logs             |
+<!-- /needs -->
+<!-- needs: argent, ui-runner -->
+| ui-runner         | opus-5.5    | medium/high     | *what the UI did* — device flows, assertions | fix code, paste hierarchies or screenshots          |
+<!-- /needs -->
+<!-- needs: opus-implementer -->
+| opus-implementer  | opus-5.5    | medium/high/max | implement judged and taste work            | architecture, review                                  |
+<!-- /needs -->
+<!-- needs: fable-implementer, fable-5.2 -->
+| fable-implementer | fable-5.2   | xhigh/max       | implement the hardest judged and taste work | routine work, untrusted input, security- or biology-adjacent work, architecture, review |
+<!-- /needs -->
+<!-- needs: sol-implementer, gpt-6.2-sol -->
+| sol-implementer   | gpt-6.2-sol | routine only    | implement free volume work                 | hard tier, untrusted input, taste work, fill spec gaps |
+<!-- /needs -->
+<!-- needs: astra-implementer, gpt-6.2-astra -->
+| astra-implementer | gpt-6.2-astra | high/xhigh/max  | implement the hardest well-specified work  | routine work, taste work, untrusted input, fill spec gaps, `--full-auto` |
+<!-- /needs -->
+<!-- needs: reviewer -->
+| reviewer          | opus-5.5    | medium          | is it actually done, red/green provenance  | fix code                                              |
+<!-- /needs -->
+<!-- needs: astra-reviewer, gpt-6.2-astra -->
+| astra-reviewer    | gpt-6.2-astra | high/xhigh      | independent cross-lab verdict on critical work | fix code, see the Claude verdict before reviewing |
+<!-- /needs -->
+<!-- needs: codex-runner -->
+| codex-runner      | gpt-6.2-sol / gpt-6-luna | routine | read-only Codex investigation and batch work | code, edits, review, verdicts, untrusted input |
+<!-- /needs -->
+
+<!-- needs: runner, reviewer -->
+Pipeline: investigate → resolve ambiguity → plan → ledger → red tests → implement
+(effort stated) → verify (runner) → review (reviewer) → clear point if more remains
+→ you accept.
+<!-- /needs -->
+
 Rules:
 - Defaults, not limits. If cheaper output misses the bar, redo it smarter or at
   higher effort without asking. Judge the output, not the price.
 - For anything that ships: intelligence > taste > cost. Cost is a tie-breaker.
 - Effort: medium routine, high hard, xhigh/max difficult or taste-critical.
 - **Implementation — two questions: volume or judged? if judged, taste?** The
-  Fleet reference table carries each agent's effort range and its never-does list.
+  agent table gives each agent's effort range and its never-does list.
 <!-- needs: gpt-6.2-sol, sol-implementer -->
   - Volume (mechanical, clear-spec, free is the point: migrations, codemods, test
     scaffolding, bulk renames) → `sol-implementer`. Needs high reasoning → not
@@ -46,10 +85,10 @@ Rules:
 <!-- /needs -->
 <!-- needs: fable-5.2, fable-implementer -->
   - Judged or taste work at the hardest tier, where Opus at max is expected to
-    fall short (long-horizon, taste-critical) → `fable-implementer`, xhigh or max.
+    fall short (long-horizon, taste-critical) → `fable-implementer`.
     Choose it when you plan, never as a retry after an Opus failure. At high effort
-    it scored level with Opus at twice the price: use Opus. Never untrusted input, never
-    security- or biology-adjacent work: safeguards still block it.
+    it scored level with Opus at twice the price: use Opus.
+    Never untrusted input, never security- or biology-adjacent work.
 <!-- /needs -->
 <!-- needs: gpt-6.2-astra, astra-implementer -->
   - Hard, crisply specified, non-taste (multi-file refactors, concurrency, tricky
@@ -59,13 +98,16 @@ Rules:
 <!-- /needs -->
   - Untrusted or externally-sourced input → opus-5.5 only.
   - Ambiguous spec → nobody. Resolve it first.
+<!-- needs: runner, researcher -->
+- Errors → `runner` first; `researcher` when the cause is not obvious from them.
+<!-- /needs -->
 <!-- needs: gpt-6.2-sol, codex-runner -->
 - Deep investigation with a self-contained brief → `codex-runner` on gpt-6.2-sol
   (plan-covered).
 <!-- /needs -->
 <!-- needs: gpt-6-luna, codex-runner -->
 - Trivial batch work on trusted text (classify, extract, short summaries) →
-  `codex-runner` on gpt-6-luna. Never for code, review or verdicts.
+  `codex-runner` on gpt-6-luna.
 <!-- /needs -->
 <!-- needs: haiku-5.5 -->
 - Same trivial batch work when gpt-6-luna is not available → a subagent with
@@ -76,7 +118,7 @@ Rules:
 - Deep investigation that needs session state or iteration → `researcher`.
 <!-- /needs -->
 <!-- needs: argent, ui-runner -->
-- Computer use: `ui-runner` (opus-5.5, injection robustness). Never in-thread — a view
+- Computer use → `ui-runner` (opus-5.5, injection robustness). Never in-thread — a view
   hierarchy in your context is re-read by every later turn.
 <!-- /needs -->
 - ⚠ Every model here **expands scope and fills gaps** if allowed. Complete specs;

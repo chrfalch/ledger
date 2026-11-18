@@ -48,16 +48,15 @@ test('/ledger:help says /ledger:task starts the task at once without a current l
   assert.match(line, /With no current ledger, it starts the task at once and continues in this session/);
 });
 
-test('the "New work, new task" rule promotes at once without a current ledger', () => {
-  const bullet = read('rules/10-operating-model.md').match(/\*\*New work, new task\.\*\*.*? - \*\*/)?.[0] ?? '';
-  assert.match(bullet, /Without a current ledger, it promotes the task with `bin\/cc-task-new --promote <slug>`.*Then it moves the session into the new worktree with `EnterWorktree`/);
-  assert.doesNotMatch(bullet, /that worktree\. If you/);
-});
-
-test('the "New work, new task" rule says how to promote without the ledger mod', () => {
-  const bullet = read('rules/10-operating-model.md').match(/\*\*New work, new task\.\*\*.*? - \*\*/)?.[0] ?? '';
-  assert.match(bullet, /Without the ledger mod, run `bin\/cc-task-new <slug> --goal '<one paragraph>'`.*Then `bin\/cc-task-new --promote <slug>` creates the worktree and branch/);
-});
+/** The rule 10 Checkpoint gate bullet that starts with `start`, up to the next bullet or heading. */
+function checkpointBullet(start: string): string {
+  const gate = read('rules/10-operating-model.md').match(/### Checkpoint gate.*?### /)?.[0] ?? '';
+  const from = gate.indexOf(`- ${start}`);
+  if (from === -1) return '';
+  const rest = gate.slice(from + 2);
+  const end = rest.search(/ - |### /);
+  return rest.slice(0, end === -1 ? undefined : end);
+}
 
 test('no document says promotion branches from the current main branch', () => {
   for (const file of ['README.md', 'DECISIONS.md', 'docs/usage.md', 'docs/installation.md', 'rules/10-operating-model.md', 'mods/ledger/commands/go.md', 'mods/ledger/commands/task.md']) {
@@ -90,10 +89,10 @@ test('/ledger:task still hands over the start: line when a current ledger exists
   assert.match(task, /Reply with the `start:` line/);
 });
 
-test('the "New work, new task" rule describes both cases', () => {
-  const bullet = read('rules/10-operating-model.md').match(/\*\*New work, new task\.\*\*.*? - \*\*/)?.[0] ?? '';
-  assert.match(bullet, /Without a current ledger, .*moves the session into the new worktree with `EnterWorktree`/);
-  assert.match(bullet, /`start:` line/);
+test('the new-work rule makes work outside the ledger goal a new task', () => {
+  const bullet = checkpointBullet('Work outside the ledger');
+  assert.match(bullet, /Work outside the ledger's goal is a new task \(`\/ledger:task <what the task is>`\)/);
+  assert.match(bullet, /If unclear, ask in one line/);
 });
 
 test('/ledger:help says /ledger:task continues in this session without a current ledger', () => {
@@ -157,42 +156,49 @@ test('the Plan gate requires a parent task for two or more separately shipped pa
 test('the Plan gate makes the current task the first child task', () => {
   const gate = planGate();
   assert.match(gate, /current task already has a worktree, it becomes the first child task/);
-  assert.match(gate, /new parent task with `\/ledger:task`/);
+  assert.match(gate, /new parent task with `\/ledger:task <what the task is>`/);
   assert.match(gate, /parent task stays in the backlog, with no worktree/);
 });
 
 test('the parent task rule states both directions', () => {
-  const bullet = read('rules/10-operating-model.md').match(/\*\*Parent tasks are for big work only\.\*\*.*? - \*\*/)?.[0] ?? '';
-  assert.match(bullet, /two or more tasks that ship separately.*a parent task is required/);
-  assert.match(bullet, /Never make a parent task for small work, for a single-PR task/);
-  assert.match(bullet, /This is a hard rule, not a preference\./);
+  const bullet = checkpointBullet('**Hard rule:**');
+  assert.match(bullet, /a parent task only for work that ships as two or more separate PRs or merges/);
+  assert.match(bullet, /After each child task's review verdict or merge, update the parent ledger/);
+  assert.match(planGate(), /two or more parts that ship separately/);
 });
 
 test('a finished task ends with one multi-select question for retire and the next task', () => {
-  const bullet = read('rules/10-operating-model.md').match(/\*\*Resume from the ledger\.\*\*.*? - /)?.[0] ?? '';
-  assert.match(bullet, /If every step is done, say so and ask with the question widget whether to commit or open a PR\./);
-  assert.match(bullet, /question widget with `multiSelect` on/);
-  assert.match(bullet, /retire this task; retire each other finished task, one option per slug; start the next task with `\/ledger:go`/);
-  assert.match(bullet, /child task that `\/ledger:parent <parent>` names, and the option is `\/ledger:go <parent>`/);
-  assert.match(bullet, /When no child task is left, say that the parent task can be retired after its child tasks are/);
-  assert.match(bullet, /A ticked option is the operator's approval to run it/);
+  assert.match(checkpointBullet('**Resume.**'), /When every plan step is done, ask with the question widget whether to commit or open a PR\./);
+  const bullet = checkpointBullet('**End of task.**');
+  assert.match(bullet, /When the work is merged, or the operator says the task is finished, ask one `multiSelect` widget question\./);
+  assert.match(bullet, /Its options are: retire this task; one option per other finished task; start the next task with `\/ledger:go <slug>`\./);
+  assert.match(bullet, /With a parent, the next task is `\/ledger:go <parent>`\./);
+  assert.match(bullet, /With no child task left, offer to retire the parent task\./);
+  assert.match(bullet, /A ticked option is the operator's approval to run it\./);
+});
+
+test('the end-of-task retires leave the worktree only when needed and never retire an unmerged branch', () => {
+  const bullet = checkpointBullet('**End of task.**');
+  assert.match(bullet, /`ExitWorktree` with `keep`, if a retire removes this session's worktree\./);
+  assert.match(bullet, /Do not retire a branch with no merged PR; say what is missing\./);
 });
 
 test('ticked options run in a fixed order: dry runs, leave the worktree, retires, then /ledger:go', () => {
-  const bullet = read('rules/10-operating-model.md').match(/\*\*Resume from the ledger\.\*\*.*? - /)?.[0] ?? '';
-  const order = ['--dry-run', '`ExitWorktree` with `keep`', 'Retire this task, then each other ticked task', '`/ledger:go` last'].map(step => bullet.indexOf(step));
+  const bullet = checkpointBullet('**End of task.**');
+  const order = ['1. Run `/ledger:retire <slug> --dry-run`', '`ExitWorktree` with `keep`', '3. Retire each ticked task, this task first.', '4. Start the next task.'].map(step => bullet.indexOf(step));
   assert.ok(order.every(at => at >= 0), `missing step: ${JSON.stringify(order)}`);
   assert.deepEqual([...order].sort((a, b) => a - b), order);
 });
 
 test('the agent retires without --force after a dry run', () => {
-  const archiving = read('rules/10-operating-model.md').match(/### Archiving a ledger.*?To find an archived ledger later/)?.[0] ?? '';
-  assert.match(archiving, /only after the operator ticked it in the end-of-task question/);
+  const archiving = read('rules/10-operating-model.md').match(/### Archiving a ledger.*?### /)?.[0] ?? '';
   assert.match(archiving, /Never pass `--force`/);
-  assert.match(archiving, /First run `\/ledger:retire <slug> --dry-run`/);
-  assert.match(archiving, /Ask the operator before you discard any change/);
-  assert.match(archiving, /A branch with no merged PR: do not retire it/);
-  assert.match(archiving, /retire the finished child tasks first/);
+  assert.match(archiving, /Retire a parent task only after all its child tasks are retired/);
+  const endOfTask = checkpointBullet('**End of task.**');
+  assert.match(endOfTask, /Run `\/ledger:retire <slug> --dry-run` for each; clear the problems it names/);
+  assert.doesNotMatch(endOfTask, /Retire this task, then/);
+  assert.match(endOfTask, /Ask before you discard any change/);
+  assert.match(endOfTask, /A ticked option is the operator's approval to run it/);
 });
 
 test('no rule says only the operator runs a retire', () => {
@@ -203,11 +209,16 @@ test('no rule says only the operator runs a retire', () => {
 });
 
 test('starting or resuming a task shows the operator its task tree', () => {
-  const bullet = read('rules/10-operating-model.md').match(/\*\*Resume from the ledger\.\*\*.*? - /)?.[0] ?? '';
-  assert.match(bullet, /When you start or resume a task that has a parent task or child tasks, first show the operator its task tree/);
-  assert.match(bullet, /`\/ledger:parent`/);
-  assert.match(bullet, /Mark the task this session works on/);
-  assert.match(bullet, /A task with no parent task and no child tasks has no tree; show nothing/);
+  assert.match(checkpointBullet('**Resume.**'), /If the task has a parent or children, show its tree with `\/ledger:parent <parent>`\./);
+});
+
+test('resuming continues from the ledger for go, go <slug> and a backlog task', () => {
+  const bullet = checkpointBullet('**Resume.**');
+  assert.match(bullet, /On "go" or `go <slug>`, continue from the ledger's Next step\./);
+  assert.match(bullet, /With several ledgers, "go" first asks which task\./);
+  assert.match(bullet, /`go <slug>` never asks: it enters the ledger's Location with `EnterWorktree`, unless already there\./);
+  assert.match(bullet, /Do not re-read files or rerun tests to re-establish state\./);
+  assert.match(bullet, /A backlog task has no worktree: run `\/ledger:go <slug>` yourself\./);
 });
 
 test('/ledger:help says /ledger:next names the next child task of a finished child task', () => {
