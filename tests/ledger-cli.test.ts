@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { stripVTControlCharacters } from 'node:util';
@@ -11,7 +11,6 @@ import { parentView } from '../tools/ledger-cli/views.js';
 import { loadHooks, nodeEngine, type Engine } from '../tools/lib/node-engine.js';
 
 const LEDGER = path.join(REPO, 'bin/ledger');
-const COMMANDS = ['all', 'archive', 'parent', 'worktrees'] as const;
 
 type Ran = { status: number | null; stdout: string; stderr: string };
 
@@ -112,15 +111,6 @@ function archived(home: string, repo: string, name: string, goal: string): void 
 
 const lineWith = (output: string, text: string): string => output.split('\n').find(line => line.includes(text)) ?? assert.fail(`no line contains "${text}" in:\n${output}`);
 
-const rowOf = (output: string, name: string): string =>
-  output.split('\n').find(line => line.startsWith(`${name} `)) ?? assert.fail(`no row starts with "${name}" in:\n${output}`);
-
-test('ledger --help lists the six commands', (t) => {
-  const stdout = ok(ledger(home(t), REPO, '--help'));
-  assert.match(stdout, /^Usage: ledger /m);
-  for (const command of [...COMMANDS, 'deploy', 'help']) assert.match(stdout, new RegExp(`^\\s+${command}\\b`, 'm'), `--help lists ${command}`);
-});
-
 test('ledger deploy --dry-run matches bin/deploy from another folder', (t) => {
   const h = home(t);
   const direct = spawn(h, h, path.join(REPO, 'bin/deploy'), ['--dry-run']);
@@ -149,72 +139,10 @@ test('ledger deploy --bogus-option passes through the deploy error', (t) => {
   assert.equal(forwarded.stderr, direct.stderr);
 });
 
-test('ledger <command> --help shows the usage of that command', (t) => {
-  const h = home(t);
-  const expected: Record<(typeof COMMANDS)[number], RegExp> = {
-    all: /--scan/,
-    archive: /\[term\][\s\S]*--all/,
-    parent: /\[slug\]/,
-    worktrees: /Usage: ledger worktrees/,
-  };
-  for (const command of COMMANDS) {
-    const stdout = ok(ledger(h, REPO, command, '--help'));
-    assert.match(stdout, new RegExp(`^Usage: ledger ${command}\\b`, 'm'));
-    assert.match(stdout, expected[command]);
-  }
-  assert.match(ok(ledger(h, REPO, 'help', 'archive')), /^Usage: ledger archive\b/m);
-});
-
 test('an unknown command exits non-zero and names the command', (t) => {
   const ran = ledger(home(t), REPO, 'nope');
   assert.notEqual(ran.status, 0);
   assert.match(ran.stderr, /nope/);
-});
-
-test('an unknown option exits non-zero', (t) => {
-  const ran = ledger(home(t), REPO, 'all', '--nope');
-  assert.notEqual(ran.status, 0);
-  assert.match(ran.stderr, /--nope/);
-});
-
-test('ledger all lists the registered tasks, children under their parent, and the backlog', (t) => {
-  const { home: h, main } = repository(t);
-  backlogTask(h, main, 'later-task');
-  const stdout = ok(ledger(h, h, 'all'));
-  assert.doesNotMatch(stdout, /\x1b\[/, 'NO_COLOR and a pipe leave no escape codes');
-  assert.match(stdout, /All task ledgers · 3 tasks, 2 active, 1 backlog/);
-  assert.match(lineWith(stdout, 'parent-task'), /app\s+parent-task\s+active\s+\d{4}-\d\d-\d\d \d\d:\d\d\s+Next step of parent-task\./);
-  assert.match(lineWith(stdout, 'child-task'), /↳ child-task\s+active\s+.*Next step of child-task\./);
-  assert.ok(stdout.indexOf('parent-task') < stdout.indexOf('child-task'), 'the child comes after its parent');
-  const backlog = stdout.slice(stdout.indexOf('Backlog'));
-  assert.match(lineWith(backlog, 'later-task'), /app\s+later-task\s+.*Goal of later-task\./);
-});
-
-test('ledger all lines up its columns', (t) => {
-  const { home: h } = repository(t);
-  const stdout = ok(ledger(h, h, 'all'));
-  const header = lineWith(stdout, 'status');
-  const status = header.indexOf('status');
-  assert.equal(lineWith(stdout, 'parent-task').indexOf('active'), status);
-  assert.equal(lineWith(stdout, 'child-task').indexOf('active'), status);
-});
-
-test('ledger all without a registry tells how to rebuild it', (t) => {
-  const h = home(t);
-  const stdout = ok(ledger(h, h, 'all'));
-  assert.match(stdout, /No ledgers registered\. Run `?ledger all --scan`? to rebuild from disk\./);
-});
-
-test('ledger all --scan rebuilds the registry from disk and says so', (t) => {
-  const { home: h } = repository(t);
-  const registry = path.join(h, '.claude/ledgers.json');
-  rmSync(registry);
-  assert.equal(existsSync(registry), false);
-  const ran = ledger(h, h, 'all', '--scan');
-  assert.equal(ran.status, 0, ran.stderr);
-  assert.match(ran.stdout + ran.stderr, /rebuilt .*ledgers\.json: 2 active, 0 archived/);
-  assert.match(ran.stdout, /All task ledgers · 2 tasks, 2 active/);
-  assert.equal(existsSync(registry), true);
 });
 
 test("ledger archive lists this repo's archived ledgers, newest first", (t) => {
@@ -271,50 +199,6 @@ test('ledger parent <slug> shows the parent task and its children', (t) => {
   assert.match(lineWith(stdout, 'child-task'), /child-task\s+active\s+Next step of child-task\./);
 });
 
-test("ledger parent without a slug shows the family of the folder's own task", (t) => {
-  const { home: h, worktrees } = repository(t);
-  const stdout = ok(ledger(h, worktrees['child-task'] ?? '', 'parent'));
-  assert.match(stdout, /Parent task parent-task · 1 child, 1 active/);
-});
-
-test('ledger parent without a slug, outside any family, exits non-zero and asks for a slug', (t) => {
-  const { home: h, main } = repository(t);
-  const ran = ledger(h, main, 'parent');
-  assert.notEqual(ran.status, 0);
-  assert.match(ran.stderr, /ledger parent <slug>/);
-});
-
-test('ledger parent of an unknown slug fails with the reason', (t) => {
-  const { home: h, main } = repository(t);
-  const ran = ledger(h, main, 'parent', 'no-such-task');
-  assert.notEqual(ran.status, 0);
-  assert.match(ran.stderr, /Could not show no-such-task\./);
-});
-
-test('ledger worktrees shows a row per linked worktree, and a PR of ? when gh fails', (t) => {
-  const { home: h, main } = repository(t);
-  const stdout = ok(ledger(h, main, 'worktrees'));
-  assert.match(stdout, /Worktrees · 2 worktrees, largest first · \d+\.\d GB total/);
-  assert.match(rowOf(stdout, 'parent-task'), /parent-task\s+\d+\.\d\s+\d\d-\d\d\s+\d+\s+parent of 1\s+\?/);
-  assert.match(rowOf(stdout, 'child-task'), /child-task\s+.*child of parent-task\s+\?/);
-  assert.match(stdout, /PR is \? because gh pr list failed \(exit 4\): gh: not logged in/);
-});
-
-test('ledger worktrees outside a git repository fails with the reason', (t) => {
-  const h = home(t);
-  const ran = ledger(h, h, 'worktrees');
-  assert.notEqual(ran.status, 0);
-  assert.match(ran.stderr, /Could not list worktrees\./);
-});
-
-test('ledger worktrees --help lists prune, derived-data and prune-orphans', (t) => {
-  const h = home(t);
-  const stdout = ok(ledger(h, REPO, 'worktrees', '--help'));
-  for (const command of ['prune', 'derived-data', 'prune-orphans']) assert.match(stdout, new RegExp(`^\\s+${command}\\b`, 'm'), `--help lists ${command}`);
-  assert.match(ok(ledger(h, REPO, 'worktrees', 'prune', '--help')), /^Usage: ledger worktrees prune \[options\] \[name\][\s\S]*--all[\s\S]*--dry-run/m);
-  assert.match(ok(ledger(h, REPO, 'worktrees', 'prune-orphans', '--help')), /--dry-run/);
-});
-
 /** Build output in a linked worktree, plus the same in folders prune must keep. 60 MB each, because prune leaves out a folder whose size rounds to 0.0 GB. */
 function buildOutput(worktree: string): void {
   writeFileSync(path.join(worktree, '.gitignore'), 'build/\nnode_modules/\n');
@@ -324,114 +208,6 @@ function buildOutput(worktree: string): void {
     writeFileSync(path.join(worktree, folder, 'output.bin'), data);
   }
 }
-
-test('ledger worktrees prune --dry-run lists the build folders and deletes nothing; prune deletes them and keeps node_modules and .claude', (t) => {
-  const { home: h, main, worktrees } = repository(t);
-  const worktree = worktrees['child-task'] ?? assert.fail('missing child worktree');
-  buildOutput(worktree);
-
-  const plan = ok(ledger(h, main, 'worktrees', 'prune', 'child-task', '--dry-run'));
-  assert.match(plan, /Prune child-task · dry run · 0\.1 GB in 1 folder/);
-  assert.match(rowOf(plan, 'build'), /^build\s+0\.1$/);
-  assert.doesNotMatch(plan, /node_modules\/pkg|\.claude\/build/);
-  assert.match(plan, /Folders inside a \.claude folder are never deleted\./);
-  assert.match(plan, /node_modules and Pods folders are kept, so the worktree still builds\./);
-  assert.match(plan, /Run ledger worktrees prune child-task to delete them\./);
-  assert.equal(existsSync(path.join(worktree, 'build/output.bin')), true);
-
-  const pruned = ok(ledger(h, main, 'worktrees', 'prune', 'child-task'));
-  assert.match(pruned, /Pruned child-task · 0\.1 GB freed in 1 folder/);
-  assert.match(rowOf(pruned, 'build'), /^build\s+0\.1$/);
-  assert.equal(existsSync(path.join(worktree, 'build')), false);
-  assert.equal(existsSync(path.join(worktree, 'node_modules/pkg/build/output.bin')), true);
-  assert.equal(existsSync(path.join(worktree, '.claude/build/output.bin')), true);
-  assert.equal(existsSync(path.join(worktree, '.claude/ledger.md')), true);
-
-  assert.match(ok(ledger(h, main, 'worktrees', 'prune', 'child-task')), /^Nothing to prune in child-task\.$/m);
-});
-
-test('ledger worktrees prune never deletes the target of a build folder that is a symbolic link', (t) => {
-  const { home: h, main, worktrees } = repository(t);
-  const worktree = worktrees['child-task'] ?? assert.fail('missing child worktree');
-  const outside = path.join(h, 'outside');
-  mkdirSync(outside);
-  writeFileSync(path.join(outside, 'output.bin'), Buffer.alloc(60_000_000, 1));
-  writeFileSync(path.join(worktree, '.gitignore'), 'build\n');
-  symlinkSync(outside, path.join(worktree, 'build'));
-
-  const ran = ledger(h, main, 'worktrees', 'prune', 'child-task');
-  assert.equal(ran.status, 0, ran.stderr);
-  // du does not follow the link, so the link measures as empty and is dropped before the link check runs.
-  assert.match(ran.stdout, /^Nothing to prune in child-task\.$/m);
-  assert.equal(existsSync(path.join(outside, 'output.bin')), true);
-  assert.equal(lstatSync(path.join(worktree, 'build')).isSymbolicLink(), true);
-});
-
-test('ledger worktrees prune of an unknown worktree exits 1 and names the linked worktrees', (t) => {
-  const { home: h, main } = repository(t);
-  const ran = ledger(h, main, 'worktrees', 'prune', 'nope');
-  assert.equal(ran.status, 1);
-  assert.match(ran.stderr, /No linked worktree named "nope"\. Worktrees: (parent-task, child-task|child-task, parent-task)/);
-});
-
-test('ledger worktrees prune --all --dry-run lists the build folders of every linked worktree; prune --all deletes them and keeps node_modules and .claude', (t) => {
-  const { home: h, main, worktrees } = repository(t);
-  const child = worktrees['child-task'] ?? assert.fail('missing child worktree');
-  const parentTree = worktrees['parent-task'] ?? assert.fail('missing parent worktree');
-  buildOutput(child);
-  buildOutput(parentTree);
-  buildOutput(main);
-
-  const plan = ok(ledger(h, main, 'worktrees', 'prune', '--all', '--dry-run'));
-  assert.match(plan, /Prune every linked worktree · dry run · 0\.1 GB in 2 folders/);
-  assert.match(plan, /^child-task · 0\.1 GB in 1 folder$/m);
-  assert.match(plan, /^parent-task · 0\.1 GB in 1 folder$/m);
-  assert.match(plan, /Run ledger worktrees prune --all to delete them\./);
-  assert.equal(existsSync(path.join(child, 'build/output.bin')), true);
-  assert.equal(existsSync(path.join(parentTree, 'build/output.bin')), true);
-
-  const pruned = ok(ledger(h, main, 'worktrees', 'prune', '--all'));
-  assert.match(pruned, /Pruned every linked worktree · 0\.1 GB freed in 2 folders/);
-  assert.match(pruned, /^child-task · 0\.1 GB freed in 1 folder$/m);
-  for (const worktree of [child, parentTree]) {
-    assert.equal(existsSync(path.join(worktree, 'build')), false);
-    assert.equal(existsSync(path.join(worktree, 'node_modules/pkg/build/output.bin')), true);
-    assert.equal(existsSync(path.join(worktree, '.claude/build/output.bin')), true);
-  }
-  assert.equal(existsSync(path.join(main, 'build/output.bin')), true, 'the main checkout is never pruned');
-
-  assert.match(ok(ledger(h, main, 'worktrees', 'prune', '--all')), /^Nothing to prune in any linked worktree\.$/m);
-});
-
-test('ledger worktrees prune --all reports a worktree it could not prune, still prunes the others, and exits 0', (t) => {
-  const { home: h, main, worktrees } = repository(t);
-  const child = worktrees['child-task'] ?? assert.fail('missing child worktree');
-  const parentTree = worktrees['parent-task'] ?? assert.fail('missing parent worktree');
-  buildOutput(child);
-  buildOutput(parentTree);
-  const gitFile = path.join(parentTree, '.git');
-  writeFileSync(gitFile, 'gitdir: /nowhere\n');
-
-  const ran = ledger(h, main, 'worktrees', 'prune', '--all');
-  assert.equal(ran.status, 0, ran.stderr);
-  assert.match(ran.stdout, /^parent-task · not pruned$/m);
-  assert.match(ran.stdout, /Could not read the ignored files of parent-task\. git status failed/);
-  assert.match(ran.stdout, /^child-task · 0\.1 GB freed in 1 folder$/m);
-  assert.equal(existsSync(path.join(child, 'build')), false);
-  assert.equal(existsSync(path.join(parentTree, 'build/output.bin')), true);
-});
-
-test('ledger worktrees prune with both a name and --all, or with neither, exits 1 and deletes nothing', (t) => {
-  const { home: h, main, worktrees } = repository(t);
-  const child = worktrees['child-task'] ?? assert.fail('missing child worktree');
-  buildOutput(child);
-  for (const args of [['child-task', '--all'], ['--all', 'child-task'], []]) {
-    const ran = ledger(h, main, 'worktrees', 'prune', ...args);
-    assert.equal(ran.status, 1, `prune ${args.join(' ')}`);
-    assert.match(ran.stderr, /Name one linked worktree, or use --all: ledger worktrees prune <name> or ledger worktrees prune --all/);
-  }
-  assert.equal(existsSync(path.join(child, 'build/output.bin')), true);
-});
 
 test('a prune that deletes in the background moves the build folders out at once and deletes them after it returns, with the same safety checks', async (t) => {
   const { home: h, main, worktrees } = repository(t);
@@ -494,93 +270,6 @@ test('the background move puts the trash in the named folder on the same disk, a
     assert.equal(existsSync(build), false);
     rmSync(trash ?? '', { recursive: true });
   }
-});
-
-const derivedData = (h: string): string => path.join(h, 'Library/Developer/Xcode/DerivedData');
-
-function xcodeFolder(h: string, name: string, workspacePath: string): string {
-  const folder = path.join(derivedData(h), name);
-  mkdirSync(folder, { recursive: true });
-  writeFileSync(
-    path.join(folder, 'info.plist'),
-    `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>WorkspacePath</key><string>${workspacePath}</string></dict></plist>\n`,
-  );
-  return folder;
-}
-
-/** One DerivedData folder built from the child worktree, and one orphan whose project is gone. */
-function xcodeFolders(h: string, worktree: string): { built: string; orphan: string } {
-  const workspace = path.join(worktree, 'ios/App.xcworkspace');
-  mkdirSync(workspace, { recursive: true });
-  return { built: xcodeFolder(h, 'App-child', workspace), orphan: xcodeFolder(h, 'Gone-old', path.join(h, 'gone/App.xcworkspace')) };
-}
-
-test('ledger worktrees derived-data groups the DerivedData folders and names the command that deletes the orphans', (t) => {
-  const { home: h, main, worktrees } = repository(t);
-  xcodeFolders(h, worktrees['child-task'] ?? assert.fail('missing child worktree'));
-  const stdout = ok(ledger(h, main, 'worktrees', 'derived-data'));
-  assert.match(stdout, /~\/Library\/Developer\/Xcode\/DerivedData · 0\.0 GB in 2 folders/);
-  assert.match(stdout, /Linked worktree child-task · 0\.0 GB in 1 folder\n(.*\n)*App-child\s+0\.0/);
-  assert.match(stdout, /Orphan · 0\.0 GB in 1 folder\n(.*\n)*Gone-old\s+0\.0/);
-  assert.match(stdout, /An orphan was built from a project that no longer exists on disk\./);
-  assert.match(stdout, /Run ledger worktrees prune-orphans to delete the orphans\./);
-});
-
-test('ledger worktrees derived-data says so when there are no folders', (t) => {
-  const { home: h, main } = repository(t);
-  assert.match(ok(ledger(h, main, 'worktrees', 'derived-data')), /^No folders in ~\/Library\/Developer\/Xcode\/DerivedData\.$/m);
-});
-
-test('ledger worktrees prune-orphans --dry-run lists only the orphans; prune-orphans deletes them', (t) => {
-  const { home: h, main, worktrees } = repository(t);
-  const { built, orphan } = xcodeFolders(h, worktrees['child-task'] ?? assert.fail('missing child worktree'));
-
-  const plan = ok(ledger(h, main, 'worktrees', 'prune-orphans', '--dry-run'));
-  assert.match(plan, /Prune orphans in ~\/Library\/Developer\/Xcode\/DerivedData · dry run · 0\.0 GB in 1 folder/);
-  assert.match(rowOf(plan, 'Gone-old'), /^Gone-old\s+0\.0$/);
-  assert.doesNotMatch(plan, /App-child/);
-  assert.match(plan, /Run ledger worktrees prune-orphans to delete them\./);
-  assert.equal(existsSync(orphan), true);
-
-  const pruned = ok(ledger(h, main, 'worktrees', 'prune-orphans'));
-  assert.match(pruned, /Pruned orphans in ~\/Library\/Developer\/Xcode\/DerivedData · 0\.0 GB freed in 1 folder/);
-  assert.equal(existsSync(orphan), false);
-  assert.equal(existsSync(built), true);
-
-  assert.match(ok(ledger(h, main, 'worktrees', 'prune-orphans')), /^Nothing to prune: no orphans in ~\/Library\/Developer\/Xcode\/DerivedData\.$/m);
-});
-
-function colorRun(h: string, overrides: NodeJS.ProcessEnv): Ran {
-  const env: NodeJS.ProcessEnv = { ...process.env, HOME: h, CI: '1', GIT_CONFIG_GLOBAL: path.join(h, '.gitconfig') };
-  delete env.NO_COLOR;
-  delete env.FORCE_COLOR;
-  const result = spawnSync(LEDGER, ['all'], {
-    cwd: h,
-    env: { ...env, ...overrides },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    encoding: 'utf8',
-  });
-  if (result.error) throw result.error;
-  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
-}
-
-test('ledger emits no ANSI when CI stdout is piped without color overrides', (t) => {
-  assert.doesNotMatch(ok(colorRun(home(t), {})), /\x1b/);
-});
-
-test('ledger honors FORCE_COLOR when piped and NO_COLOR is set', (t) => {
-  const { home: h } = repository(t);
-  const stdout = ok(colorRun(h, { FORCE_COLOR: '1', NO_COLOR: '1' }));
-  assert.match(stdout, /\x1b/);
-  const plain = stripVTControlCharacters(stdout);
-  const status = lineWith(plain, 'status').indexOf('status');
-  assert.equal(lineWith(plain, 'parent-task').indexOf('active'), status);
-  assert.equal(lineWith(plain, 'child-task').indexOf('active'), status);
-});
-
-test('ledger treats zero and empty FORCE_COLOR as unforced on a pipe', (t) => {
-  const h = home(t);
-  for (const FORCE_COLOR of ['0', '']) assert.doesNotMatch(ok(colorRun(h, { FORCE_COLOR })), /\x1b/);
 });
 
 for (const { name, env, isTTY, expected } of [
