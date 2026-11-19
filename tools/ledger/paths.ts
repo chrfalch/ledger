@@ -11,8 +11,6 @@ export function ledgerPaths(home: string) {
     home,
     /** Where a rebuild looks for repos when the registry cannot name them. */
     scanRoots: [path.join(home, 'repos'), path.join(home, 'issues')],
-    /** Where Xcode keeps its build folders; bin/cc-dd-path puts a worktree's there too. */
-    derivedData: path.join(home, 'Library', 'Developer', 'Xcode', 'DerivedData'),
     /** The path as a person reads it, with HOME as ~. */
     tilde: (file: string): string => (file === home || file.startsWith(`${home}${path.sep}`) ? `~${file.slice(home.length)}` : file),
   };

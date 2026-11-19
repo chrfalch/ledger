@@ -489,6 +489,49 @@ test('session, list and go --json give each main checkout as its real path, also
   assert.deepEqual((started.marked as { parent: unknown }).parent, { slug: 'epic', main: app });
 });
 
+test("auto-prune deletes the worktree's own build folder beside the worktrees, and leaves the main checkout's", (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  const worktree = worktreeOf(app, 'epic');
+  const buildRoot = path.join(app, '.claude/worktrees/.build');
+  for (const name of ['epic', '.main']) bigFile(path.join(buildRoot, name, 'Debug-sim/Build/app.o'));
+  writeFileSync(file, finishedText({ slug: 'epic', worktree, branch: 'me/epic' }));
+
+  const pruned = done(json(h, app, 'auto-prune', file));
+  assert.equal(pruned.outcome, 'pruned');
+  assert.deepEqual((pruned.folders as { path: string }[]).map(({ path: folder }) => folder), [path.join(buildRoot, 'epic')]);
+  assert.equal(existsSync(path.join(buildRoot, 'epic')), false);
+  assert.ok(existsSync(path.join(buildRoot, '.main/Debug-sim/Build/app.o')));
+});
+
+test('auto-prune deletes no build folder, and says so, when .claude/worktrees/.build is a symbolic link', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  const target = path.join(h, 'elsewhere');
+  bigFile(path.join(target, 'epic/Debug-sim/Build/app.o'));
+  symlinkSync(target, path.join(app, '.claude/worktrees/.build'));
+  writeFileSync(file, finishedText({ slug: 'epic', worktree: worktreeOf(app, 'epic'), branch: 'me/epic' }));
+
+  const pruned = done(json(h, app, 'auto-prune', file));
+  assert.ok(existsSync(path.join(target, 'epic/Debug-sim/Build/app.o')));
+  assert.match(String(pruned.message), /not deleted/);
+  assert.ok((pruned.failures as string[]).some((line) => line.includes('is a symbolic link')), JSON.stringify(pruned));
+});
+
+test('auto-prune keeps the build folder of a worktree whose name another worktree shares regardless of case, and says so', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/other', path.join(h, 'elsewhere/EPIC'), 'main');
+  const object = path.join(app, '.claude/worktrees/.build/epic/Debug-sim/Build/app.o');
+  bigFile(object);
+  writeFileSync(file, finishedText({ slug: 'epic', worktree: worktreeOf(app, 'epic'), branch: 'me/epic' }));
+
+  const pruned = done(json(h, app, 'auto-prune', file));
+  assert.ok(existsSync(object));
+  assert.match(String(pruned.message), /not deleted/);
+  assert.ok((pruned.failures as string[]).some((line) => line.includes('EPIC')), JSON.stringify(pruned));
+});
+
 test('auto-prune deletes all the build folders of a worktree with one background rm', async (t) => {
   const { h, app } = setup(t);
   const file = worktreeTask(h, app, { slug: 'epic' });

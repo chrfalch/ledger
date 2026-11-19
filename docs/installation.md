@@ -190,9 +190,9 @@ commands:
 
 `/ledger:worktrees prune <name>` deletes the build folders of one worktree.
 These are ignored folders such as `build` and `.expo-prebuild`, and the
-worktree's Xcode build folders from `bin/cc-dd-path`. Empty folders are left
+worktree's Xcode build folder from `bin/cc-dd-path`. Empty folders are left
 out. Add `--dry-run` to only list them and their sizes. The command never
-deletes the worktree itself or anything in `.claude`. It also keeps `node_modules` and
+deletes the worktree itself or anything in its `.claude`. It also keeps `node_modules` and
 `Pods`, so the worktree still builds without a new install.
 
 Deploy installs the mod through the `claude` CLI, at user scope:

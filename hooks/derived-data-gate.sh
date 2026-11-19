@@ -64,26 +64,51 @@ if [ -z "$root" ]; then
   exit 0
 fi
 
-hash=$(printf '%s' "$root" | shasum | cut -c1-6)
-prefix="$HOME/Library/Developer/Xcode/DerivedData/cc-$(basename "$root")-$hash-"
+# The folder bin/cc-dd-path names for the checkout at $root; keep the two in step.
+common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)
+main=$(cd "$(dirname "$common")" && pwd -P)
+if [ "$(git -C "$root" rev-parse --path-format=absolute --git-dir)" = "$common" ]; then
+  name=.main
+else
+  name=$(basename "$root")
+fi
+folder="$main/.claude/worktrees/.build/$name"
 
-paths=$(printf '%s' "$command" \
-  | grep -oE -- "-derivedDataPath[= ]+$value" \
-  | sed -E 's/^-derivedDataPath[= ]+//' \
-  | tr -d '"'"'"'' \
-  | sed -E "s|^~|$HOME|")
+# Each -derivedDataPath is followed by = or blanks and one single-quoted, double-quoted or bare word that
+# ends where the shell word ends. A flag in any other spelling is not read, so it is denied.
+word='("[^"]*"|'"'"'[^'"'"']*'"'"'|[^[:space:];|&()<>"'"'"'`]+)'
+end='[[:space:];|&)]'
+flags=$(( $(printf '%s\n' "$command" | grep -o -- '-derivedDataPath' | wc -l) ))
+paths=$(printf '%s\n' "$command" \
+  | grep -oE -- "-derivedDataPath(=|[[:space:]]+)$word($end|\$)" \
+  | sed -E "s/^-derivedDataPath(=|[[:space:]]+)//; s/$end\$//" \
+  | sed -E "s#^~(/|\$)#$HOME\\1#; s/^\"(.*)\"\$/\\1/; s/^'(.*)'\$/\\1/")
 
-bad=$(printf '%s\n' "$paths" | grep -v '^$' | grep -v "^$prefix")
+# A configuration is one folder name right after "$folder/", as bin/cc-dd-path accepts it. That also
+# rules out $, backticks, //, a trailing slash and .. anywhere in the path. An empty value is not read.
+bad=""
+read_paths=0
+while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  read_paths=$((read_paths + 1))
+  config=${p#"$folder/"}
+  if [ "$config" = "$p" ] || ! [[ "$config" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]]; then
+    bad="$bad$p "
+  fi
+done <<< "$paths"
+if [ "$read_paths" -ne "$flags" ]; then
+  bad="${bad}(a -derivedDataPath this hook cannot read) "
+fi
 if [ -z "$bad" ]; then
   exit 0
 fi
 
 reason=$(printf '%s\n' \
-  "Build folder is not reusable: $(printf '%s' "$bad" | tr '\n' ' ')" \
+  "Build folder is not reusable: $bad" \
   "" \
-  "Use one folder per worktree and configuration. The path must start with:" \
-  "  $prefix" \
-  "followed by the configuration, for example ${prefix}Debug-sim." \
+  "Use one folder per worktree and configuration:" \
+  "  $folder/<configuration>" \
+  "for example $folder/Debug-sim." \
   "" \
   "Write the path in full in the command, not as a shell variable such as \$D." \
   "This hook reads the command text and cannot see what a variable holds." \

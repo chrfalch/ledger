@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -24,14 +24,42 @@ function run(root: string, cwd: string, command: string, args: string[], input?:
   return spawnSync(command, args, { cwd, env: environment(root), input, encoding: 'utf8' });
 }
 
-function repository(root: string, name: string): { dir: string; buildFolder: string } {
+function ccDdPath(root: string, cwd: string, ...args: string[]) {
+  return run(root, cwd, 'bash', [CC_DD_PATH, ...args]);
+}
+
+function printedPath(root: string, cwd: string, config = 'Debug-sim'): string {
+  const result = ccDdPath(root, cwd, config);
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+/** A git repository at <root>/<name> on which cc-dd-path has not run yet. */
+function initialized(root: string, name: string): string {
   const dir = path.join(root, name);
   mkdirSync(dir);
   assert.equal(run(root, dir, 'git', ['init', '--quiet']).status, 0);
-  const result = run(root, dir, 'bash', [CC_DD_PATH, 'Debug-sim']);
-  assert.equal(result.status, 0, result.stderr);
-  return { dir, buildFolder: result.stdout.trim() };
+  return dir;
 }
+
+function repository(root: string, name: string): { dir: string; buildFolder: string } {
+  const dir = initialized(root, name);
+  return { dir, buildFolder: printedPath(root, dir) };
+}
+
+/** A linked worktree of `main` at <main>/.claude/worktrees/<name>. */
+function worktree(root: string, main: string, name: string): { dir: string; buildFolder: string } {
+  const identity = ['-c', 'user.name=test', '-c', 'user.email=test@example.com'];
+  assert.equal(run(root, main, 'git', [...identity, 'commit', '--quiet', '--allow-empty', '-m', 'first']).status, 0);
+  const dir = path.join(main, '.claude/worktrees', name);
+  const added = run(root, main, 'git', ['worktree', 'add', '--quiet', '-b', name, dir]);
+  assert.equal(added.status, 0, added.stderr);
+  return { dir, buildFolder: printedPath(root, dir) };
+}
+
+const EXCLUDE_LINE = '/.claude/worktrees/.build/';
+
+const excludeLines = (main: string): string[] => readFileSync(path.join(main, '.git/info/exclude'), 'utf8').split('\n');
 
 /** A session repository and a separate app repository, both inside one temp HOME. */
 function repositories(t: TestContext) {
@@ -61,14 +89,130 @@ function assertAllowed(stdout: string): void {
   assert.equal(stdout, '', `expected silence, got ${stdout}`);
 }
 
+test('cc-dd-path in a main checkout prints and creates <main>/.claude/worktrees/.build/.main/<configuration>', (t) => {
+  const { session } = repositories(t);
+  assert.equal(session.buildFolder, path.join(session.dir, '.claude/worktrees/.build/.main/Debug-sim'));
+  assert.ok(statSync(session.buildFolder).isDirectory());
+});
+
+test('cc-dd-path in a linked worktree names the folder after the worktree, beside the worktrees of the main checkout', (t) => {
+  const { root, session } = repositories(t);
+  const linked = worktree(root, session.dir, 'fix-login');
+  assert.equal(linked.buildFolder, path.join(session.dir, '.claude/worktrees/.build/fix-login/Debug-sim'));
+  assert.ok(statSync(linked.buildFolder).isDirectory());
+  mkdirSync(path.join(linked.dir, 'ios/App'), { recursive: true });
+  assert.equal(printedPath(root, path.join(linked.dir, 'ios/App'), 'Release-sim'), path.join(session.dir, '.claude/worktrees/.build/fix-login/Release-sim'));
+});
+
+test('cc-dd-path gives each repository its own folder', (t) => {
+  const { session, app } = repositories(t);
+  assert.equal(app.buildFolder, path.join(app.dir, '.claude/worktrees/.build/.main/Debug-sim'));
+  assert.notEqual(app.buildFolder, session.buildFolder);
+});
+
+test('cc-dd-path run only in a linked worktree hides the build folders from git through the shared info/exclude, and adds the line only once', (t) => {
+  const { root } = repositories(t);
+  const main = initialized(root, 'fresh');
+  const linked = worktree(root, main, 'fix-login');
+  writeFileSync(path.join(printedPath(root, linked.dir, 'Release-sim'), 'info.plist'), '');
+  assert.equal(excludeLines(main).filter((line) => line === EXCLUDE_LINE).length, 1);
+  for (const checkout of [main, linked.dir]) {
+    const status = run(root, checkout, 'git', ['status', '--porcelain', '--untracked-files=all']);
+    assert.doesNotMatch(status.stdout, /\.build/);
+  }
+});
+
+test('cc-dd-path creates info/exclude when it is missing, and keeps the last line of one without a final newline', (t) => {
+  const { root, session, app } = repositories(t);
+  rmSync(path.join(session.dir, '.git/info'), { recursive: true, force: true });
+  printedPath(root, session.dir);
+  assert.deepEqual(excludeLines(session.dir), [EXCLUDE_LINE, '']);
+  writeFileSync(path.join(app.dir, '.git/info/exclude'), 'build/');
+  printedPath(root, app.dir);
+  assert.deepEqual(excludeLines(app.dir), ['build/', EXCLUDE_LINE, '']);
+});
+
+test('cc-dd-path without a configuration prints its usage and exits 1', (t) => {
+  const { root, session } = repositories(t);
+  const result = ccDdPath(root, session.dir);
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, 'usage: cc-dd-path <configuration>\n');
+  assert.equal(result.stdout, '');
+});
+
+test('cc-dd-path refuses a configuration that is not one plain folder name, and creates nothing', (t) => {
+  const { root, session } = repositories(t);
+  const buildRoot = path.join(session.dir, '.claude/worktrees/.build');
+  for (const config of ['../sibling', '.', '..', '.hidden', 'Debug/sim', 'Debug sim', '$D']) {
+    const result = ccDdPath(root, session.dir, config);
+    assert.notEqual(result.status, 0, config);
+    assert.equal(result.stdout, '', config);
+    assert.match(result.stderr, /usage: cc-dd-path <configuration>/, config);
+  }
+  assert.deepEqual(readdirSync(buildRoot), ['.main']);
+  assert.deepEqual(readdirSync(path.join(buildRoot, '.main')), ['Debug-sim']);
+  assert.equal(printedPath(root, session.dir, 'Release_1.2-sim'), path.join(buildRoot, '.main/Release_1.2-sim'));
+});
+
 test('the session build folder is allowed', (t) => {
   const { root, session } = repositories(t);
   assertAllowed(gate(root, session.dir, `xcodebuild -derivedDataPath ${session.buildFolder}`));
 });
 
-test('a build folder elsewhere is denied', (t) => {
+test('a build folder elsewhere is denied, and the reason names the folder to use', (t) => {
   const { root, session } = repositories(t);
-  assertDenied(gate(root, session.dir, 'xcodebuild -derivedDataPath /tmp/x'));
+  const reason = assertDenied(gate(root, session.dir, 'xcodebuild -derivedDataPath /tmp/x'));
+  const own = path.join(session.dir, '.claude/worktrees/.build/.main');
+  assert.ok(reason.includes(`${own}/<configuration>`), reason);
+  assert.ok(reason.includes(`${own}/Debug-sim`), reason);
+});
+
+test('a build folder in Xcode DerivedData is denied', (t) => {
+  const { root, session } = repositories(t);
+  const old = 'Library/Developer/Xcode/DerivedData/cc-session-123abc-Debug-sim';
+  assertDenied(gate(root, session.dir, `xcodebuild -derivedDataPath ${path.join(root, old)}`));
+  assertDenied(gate(root, session.dir, `xcodebuild -derivedDataPath ~/${old}`));
+});
+
+test('a linked worktree build folder is allowed in that worktree, and the main checkout folder is denied there', (t) => {
+  const { root, session } = repositories(t);
+  const linked = worktree(root, session.dir, 'fix-login');
+  assertAllowed(gate(root, linked.dir, `xcodebuild -derivedDataPath ${linked.buildFolder}`));
+  const reason = assertDenied(gate(root, linked.dir, `xcodebuild -derivedDataPath ${session.buildFolder}`));
+  assert.ok(reason.includes(path.join(session.dir, '.claude/worktrees/.build/fix-login/Debug-sim')), reason);
+  assertDenied(gate(root, session.dir, `xcodebuild -derivedDataPath ${linked.buildFolder}`));
+});
+
+test('only a configuration folder inside the own build folder is allowed', (t) => {
+  const { root, session } = repositories(t);
+  const own = path.dirname(session.buildFolder);
+  assertAllowed(gate(root, session.dir, `xcodebuild -derivedDataPath ${own}/Release-device`));
+  const others = [own, `${own}/`, `${own}/../fix-login/Debug-sim`, `${own}/..`, `${own}-other/Debug-sim`, path.join(path.dirname(own), 'fix-login/Debug-sim')];
+  for (const other of others) assertDenied(gate(root, session.dir, `xcodebuild -derivedDataPath ${other}`));
+});
+
+test('a build folder that is not one plain configuration folder in the own build folder is denied', (t) => {
+  const { root, session } = repositories(t);
+  const own = path.dirname(session.buildFolder);
+  const others = [`${own}/.`, `${own}/.hidden`, `${own}/Debug-sim/Build`, `${own}//Debug-sim`, `${session.buildFolder}/`, `${own}/$CONFIG`, `${own}/\`echo Debug-sim\``, `'${own}/$CONFIG'`];
+  for (const other of others) assertDenied(gate(root, session.dir, `xcodebuild -derivedDataPath ${other}`));
+});
+
+test('every -derivedDataPath in the command is checked, in each spelling of the flag and its value', (t) => {
+  const { root, session } = repositories(t);
+  const own = session.buildFolder;
+  const allowed = [`-derivedDataPath=${own}`, `-derivedDataPath="${own}"`, `-derivedDataPath='${own}'`, `-derivedDataPath\t${own}`, `-derivedDataPath ${own} -derivedDataPath ${own}`, `-derivedDataPath ${own}; echo done`];
+  for (const flags of allowed) assertAllowed(gate(root, session.dir, `xcodebuild ${flags}`));
+  const denied = [
+    `-derivedDataPath ${own} -derivedDataPath /tmp/x`,
+    `-derivedDataPath=${own} -derivedDataPath=/tmp/x`,
+    `-derivedDataPath ${own} -derivedDataPath='/tmp/x'`,
+    `-derivedDataPath ${own} -derivedDataPath="/tmp/x"`,
+    `-derivedDataPath\t/tmp/x`,
+    `-derivedDataPath ${own} "-derivedDataPath" /tmp/x`,
+    `-derivedDataPath ${own} '-derivedDataPath' /tmp/x`,
+  ];
+  for (const flags of denied) assertDenied(gate(root, session.dir, `xcodebuild ${flags}`));
 });
 
 test('the app build folder is allowed when -workspace names the app', (t) => {

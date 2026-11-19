@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -24,7 +23,7 @@ const read = (file: string): string => readFileSync(file, 'utf8');
 const worktreeOf = (main: string, slug: string): string => path.join(main, '.claude/worktrees', slug);
 const archiveFolder = (h: string, main: string): string => path.join(h, '.claude/ledger-archive', path.basename(main));
 const archiveList = (h: string, main: string): string[] => (existsSync(archiveFolder(h, main)) ? readdirSync(archiveFolder(h, main)).sort() : []);
-const derivedData = (h: string): string => path.join(h, 'Library/Developer/Xcode/DerivedData');
+const buildRoot = (main: string): string => path.join(realpathSync(main), '.claude/worktrees/.build');
 type RegistryEntry = { slug: string; status: string; archivePath?: string };
 const registry = (h: string): RegistryEntry[] => JSON.parse(read(path.join(h, '.claude/ledgers.json')));
 
@@ -764,52 +763,79 @@ test('ledger retire refuses the main checkout', (t) => {
   assert.deepEqual(archiveList(h, app), []);
 });
 
-test('buildFolderPrefix is cc-<folder>-<first 6 hex of sha1 of the real top folder>- under ~/Library/Developer/Xcode/DerivedData', async (t) => {
+test('ownXcodeFolders is the folder <main>/.claude/worktrees/.build/<worktree name> once it exists', async (t) => {
   // Imported here, so the other tests of this file run while the module is missing.
-  const { buildFolderPrefix } = await import('../tools/ledger/worktrees.js');
+  const { ownXcodeFolders } = await import('../tools/ledger/worktrees.js');
   const { h, app } = setup(t);
+  asCli(t, h);
   worktreeTask(h, app, { slug: 'fix-login' });
-  const worktree = realpathSync(worktreeOf(app, 'fix-login'));
-  const hash = createHash('sha1').update(worktree).digest('hex').slice(0, 6);
-  const expected = path.join(derivedData(h), `cc-fix-login-${hash}-`);
-  assert.equal(buildFolderPrefix(ledgerPaths(h), path.join(worktree, '.claude')), expected);
+  const inside = path.join(worktreeOf(app, 'fix-login'), '.claude');
+  assert.deepEqual(ownXcodeFolders(inside), []);
+  mkdirSync(path.join(buildRoot(app), 'fix-login/Debug-sim'), { recursive: true });
+  assert.deepEqual(ownXcodeFolders(inside), [path.join(buildRoot(app), 'fix-login')]);
 });
 
-test('the build folder bin/cc-dd-path prints for a worktree has its buildFolderPrefix, and ledger retire deletes it', async (t) => {
-  const { buildFolderPrefix } = await import('../tools/ledger/worktrees.js');
+test('ledger retire deletes the whole build folder bin/cc-dd-path made for the worktree, and no other', (t) => {
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'fix-login' });
+  worktreeTask(h, app, { slug: 'fix-login-2' });
   const worktree = worktreeOf(app, 'fix-login');
-  const printed = ok(spawn(h, worktree, path.join(REPO, 'bin/cc-dd-path'), ['Debug-sim'])).trim();
-  const prefix = buildFolderPrefix(ledgerPaths(h), path.join(worktree, '.claude'));
-  assert.ok(prefix !== undefined && printed.startsWith(prefix), `${printed} starts with ${prefix}`);
-  assert.ok(existsSync(printed));
+  const printed = ['Debug-sim', 'Release-sim'].map((config) => ok(spawn(h, worktree, path.join(REPO, 'bin/cc-dd-path'), [config])).trim());
+  assert.deepEqual(printed, [path.join(buildRoot(app), 'fix-login/Debug-sim'), path.join(buildRoot(app), 'fix-login/Release-sim')]);
+  const kept = [ok(spawn(h, worktreeOf(app, 'fix-login-2'), path.join(REPO, 'bin/cc-dd-path'), ['Debug-sim'])).trim(), ok(spawn(h, app, path.join(REPO, 'bin/cc-dd-path'), ['Debug-sim'])).trim()];
 
   ok(ledger(h, app, 'retire', 'fix-login'));
-  assert.equal(existsSync(printed), false);
+  assert.equal(existsSync(path.join(buildRoot(app), 'fix-login')), false);
+  for (const folder of kept) assert.ok(existsSync(folder), folder);
 });
 
-test("ledger retire moves the worktree's own build folders to a trash folder and deletes them without waiting", (t) => {
+test('ledger retire deletes no build folder, and warns, when .claude/worktrees/.build or a folder above it is a symbolic link', (t) => {
+  for (const linked of ['.claude', '.claude/worktrees', '.claude/worktrees/.build']) {
+    const { h, app } = setup(t);
+    const target = path.join(h, 'elsewhere', linked);
+    mkdirSync(target, { recursive: true });
+    mkdirSync(path.dirname(path.join(app, linked)), { recursive: true });
+    symlinkSync(target, path.join(app, linked));
+    worktreeTask(h, app, { slug: 'fix-login' });
+    const object = path.join(app, '.claude/worktrees/.build/fix-login/Debug-sim/app.o');
+    mkdirSync(path.dirname(object), { recursive: true });
+    writeFileSync(object, 'object');
+    const ran = ledger(h, app, 'retire', 'fix-login');
+    assert.match(ran.stdout + ran.stderr, /is a symbolic link/, linked);
+    assert.ok(existsSync(object), linked);
+  }
+});
+
+test('ledger retire keeps the build folder of a worktree whose name another worktree shares regardless of case, and warns', (t) => {
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'fix-login' });
-  const worktree = realpathSync(worktreeOf(app, 'fix-login'));
-  const hash = createHash('sha1').update(worktree).digest('hex').slice(0, 6);
-  const own = path.join(derivedData(h), `cc-fix-login-${hash}-Debug-sim`);
-  const other = path.join(derivedData(h), 'cc-fix-login-000000-Debug-sim');
+  git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/other', path.join(h, 'elsewhere/Fix-Login'), 'main');
+  const folder = path.join(buildRoot(app), 'fix-login/Debug-sim');
+  mkdirSync(folder, { recursive: true });
+  const ran = ledger(h, app, 'retire', 'fix-login');
+  assert.match(ran.stdout + ran.stderr, /Fix-Login/);
+  assert.ok(existsSync(folder));
+});
+
+test("ledger retire moves the worktree's own build folder to a trash folder and deletes it without waiting", (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const own = path.join(buildRoot(app), 'fix-login');
+  const other = path.join(buildRoot(app), '.main');
   for (const folder of [own, other]) {
-    mkdirSync(path.join(folder, 'Build'), { recursive: true });
-    writeFileSync(path.join(folder, 'Build/app.o'), 'object');
+    mkdirSync(path.join(folder, 'Debug-sim/Build'), { recursive: true });
+    writeFileSync(path.join(folder, 'Debug-sim/Build/app.o'), 'object');
   }
-  // An rm that takes 8 s on anything in DerivedData, so a delete in the foreground would hold retire up.
-  writeFileSync(path.join(h, 'stub-bin/rm'), '#!/bin/sh\ncase "$*" in *Library/Developer/Xcode/DerivedData/*) sleep 8 ;; esac\nexec /bin/rm "$@"\n');
+  // An rm that takes 8 s on anything in the build folders, so a delete in the foreground would hold retire up.
+  writeFileSync(path.join(h, 'stub-bin/rm'), '#!/bin/sh\ncase "$*" in */.claude/worktrees/.build/*) sleep 8 ;; esac\nexec /bin/rm "$@"\n');
   chmodSync(path.join(h, 'stub-bin/rm'), 0o755);
   const started = Date.now();
   const stdout = ok(ledger(h, app, 'retire', 'fix-login'));
   assert.ok(Date.now() - started < 6000, 'retire does not wait for the delete');
-  assert.match(stdout, new RegExp(`deleted +${own.replaceAll('/', '\\/')}`));
+  assert.match(stdout, new RegExp(`deleted +${own.replaceAll('/', '\\/').replaceAll('.', '\\.')}$`, 'm'));
   assert.equal(existsSync(own), false);
   assert.ok(existsSync(other));
-  assert.ok(readdirSync(derivedData(h)).some((name) => name.startsWith('.cc-trash-')), 'the folder waits in a trash folder');
+  assert.ok(readdirSync(buildRoot(app)).some((name) => name.startsWith('.cc-trash-')), 'the folder waits in a trash folder');
 });
 
 test('ledger retire never takes an archive <name>.md that is a symbolic link to the live ledger for a copy: it writes a real one', (t) => {

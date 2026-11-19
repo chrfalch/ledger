@@ -8,7 +8,14 @@ pure cost. Measured on one machine on 2026-10-08: three such folders held 17.4 G
 and the scratchpad root held 23 GB.
 
 - Get the folder with `bin/cc-dd-path <configuration>` from the ledger repo.
-  It prints one fixed path and creates it.
+  It prints one fixed path and creates it:
+  `<main checkout>/.claude/worktrees/.build/<worktree>/<configuration>`.
+  `<worktree>` is the worktree's folder name. In the main checkout it is `.main`.
+- The folder sits in `.claude/worktrees/` beside the linked worktrees, outside each
+  of them. Metro, Jest, editor file watchers and Spotlight ignore `.gitignore`, so
+  they would walk a build folder inside a linked worktree.
+- `cc-dd-path` hides the folder from git. It adds `/.claude/worktrees/.build/` to
+  the repo's `.git/info/exclude`.
 - Pass that path to `xcodebuild -derivedDataPath`. Use the same path for every later
   build of the same worktree and the same configuration.
 - Write the path in full in the command, not in a shell variable such as `$D`. The
@@ -18,11 +25,13 @@ and the scratchpad root held 23 GB.
   `-project`, or start the command with `cd <app> &&`.
 - Name the configuration for what changes the output: `Debug-sim`, `Release-sim`,
   `Debug-device`.
-- Never put a build folder in the session scratchpad, in `/tmp`, or in the worktree.
+- Never put a build folder in the session scratchpad, in `/tmp`, or anywhere else in
+  a worktree or the main checkout.
 - A clean build is `xcodebuild clean` in the shared folder, not a new folder.
-- `/ledger:retire <slug>` deletes the worktree's `cc-dd-path` build folders
-  after it removes the worktree.
-- Repo tooling that computes its own derived-data path is out of scope. Do not
+- `/ledger:retire <slug>` deletes the worktree's `cc-dd-path` build folder
+  after it removes the worktree. `ledger worktrees prune-orphans` deletes the
+  folders of worktrees that no longer exist.
+- Repo tooling that computes its own build folder path is out of scope. Do not
   override it.
 
 A `PreToolUse` hook denies any other `-derivedDataPath`. The deny message names the
