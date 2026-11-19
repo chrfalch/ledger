@@ -435,8 +435,8 @@ export function autoPrune({ paths }: Context, ledger: string): AutoPruneResult {
       : { ...facts, outcome: 'pruned', ...prunedOf(pruned, name) };
   const note =
     result.outcome === 'failed'
-      ? `ledger auto-prune could not prune the build folders of this worktree on ${date}, when its task was finished:\n${result.error}\nWhile this file exists, it does not try again. Run \`ledger worktrees prune ${name}\` to prune by hand.\n`
-      : `ledger auto-prune pruned the build folders of this worktree on ${date}, because its task was finished. While this file exists, it does not prune them again.\n`;
+      ? `ledger worktrees auto-prune could not prune the build folders of this worktree on ${date}, when its task was finished:\n${result.error}\nWhile this file exists, it does not try again. Run \`ledger worktrees prune ${name}\` to prune by hand.\n`
+      : `ledger worktrees auto-prune pruned the build folders of this worktree on ${date}, because its task was finished. While this file exists, it does not prune them again.\n`;
   try {
     writeAtomic(marker, note);
   } catch (error) {

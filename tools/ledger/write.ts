@@ -166,7 +166,7 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
   if (refs !== undefined && !/^\d+(?:,\d+)*$/.test(refs)) fail(`--design-refs takes LLP numbers, comma-separated, such as 3,12. "${refs}" is not.`);
   const goal = rawGoal === undefined || oneLine(rawGoal) === '' ? undefined : oneLine(rawGoal);
   if (here) return hereTask(context, slug, goal, refs);
-  if (slug === undefined) return fail('ledger task needs a slug, or --here for this worktree.');
+  if (slug === undefined) return fail('ledger task new needs a slug, or --here for this worktree.');
 
   const main = repoOf(cwd, repo === undefined ? cwd : path.resolve(cwd, repo));
   const template = readTemplate(paths, refs);
@@ -206,7 +206,7 @@ function hereTask(context: Context, given: string | undefined, goal: string | un
   if (exists(ledger)) fail(`This worktree already has a ledger: ${ledger}`);
   const branch = currentBranch(cwd);
   const slug = given ?? (branch?.split('/').at(-1) || path.basename(worktree));
-  if (!isNewSlug(slug)) fail(`${slugRule(slug)} Name it: ledger task --here <slug>`);
+  if (!isNewSlug(slug)) fail(`${slugRule(slug)} Name it: ledger task new --here <slug>`);
   const commit = commitOf(cwd, 'HEAD') ?? fail(`This worktree has no commit yet: ${worktree}`);
   const started: Started = { worktree, branch: branch ?? 'detached HEAD', base: `HEAD @ ${short(cwd, commit)}`, ledger };
   writeAtomic(ledger, fillLedger(readTemplate(paths, refs), { slug, goal, ...started, designRefs: designRefs(worktree, refs) }));
@@ -301,7 +301,7 @@ export function goTask(context: Context, slug: string, repo: string | undefined)
   let chain: Ref[] = [];
   if (task !== undefined && namedChildren(task, tasks).length > 0) {
     chain = firstToStart(tasks, { task, ref: named }) ?? [];
-    if (chain.length === 0 && task.place === 'backlog') fail(`No child task of ${slug} is left in the backlog, so there is nothing to start. ledger parent ${slug} shows its children.`);
+    if (chain.length === 0 && task.place === 'backlog') fail(`No child task of ${slug} is left in the backlog, so there is nothing to start. ledger tree show ${slug} shows its children.`);
   }
   const target = chain.at(-1) ?? named;
   const found = (chain.length === 0 ? task : liveLedger(tasks, target)) ?? refuseMissing(tasks, target);
@@ -362,7 +362,7 @@ export type ParkResult = Ref & { ledger: string; parked: ParkedMark };
 export type UnparkResult = Ref & { ledger: string; unparked: boolean; parked?: ParkedMark };
 
 export function parkTask(context: Context, name: string, reason: string): ParkResult {
-  if (oneLine(reason) === '') fail('A parked task needs a reason: ledger park <slug> --reason <text>');
+  if (oneLine(reason) === '') fail('A parked task needs a reason: ledger task park <slug> --reason <text>');
   const { task, ref } = liveTask(context, name);
   const parked = { date: today(), reason: oneLine(reason) };
   updateLedger(context, task, (text) => park(text, parkMarker(parked)));
@@ -386,13 +386,10 @@ export function unparkTask(context: Context, name: string): UnparkResult {
 export const unparkText = ({ slug, parked }: UnparkResult): string =>
   parked === undefined ? `${slug} is not parked.` : `Unparked ${slug}. It was parked on ${parked.date}${parked.reason ? `: ${parked.reason}` : ''}.`;
 
-export const PARENT_ACTIONS = ['add', 'remove', 'start', 'next'] as const;
-export type ParentAction = (typeof PARENT_ACTIONS)[number];
-
-const isParentAction = (action: string): action is ParentAction => (PARENT_ACTIONS as readonly string[]).includes(action);
+export type ParentAction = 'add' | 'remove' | 'start' | 'next';
 
 /**
- * What `ledger parent <parent> <action>` did. A start that marks nothing says why: the line is `already-marked` with
+ * What `ledger tree <action> <parent>` did. A start that marks nothing says why: the line is `already-marked` with
  * `mark`, or the child is `retired`. A next names the chain from the parent down to the child to start, empty for none.
  */
 export type ParentChange =
@@ -417,15 +414,14 @@ export function parentChangeText({ cwd, paths }: Context, change: ParentChange):
   }
 }
 
-/** `ledger parent <parent> <action> [<child>]`. */
-export function changeParent(context: Context, parentName: string, action: string, childName: string | undefined): ParentChange {
-  if (!isParentAction(action)) return fail(`"${action}" is not something ledger parent does. Use add, remove, start or next.`);
+/** `ledger tree <action> <parent> [<child>]`. */
+export function changeParent(context: Context, parentName: string, action: ParentAction, childName: string | undefined): ParentChange {
   if (action === 'next') {
-    if (childName !== undefined) fail('ledger parent <parent> next takes no child.');
+    if (childName !== undefined) fail('ledger tree next <parent> takes no child.');
     const { task, ref, tasks } = liveTask(context, parentName);
     return { action, parent: ref, chain: firstToStart(tasks, { task, ref }) ?? [] };
   }
-  if (childName === undefined) return fail(`ledger parent <parent> ${action} needs a child: ledger parent ${parentName} ${action} <child>`);
+  if (childName === undefined) return fail(`ledger tree ${action} <parent> needs a child: ledger tree ${action} ${parentName} <child>`);
   const parentRef = taskRef(context.cwd, parentName);
   const childRef = taskRef(context.cwd, childName);
   const tasks = loadTasks(context, [parentRef.main, childRef.main]);
@@ -474,7 +470,7 @@ function addChildTask(context: Context, tasks: Task[], parent: Linked, childRef:
   if (wasChildOf(tasks, childRef, parent.ref)) fail(`${name(childRef)} is a retired child of ${name(parent.ref)}. Give the new task another slug.`);
   const current = parentOf(child, childRef.main);
   if (current !== undefined && !sameTask(current, parent.ref)) {
-    fail(`${name(childRef)} already has the parent ${name(current)}. First run: ledger parent ${name(current)} remove ${name(childRef)}`);
+    fail(`${name(childRef)} already has the parent ${name(current)}. First run: ledger tree remove ${name(current)} ${name(childRef)}`);
   }
   if (ancestors(tasks, parent).some((ancestor) => sameTask(ancestor, childRef))) {
     fail(`${name(childRef)} is already a parent of ${name(parent.ref)}, or of one of its parents. Making it a child of ${name(parent.ref)} would make a cycle.`);
@@ -509,7 +505,7 @@ function removeChildTask(context: Context, tasks: Task[], parent: Linked, childR
 /** The Children mark is only a hint, so a marked line and a retired child are both left as they are. */
 function startChildTask(context: Context, tasks: Task[], parent: Linked, childRef: Ref): ParentChange {
   const name = nameFrom(context.cwd);
-  const notListed = (): never => fail(`${name(childRef)} is not listed under ## Children of ${name(parent.ref)}. Add it with: ledger parent ${name(parent.ref)} add ${name(childRef)}`);
+  const notListed = (): never => fail(`${name(childRef)} is not listed under ## Children of ${name(parent.ref)}. Add it with: ledger tree add ${name(parent.ref)} ${name(childRef)}`);
   const [line] = linesOf(parent, childRef);
   if (line === undefined) notListed();
   if (!namedChildren(parent.task, tasks).includes(line)) fail(`${name(childRef)} names no task: its line under ## Children of ${name(parent.ref)} is a note, not a child.`);

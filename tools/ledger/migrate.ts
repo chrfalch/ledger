@@ -50,7 +50,7 @@ const joined = (parts: string[]): string => (parts.length < 2 ? parts.join('') :
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /**
- * `ledger migrate --to <storage> [--remove-source] [--dry-run]`: copies the backlog ledgers, the archive copies with their
+ * `ledger store migrate --to <storage> [--remove-source] [--dry-run]`: copies the backlog ledgers, the archive copies with their
  * evidence, and the registry from the other storage, reads every copy back, and only then switches the setting and, with
  * `removeSource`, removes what was copied. Exits 1 with nothing changed when the target has a name to copy, and when a
  * copy fails or reads back different: then it removes every copy it made first. Prints one line per step to `line`.
@@ -58,7 +58,7 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
  */
 export function migrateStorage(paths: LedgerPaths, to: Storage, options: MigrateOptions, line: (text: string) => void, open: OpenStore = openStore): void {
   // One side is always the SQLite storage, and a dry run must refuse where the real run would.
-  if (loadSqlite() === undefined) fail('ledger migrate needs a Node version with node:sqlite: 22.13 or later, and 23.4 or later on Node 23.');
+  if (loadSqlite() === undefined) fail('ledger store migrate needs a Node version with node:sqlite: 22.13 or later, and 23.4 or later on Node 23.');
   const from: Storage = to === 'file' ? 'sqlite' : 'file';
   const setting = readStorage(paths.home);
   const opened: LedgerStore[] = [];
@@ -100,7 +100,7 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
       ...archive.filter(({ repo, name }) => target.archive.nameTaken(repo, name)).map(conflict('archive', target.archive)),
     ];
     if (conflicts.length > 0) {
-      const summary = `ledger migrate stopped, and nothing changed: the ${STORAGE_NAME[to]} already has ${plural(conflicts.length, 'name')} to copy. A ledger with identical text counts too.`;
+      const summary = `ledger store migrate stopped, and nothing changed: the ${STORAGE_NAME[to]} already has ${plural(conflicts.length, 'name')} to copy. A ledger with identical text counts too.`;
       fail([summary, ...conflicts].join('\n'));
     }
   }
@@ -136,7 +136,7 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
 
   if (writing) {
     const stopped = (reason: string, undone: string): string =>
-      `ledger migrate stopped: ${reason} ${undone} The setting stays "${setting}", and nothing was removed from the ${STORAGE_NAME[from]}.`;
+      `ledger store migrate stopped: ${reason} ${undone} The setting stays "${setting}", and nothing was removed from the ${STORAGE_NAME[from]}.`;
     copyChecked(source, target, { backlog, archive, evidenceRoot, entries: sourceEntries, mergeRegistry, targetName: STORAGE_NAME[to] }, stopped);
   }
   line(`${act('copied', 'copy')} ${plural(backlog.length, 'backlog ledger')}`);

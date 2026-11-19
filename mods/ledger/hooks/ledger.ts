@@ -67,7 +67,7 @@ export function slugExpectedMessage(args: string): string {
 /** A slug never holds whitespace, so a target with whitespace before any @ is a task description. */
 export const isDescription = (target: string): boolean => /\s/.test(target.split('@')[0] ?? '')
 
-/** A slug `ledger task` accepts for a new task. */
+/** A slug `ledger task new` accepts for a new task. */
 export const isNewSlug = (target: string): boolean => /^[a-z0-9][a-z0-9-]*$/.test(target)
 
 export const descriptionMessage = (description: string): string =>
@@ -156,7 +156,7 @@ export function startedElsewhereMessage({ slug, main, worktree, promoted, chain,
 }
 
 /**
- * What `ledger retire --dry-run` tells of a task's branch, and what stops the retire; unknown when the dry run failed or
+ * What `ledger task retire --dry-run` tells of a task's branch, and what stops the retire; unknown when the dry run failed or
  * the task has no worktree.
  */
 export type BranchFacts = { merged: boolean; openPr?: number; blockedBy: string[] } | undefined

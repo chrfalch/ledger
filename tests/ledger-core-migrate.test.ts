@@ -73,12 +73,12 @@ function populated(t: TestContext, from: Storage) {
     writeFileSync(path.join(main, '.git/info/exclude'), '.claude/\n');
     return main;
   });
-  ok(ledger(h, app, 'task', 'fix-login', '--goal', 'Users cannot log in.'));
-  ok(ledger(h, lib, 'task', 'idea', '--goal', 'An idea.'));
-  ok(ledger(h, app, 'task', 'old', '--goal', 'Old work.'));
+  ok(ledger(h, app, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.'));
+  ok(ledger(h, lib, 'task', 'new', 'idea', '--goal', 'An idea.'));
+  ok(ledger(h, app, 'task', 'new', 'old', '--goal', 'Old work.'));
   ok(ledger(h, app, 'go', 'old'));
   writeEvidence(path.join(app, '.claude/worktrees/old/.claude/evidence'));
-  ok(ledger(h, app, 'retire', 'old'));
+  ok(ledger(h, app, 'task', 'retire', 'old'));
   ok(ledger(h, lib, 'list'));
   const source = withStore(h, from, contents);
   assert.equal(source.backlog.length, 2, 'the fixture made two backlog ledgers');
@@ -117,7 +117,7 @@ for (const from of ['file', 'sqlite'] as const) {
   test(`migrate ${from} → ${to} copies every backlog ledger, archive copy with its evidence bytes, and registry entry, and switches the setting`, { skip }, (t) => {
     const { h, app, source, archived } = populated(t, from);
     const before = listed(h, app);
-    const stdout = ok(ledger(h, app, 'migrate', '--to', to));
+    const stdout = ok(ledger(h, app, 'store', 'migrate', '--to', to));
     assert.deepEqual(readSettings(h), { storage: to, editor: 'vim' });
     const target = withStore(h, to, contents);
     assert.deepEqual(target.backlog, source.backlog);
@@ -140,7 +140,7 @@ for (const from of ['file', 'sqlite'] as const) {
 
   test(`migrate ${from} → ${to} keeps the symbolic link and the folders of the evidence`, { skip }, (t) => {
     const { h, app, archived } = populated(t, from);
-    ok(ledger(h, app, 'migrate', '--to', to));
+    ok(ledger(h, app, 'store', 'migrate', '--to', to));
     const reference = path.join(h, 'reference');
     writeEvidence(reference);
     assert.equal(withStore(h, to, (store) => store.archive.evidenceState('app', archived, reference)), 'same');
@@ -153,7 +153,7 @@ for (const from of ['file', 'sqlite'] as const) {
 
   test(`migrate ${from} → ${to} copies the registry with each entry's created time, and points backlog and archive entries at the target`, { skip }, (t) => {
     const { h, app, source, archived } = populated(t, from);
-    ok(ledger(h, app, 'migrate', '--to', to));
+    ok(ledger(h, app, 'store', 'migrate', '--to', to));
     const [copied, locations] = withStore(h, to, (store) => [
       entries(store.registry.read()),
       { 'fix-login': store.backlog.location('app', 'fix-login'), idea: store.backlog.location('lib', 'idea'), old: store.archive.location('app', archived) },
@@ -169,13 +169,13 @@ for (const from of ['file', 'sqlite'] as const) {
 
   test(`migrate ${from} → ${to} without --remove-source leaves the source as it was`, { skip }, (t) => {
     const { h, app, source } = populated(t, from);
-    ok(ledger(h, app, 'migrate', '--to', to));
+    ok(ledger(h, app, 'store', 'migrate', '--to', to));
     assert.deepEqual(withStore(h, from, contents), source);
   });
 
   test(`migrate ${from} → ${to} --remove-source removes every copied ledger, archive copy and the registry from the source`, { skip }, (t) => {
     const { h, app, source } = populated(t, from);
-    const stdout = ok(ledger(h, app, 'migrate', '--to', to, '--remove-source'));
+    const stdout = ok(ledger(h, app, 'store', 'migrate', '--to', to, '--remove-source'));
     assert.deepEqual(withStore(h, from, contents), { backlog: [], archive: [], registry: undefined });
     const target = withStore(h, to, contents);
     assert.deepEqual(target.backlog, source.backlog);
@@ -193,7 +193,7 @@ for (const from of ['file', 'sqlite'] as const) {
     });
     const target = withStore(h, to, contents);
     const settings = readFileSync(settingsFile(h), 'utf8');
-    const stderr = failed(ledger(h, app, 'migrate', '--to', to));
+    const stderr = failed(ledger(h, app, 'store', 'migrate', '--to', to));
     assert.match(stderr, /app\/fix-login/);
     assert.ok(stderr.includes(`app/${archived}`), stderr);
     assert.doesNotMatch(stderr, /lib\/idea/);
@@ -206,7 +206,7 @@ for (const from of ['file', 'sqlite'] as const) {
   test(`migrate ${from} → ${to} --dry-run prints the plan and changes nothing`, { skip }, (t) => {
     const { h, app, source } = populated(t, from);
     const settings = readFileSync(settingsFile(h), 'utf8');
-    const stdout = ok(ledger(h, app, 'migrate', '--to', to, '--dry-run', '--remove-source'));
+    const stdout = ok(ledger(h, app, 'store', 'migrate', '--to', to, '--dry-run', '--remove-source'));
     assert.match(stdout, /dry run/i);
     assert.match(stdout, /2 backlog ledgers/);
     assert.match(stdout, /1 archive copy/);
@@ -219,7 +219,7 @@ for (const from of ['file', 'sqlite'] as const) {
   test(`migrate ${from} → ${to} when the setting already names ${to} copies the ledgers and says the setting is unchanged`, { skip }, (t) => {
     const { h, app, source } = populated(t, from);
     writeFileSync(settingsFile(h), JSON.stringify({ storage: to, editor: 'vim' }));
-    const stdout = ok(ledger(h, app, 'migrate', '--to', to));
+    const stdout = ok(ledger(h, app, 'store', 'migrate', '--to', to));
     assert.match(stdout, /already/);
     assert.deepEqual(readSettings(h), { storage: to, editor: 'vim' });
     assert.deepEqual(withStore(h, to, contents).backlog, source.backlog);
@@ -232,7 +232,7 @@ test('migrate merges the registry: an entry the target has stays as the target h
   const entry = (slug: string, created: string) => ({ repo: 'app', slug, path: `/repos/app/.claude/worktrees/${slug}/.claude/ledger.md`, branch: slug, status: 'active', created, updated: created });
   withStore(h, 'file', (store) => store.registry.write(JSON.stringify([entry('both', '2026-01-01T00:00:00.000Z'), entry('only-source', '2026-01-02T00:00:00.000Z')])));
   withStore(h, 'sqlite', (store) => store.registry.write(JSON.stringify([entry('both', '2025-12-31T00:00:00.000Z')])));
-  const stdout = ok(ledger(h, h, 'migrate', '--to', 'sqlite'));
+  const stdout = ok(ledger(h, h, 'store', 'migrate', '--to', 'sqlite'));
   assert.match(stdout, /1 added/);
   assert.match(stdout, /1 kept/);
   const merged = entries(withStore(h, 'sqlite', (store) => store.registry.read()));
@@ -244,14 +244,14 @@ test('migrate merges the registry: an entry the target has stays as the target h
 
 test('migrate with a --to that is neither file nor sqlite exits 1 and names both', (t) => {
   const h = home(t);
-  const stderr = failed(ledger(h, h, 'migrate', '--to', 'mysql'));
+  const stderr = failed(ledger(h, h, 'store', 'migrate', '--to', 'mysql'));
   assert.match(stderr, /file/);
   assert.match(stderr, /sqlite/);
 });
 
 test('migrate without --to exits 1', (t) => {
   const h = home(t);
-  failed(ledger(h, h, 'migrate'));
+  failed(ledger(h, h, 'store', 'migrate'));
 });
 
 type Change = { backlog?: Partial<Backlog>; archive?: Partial<Archive>; registry?: Partial<Registry> };
@@ -307,7 +307,7 @@ for (const from of ['file', 'sqlite'] as const) {
       const inner = () => (target ??= openStore({ home: h }, to));
       try {
         const message = failure(() => migrateWith(h, to, change(inner), { removeSource: true }));
-        assert.match(message, /ledger migrate stopped/);
+        assert.match(message, /ledger store migrate stopped/);
         assert.match(message, /nothing was removed/);
       } finally {
         target?.close?.();
@@ -386,7 +386,7 @@ for (const from of ['file', 'sqlite'] as const) {
       return false;
     };
     const message = failure(() => migrateWith(h, to, { archive: { nameTaken: takeName } }));
-    assert.match(message, /ledger migrate stopped/);
+    assert.match(message, /ledger store migrate stopped/);
     assert.match(message, /backlog app\/fix-login/);
     assert.equal(readFileSync(settingsFile(h), 'utf8'), settings);
     assert.deepEqual(withStore(h, from, contents), source);
@@ -434,15 +434,15 @@ for (const from of ['file', 'sqlite'] as const) {
 
 test('migrate --to sqlite --dry-run without node:sqlite exits 1, says migrate needs node:sqlite, and makes no database', { skip: cannotHideSqlite }, (t) => {
   const { h, app } = populated(t, 'file');
-  const stderr = failed(ledgerIn(withoutSqlite(h), app, 'migrate', '--to', 'sqlite', '--dry-run'));
-  assert.match(stderr, /ledger migrate needs a Node version with node:sqlite: 22\.13 or later, and 23\.4 or later on Node 23\./);
+  const stderr = failed(ledgerIn(withoutSqlite(h), app, 'store', 'migrate', '--to', 'sqlite', '--dry-run'));
+  assert.match(stderr, /ledger store migrate needs a Node version with node:sqlite: 22\.13 or later, and 23\.4 or later on Node 23\./);
   assert.equal(existsSync(sqliteFile(h)), false);
 });
 
 test('migrate --to file from SQLite storage without node:sqlite exits 1 and says migrate needs node:sqlite, not to set storage to file', { skip: cannotHideSqlite || noSqlite }, (t) => {
   const { h, app, source } = populated(t, 'sqlite');
-  const stderr = failed(ledgerIn(withoutSqlite(h), app, 'migrate', '--to', 'file'));
-  assert.match(stderr, /ledger migrate needs a Node version with node:sqlite: 22\.13 or later, and 23\.4 or later on Node 23\./);
+  const stderr = failed(ledgerIn(withoutSqlite(h), app, 'store', 'migrate', '--to', 'file'));
+  assert.match(stderr, /ledger store migrate needs a Node version with node:sqlite: 22\.13 or later, and 23\.4 or later on Node 23\./);
   assert.doesNotMatch(stderr, /set "storage"/);
   assert.deepEqual(withStore(h, 'sqlite', contents), source);
 });
@@ -462,7 +462,7 @@ test('migrate skips an archived registry entry with no archive path, counts it, 
   const h = home(t);
   writeFileSync(settingsFile(h), JSON.stringify({ storage: 'file' }));
   withStore(h, 'file', (store) => store.registry.write(JSON.stringify([entry('active'), entry('lost', { status: 'archived' })])));
-  const stdout = ok(ledger(h, h, 'migrate', '--to', 'sqlite', '--remove-source'));
+  const stdout = ok(ledger(h, h, 'store', 'migrate', '--to', 'sqlite', '--remove-source'));
   assert.match(stdout, /1 skipped/);
   assert.deepEqual(entries(withStore(h, 'sqlite', (store) => store.registry.read())).map(({ slug }) => slug), ['active']);
   assert.deepEqual(entries(withStore(h, 'file', (store) => store.registry.read())).map(({ slug }) => slug), ['lost']);
@@ -478,7 +478,7 @@ test('migrate merges a registry entry with no updated time', { skip: noSqlite },
   // Undated on both sides, so the sort compares an undated entry as either argument, whatever order it picks.
   withStore(h, 'file', (store) => store.registry.write(JSON.stringify([undated('undated'), entry('dated')])));
   withStore(h, 'sqlite', (store) => store.registry.write(JSON.stringify([undated('there')])));
-  ok(ledger(h, h, 'migrate', '--to', 'sqlite'));
+  ok(ledger(h, h, 'store', 'migrate', '--to', 'sqlite'));
   assert.deepEqual(entries(withStore(h, 'sqlite', (store) => store.registry.read())).map(({ slug }) => slug).sort(), ['dated', 'there', 'undated']);
 });
 

@@ -215,7 +215,7 @@ outlive the task move to a rule file or memory. A ledger that keeps growing
 past the limit anyway is a sign that the work is too big for one task. Split
 it into a parent task with child tasks; see [Parent tasks](#parent-tasks).
 
-In repos with `llp/`, `ledger task` writes the line `- design refs: none`.
+In repos with `llp/`, `ledger task new` writes the line `- design refs: none`.
 `/ledger:task` then picks the design documents the task touches and writes
 their numbers on that line. Without `llp/`, the ledger has no such line.
 Ledgers stay local; durable decisions go in LLP documents committed with the
@@ -338,11 +338,11 @@ removes the new worktree, keeps the backlog ledger, and exits 1. Run
 #### Switching storage
 
 A change of the setting by hand hides the ledgers in the other storage. To
-switch, run `ledger migrate` from a terminal:
+switch, run `ledger store migrate` from a terminal:
 
 ```
-ledger migrate --to sqlite --dry-run
-ledger migrate --to sqlite
+ledger store migrate --to sqlite --dry-run
+ledger store migrate --to sqlite
 ```
 
 The first command prints what it would copy and changes nothing. The second
@@ -352,7 +352,7 @@ Only then does it write `"storage": "sqlite"` to
 `~/.claude/ledger-settings.json`. The other keys in that file stay.
 
 The files stay where they are. Add `--remove-source` to remove them after the
-check. To go back to files, run `ledger migrate --to file`.
+check. To go back to files, run `ledger store migrate --to file`.
 
 When the database already has a ledger of the same name, the command lists
 each one, exits 1, and changes nothing. A ledger with identical text counts
@@ -377,7 +377,7 @@ child task with its own `/ledger:task`. Then attach each child task:
 ```
 
 The orchestrator attaches child tasks itself. It runs
-`ledger parent <parent> add <child>` in a folder inside the task's repo.
+`ledger tree add <parent> <child>` in a folder inside the task's repo.
 Retiring a task stays with you.
 
 A task becomes a parent task when its first child task is attached. There is
@@ -424,7 +424,7 @@ if the parent task has a worktree. A parent task in the backlog stays there:
 the command lists its child tasks with their status, and changes nothing.
 
 Both steps run the `ledger` command. `ledger go <name>` writes the mark and
-picks the child task to start. `ledger parent <parent> next` prints the child
+picks the child task to start. `ledger tree next <parent>` prints the child
 task that starts next.
 
 `/ledger:parent <parent>` prints the parent task, then one line per direct
@@ -488,7 +488,7 @@ Two tasks with the same slug in two repositories are two tasks. The command
 refuses a link to another repository when the path of either main checkout has
 a space or another whitespace character.
 
-To make the child task in the other repository, run `ledger task` with
+To make the child task in the other repository, run `ledger task new` with
 `--repo <path>`. It makes the backlog task as if you ran it in that repository.
 `ledger go` also takes `--repo`. `--repo` does not work with `--here` or
 `--stack`, because both build on the current worktree.
@@ -511,7 +511,7 @@ The parent session does the work of such child tasks through subagents:
 3. When a child task is done, its subagent writes `## Report` in the child
    ledger. See [Child reports](#child-reports).
 
-`/ledger:parent`, `/ledger` at session start and `ledger parent <parent> next`
+`/ledger:parent`, `/ledger` at session start and `ledger tree next <parent>`
 show such a child task as `<child> @ <main checkout>` or `<child>@<main checkout>`.
 At session start, the status of a parent or child task in another repository
 is looked up in that repository. A lookup that takes more than 3 seconds shows
@@ -539,7 +539,7 @@ the outcome, the PR link, and what the parent task must know. The template's
 hint line in angle brackets is not a report.
 
 `/ledger:parent <parent>` prints the report of each child task under its line.
-`ledger parent <parent>` does the same. With `--json`, each child
+`ledger tree show <parent>` does the same. With `--json`, each child
 task has a `report` list, which is empty when there is no report.
 
 Retiring a child task copies its report into the parent ledger, under
@@ -574,8 +574,8 @@ library is one child task.
 2. For each library, make a child task in its fork, and link it to the parent:
 
    ```
-   ledger task async-storage --repo ~/forks/async-storage --goal 'Support the new architecture.'
-   ledger parent rn-new-arch add async-storage@$HOME/forks/async-storage
+   ledger task new async-storage --repo ~/forks/async-storage --goal 'Support the new architecture.'
+   ledger tree add rn-new-arch async-storage@$HOME/forks/async-storage
    ```
 
 3. Start each child task:

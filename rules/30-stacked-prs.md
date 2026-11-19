@@ -17,6 +17,6 @@ Stacks are the orchestrator's. Implementers and reviewers never run `gh stack`.
   ledgers, three clear-point cycles.
 - One parent task per stack. Each stacked PR is a child task of it. The parent
   ledger tracks the stack order. A parent task is a ledger relation, not a
-  parent branch; `ledger parent --help` says how to make one.
+  parent branch; `ledger tree --help` says how to make one.
 - Writing for humans applies to every PR in the stack. Each description states
   in plain words what it depends on.

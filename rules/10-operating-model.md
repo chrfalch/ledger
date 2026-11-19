@@ -22,11 +22,11 @@ about *intent* → ask; about technique → resolve at raised effort.
 approved plan has two or more parts that ship separately, make the parent task
 and each child task. Then attach each child task to the parent task. Put the
 split and the order in the parent task's goal: the `--goal` text of
-`ledger task`. Do all of this before any child work starts. If the current
+`ledger task new`. Do all of this before any child work starts. If the current
 task already has a worktree, it becomes the first child task. Make a new
 parent task with `/ledger:task <what the task is>` for the parent alone, and
 attach the current task and each other part to it. The parent task stays in
-the backlog, with no worktree. `ledger parent --help` gives the commands.
+the backlog, with no worktree. `ledger tree --help` gives the commands.
 
 ### Test-first gate (red/green)
 Behavior-changing work runs red → green:

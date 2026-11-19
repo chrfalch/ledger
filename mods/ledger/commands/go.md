@@ -53,7 +53,7 @@ ledger steps below still apply.
      l=$(readlink "$f")
      case "$l" in /*) f="$l" ;; *) f="$(dirname "$f")/$l" ;; esac
    done
-   "$(cd -P "$(dirname "$f")/.." && pwd)/bin/ledger" task <slug> --goal '<goal>'
+   "$(cd -P "$(dirname "$f")/.." && pwd)/bin/ledger" task new <slug> --goal '<goal>'
    ```
 
    If new-task step 3 picked LLPs, add `--design-refs` with their numbers,
@@ -62,13 +62,13 @@ ledger steps below still apply.
 5. Run the same `bin/ledger` as `bin/ledger go <slug>`, with nothing else. It
    makes the worktree and branch. Do not move this session into the worktree:
    the next session does.
-6. If `ledger task` fails, nothing was made. Reply with its error and stop:
+6. If `ledger task new` fails, nothing was made. Reply with its error and stop:
    the session does not clear. If only `ledger go` fails, the backlog ledger
    exists, so the session still clears, and the next session tries to start
    it again. Then still do the ledger steps, and put the error in your reply.
-7. If `ledger:` is not `none` and `ledger task` printed no `noted` line, add
-   one line under that ledger's Decisions that names the new task, together
-   with the ledger steps below. A `noted` line means the script already wrote
+7. If `ledger:` is not `none` and `ledger task new` printed no `noted` line,
+   add one line under that ledger's Decisions that names the new task,
+   together with the ledger steps below. A `noted` line means the script already wrote
    that line.
 
 If `ledger:` is `none`, this session has no task ledger. Write nothing, do not

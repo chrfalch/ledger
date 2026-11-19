@@ -88,29 +88,33 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 The `ledger` command reads and changes the task ledgers from a terminal,
-without a Claude Code session. It also runs deploy. `list`, `archive`, `show`,
-`parent <slug>` and `worktrees` only read. `task`,
-`go`, `park`, `unpark`, `retire` and the `parent` actions change ledgers; each
-edit changes only the lines it names.
+without a Claude Code session. It also runs deploy. Its commands come in
+groups: `task` for tasks, `tree` for parent and child tasks, `store` for where
+the ledgers are kept, and `worktrees` for linked worktrees. `ledger go`,
+`ledger list` and `ledger show` are short for `ledger task go`,
+`ledger task list` and `ledger task show`. `task list`, `task archive`,
+`task show`, `tree show` and `worktrees` only read. `task new`, `task go`,
+`task park`, `task unpark`, `task retire` and the other `tree` commands change
+ledgers; each edit changes only the lines it names.
 
 | You type | What happens |
 |---|---|
-| `ledger list [--json]` | Lists the tasks that are not retired, in every repo it knows: active, parked and backlog. It reads the status from the ledgers on disk. |
-| `ledger archive [term] [--all]` | Lists this repo's archived ledgers, newest first. A term keeps only the ledgers that contain it, in any case. `--all` lists the archive of every repo. |
-| `ledger show <slug> [--repo <name>] [--json]` | Prints the task's backlog ledger in this repo, else its newest archive copy, `<date>-<slug>`. A full archive name, such as `2026-11-01-fix-login-2`, prints that one copy. `--repo <name>` reads another repo's ledgers; outside a repo it is required. |
-| `ledger show <slug> --evidence [<file>]` | Lists the evidence files of the task's newest archive copy, one path per line. With a file, it prints that file's bytes. |
-| `ledger parent <slug> [--json]` | Shows a parent task and the status of each child task. Use `<slug>@<path>` for a parent in the repo at `<path>`. |
-| `ledger parent <slug> add <child>` | Makes `<child>` a child task of `<slug>`. It writes `- parent:` in the child's ledger and a line under `## Children` in the parent's. A child in another repo is `<child>@<path>`. It refuses a task as its own parent, a child that has another parent, a cycle, and a retired child. |
-| `ledger parent <slug> remove <child>` | Removes the link again. A `## Children` section with no child left is removed too. |
-| `ledger parent <slug> start <child>` | Marks the child's line `(started <date>)`. Text written after the line's name stays. |
-| `ledger parent <slug> next` | Prints the chain from the parent to its first child task that is still in the backlog, such as `epic part`. It prints nothing when no such child is left. |
-| `ledger task <slug> [--goal <text>]` | Writes a backlog ledger, `~/.claude/ledger-backlog/<repo>/<slug>.md`, from `~/.claude/ledger.template.md`, and prints the `start:` line. In a worktree with a ledger, it adds a line under that ledger's `## Decisions` that names the new task. `--stack` makes the branch and worktree at once, on top of the current branch. `--repo <path>` writes the task for the repo at `<path>`. |
-| `ledger task --here [<slug>]` | Gives the current linked worktree a ledger. Without a slug, the task takes the branch name without its owner prefix. It prints no `start:` line. |
-| `ledger go <slug> [--repo <path>]` | Starts a backlog task: it makes the branch and the worktree `.claude/worktrees/<slug>`, and moves the ledger into it with the worktree, branch and base filled in. The branch starts at the ledger's `- base:` when it names one, else at the default branch. |
-| `ledger park <slug> --reason <text>` | Marks a task parked: `Parked: <date> — <reason>` becomes the first line under `## Next step`. The reason is required. |
-| `ledger unpark <slug>` | Removes the parked mark. |
-| `ledger retire [<slug>] [--dry-run] [--force]` | Retires a task. Without a slug, it retires the task of the worktree you are in. It copies the ledger to `~/.claude/ledger-archive/<repo>/<date>-<slug>.md`, and `.claude/evidence/` to the folder of the same name. Then it removes the worktree, or the backlog ledger. It marks the task `(retired <date>)` in its parent and copies its `## Report` to the parent's `## Child reports`. It deletes the branch when the branch is merged: no commits ahead of the default branch, or a merged PR that ends at HEAD. Uncommitted changes, an unmerged branch and child tasks that are not retired each need `--force`. Evidence that cannot be archived whole stops it even with `--force`: a `.claude/evidence` that is not a folder or cannot be read, a symbolic link in it that leaves it, or an archive copy whose evidence differs. `--dry-run` prints the checks and steps; it fetches origin's default branch and changes nothing else. It exits 1 when a check stops it. |
-| `ledger migrate --to <file\|sqlite> [--remove-source] [--dry-run]` | Moves the backlog ledgers, the archive with its evidence, and the registry from the other storage to the one you name. It copies everything, reads each copy back, and then sets `"storage"` in `~/.claude/ledger-settings.json`. The other storage keeps its ledgers unless you add `--remove-source`. It exits 1, with nothing changed, when the target already has a ledger of the same name. `--dry-run` prints the plan and changes nothing. |
+| `ledger task list [--json]` | Lists the tasks that are not retired, in every repo it knows: active, parked and backlog. It reads the status from the ledgers on disk. |
+| `ledger task archive [term] [--all]` | Lists this repo's archived ledgers, newest first. A term keeps only the ledgers that contain it, in any case. `--all` lists the archive of every repo. |
+| `ledger task show <slug> [--repo <name>] [--json]` | Prints the task's backlog ledger in this repo, else its newest archive copy, `<date>-<slug>`. A full archive name, such as `2026-11-01-fix-login-2`, prints that one copy. `--repo <name>` reads another repo's ledgers; outside a repo it is required. |
+| `ledger task show <slug> --evidence [<file>]` | Lists the evidence files of the task's newest archive copy, one path per line. With a file, it prints that file's bytes. |
+| `ledger tree show <slug> [--json]` | Shows a parent task and the status of each child task. Use `<slug>@<path>` for a parent in the repo at `<path>`. |
+| `ledger tree add <slug> <child>` | Makes `<child>` a child task of `<slug>`. It writes `- parent:` in the child's ledger and a line under `## Children` in the parent's. A child in another repo is `<child>@<path>`. It refuses a task as its own parent, a child that has another parent, a cycle, and a retired child. |
+| `ledger tree remove <slug> <child>` | Removes the link again. A `## Children` section with no child left is removed too. |
+| `ledger tree start <slug> <child>` | Marks the child's line `(started <date>)`. Text written after the line's name stays. |
+| `ledger tree next <slug>` | Prints the chain from the parent to its first child task that is still in the backlog, such as `epic part`. It prints nothing when no such child is left. |
+| `ledger task new <slug> [--goal <text>]` | Writes a backlog ledger, `~/.claude/ledger-backlog/<repo>/<slug>.md`, from `~/.claude/ledger.template.md`, and prints the `start:` line. In a worktree with a ledger, it adds a line under that ledger's `## Decisions` that names the new task. `--stack` makes the branch and worktree at once, on top of the current branch. `--repo <path>` writes the task for the repo at `<path>`. |
+| `ledger task new --here [<slug>]` | Gives the current linked worktree a ledger. Without a slug, the task takes the branch name without its owner prefix. It prints no `start:` line. |
+| `ledger task go <slug> [--repo <path>]` | Starts a backlog task: it makes the branch and the worktree `.claude/worktrees/<slug>`, and moves the ledger into it with the worktree, branch and base filled in. The branch starts at the ledger's `- base:` when it names one, else at the default branch. |
+| `ledger task park <slug> --reason <text>` | Marks a task parked: `Parked: <date> — <reason>` becomes the first line under `## Next step`. The reason is required. |
+| `ledger task unpark <slug>` | Removes the parked mark. |
+| `ledger task retire [<slug>] [--dry-run] [--force]` | Retires a task. Without a slug, it retires the task of the worktree you are in. It copies the ledger to `~/.claude/ledger-archive/<repo>/<date>-<slug>.md`, and `.claude/evidence/` to the folder of the same name. Then it removes the worktree, or the backlog ledger. It marks the task `(retired <date>)` in its parent and copies its `## Report` to the parent's `## Child reports`. It deletes the branch when the branch is merged: no commits ahead of the default branch, or a merged PR that ends at HEAD. Uncommitted changes, an unmerged branch and child tasks that are not retired each need `--force`. Evidence that cannot be archived whole stops it even with `--force`: a `.claude/evidence` that is not a folder or cannot be read, a symbolic link in it that leaves it, or an archive copy whose evidence differs. `--dry-run` prints the checks and steps; it fetches origin's default branch and changes nothing else. It exits 1 when a check stops it. |
+| `ledger store migrate --to <file\|sqlite> [--remove-source] [--dry-run]` | Moves the backlog ledgers, the archive with its evidence, and the registry from the other storage to the one you name. It copies everything, reads each copy back, and then sets `"storage"` in `~/.claude/ledger-settings.json`. The other storage keeps its ledgers unless you add `--remove-source`. It exits 1, with nothing changed, when the target already has a ledger of the same name. `--dry-run` prints the plan and changes nothing. |
 | `ledger worktrees` | Shows each linked worktree of this repo: size, last commit, uncommitted files, ledger and PR, largest first. |
 | `ledger worktrees prune <name>\|--all [--dry-run]` | Deletes the git-ignored build folders (`.build`, `.expo-prebuild`, `.cache`, `build`, `.DerivedData`) and the worktree's own Xcode build folder, `.claude/worktrees/.build/<name>` in the main checkout, each of 0.05 GB or more. It never deletes anything else in `.claude`, nor anything in `node_modules` or `Pods`. `--dry-run` only lists the folders. It exits 1 when a folder could not be deleted. |
 | `ledger worktrees prune-orphans [--dry-run]` | Deletes the Xcode build folders in `.claude/worktrees/.build/` whose worktree git no longer lists. It keeps `.main`, the folder of the main checkout. `--dry-run` only lists the folders. It exits 1 when a folder could not be deleted. |
@@ -134,8 +138,8 @@ JSON, or names another storage, makes every command that uses the storage
 exit 1; `ledger --help` still works, and hooks print the error and exit 0.
 The database also holds the evidence files of each archive copy. Read a ledger or its evidence with
 `ledger show`. A change of the setting by hand does not move the ledgers.
-Use `ledger migrate --to sqlite` or `ledger migrate --to file`: it copies the
-ledgers, checks the copy, and then changes the setting.
+Use `ledger store migrate --to sqlite` or `ledger store migrate --to file`: it
+copies the ledgers, checks the copy, and then changes the setting.
 
 ## Commands
 
@@ -177,7 +181,7 @@ without a prompt box, such as SDK hosts, still show them.
 | `/ledger` | Prints each task ledger's goal, current step and next step. A parent task in this repo's backlog is listed too, marked `(backlog)`, with its child tasks under it; so is that task's own parent task in the backlog. Other backlog tasks are not listed. |
 | `/ledger <name>` | Prints each ledger whose name contains `<name>`, in any case. More than one ledger can match. |
 | `/ledger:help` | Prints one line for each `/ledger` command. |
-| `/ledger:task <description>` | Starts a separate task. The agent picks a short name, writes the goal, and runs `ledger task`. The command writes a ledger with the goal filled in to the backlog, `~/.claude/ledger-backlog/<repo>/<name>.md`, with no branch or worktree yet. When no task is open, the session moves into the new worktree and continues there. The agent makes that branch and worktree at once, the same way `/ledger:go` does. When another task is open, the ledger stays in the backlog, and the reply ends with a `start:` line, `/ledger:go <name>`. Type it to clear the session and continue in the new task. Either way, you do not open a new terminal. `--stack` makes the branch and worktree at once, on top of the current branch. |
+| `/ledger:task <description>` | Starts a separate task. The agent picks a short name, writes the goal, and runs `ledger task new`. The command writes a ledger with the goal filled in to the backlog, `~/.claude/ledger-backlog/<repo>/<name>.md`, with no branch or worktree yet. When no task is open, the session moves into the new worktree and continues there. The agent makes that branch and worktree at once, the same way `/ledger:go` does. When another task is open, the ledger stays in the backlog, and the reply ends with a `start:` line, `/ledger:go <name>`. Type it to clear the session and continue in the new task. Either way, you do not open a new terminal. `--stack` makes the branch and worktree at once, on top of the current branch. |
 | `/ledger:task --here [<slug>]` | Gives the linked worktree this session is in a ledger, instead of a new worktree. Without a slug, the task takes the branch name without its owner prefix. It refuses the main checkout and a worktree that already has a ledger. The reply is the path of the new ledger. |
 | `/ledger:update` | Writes the step status, the subagent reports, the decisions and the next step to the task's ledger. After an implement-and-review cycle with work left, the reply is the clear point line. Otherwise it says only that the ledger is updated. With no ledger in the working directory, the agent creates nothing and tells you to use `/ledger:task`. |
 | `/ledger:close` | Writes the ledger the same way, then clears the session. Type `go` later to continue. It never starts a task: with no ledger in the worktree, it prints why and does nothing. |
@@ -215,7 +219,7 @@ without a prompt box, such as SDK hosts, still show them.
 | `/ledger:all` | Prints one table of every task ledger on the machine, from every repo, newest first, with its parent and next step. A status column gives each task's status: active, parked, backlog or retired. The title line counts the live tasks: active, parked and backlog. A child task follows its parent as `↳ <child>`, also when the parent is in another repo. `~/.claude/ledgers.json` names the repos to read; each run brings it in line with the ledgers on disk. |
 
 To remove a finished worktree, use `/ledger:retire <slug>` or
-`ledger retire <slug>`. It archives the ledger first, then removes the
+`ledger task retire <slug>`. It archives the ledger first, then removes the
 worktree and its Xcode build folders. For a task in the backlog, it archives
 the ledger, then deletes it from `~/.claude/ledger-backlog/<repo>/`.
 

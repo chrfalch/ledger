@@ -98,7 +98,7 @@ Both tests write only to a temporary directory.
 ## Change the ledger template
 
 `ledger.template.md` is copied to a new ledger when a task is named:
-`/ledger:task` runs `ledger task`, which writes the ledger to the backlog
+`/ledger:task` runs `ledger task new`, which writes the ledger to the backlog
 before any plan. `/ledger:go <slug>` later moves it to `.claude/ledger.md` in
 the task's new worktree. The approved plan is written into it later. Keep it
 short: the ledger has a budget of about 4k tokens, and every section you add is

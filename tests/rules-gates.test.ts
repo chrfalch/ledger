@@ -207,10 +207,10 @@ test('rule 10 sends reviews to reviewer, and astra-reviewer after it, only where
   assert.ok(!astraOnly.includes(reviews) && !astraOnly.includes(astraAfter));
 });
 
-test('rule 30 points to ledger parent --help for making a parent task', () => {
+test('rule 30 points to ledger tree --help for making a parent task', () => {
   const stacks = ruleSource('30-stacked-prs.md');
   assert.doesNotMatch(stacks, /Checkpoint gate says how/);
-  assert.match(stacks, /`ledger parent --help`/);
+  assert.match(stacks, /`ledger tree --help`/);
 });
 
 test('the ui-runner row of rule 40 needs argent', (t) => {
