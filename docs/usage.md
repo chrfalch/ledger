@@ -348,8 +348,9 @@ no flag that starts a task as a child task.
 
 The parent ledger holds the overall goal, the split into child tasks, the
 decisions that cross tasks, and the order. Each child ledger holds its own plan
-and state. After a child task's review verdict or merge, update the parent
-ledger.
+and state. You do not update the parent ledger by hand. Retiring a child task
+marks it retired there and copies its report. See
+[Child reports](#child-reports).
 
 `add` writes two ledgers and the task list:
 
