@@ -119,6 +119,19 @@ still the text it read. Otherwise it starts again, up to 20 times.
 The plugin does not keep task state. `mods/ledger/hooks/cli.ts` runs
 `bin/ledger` from this checkout and reads its `--json` output.
 
+**Clearing the session.** `/ledger:next`, `/ledger:close` and `/ledger:go` end
+a session. When one of them runs, `register.ts` arms a clear in the plugin's
+state. The agent then writes the ledger in its turn. At the end of that turn,
+the plugin clears the session. After `/ledger:next`, the new session continues
+from the ledger's next step with no typing. After `/ledger:go`, it continues in
+the other task. After `/ledger:close`, nothing starts.
+
+Only the operator may type `/ledger:next`, `/ledger:close` and `/ledger:park`
+(`TYPED_ONLY` in `register.ts`). The plugin refuses them when the agent starts
+them through the `Skill` tool. The agent may start `/ledger:go`; Claude Code
+then asks the operator for permission. A subagent may not start `/ledger:go`,
+because its turn end does not clear the session.
+
 ### Hooks
 
 `ledger hook <event>` answers four Claude Code events. `answerHook` in

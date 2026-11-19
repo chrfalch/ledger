@@ -95,3 +95,7 @@ New design goes in `llp/`, as a numbered design document such as
 `llp/0000-ledger-architecture.explainer.md`. `DECISIONS.md` stays as the history
 of past decisions; do not add new ones there. Run `npm run llp` to check the
 document headers, links and `@ref LLP` comments; `npm test` runs the same check.
+
+A change to how the system works updates
+`llp/0000-ledger-architecture.explainer.md` in the same PR. The reviewer checks
+this.
