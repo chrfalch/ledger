@@ -2,8 +2,10 @@ import { cpSync, lstatSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fail } from './failure.js';
 import { createFile, folderEntries, holdsAnything, isFolder, isReadableFile, isTaken, readText, readTimedText, sameTree, treeEntries, writeAtomic } from './files.js';
+import { withLock } from './lock.js';
 import type { LedgerPaths } from './paths.js';
 import { byCodeUnit, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
+import { pauseForTest } from './wait.js';
 
 /**
  * Ledgers as files <root>/<repo>/<name>.md. A ledger is a readable regular file, never a symbolic link; a repo is a
@@ -45,6 +47,13 @@ export function fileStore({ home }: LedgerPaths): LedgerStore {
   const backlog = collection(path.join(claude, 'ledger-backlog'));
   const archive = collection(path.join(claude, 'ledger-archive'));
   const registry = path.join(claude, 'ledgers.json');
+  const readRegistry = (): string | undefined => {
+    try {
+      return readText(registry);
+    } catch {
+      return undefined;
+    }
+  };
   const evidenceOf = (repo: string, name: string): string => path.join(archive.repoLocation(repo), name);
   const evidenceFiles = (repo: string, name: string): string[] => {
     const folder = evidenceOf(repo, name);
@@ -55,11 +64,35 @@ export function fileStore({ home }: LedgerPaths): LedgerStore {
       .map((entry) => path.relative(folder, path.join(entry.parentPath, entry.name)))
       .sort(byCodeUnit);
   };
+  /** Runs `work` on a backlog ledger and its text while holding its lock; throws when it does not exist. */
+  const withExisting = <T>(repo: string, slug: string, work: (file: string, text: string) => T): T => {
+    const file = backlog.location(repo, slug);
+    const missing = (): never => fail(`${file} does not exist.`);
+    if (!backlog.has(repo, slug)) missing();
+    return withLock(file, () => work(file, (backlog.read(repo, slug) ?? missing()).text));
+  };
   return {
     backlog: {
       ...backlog,
-      write: (repo, slug, text) => writeAtomic(backlog.location(repo, slug), text),
-      remove: (repo, slug) => rmSync(backlog.location(repo, slug)),
+      write: (repo, slug, text) => {
+        const file = backlog.location(repo, slug);
+        withLock(file, () => writeAtomic(file, text));
+      },
+      create: (repo, slug, text) => createFile(backlog.location(repo, slug), text),
+      update: (repo, slug, change) =>
+        withExisting(repo, slug, (file, current) => {
+          pauseForTest();
+          const text = change(current);
+          if (text !== undefined) writeAtomic(file, text);
+          return text !== undefined;
+        }),
+      // Under the lock, so an update that read the ledger before cannot write it back after.
+      remove: (repo, slug, expected) =>
+        withExisting(repo, slug, (file, current) => {
+          if (current !== expected) return false;
+          rmSync(file);
+          return true;
+        }),
     },
     archive: {
       ...archive,
@@ -92,14 +125,13 @@ export function fileStore({ home }: LedgerPaths): LedgerStore {
       readEvidence: (repo, name, file) => (evidenceFiles(repo, name).includes(file) ? readFileSync(path.join(evidenceOf(repo, name), file)) : undefined),
     },
     registry: {
-      read: () => {
-        try {
-          return readText(registry);
-        } catch {
-          return undefined;
-        }
-      },
-      write: (text) => writeAtomic(registry, text),
+      read: readRegistry,
+      write: (text) => withLock(registry, () => writeAtomic(registry, text)),
+      update: (change) =>
+        withLock(registry, () => {
+          const text = change(readRegistry());
+          if (text !== undefined) writeAtomic(registry, text);
+        }),
     },
   };
 }

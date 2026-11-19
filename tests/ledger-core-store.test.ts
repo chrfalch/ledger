@@ -216,7 +216,14 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
 
   test(`${name}: removing a backlog ledger that is not there throws`, { skip }, (t) => {
     const store = makeStore(t);
-    assert.throws(() => store.backlog.remove('app', 'nothing'));
+    assert.throws(() => store.backlog.remove('app', 'nothing', ''));
+  });
+
+  test(`${name}: remove keeps a backlog ledger whose text is not the text the caller read`, { skip }, (t) => {
+    const store = makeStore(t);
+    store.backlog.write('app', 'fix-login', text('fix-login'));
+    assert.equal(store.backlog.remove('app', 'fix-login', text('an older read')), false);
+    assert.equal(store.backlog.read('app', 'fix-login')?.text, text('fix-login'));
   });
 
   test(`${name}: an archive write refuses a name that is taken and keeps the first copy`, { skip }, (t) => {
@@ -243,7 +250,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     store.backlog.write('app', 'fix-login', text('fix-login'));
     store.backlog.write('app', 'keep', text('keep'));
     assert.equal(store.backlog.has('app', 'fix-login'), true);
-    store.backlog.remove('app', 'fix-login');
+    assert.equal(store.backlog.remove('app', 'fix-login', text('fix-login')), true);
     assert.equal(store.backlog.has('app', 'fix-login'), false);
     assert.equal(store.backlog.read('app', 'fix-login'), undefined);
     assert.deepEqual(store.backlog.list('app').map(({ name: slug }) => slug), ['keep']);
@@ -620,7 +627,9 @@ function recording(inner: LedgerStore): { store: LedgerStore; calls: string[] } 
       read: (repo, name) => (note('backlog.read', repo, name), inner.backlog.read(repo, name)),
       has: (repo, name) => (note('backlog.has', repo, name), inner.backlog.has(repo, name)),
       write: (repo, name, body) => (note('backlog.write', repo, name), inner.backlog.write(repo, name, body)),
-      remove: (repo, name) => (note('backlog.remove', repo, name), inner.backlog.remove(repo, name)),
+      create: (repo, name, body) => (note('backlog.create', repo, name), inner.backlog.create(repo, name, body)),
+      update: (repo, name, change) => (note('backlog.update', repo, name), inner.backlog.update(repo, name, change)),
+      remove: (repo, name, expected) => (note('backlog.remove', repo, name), inner.backlog.remove(repo, name, expected)),
     },
     archive: {
       location: (repo, name) => inner.archive.location(repo, name),
@@ -639,6 +648,7 @@ function recording(inner: LedgerStore): { store: LedgerStore; calls: string[] } 
     registry: {
       read: () => (note('registry.read'), inner.registry.read()),
       write: (body) => (note('registry.write'), inner.registry.write(body)),
+      update: (change) => (note('registry.update'), inner.registry.update(change)),
     },
   };
   return { store, calls };
@@ -658,12 +668,12 @@ test('the core reads and writes backlog ledgers and the registry through the sto
   const context: Context = { paths, cwd: app, store };
 
   createTask(context, 'fix-login', { goal: 'Users cannot log in.' });
-  includesAll(calls, ['backlog.has app fix-login', 'backlog.write app fix-login', 'registry.write']);
+  includesAll(calls, ['backlog.has app fix-login', 'backlog.create app fix-login', 'registry.update']);
   assert.match(store.backlog.read('app', 'fix-login')?.text ?? '', /Users cannot log in\./);
 
   calls.length = 0;
   parkTask(context, 'fix-login', 'waits for the API');
-  includesAll(calls, ['registry.read', 'backlog.list app', 'backlog.write app fix-login']);
+  includesAll(calls, ['registry.read', 'backlog.list app', 'backlog.update app fix-login']);
   assert.match(store.backlog.read('app', 'fix-login')?.text ?? '', /Parked: .* — waits for the API/);
 
   createTask(context, 'add-cache', { goal: 'Pages load slowly.' });

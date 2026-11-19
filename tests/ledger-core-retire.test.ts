@@ -5,7 +5,7 @@ import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, read
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { REPO, snapshot } from './helpers.js';
-import { archivedTask, backlogTask, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, ok, repository, spawn, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { archivedTask, asCli, backlogTask, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, ok, repository, spawn, worktreeTask, type Ran } from './ledger-core-fixtures.js';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
@@ -829,21 +829,11 @@ test('ledger retire never takes an archive <name>.md that is a symbolic link to 
   }
 });
 
-/** Runs git and gh in this process as the CLI runs them under the HOME `h`, with its stub gh first on PATH. */
-function asCli(t: TestContext, h: string): void {
-  const saved = { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL };
-  process.env.PATH = `${path.join(h, 'stub-bin')}${path.delimiter}${saved.PATH ?? ''}`;
-  process.env.GIT_CONFIG_GLOBAL = path.join(h, '.gitconfig');
-  t.after(() => {
-    for (const [name, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-  });
-}
-
-/** A forced retire of `slug`, planned in this process; carrying it out runs `meanwhile` right after the archive copy is written. */
-function retireWithChange(t: TestContext, h: string, app: string, slug: string, meanwhile: () => void): () => void {
+/**
+ * A forced retire of `slug`, planned in this process; carrying it out runs `meanwhile` right after the archive copy is
+ * written, or, with `beforeRemoval`, right before the store is asked to delete the backlog ledger.
+ */
+function retireWithChange(t: TestContext, h: string, app: string, slug: string, meanwhile: () => void, beforeRemoval = false): () => void {
   asCli(t, h);
   const paths = ledgerPaths(h);
   const real = fileStore(paths);
@@ -853,7 +843,14 @@ function retireWithChange(t: TestContext, h: string, app: string, slug: string, 
       ...real.archive,
       write: (...args: Parameters<typeof real.archive.write>) => {
         real.archive.write(...args);
-        meanwhile();
+        if (!beforeRemoval) meanwhile();
+      },
+    },
+    backlog: {
+      ...real.backlog,
+      remove: (...args: Parameters<typeof real.backlog.remove>) => {
+        if (beforeRemoval) meanwhile();
+        return real.backlog.remove(...args);
       },
     },
   };
@@ -897,6 +894,14 @@ test('ledger retire stops and keeps the backlog ledger when it changes after the
   const { h, app } = setup(t);
   const file = backlogTask(h, app, { slug: 'later' });
   const run = retireWithChange(t, h, app, 'later', () => writeFileSync(file, `${read(file)}- a late note\n`));
+  stopsWith(run, /^Stopped before removing the backlog ledger .*\/later\.md: the ledger .*\/later\.md changed after the archive copy .*-later\.md was written\./);
+  assert.match(read(file), /a late note/);
+});
+
+test('ledger retire keeps the backlog ledger when it changes between the check and the removal', (t) => {
+  const { h, app } = setup(t);
+  const file = backlogTask(h, app, { slug: 'later' });
+  const run = retireWithChange(t, h, app, 'later', () => writeFileSync(file, `${read(file)}- a late note\n`), true);
   stopsWith(run, /^Stopped before removing the backlog ledger .*\/later\.md: the ledger .*\/later\.md changed after the archive copy .*-later\.md was written\./);
   assert.match(read(file), /a late note/);
 });

@@ -87,16 +87,32 @@ export function ledgerText(fields: Fields): string {
   ].join('\n');
 }
 
+/** The environment of a command run against the fake HOME `home`. */
+export const commandEnv = (home: string): NodeJS.ProcessEnv => ({
+  ...process.env,
+  HOME: home,
+  NO_COLOR: '1',
+  PATH: `${path.join(home, 'stub-bin')}${path.delimiter}${process.env.PATH ?? ''}`,
+  GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'),
+});
+
+/** Runs git and gh in this process as the CLI runs them under the HOME `h`, with its stub gh first on PATH. */
+export function asCli(t: TestContext, h: string): void {
+  const saved = { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL };
+  process.env.PATH = `${path.join(h, 'stub-bin')}${path.delimiter}${saved.PATH ?? ''}`;
+  process.env.GIT_CONFIG_GLOBAL = path.join(h, '.gitconfig');
+  t.after(() => {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+}
+
 export function spawn(home: string, cwd: string, command: string, args: string[]): Ran {
   const result = spawnSync(command, args, {
     cwd,
-    env: {
-      ...process.env,
-      HOME: home,
-      NO_COLOR: '1',
-      PATH: `${path.join(home, 'stub-bin')}${path.delimiter}${process.env.PATH ?? ''}`,
-      GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'),
-    },
+    env: commandEnv(home),
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
   });

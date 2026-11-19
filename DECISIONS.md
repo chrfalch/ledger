@@ -1021,3 +1021,72 @@ file.
 
 There is no migration between the two storages. Changing the setting starts
 with an empty store; the ledgers in the other storage stay where they are.
+
+## 2026-11-19 — Ledger commands that run at the same time
+
+Two `ledger` commands could both check that a task name was free, then both
+write it. One task was lost, and both commands said they made it. The same
+happened to the registry: each command read it, rebuilt it, and wrote it
+back, so the last writer dropped the task another command had just added.
+Two `ledger parent <p> add` runs on one parent kept only one child.
+
+**The store does the check and the write as one step.** `Backlog.create`
+writes a new ledger, or returns false when the name is taken.
+`Backlog.update` and `Registry.update` take a function that gets the text as
+it is now and returns the new text. No other write can come between the read
+and the write. Callers never see a lock, so neither storage can be used
+the wrong way, and each storage keeps its own way of doing it.
+
+**Files use a lock file; SQLite uses a transaction.** The file store makes a
+new ledger with a hard link, which fails when the name is taken. An update
+holds `<file>.lock` while it reads and writes, and writes through a
+temporary file and a rename. The database runs each update in
+`BEGIN IMMEDIATE … COMMIT`, which other writers wait for, and makes a new
+ledger with `INSERT … ON CONFLICT DO NOTHING`. WAL mode is not turned on: a
+write transaction does not block readers in the default mode either, and
+WAL would add two more files next to `ledgers.db`.
+
+**The registry rebuild never runs under the lock.** A rebuild reads every
+repo with git, which can take seconds. A first version rebuilt again under
+the lock when another command had written the registry in between. With
+eight commands at once, those rebuilds ran one after the other, and the last
+commands gave up after five seconds. Now a command rebuilds, then takes the
+lock only to compare and write. If the registry is still the text it read, it
+writes its rebuild. If another command wrote it in between, it lets go,
+rebuilds from the new text, and tries again, so the other command's task is
+kept. Each failed try means another command wrote, so a command gives up,
+with a message, only after 20 tries.
+
+**A backlog ledger is deleted only while it is the text the command read.**
+`ledger go` reads the backlog ledger, makes the worktree, and then deletes
+the backlog ledger. `ledger retire` checks the ledger against its archive
+copy, and then deletes it. `Backlog.remove` takes the text the command read,
+and deletes the ledger only if it is still that text, under the same lock or
+transaction as an update. If it changed, `ledger retire` stops, as it does
+for a change it finds before. `ledger go` removes the new worktree and
+branch, keeps the backlog ledger, and says to run it again. Keeping both
+copies would leave one task twice, and with SQLite storage no command could
+delete the backlog copy.
+
+**A wait ends after five seconds, with a message.** Both storages wait the
+same time: the lock file with short sleeps, the database with
+`busy_timeout`. The message names the lock or the database and says to try
+again. The lock file holds the pid and the time it was taken. A lock whose
+process is gone, or that is older than a minute, was left behind, and the
+next command takes it over. No write holds a lock that long, so the minute
+also covers a pid that the system has given to another process since.
+
+**A failed rollback does not hide the error.** In SQLite, every write runs
+in a transaction, so a write that waits too long gives the same message as an
+update. If the rollback after a failed write fails too, the command reports
+the first error.
+
+**Not covered.** A task's `.claude/ledger.md` in its worktree is still
+written without a lock: agents and hooks edit it with file tools, which take
+no lock. That is outside the goal of this change, which is the backlog and
+the task list in the registry.
+
+`LEDGER_TEST_DELAY_MS` makes a command sleep for a random time, up to that
+many milliseconds, between a read and the write that depends on it. The
+tests in `tests/ledger-core-concurrency.test.ts` set it, so the commands
+they start together overlap every time.

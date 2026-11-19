@@ -1,7 +1,9 @@
 import path from 'node:path';
+import { fail } from './failure.js';
 import { mainCheckout } from './git.js';
 import { mainOfTaskWorktree, worktreeLedger, type LedgerPaths } from './paths.js';
 import type { LedgerStore } from './store.js';
+import { pauseForTest } from './wait.js';
 import { findTasks, folderTask, scanLedgerFolders, type Task } from './tasks.js';
 
 /** One entry of ~/.claude/ledgers.json, in the shape the ledger plugin also reads. Parked is not stored: it is computed on read. */
@@ -60,14 +62,13 @@ function entryMain(entry: RegistryEntry): string | undefined {
   return mainOfTaskWorktree(worktree) ?? worktree;
 }
 
-/**
- * Every task on disk, with the registry brought in line with it. The registry only tells which repos to look in; when it
- * is missing or unreadable, the repos under the scan roots stand in. `extraMains` are repos the caller knows about.
- * Disk wins only where git can read it: the active entries of a repo that is gone or on a disk that is not connected
- * are kept as stored. A ledger at <folder>/.claude/ledger.md in no git repository is read from disk all the same.
- */
-export function loadTasks({ store, paths }: { store: LedgerStore; paths: LedgerPaths }, extraMains: string[]): Task[] {
-  const current = store.registry.read();
+type Context = { store: LedgerStore; paths: LedgerPaths };
+
+/** A try fails only when another command wrote the registry in between, so running out of tries takes 20 such writes. */
+const REBUILD_TRIES = 20;
+
+/** The tasks on disk, and the registry text that lists them, read with `current` as the registry. */
+function rebuild({ store, paths }: Context, extraMains: string[], current: string | undefined): { tasks: Task[]; text: string } {
   const stored = current === undefined ? undefined : parseRegistry(current);
   const storedMains = (stored ?? []).flatMap((entry) => entryMain(entry) ?? []);
   const scanned = stored === undefined ? scanLedgerFolders(paths.scanRoots) : [];
@@ -80,7 +81,31 @@ export function loadTasks({ store, paths }: { store: LedgerStore; paths: LedgerP
     return entry.status === 'active' && main !== undefined && mainCheckout(main) === undefined && !tasks.some(({ file }) => file === entry.path);
   });
   const entries = [...tasks.map((task) => toEntry(task, stored?.find(sameLedger(task)))), ...unreadable].sort((a, b) => b.updated.localeCompare(a.updated));
-  const text = `${JSON.stringify(entries, null, 2)}\n`;
-  if (text !== current) store.registry.write(text);
-  return tasks;
+  return { tasks, text: `${JSON.stringify(entries, null, 2)}\n` };
+}
+
+/**
+ * Every task on disk, with the registry brought in line with it. The registry only tells which repos to look in; when it
+ * is missing or unreadable, the repos under the scan roots stand in. `extraMains` are repos the caller knows about.
+ * Disk wins only where git can read it: the active entries of a repo that is gone or on a disk that is not connected
+ * are kept as stored. A ledger at <folder>/.claude/ledger.md in no git repository is read from disk all the same.
+ */
+export function loadTasks(context: Context, extraMains: string[]): Task[] {
+  let read = context.store.registry.read();
+  for (let tries = 1; ; tries++) {
+    const found = rebuild(context, extraMains, read);
+    if (found.text === read) return found.tasks;
+    pauseForTest();
+    // A rebuild runs git and may take seconds, so it never runs while the registry is held: other commands would wait
+    // for each other's rebuilds. A command that wrote since the read may have added a task this rebuild missed, so the
+    // write happens only while the registry is still the text that was read; otherwise the rebuild starts over.
+    let current: string | undefined;
+    context.store.registry.update((now) => {
+      current = now;
+      return now === read ? found.text : undefined;
+    });
+    if (current === read || current === found.text) return found.tasks;
+    if (tries === REBUILD_TRIES) fail(`Other ledger commands changed the task registry ${tries} times while this one read it, so it gave up. Try again.`);
+    read = current;
+  }
 }
