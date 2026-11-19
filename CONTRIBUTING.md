@@ -65,8 +65,8 @@ about, and none of it may be lost.
 
 Every rule file is read by an agent on every turn, so every line costs tokens on
 every turn. Add a rule only if it changes behaviour. Delete a rule that has
-stopped being true. Say what to do, not why, and put the why in `DECISIONS.md`
-or `notes/`.
+stopped being true. Say what to do, not why, and put the why in an LLP document
+in `llp/` (see [Design documents](#design-documents)).
 
 Anything that names a model or a tool needs a gate, so a teammate without it does
 not read about it. Whole file:
@@ -88,3 +88,10 @@ A block inside a file:
 `npx tsx tools/build-rules.ts --vocabulary` lists the names a gate may use.
 
 Figures measured from one person's sessions should say so.
+
+## Design documents
+
+New design goes in `llp/`, as a numbered design document such as
+`llp/0000-ledger-architecture.explainer.md`. `DECISIONS.md` stays as the history
+of past decisions; do not add new ones there. Run `npm run llp` to check the
+document headers, links and `@ref LLP` comments; `npm test` runs the same check.

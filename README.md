@@ -359,6 +359,11 @@ place where planning, routing, and review happen.
 | [docs/customizing.md](docs/customizing.md) | Changing models, gating rules, adding an agent, tests |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Forking, what to send back, what must never be committed |
 | [DECISIONS.md](DECISIONS.md) | Why the setup is shaped this way |
+| [llp/](llp/) | Design documents: how the ledger system is built, and plans for it |
+
+New design goes in `llp/`, one numbered document per topic. `DECISIONS.md`
+stays as the history of past decisions. Run `npm run llp` to check the
+documents and the links to them.
 
 ## Layout
 
@@ -369,6 +374,7 @@ docs/                     this documentation
 ledger.template.md        copied per task to .claude/ledger.md
 notes/                    rationale, not rules
 DECISIONS.md              why the setup is shaped this way
+llp/                      design documents, checked by npm run llp
 settings.policy.json      Claude Code keys this repo asserts
 codex/policy.toml         Codex keys this repo asserts
 mods/ledger/              the /ledger command and its /ledger: commands, /ledger:worktrees included (a Claude Code plugin)

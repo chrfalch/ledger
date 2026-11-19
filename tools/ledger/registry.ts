@@ -6,6 +6,8 @@ import type { LedgerStore } from './store.js';
 import { pauseForTest } from './wait.js';
 import { findTasks, folderTask, scanLedgerFolders, type Task } from './tasks.js';
 
+// @ref LLP 0000#the-registry — why the registry is a cache that a rebuild can always replace.
+
 /** One entry of ~/.claude/ledgers.json, in the shape the ledger plugin also reads. Parked is not stored: it is computed on read. */
 export type RegistryEntry = {
   repo: string;

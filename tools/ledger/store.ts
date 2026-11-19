@@ -1,3 +1,5 @@
+// @ref LLP 0000#the-store — what each store keeps, and how the storage setting picks one.
+
 /**
  * One ledger a store keeps. `location` names it for a person: messages and JSON print it as it is, but nothing outside
  * the store opens it, as a store need not keep its ledgers in files.
