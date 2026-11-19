@@ -12,7 +12,8 @@
 This document describes the ledger system as the code builds it today. A
 ledger is the notes of one task: its goal, plan, decisions and next step. One
 command, `ledger`, reads and writes all ledgers. A store keeps the ledgers that
-are not in a worktree, as files or in one SQLite database. A Claude Code plugin
+are not in a worktree, as files, in one SQLite database, or in a private git
+repository that several machines share. A Claude Code plugin
 exposes the command as `/ledger:` commands. Hooks show the current ledger at
 session start and block unsafe writes. Rules tell the agent when to use all of
 this.
@@ -56,7 +57,8 @@ it. The commands are:
   that is still in the backlog.
 - `park`, `unpark`: add or remove the parked mark under `## Next step`.
 - `retire`: archives the ledger (see [Retire and archive](#retire-and-archive)).
-- `migrate`: moves the ledgers between file and SQLite storage.
+- `store migrate`: moves the ledgers between file, SQLite and git storage.
+- `store sync`: pushes and pulls the ledgers of git storage.
 - `worktrees`: shows the linked worktrees and prunes their build folders.
 - `session`: prints the ledgers a session in a folder works on.
 - `hook`: answers a Claude Code hook (see [Hooks](#hooks)).
@@ -76,20 +78,35 @@ three parts:
 
 A worktree's `.claude/ledger.md` is not in the store. Hooks read it from disk.
 
-Two stores implement the interfaces:
+Three stores implement the interfaces:
 
 - `fileStore` in `tools/ledger/file-store.ts` keeps files under `~/.claude`.
 - `sqliteStore` in `tools/ledger/sqlite-store.ts` keeps everything in
   `~/.claude/ledgers.db`. It loads `node:sqlite` only when it is used, so the
   file store also runs on a Node without it.
+- `gitStore` in `tools/ledger/git-store.ts` keeps the backlog and the archive
+  ledgers in `~/.claude/ledger-data`, a clone of a private GitHub repository.
+  It is the file store with other folders. After a command writes, it commits
+  once and starts `ledger store sync --quiet` in the background, so a command
+  never waits for the network. Only the ledgers, a `.ledger-data` marker and a
+  `.gitignore` are committed. Evidence and the registry stay on this machine.
 
 `readStorage` in `tools/ledger/settings.ts` picks the store. It reads
 `"storage"` from `~/.claude/ledger-settings.json`. With no file and no key, the
-store is `file`. `cli.ts` opens the store that the setting names.
+store is `file`. `openStore` in `tools/ledger/open-store.ts` opens the store
+that the setting names.
+
+`ledger store sync init <url>` makes the clone, once on each machine. It
+accepts only a private GitHub repository. `ledger store sync`
+(`tools/ledger/sync.ts`) commits, pulls with a rebase, checks that only ledgers
+and no secret-like text go out, and pushes. A pre-push hook in the clone runs
+the same secret scan (`tools/ledger/secret-scan.ts`).
 
 `migrateStorage` in `tools/ledger/migrate.ts` copies everything from one store
-to the other. It reads every copy back before it switches the setting. When a
-copy fails, it removes the copies it made, and nothing changes.
+to another, between any two of the three. It reads every copy back before it
+switches the setting. When a copy fails, it removes the copies it made, and
+nothing changes. A move into git storage commits, then pushes; a failed push is
+reported, and the setting still switches.
 
 ### The registry
 
@@ -138,7 +155,9 @@ because its turn end does not clear the session.
 `tools/ledger/hooks.ts` handles them:
 
 - `session-start`: injects the ledgers of the session's folder, with the
-  status of their parent and child tasks.
+  status of their parent and child tasks. With git storage it pulls first, and
+  a sync problem adds one line above the ledgers. The whole hook has one
+  five-second deadline.
 - `prompt-submit`: titles the session when the prompt is exactly
   `go <slug>`.
 - `pre-compact`: tells the compaction to keep the ledger path and its next
@@ -205,14 +224,17 @@ the rules. The agent follows them.
 
 ## Data and storage
 
-| Data | File store | SQLite store |
-|---|---|---|
-| Backlog ledger | `~/.claude/ledger-backlog/<repo>/<slug>.md` | `~/.claude/ledgers.db` |
-| Archive copy | `~/.claude/ledger-archive/<repo>/<YYYY-MM-DD>-<slug>.md` | `~/.claude/ledgers.db` |
-| Archive evidence | `~/.claude/ledger-archive/<repo>/<YYYY-MM-DD>-<slug>/` | `~/.claude/ledgers.db`, as bytes |
-| Registry | `~/.claude/ledgers.json` | `~/.claude/ledgers.db` |
-| Active ledger | `<worktree>/.claude/ledger.md` | the same file |
-| Store setting | `~/.claude/ledger-settings.json` | the same file |
+| Data | File store | SQLite store | Git store |
+|---|---|---|---|
+| Backlog ledger | `~/.claude/ledger-backlog/<repo>/<slug>.md` | `~/.claude/ledgers.db` | `~/.claude/ledger-data/backlog/<repo>/<slug>.md`, committed |
+| Archive copy | `~/.claude/ledger-archive/<repo>/<YYYY-MM-DD>-<slug>.md` | `~/.claude/ledgers.db` | `~/.claude/ledger-data/archive/<repo>/<YYYY-MM-DD>-<slug>.md`, committed |
+| Archive evidence | `~/.claude/ledger-archive/<repo>/<YYYY-MM-DD>-<slug>/` | `~/.claude/ledgers.db`, as bytes | `~/.claude/ledger-evidence/<repo>/<YYYY-MM-DD>-<slug>/`, never committed |
+| Registry | `~/.claude/ledgers.json` | `~/.claude/ledgers.db` | `~/.claude/ledgers-git.json`, never committed |
+| Active ledger | `<worktree>/.claude/ledger.md` | the same file | the same file |
+| Store setting | `~/.claude/ledger-settings.json` | the same file | the same file |
+
+The git store also keeps a clone lock, `~/.claude/ledger-data.lock`, and the
+last sync problem, `~/.claude/ledger-data.status.json`, outside the clone.
 
 The file store writes backlog ledgers and the registry atomically. It holds a
 lock file, `<target>.lock`, during each such write. `withLock` in `tools/ledger/lock.ts` waits

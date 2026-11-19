@@ -1,11 +1,14 @@
 import { statSync, type Stats } from 'node:fs';
 import path from 'node:path';
+import { limitCloneGitCalls } from './clone.js';
 import { folderEntries } from './files.js';
 import { logHookFailure, markHookFailuresReported, unreportedHookFailures } from './hook-failures.js';
 import { findSection, serializeLedger, type Child, type Ledger, type TaskRef } from './format.js';
 import { checkoutRoot, gitTimedOut, inMainCheckout, limitGitCalls, mainCheckout } from './git.js';
+import { limitLockWaits } from './lock.js';
 import { repoName, samePath, worktreeLedger } from './paths.js';
 import { loadTasks } from './registry.js';
+import { pullForSession, syncNotice } from './sync.js';
 import { archivedTasks, findNamed, findTasks, folderTask, locateChild, namedChildren, worktreeTasks, type Task } from './tasks.js';
 import type { Context } from './write.js';
 
@@ -43,6 +46,8 @@ export function parseHookInput(json: string): HookInput {
 const folderOf = (input: HookInput, context: HookContext): string => input.cwd || context.cwd;
 
 const GIT_TIMEOUT_MS = 5000;
+/** What the session start keeps of its 5 s for the ledgers, after the pull of git storage. */
+const AFTER_PULL_MS = 1000;
 
 /**
  * What the hook prints on stdout for Claude Code's JSON `stdin`: hook JSON, plain text for pre-compact, or nothing.
@@ -50,12 +55,13 @@ const GIT_TIMEOUT_MS = 5000;
  * call of the process, so a repository that hangs cannot stall Claude Code.
  */
 export function answerHook(event: HookEvent, stdin: string, context: HookContext): string {
+  const deadline = Date.now() + GIT_TIMEOUT_MS;
   limitGitCalls(GIT_TIMEOUT_MS);
   const input = parseHookInput(stdin);
   const json = (output: object | undefined): string => (output === undefined ? '' : `${JSON.stringify(output)}\n`);
   switch (event) {
     case 'session-start':
-      return json(sessionStart(input, context));
+      return json(sessionStart(input, context, deadline));
     case 'prompt-submit':
       return json(promptSubmit(input, context));
     case 'pre-compact':
@@ -162,22 +168,35 @@ function tasksOnDisk(context: HookContext, mains: string[]): Task[] {
   }
 }
 
-function sessionLedgerContext(input: HookInput, context: HookContext): { text?: string; title?: string } {
+/**
+ * With git storage it pulls first, and a sync problem adds one line before the ledgers. The pull, and every git call and
+ * lock wait after it, opening and closing the store too, end by `deadline`.
+ */
+function sessionLedgerContext(input: HookInput, context: HookContext, deadline: number): { text?: string; title?: string } {
+  limitLockWaits(deadline);
+  limitCloneGitCalls(deadline);
+  // Opened first, as git in the session folder may use up the time that is left after the pull.
+  void context.store;
+  pullForSession(context.paths, deadline - AFTER_PULL_MS);
+  limitGitCalls(GIT_TIMEOUT_MS, deadline);
+  const notice = syncNotice(context.paths);
   const found = sessionLedgers(folderOf(input, context));
-  if (found.tasks.length === 0) return {};
+  if (found.tasks.length === 0) return { text: notice };
   const mains = found.tasks.flatMap(({ main, ledger: { location, children } }) => [main, location.parent?.main, ...children.map((child) => child.main)].filter((known) => known !== undefined));
-  return { text: sessionStartText(found, tasksOnDisk(context, mains)), title: sessionTitle(found) };
+  const ledgers = sessionStartText(found, tasksOnDisk(context, mains));
+  return { text: notice === undefined ? ledgers : `${notice}\n${ledgers}`, title: sessionTitle(found) };
 }
 
 /**
- * Hook failures since the last report come first, above the ledgers, and count as reported once the output is built.
- * When the ledger part throws, the report still goes out alone and the new failure waits for the next one.
+ * Hook failures since the last report come first, above the sync notice and the ledgers, and count as reported once the
+ * output is built. When the pull or the ledger part throws, the report still goes out alone and the new failure waits
+ * for the next one.
  */
-export function sessionStart(input: HookInput, context: HookContext): SessionStartOutput | undefined {
+export function sessionStart(input: HookInput, context: HookContext, deadline = Date.now() + GIT_TIMEOUT_MS): SessionStartOutput | undefined {
   const failures = unreportedHookFailures(context.paths);
   let ledgers: { text?: string; title?: string };
   try {
-    ledgers = sessionLedgerContext(input, context);
+    ledgers = sessionLedgerContext(input, context, deadline);
   } catch (error) {
     if (failures === undefined) throw error;
     logHookFailure(context.paths.home, 'ledger hook session-start', error instanceof Error ? error.message : String(error));
