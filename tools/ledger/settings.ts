@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fail } from './failure.js';
+import { exists, writeAtomic } from './files.js';
 import { ledgerPaths } from './paths.js';
 
-const STORAGES = ['file', 'sqlite'] as const;
+export const STORAGES = ['file', 'sqlite'] as const;
 export type Storage = (typeof STORAGES)[number];
 
 export const settingsFile = (home: string): string => path.join(home, '.claude', 'ledger-settings.json');
@@ -36,4 +37,11 @@ export function readStorage(home: string): Storage {
   const { storage } = settings as { storage?: unknown };
   if (storage === undefined || isStorage(storage)) return storage ?? 'file';
   return fail(`Unknown storage ${JSON.stringify(storage)} in ${shown}. Use ${ALLOWED}.`);
+}
+
+/** Sets "storage" in the settings file and keeps every other key. Call readStorage first: it refuses a broken file. */
+export function writeStorage(home: string, storage: Storage): void {
+  const file = settingsFile(home);
+  const settings: object = exists(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
+  writeAtomic(file, `${JSON.stringify({ ...settings, storage }, null, 2)}\n`);
 }

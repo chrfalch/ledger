@@ -644,11 +644,14 @@ function recording(inner: LedgerStore): { store: LedgerStore; calls: string[] } 
       evidenceLocation: (repo, name) => (note('archive.evidenceLocation', repo, name), inner.archive.evidenceLocation(repo, name)),
       evidenceFiles: (repo, name) => (note('archive.evidenceFiles', repo, name), inner.archive.evidenceFiles(repo, name)),
       readEvidence: (repo, name, file) => (note('archive.readEvidence', repo, name, file), inner.archive.readEvidence(repo, name, file)),
+      copyEvidence: (repo, name, to) => (note('archive.copyEvidence', repo, name), inner.archive.copyEvidence(repo, name, to)),
+      remove: (repo, name) => (note('archive.remove', repo, name), inner.archive.remove(repo, name)),
     },
     registry: {
       read: () => (note('registry.read'), inner.registry.read()),
       write: (body) => (note('registry.write'), inner.registry.write(body)),
       update: (change) => (note('registry.update'), inner.registry.update(change)),
+      remove: () => (note('registry.remove'), inner.registry.remove()),
     },
   };
   return { store, calls };

@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, readFileSync, readlinkSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
@@ -33,6 +33,9 @@ const SCHEMA = `
   ) STRICT;
 `;
 
+/** The database of the SQLite store. */
+export const sqliteFile = (home: string): string => path.join(home, '.claude', 'ledgers.db');
+
 const BUSY_TIMEOUT_MS = 5_000;
 const SQLITE_BUSY = 5;
 
@@ -65,18 +68,23 @@ function withoutSqliteWarning<T>(load: () => T): T {
 }
 
 /**
- * node:sqlite loads only here, through require, so the file store runs on a Node without it. Not
- * process.getBuiltinModule, which a module resolve hook cannot stop, so a test can stand in for an older Node.
+ * node:sqlite, or undefined on a Node without it. It loads only here, through require, so the file store runs on a Node
+ * without it. Not process.getBuiltinModule, which a module resolve hook cannot stop, so a test can stand in for an older Node.
  */
-function openDatabase(file: string, home: string): DatabaseSync {
-  let sqlite: typeof import('node:sqlite');
+export function loadSqlite(): typeof import('node:sqlite') | undefined {
   try {
-    sqlite = withoutSqliteWarning(() => createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite'));
+    return withoutSqliteWarning(() => createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite'));
   } catch {
-    return fail(
+    return undefined;
+  }
+}
+
+function openDatabase(file: string, home: string): DatabaseSync {
+  const sqlite =
+    loadSqlite() ??
+    fail(
       `SQLite storage needs Node 22.13 or later, and 23.4 or later on Node 23. This is Node ${process.versions.node}. Run a newer Node, or set "storage" to "file" in ${shownSettingsFile(home)}.`,
     );
-  }
   mkdirSync(path.dirname(file), { recursive: true });
   const db = new sqlite.DatabaseSync(file);
   // Hooks and commands of several sessions may write at once; each waits for the others' short transactions.
@@ -115,7 +123,7 @@ function sameEvidence(a: EvidenceEntry[], b: EvidenceEntry[]): boolean {
  * ~/.claude/ledgers.db:archive/app/2026-11-01-fix-login, and names no file of its own.
  */
 export function sqliteStore({ home }: { home: string }): LedgerStore {
-  const file = path.join(home, '.claude', 'ledgers.db');
+  const file = sqliteFile(home);
   const db = openDatabase(file, home);
   const all = <T>(sql: string, ...params: SQLInputValue[]): T[] => db.prepare(sql).all(...params) as T[];
   const one = <T>(sql: string, ...params: SQLInputValue[]): T | undefined => db.prepare(sql).get(...params) as T | undefined;
@@ -178,6 +186,10 @@ export function sqliteStore({ home }: { home: string }): LedgerStore {
         return row && stored(row);
       },
       has: (repo, name) => one('SELECT 1 FROM ledgers WHERE place = ? AND repo = ? AND name = ?', place, repo, name) !== undefined,
+      setModified: (repo, name, mtimeMs) =>
+        transaction(() => {
+          if (run('UPDATE ledgers SET modified_ms = ? WHERE place = ? AND repo = ? AND name = ?', mtimeMs, place, repo, name) === 0) fail(`${location(repo, name)} does not exist.`);
+        }),
     };
   }
 
@@ -261,6 +273,19 @@ export function sqliteStore({ home }: { home: string }): LedgerStore {
         const row = one<{ data: Uint8Array }>(`SELECT data FROM evidence WHERE repo = ? AND name = ? AND path = ? AND kind = 'file'`, repo, name, relative);
         return row && Buffer.from(row.data);
       },
+      copyEvidence: (repo, name, to) => {
+        for (const entry of archived(repo, name)) {
+          const target = path.join(to, entry.path);
+          mkdirSync(entry.kind === 'folder' ? target : path.dirname(target), { recursive: true });
+          if (entry.kind === 'file') writeFileSync(target, entry.data, { flag: 'wx' });
+          if (entry.kind === 'link') symlinkSync(Buffer.from(entry.data), target);
+        }
+      },
+      remove: (repo, name) =>
+        transaction(() => {
+          if (run(`DELETE FROM ledgers WHERE place = 'archive' AND repo = ? AND name = ?`, repo, name) === 0) fail(`${archive.location(repo, name)} does not exist.`);
+          run('DELETE FROM evidence WHERE repo = ? AND name = ?', repo, name);
+        }),
     },
     registry: {
       read: readRegistry,
@@ -270,6 +295,7 @@ export function sqliteStore({ home }: { home: string }): LedgerStore {
           const text = change(readRegistry());
           if (text !== undefined) writeRegistry(text);
         }),
+      remove: () => transaction(() => void run('DELETE FROM registry')),
     },
     close: () => db.close(),
   };

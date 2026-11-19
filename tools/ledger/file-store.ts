@@ -1,4 +1,4 @@
-import { cpSync, lstatSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, lstatSync, readFileSync, rmSync, utimesSync } from 'node:fs';
 import path from 'node:path';
 import { fail } from './failure.js';
 import { createFile, folderEntries, holdsAnything, isFolder, isReadableFile, isTaken, readText, readTimedText, sameTree, treeEntries, writeAtomic } from './files.js';
@@ -35,6 +35,11 @@ function collection(root: string): LedgerCollection {
         .flatMap((name) => read(repo, name.slice(0, -'.md'.length)) ?? []),
     read,
     has: (repo, name) => isReadableFile(location(repo, name)),
+    setModified: (repo, name, mtimeMs) => {
+      const file = location(repo, name);
+      const time = new Date(mtimeMs);
+      withLock(file, () => utimesSync(file, time, time));
+    },
   };
 }
 
@@ -123,6 +128,17 @@ export function fileStore({ home }: LedgerPaths): LedgerStore {
       evidenceFiles,
       // Only a listed file, so a path such as ../<name>.md cannot read past the evidence folder.
       readEvidence: (repo, name, file) => (evidenceFiles(repo, name).includes(file) ? readFileSync(path.join(evidenceOf(repo, name), file)) : undefined),
+      copyEvidence: (repo, name, to) => {
+        const folder = evidenceOf(repo, name);
+        if (lstatSync(folder, { throwIfNoEntry: false })?.isDirectory()) cpSync(folder, to, { recursive: true, verbatimSymlinks: true, errorOnExist: true, force: false });
+      },
+      remove: (repo, name) => {
+        const file = archive.location(repo, name);
+        withLock(file, () => {
+          rmSync(file);
+          rmSync(evidenceOf(repo, name), { recursive: true, force: true });
+        });
+      },
     },
     registry: {
       read: readRegistry,
@@ -132,6 +148,7 @@ export function fileStore({ home }: LedgerPaths): LedgerStore {
           const text = change(readRegistry());
           if (text !== undefined) writeAtomic(registry, text);
         }),
+      remove: () => withLock(registry, () => rmSync(registry, { force: true })),
     },
   };
 }

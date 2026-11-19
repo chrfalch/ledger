@@ -1,17 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import module from 'node:module';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { pathToFileURL } from 'node:url';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { shellWord } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
-import { home, LEDGER_BIN, ledger, ledgerText, noSqlite, noSqliteOn, ok, repository, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { cannotHideSqlite, home, LEDGER_BIN, ledger, ledgerIn, ledgerText, noSqlite, noSqliteOn, ok, repository, withoutSqlite, worktreeTask, type Ran } from './ledger-core-fixtures.js';
 
 type Storage = 'file' | 'sqlite';
 
@@ -467,42 +465,6 @@ test('the node:sqlite probe of the test fixtures names the version of the Node i
   chmodSync(node21, 0o755);
   assert.match(String(noSqliteOn(node21)), /this is Node 21\.7\.3$/);
 });
-
-/**
- * The seam: the SQLite store loads node:sqlite with import() or require, never process.getBuiltinModule, so a module
- * resolve hook preloaded with NODE_OPTIONS=--import can make it fail to load, as an older Node would. An older Node
- * itself needs no hook.
- */
-function withoutSqlite(h: string): NodeJS.ProcessEnv {
-  if (noSqlite) return { ...process.env, HOME: h, NO_COLOR: '1', GIT_CONFIG_GLOBAL: path.join(h, '.gitconfig') };
-  const hook = path.join(h, 'no-sqlite.mjs');
-  writeFileSync(
-    hook,
-    [
-      "import { registerHooks } from 'node:module';",
-      'registerHooks({',
-      '  resolve(specifier, context, nextResolve) {',
-      "    if (specifier === 'node:sqlite') throw Object.assign(new Error(`No such built-in module: ${specifier}`), { code: 'ERR_UNKNOWN_BUILTIN_MODULE' });",
-      '    return nextResolve(specifier, context);',
-      '  },',
-      '});',
-      '',
-    ].join('\n'),
-  );
-  const env = { ...process.env, HOME: h, NO_COLOR: '1', GIT_CONFIG_GLOBAL: path.join(h, '.gitconfig'), NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import ${pathToFileURL(hook).href}`.trim() };
-  const probe = spawnSync(process.execPath, ['--input-type=module', '-e', "await import('node:sqlite')"], { env, encoding: 'utf8' });
-  assert.notEqual(probe.status, 0, 'the resolve hook did not stop node:sqlite from loading');
-  return env;
-}
-
-const ledgerIn = (env: NodeJS.ProcessEnv, cwd: string, ...args: string[]): Ran => {
-  const result = spawnSync(process.execPath, [LEDGER_BIN, ...args], { cwd, env, encoding: 'utf8' });
-  if (result.error) throw result.error;
-  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
-};
-
-const noRegisterHooks = typeof module.registerHooks !== 'function' && 'module.registerHooks, which the fixture needs, came in Node 22.15 and 23.5';
-const cannotHideSqlite = !noSqlite && noRegisterHooks;
 
 test('with storage sqlite and no node:sqlite, ledger exits 1 and says SQLite storage needs Node 22.13, or 23.4 on Node 23, and names the settings file', { skip: cannotHideSqlite }, (t) => {
   const { h, app } = setup(t, 'sqlite');
