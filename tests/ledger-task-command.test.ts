@@ -163,7 +163,7 @@ test('the Plan gate makes the current task the first child task', () => {
 test('the parent task rule states both directions', () => {
   const bullet = checkpointBullet('**Hard rule:**');
   assert.match(bullet, /a parent task only for work that ships as two or more separate PRs or merges/);
-  assert.match(bullet, /After each child task's review verdict or merge, update the parent ledger/);
+  assert.match(bullet, /Retiring a child updates the parent ledger\. Write its `## Report` first\./);
   assert.match(planGate(), /two or more parts that ship separately/);
 });
 

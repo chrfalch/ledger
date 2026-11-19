@@ -91,8 +91,8 @@ The **task ledger** records the task. See `ledger --help`.
   fact still true next week goes in a rule file or auto memory, not the
   ledger.
 - **Hard rule:** make a parent task only for work that ships as two or more
-  separate PRs or merges. After each child task's review verdict or merge,
-  update the parent ledger. Send a child task in another repo to its own
+  separate PRs or merges. Retiring a child updates the parent ledger.
+  Write its `## Report` first. Send a child task in another repo to its own
   subagent, with that worktree's absolute path.
   `EnterWorktree` cannot enter another repo.
 - **Clear point.** After an implement→review cycle with work left, update

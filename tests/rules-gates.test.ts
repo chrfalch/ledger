@@ -234,8 +234,8 @@ test('rule 10 sends one subagent per child task in another repo', () => {
   assert.match(rule, /`EnterWorktree` cannot enter another repo\./);
 });
 
-test('rule 10 updates the parent ledger after each child task verdict or merge', () => {
-  assert.match(flatRule10(), /After each child task's review verdict or merge, update the parent ledger\./);
+test('rule 10 says retire updates the parent ledger, so the child report is written first', () => {
+  assert.match(flatRule10(), /Retiring a child updates the parent ledger\. Write its `## Report` first\./);
 });
 
 test('no rule names the retired ledger scripts or the dashboard', () => {

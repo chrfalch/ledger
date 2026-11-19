@@ -148,6 +148,38 @@ for (const storage of ['file', 'sqlite'] as const) {
     keptIn(h, storage);
   });
 
+  /** Backlog parent epic with child part started in a worktree, whose ## Report holds `report`; then part is retired. */
+  function retiredChildOfBacklogParent(t: TestContext, report: string[]) {
+    const { h, app, store } = setup(t, storage);
+    ok(ledger(h, app, 'task', 'epic', '--goal', 'Ship the epic.'));
+    ok(ledger(h, app, 'task', 'part', '--goal', 'Ship a part.'));
+    ok(ledger(h, app, 'parent', 'epic', 'add', 'part'));
+    ok(ledger(h, app, 'go', 'part'));
+    const file = path.join(app, '.claude/worktrees/part/.claude/ledger.md');
+    const text = readFileSync(file, 'utf8');
+    const placeholder = '<3–5 lines for the parent task: outcome, PR link, what the parent must know>';
+    assert.ok(text.includes(placeholder), text);
+    writeFileSync(file, text.replace(placeholder, report.join('\n')));
+    const ran = ledger(h, app, 'retire', 'part');
+    assert.equal(ran.status, 0, ran.stderr);
+    keptIn(h, storage);
+    return { ran, parent: store().backlog.read('app', 'epic')?.text ?? assert.fail('the backlog parent epic is gone') };
+  }
+
+  test(`${storage} store: ledger retire marks the child retired in a backlog parent and copies its report there`, { skip }, (t) => {
+    const { ran, parent } = retiredChildOfBacklogParent(t, ['PR #12 merged.', 'The parent must know X.']);
+    assert.match(parent, new RegExp(`^- part \\(retired ${today()}\\)$`, 'm'));
+    assert.match(parent, /## Child reports\n\n### part\nPR #12 merged\.\nThe parent must know X\.\n/);
+    assert.doesNotMatch(ran.stderr, /^warning: .*(epic|parent|## Children|report)/im);
+  });
+
+  test(`${storage} store: ledger retire marks the child retired in a backlog parent and warns that an empty report is not copied`, { skip }, (t) => {
+    const { ran, parent } = retiredChildOfBacklogParent(t, []);
+    assert.match(parent, new RegExp(`^- part \\(retired ${today()}\\)$`, 'm'));
+    assert.doesNotMatch(parent, /### part/);
+    assert.match(ran.stderr, /^warning: .*has no report under ## Report, so none is copied to epic\.$/m);
+  });
+
   // ledger show
 
   test(`${storage} store: ledger show prints this repo's backlog ledger exactly, before any archive copy of the slug`, { skip }, (t) => {
