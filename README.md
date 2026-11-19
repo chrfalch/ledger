@@ -88,7 +88,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 The `ledger` command reads and changes the task ledgers from a terminal,
-without a Claude Code session. It also runs deploy. `list`, `archive`,
+without a Claude Code session. It also runs deploy. `list`, `archive`, `show`,
 `parent <slug>`, `worktrees` and `worktrees derived-data` only read. `task`,
 `go`, `park`, `unpark`, `retire` and the `parent` actions change ledgers; each
 edit changes only the lines it names.
@@ -97,6 +97,8 @@ edit changes only the lines it names.
 |---|---|
 | `ledger list [--json]` | Lists the tasks that are not retired, in every repo it knows: active, parked and backlog. It reads the status from the ledgers on disk. |
 | `ledger archive [term] [--all]` | Lists this repo's archived ledgers, newest first. A term keeps only the ledgers that contain it, in any case. `--all` lists the archive of every repo. |
+| `ledger show <slug> [--repo <name>] [--json]` | Prints the task's backlog ledger in this repo, else its newest archive copy, `<date>-<slug>`. A full archive name, such as `2026-11-01-fix-login-2`, prints that one copy. `--repo <name>` reads another repo's ledgers; outside a repo it is required. |
+| `ledger show <slug> --evidence [<file>]` | Lists the evidence files of the task's newest archive copy, one path per line. With a file, it prints that file's bytes. |
 | `ledger parent <slug> [--json]` | Shows a parent task and the status of each child task. Use `<slug>@<path>` for a parent in the repo at `<path>`. |
 | `ledger parent <slug> add <child>` | Makes `<child>` a child task of `<slug>`. It writes `- parent:` in the child's ledger and a line under `## Children` in the parent's. A child in another repo is `<child>@<path>`. It refuses a task as its own parent, a child that has another parent, a cycle, and a retired child. |
 | `ledger parent <slug> remove <child>` | Removes the link again. A `## Children` section with no child left is removed too. |
@@ -114,6 +116,25 @@ edit changes only the lines it names.
 | `ledger worktrees prune-orphans [--dry-run]` | Deletes the DerivedData folders whose project is gone from a connected disk. |
 | `ledger deploy [options]` | Runs `bin/deploy` from this repo. The options pass through, so `ledger deploy --dry-run` prints every change and writes nothing. |
 | `ledger help [command]` | Prints help for `ledger`, or for one of its commands. |
+
+### Where the ledgers are kept
+
+The active ledger is always `.claude/ledger.md` in the task's worktree. The
+backlog ledgers, the archive and the registry, `~/.claude/ledgers.json`, are
+files by default, at the paths this README names. To keep them in one SQLite
+database, `~/.claude/ledgers.db`, write this to `~/.claude/ledger-settings.json`:
+
+```json
+{ "storage": "sqlite" }
+```
+
+SQLite storage needs Node.js 22.13 or later, and 23.4 or later on Node.js 23.
+A settings file that is not valid
+JSON, or names another storage, makes every command that uses the storage
+exit 1; `ledger --help` still works, and hooks print the error and exit 0.
+The database also holds the evidence files of each archive copy. Read a ledger or its evidence with
+`ledger show`. The other storage is not copied over when you change the
+setting.
 
 ## Commands
 
@@ -355,7 +376,7 @@ githooks/                 the git hook dispatcher that deploy installs
 tools/                    the deploy code, its wizard and CLI, the settings merge and the rule filter
 tests/                    the tests for tools/, bin/ and hooks/
 bin/deploy                installs everything above
-bin/ledger                the terminal command: lists tasks, the archive and parents; writes task, go, park, unpark and parent changes; retires tasks; shows and prunes worktrees; runs deploy; keeps ~/.claude/ledgers.json, the list of every task ledger
+bin/ledger                the terminal command: lists tasks, the archive and parents; writes task, go, park, unpark and parent changes; retires tasks; shows and prunes worktrees; runs deploy; keeps the registry, the list of every task ledger
 bin/cc-dd-path            prints the shared Xcode build folder for a worktree
 CONTRIBUTING.md           forking, what to send back, what must never be committed
 ```

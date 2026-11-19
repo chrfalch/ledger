@@ -499,7 +499,9 @@ flag writes `~/.claude/ledger-backlog/<repo>/<slug>.md`, the same layout as
 `~/.claude/ledger-archive/`. There is no branch or worktree yet. The registry
 entry in `~/.claude/ledgers.json` has the status `backlog` and a `main` field:
 the path of the repo's main checkout. Session start does not show backlog
-tasks. `/ledger:all` lists them in their own section.
+tasks. `/ledger:all` lists them in their own section. Since 2026-11-18, these
+files are the default storage; SQLite storage keeps the same data in
+`~/.claude/ledgers.db` instead.
 
 **`/ledger:go <slug>` promotes a backlog task.** It runs
 `bin/cc-task-new --promote <slug>`, which makes the branch and the worktree,
@@ -969,3 +971,53 @@ reports such a link as stale.
 
 `tools/apply-policy.ts` keeps its list of the old hook commands. It removes
 them from a `settings.json` that an earlier deploy wrote.
+
+## 2026-11-18 — Ledgers can be kept in one SQLite database
+
+The backlog ledgers, the archive copies with their evidence, and the registry
+can now be kept in one SQLite database, `~/.claude/ledgers.db`. Files stay the
+default. A person chooses with `~/.claude/ledger-settings.json`:
+
+```json
+{ "storage": "sqlite" }
+```
+
+No settings file, or no `storage` key, keeps the files. Any value other than
+`file` or `sqlite`, or a file that is not valid JSON, stops every `ledger`
+command that uses the storage with exit 1 and a message that names the
+settings file. `ledger --help` still works. A hook prints the message to
+stderr and exits 0, so a bad setting never blocks Claude Code.
+
+**The active ledger stays a file.** Agents and hooks read and edit
+`.claude/ledger.md` in the task's worktree with file tools. Only the ledgers
+outside a worktree move.
+
+**Evidence goes into the database.** The archive keeps the bytes of each
+evidence file, and each folder and symbolic link, so a retire can still
+compare the copy with the worktree's `.claude/evidence/` before it deletes
+the worktree. `ledger show <slug> --evidence` lists and prints the files.
+With the database, an archive copy has no file path to open, so
+`ledger show` is the way to read one.
+
+**The engine is Node's built-in `node:sqlite`.** It adds no dependency. It
+needs Node 22.13 or later, and 23.4 or later on Node 23: earlier versions load
+`node:sqlite` only with `--experimental-sqlite`, which `ledger` does not set.
+Measured on 2026-11-18: 22.12 and 23.3 cannot load it without the flag, and
+on 22.5.1 a query that matches no row returns an object instead of
+`undefined`. The file storage keeps working on Node 20.12, because
+`node:sqlite` loads only when the setting asks for SQLite. On an older Node,
+that setting stops `ledger` with a message that says so.
+
+**A `ledgers.db` from an earlier build of this change must be deleted.** That
+build stored the ledger text as `TEXT`; the text is now a `BLOB`, because
+`node:sqlite` on Node 22 cuts a `TEXT` value short at a NUL byte. There is no
+migration, so delete `~/.claude/ledgers.db` before the first run of this
+build.
+
+**A location in the database is for display only.** Messages and JSON name an
+entry as `<database>:<place>/<repo>/<name>`, for example
+`~/.claude/ledgers.db:archive/app/2026-11-18-fix-login`. Nothing opens it as a
+file.
+
+There is no migration between the two storages. Changing the setting starts
+with an empty store; the ledgers in the other storage stay where they are.

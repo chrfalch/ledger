@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { REPO, snapshot } from './helpers.js';
-import { archivedTask, backlogTask, git, home, ledger, ledgerText, lineWith, ok, repository, spawn, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { archivedTask, backlogTask, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, ok, repository, spawn, worktreeTask, type Ran } from './ledger-core-fixtures.js';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { executeRetire, planRetire, readRetire } from '../tools/ledger/retire.js';
-import type { Context } from '../tools/ledger/write.js';
+import { shellWord, type Context } from '../tools/ledger/write.js';
 
 /** A HOME with the repo ~/repos/app, whose untracked .claude/ folders git ignores, as a real repo's .gitignore does. */
 function setup(t: TestContext) {
@@ -135,13 +135,23 @@ function retiredOnceLocked(t: TestContext) {
   mkdirSync(evidence, { recursive: true });
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
   git(h, app, 'worktree', 'lock', worktree);
-  failed(ledger(h, app, 'retire', 'fix-login'), /^Could not remove the worktree/m);
+  failed(ledger(h, app, 'retire', 'fix-login'), new RegExp(`^Could not remove the worktree [^]*run ${retireCommand} again once git can remove the worktree\\.$`, 'm'));
   assert.ok(existsSync(worktree));
   git(h, app, 'worktree', 'unlock', worktree);
   return { h, app, worktree, evidence };
 }
 
-const differs = /^Not retired: .*\.md is archived already, but its evidence differs from .*\/\.claude\/evidence\/\. Move .*\.md and .*\/ away, then run retire again\.$/m;
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const retireCommand = `${escapeRegExp(shellWord(LEDGER_BIN))} retire`;
+
+/**
+ * The remedy names no file operation, so it holds for every store: it lists the archived evidence with show, through
+ * the bin/ledger path, which runs without `ledger` on PATH.
+ */
+const differs = new RegExp(
+  `^Not retired: .*\\.md is archived already, but its evidence differs from .*/\\.claude/evidence/\\. See what is archived in .*/ with \`${escapeRegExp(shellWord(LEDGER_BIN))} show \\d{4}-\\d{2}-\\d{2}-fix-login --evidence\`, then make the two match and run ${retireCommand} again\\.$`,
+  'm',
+);
 
 test('ledger retire runs again after git could not remove the worktree: the same evidence is archived already, so it goes on with one archive copy', (t) => {
   const { h, app, worktree } = retiredOnceLocked(t);
@@ -180,6 +190,98 @@ test('ledger retire refuses, even with --force, an identical archive copy that h
   }
 });
 
+test('ledger retire quotes the archive name as one shell word in the show command it names', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'fix-login' });
+  mkdirSync(archiveFolder(h, app), { recursive: true });
+  copyFileSync(file, path.join(archiveFolder(h, app), "2026-01-02-fix login's copy.md"));
+  mkdirSync(path.join(worktreeOf(app, 'fix-login'), '.claude/evidence'));
+  writeFileSync(path.join(worktreeOf(app, 'fix-login'), '.claude/evidence/red.txt'), 'failing\n');
+  const name = escapeRegExp(shellWord("2026-01-02-fix login's copy"));
+  failed(ledger(h, app, 'retire', 'fix-login'), new RegExp(`with \`${escapeRegExp(shellWord(LEDGER_BIN))} show ${name} --evidence\`, then make the two match`));
+});
+
+/**
+ * The bin/ledger of a copy of this checkout in a folder whose name has a space. The copy's node_modules links to every
+ * package this checkout resolves, so bin/ledger finds its install and does not run npm ci.
+ */
+function spacedLedgerBin(h: string): string {
+  const checkout = path.join(h, 'ledger checkout');
+  for (const folder of ['bin', 'tools']) cpSync(path.join(REPO, folder), path.join(checkout, folder), { recursive: true });
+  copyFileSync(path.join(REPO, 'package.json'), path.join(checkout, 'package.json'));
+  const modules = path.join(checkout, 'node_modules');
+  mkdirSync(modules);
+  const folders = packageFolders(REPO);
+  for (const found of folders) {
+    for (const name of readdirSync(found)) if (!existsSync(path.join(modules, name))) symlinkSync(path.join(found, name), path.join(modules, name));
+  }
+  assert.ok(existsSync(path.join(modules, '.package-lock.json')), `No node_modules/.package-lock.json in ${folders.join(', ') || REPO}: run npm ci.`);
+  return path.join(checkout, 'bin/ledger');
+}
+
+/**
+ * The node_modules folders the packages of the checkout at `repo` resolve from, nearest first. A worktree inside its
+ * main checkout also finds those of the folders up to the main checkout, but none above it count. A worktree elsewhere,
+ * or a submodule, has only its own.
+ */
+function packageFolders(repo: string): string[] {
+  const commonDir = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: repo, encoding: 'utf8' }).trim();
+  const main = path.dirname(realpathSync(commonDir));
+  const start = realpathSync(repo);
+  const insideMain = isWithin(start, main);
+  const folders: string[] = [];
+  for (let folder = start; ; folder = path.dirname(folder)) {
+    const found = path.join(folder, 'node_modules');
+    if (existsSync(found)) folders.push(found);
+    if (!insideMain || folder === main) return folders;
+  }
+}
+
+const isWithin = (folder: string, ancestor: string): boolean => {
+  const relative = path.relative(ancestor, folder);
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+};
+
+test('a folder is within itself and its ancestors, the root among them, and not within a sibling that shares its prefix', () => {
+  assert.equal(isWithin('/repos/app', '/repos/app'), true);
+  assert.equal(isWithin('/repos/app/.claude/worktrees/wt', '/repos/app'), true);
+  assert.equal(isWithin('/repos/app/.claude/worktrees/wt', '/'), true);
+  assert.equal(isWithin('/', '/'), true);
+  assert.equal(isWithin('/repos/app2', '/repos/app'), false);
+  assert.equal(isWithin('/repos', '/repos/app'), false);
+});
+
+test('the package folders of a checkout stop at its main checkout, the parent of the git common dir', (t) => {
+  const { app } = setup(t);
+  mkdirSync(path.join(path.dirname(app), 'node_modules/outside'), { recursive: true });
+  mkdirSync(path.join(app, 'node_modules/inside'), { recursive: true });
+  const worktree = path.join(app, '.claude/worktrees/wt');
+  mkdirSync(worktree, { recursive: true });
+  assert.deepEqual(packageFolders(worktree).map((folder) => realpathSync(folder)), [realpathSync(path.join(app, 'node_modules'))]);
+});
+
+test('the package folders of a worktree outside its main checkout are its own node_modules alone', (t) => {
+  const { h, app } = setup(t);
+  mkdirSync(path.join(h, 'node_modules/outside'), { recursive: true });
+  const worktree = path.join(h, 'elsewhere/wt');
+  git(h, app, 'worktree', 'add', '--quiet', '-b', 'elsewhere', worktree);
+  mkdirSync(path.join(worktree, 'node_modules/own'), { recursive: true });
+  assert.deepEqual(packageFolders(worktree), [path.join(worktree, 'node_modules')]);
+});
+
+test('ledger retire names its own bin/ledger in what to run, quoted as one shell word when its path has a space', (t) => {
+  const { h, app } = setup(t);
+  const bin = spacedLedgerBin(h);
+  const command = escapeRegExp(shellWord(bin));
+  failed(spawn(h, h, bin, ['retire', 'fix-login']), new RegExp(`is not inside a git repository\\. Run ${command} retire in the repo of the task\\.$`, 'm'));
+  const file = worktreeTask(h, app, { slug: 'fix-login' });
+  mkdirSync(archiveFolder(h, app), { recursive: true });
+  copyFileSync(file, path.join(archiveFolder(h, app), '2026-01-02-fix-login.md'));
+  mkdirSync(path.join(worktreeOf(app, 'fix-login'), '.claude/evidence'));
+  writeFileSync(path.join(worktreeOf(app, 'fix-login'), '.claude/evidence/red.txt'), 'failing\n');
+  failed(spawn(h, app, bin, ['retire', 'fix-login']), new RegExp(`with \`${command} show 2026-01-02-fix-login --evidence\`, then make the two match`));
+});
+
 test('ledger retire stops with a message, and no stack trace, when the archive copy cannot be written; it retires once the cause is fixed', { skip: process.getuid?.() === 0 }, (t) => {
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'fix-login' });
@@ -192,7 +294,7 @@ test('ledger retire stops with a message, and no stack trace, when the archive c
   chmodSync(archive, 0o555);
   try {
     const first = ledger(h, app, 'retire', 'fix-login');
-    failed(first, /^Could not archive fix-login: .*Fix the cause, then run ledger retire again\.$/m);
+    failed(first, new RegExp(`^Could not archive fix-login: .*Fix the cause, then run ${retireCommand} again\\.$`, 'm'));
     assert.doesNotMatch(first.stderr, /^\s+at /m);
     assert.ok(first.stderr.includes(path.join(archive, `${today()}-fix-login.md`)), first.stderr);
     assert.ok(existsSync(worktree));
@@ -215,7 +317,7 @@ test('ledger retire refuses, even with --force, an evidence file it cannot read,
   t.after(() => existsSync(secret) && chmodSync(secret, 0o644));
   const plan = ok(ledger(h, app, 'retire', 'fix-login', '--dry-run'));
   assert.match(plan, /^It cannot be retired, not even with --force: .*\/\.claude\/evidence\/logs\/secret\.txt cannot be read \(EACCES\)/m);
-  refusedEvenForced(h, app, /^Not retired: .*\/\.claude\/evidence\/logs\/secret\.txt cannot be read \(EACCES\), so the evidence cannot be archived\. Make it readable, then run retire again\.$/m);
+  refusedEvenForced(h, app, new RegExp(`^Not retired: .*\\/\\.claude\\/evidence\\/logs\\/secret\\.txt cannot be read \\(EACCES\\), so the evidence cannot be archived\\. Make it readable, then run ${retireCommand} again\\.$`, 'm'));
 });
 
 test('ledger retire archives a relative symbolic link in the evidence as the same relative link', (t) => {
@@ -241,26 +343,26 @@ function refusedEvenForced(h: string, app: string, pattern: RegExp): void {
 }
 
 const outsideLink = (link: string): RegExp =>
-  new RegExp(`^Not retired: ${link.replaceAll('/', '\\/')} is a symbolic link to .*, outside .*\\/\\.claude\\/evidence\\/\\. Replace it with the (file|folder) it points to, then run retire again\\.$`, 'm');
+  new RegExp(`^Not retired: ${link.replaceAll('/', '\\/')} is a symbolic link to .*, outside .*\\/\\.claude\\/evidence\\/\\. Replace it with the (file|folder) it points to, then run ${retireCommand} again\\.$`, 'm');
 
 const escaped = (text: string): string => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 
 const textStepsOut = (link: string, target: string, inside: string): RegExp =>
   new RegExp(
     `^Not retired: the symbolic link ${escaped(link)} in .*\\/\\.claude\\/evidence\\/ has the text ${escaped(target)}, which steps outside the evidence folder\\. ` +
-      `The link would break in the archive\\. Change its text to ${escaped(inside)}, then run retire again\\.$`,
+      `The link would break in the archive\\. Change its text to ${escaped(inside)}, then run ${retireCommand} again\\.$`,
     'm',
   );
 
 const linksToEvidence = (link: string): RegExp =>
-  new RegExp(`^Not retired: the symbolic link ${escaped(link)} in .*\\/\\.claude\\/evidence\\/ points to the evidence folder itself, so it makes a loop\\. Remove the link, then run retire again\\.$`, 'm');
+  new RegExp(`^Not retired: the symbolic link ${escaped(link)} in .*\\/\\.claude\\/evidence\\/ points to the evidence folder itself, so it makes a loop\\. Remove the link, then run ${retireCommand} again\\.$`, 'm');
 
 const linksToHolder = (link: string, holder: string): RegExp =>
-  new RegExp(`^Not retired: the symbolic link ${escaped(link)} in .*\\/\\.claude\\/evidence\\/ points to the folder ${escaped(holder)}, which holds it, so it makes a loop\\. Remove the link, then run retire again\\.$`, 'm');
+  new RegExp(`^Not retired: the symbolic link ${escaped(link)} in .*\\/\\.claude\\/evidence\\/ points to the folder ${escaped(holder)}, which holds it, so it makes a loop\\. Remove the link, then run ${retireCommand} again\\.$`, 'm');
 
 const pointsOutside = (link: string, target: string): RegExp =>
   new RegExp(
-    `^Not retired: the symbolic link ${escaped(link)} in .*\\/\\.claude\\/evidence\\/ points to ${escaped(target)}, outside the evidence folder\\. Replace it with the file it points to, then run retire again\\.$`,
+    `^Not retired: the symbolic link ${escaped(link)} in .*\\/\\.claude\\/evidence\\/ points to ${escaped(target)}, outside the evidence folder\\. Replace it with the file it points to, then run ${retireCommand} again\\.$`,
     'm',
   );
 
@@ -296,7 +398,7 @@ test('ledger retire refuses, even with --force, evidence it cannot read: the fol
   const evidence = path.join(worktreeOf(app, 'fix-login'), '.claude/evidence');
   mkdirSync(path.join(evidence, 'logs'), { recursive: true });
   writeFileSync(path.join(evidence, 'logs/build.log'), 'built\n');
-  const unreadable = /^Not retired: .*\/\.claude\/evidence(\/logs)? cannot be read .*Make it readable, then run retire again\.$/m;
+  const unreadable = new RegExp(`^Not retired: .*\\/\\.claude\\/evidence(\\/logs)? cannot be read .*Make it readable, then run ${retireCommand} again\\.$`, 'm');
   for (const folder of [evidence, path.join(evidence, 'logs')]) {
     chmodSync(folder, 0o000);
     try {
@@ -350,7 +452,7 @@ test('ledger retire refuses, even with --force, a link to the evidence folder it
   mkdirSync(path.join(evidence, 'logs'), { recursive: true });
   symlinkSync('..', path.join(evidence, 'logs/up'));
   refusedEvenForced(h, app, linksToEvidence('logs/up'));
-  rmSync(path.join(evidence, 'logs/up'));
+  unlinkSync(path.join(evidence, 'logs/up'));
   symlinkSync('.', path.join(evidence, 'here'));
   refusedEvenForced(h, app, linksToEvidence('here'));
 });
@@ -369,7 +471,7 @@ test('ledger retire refuses, even with --force, a link to any folder that holds 
   for (const [link, target] of cases) {
     symlinkSync(target, path.join(evidence, link));
     refusedEvenForced(h, app, linksToHolder(link, 'logs'));
-    rmSync(path.join(evidence, link));
+    unlinkSync(path.join(evidence, link));
   }
 });
 
@@ -382,7 +484,7 @@ test('ledger retire refuses, even with --force, evidence that holds a FIFO, befo
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
   execFileSync('mkfifo', [path.join(evidence, 'logs/pipe')]);
   const ledgerBefore = read(path.join(worktree, '.claude/ledger.md'));
-  refusedEvenForced(h, app, new RegExp(`^Not retired: logs\\/pipe in .*\\/\\.claude\\/evidence\\/ is not a file, a folder or a symbolic link\\. Move it out of the evidence folder, then run retire again\\.$`, 'm'));
+  refusedEvenForced(h, app, new RegExp(`^Not retired: logs\\/pipe in .*\\/\\.claude\\/evidence\\/ is not a file, a folder or a symbolic link\\. Move it out of the evidence folder, then run ${retireCommand} again\\.$`, 'm'));
   assert.equal(read(path.join(worktree, '.claude/ledger.md')), ledgerBefore);
   assert.ok(lstatSync(path.join(evidence, 'logs/pipe')).isFIFO());
   assert.equal(read(path.join(evidence, 'red.txt')), 'failing\n');
@@ -392,7 +494,7 @@ test('ledger retire refuses, even with --force, a .claude/evidence that is not a
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'fix-login' });
   writeFileSync(path.join(worktreeOf(app, 'fix-login'), '.claude/evidence'), 'a file, not a folder\n');
-  refusedEvenForced(h, app, /^Not retired: .*\/\.claude\/evidence is not a folder, and evidence must be a folder\..*then run retire again\.$/m);
+  refusedEvenForced(h, app, new RegExp(`^Not retired: .*\\/\\.claude\\/evidence is not a folder, and evidence must be a folder\\..*then run ${retireCommand} again\\.$`, 'm'));
 });
 
 test('ledger retire refuses, even with --force, evidence in a folder it can list but not search', { skip: process.getuid?.() === 0 }, (t) => {
@@ -404,7 +506,7 @@ test('ledger retire refuses, even with --force, evidence in a folder it can list
   for (const folder of [evidence, path.join(evidence, 'logs')]) {
     chmodSync(folder, 0o444);
     try {
-      refusedEvenForced(h, app, /^Not retired: .*\/\.claude\/evidence(\/logs)? cannot be read .*Make it readable, then run retire again\.$/m);
+      refusedEvenForced(h, app, new RegExp(`^Not retired: .*\\/\\.claude\\/evidence(\\/logs)? cannot be read .*Make it readable, then run ${retireCommand} again\\.$`, 'm'));
     } finally {
       chmodSync(folder, 0o755);
     }
@@ -552,6 +654,18 @@ test('ledger retire of a backlog task archives and deletes its ledger, and never
   assert.equal(registry(h).find(({ slug }) => slug === 'later')?.status, 'archived');
 });
 
+test('ledger retire stops with a message when the backlog ledger cannot be deleted, and names the command to run again', { skip: process.getuid?.() === 0 }, (t) => {
+  const { h, app } = setup(t);
+  const file = backlogTask(h, app, { slug: 'later' });
+  chmodSync(path.dirname(file), 0o555);
+  try {
+    failed(ledger(h, app, 'retire', 'later'), new RegExp(`^Could not delete the backlog ledger .*later\\.md: .*Fix the cause, then run ${retireCommand} again\\.$`, 'm'));
+    assert.ok(existsSync(file));
+  } finally {
+    chmodSync(path.dirname(file), 0o755);
+  }
+});
+
 test('ledger retire refuses a parent with active children, names them, and --force retires it', (t) => {
   const { h, app } = setup(t);
   const epic = worktreeTask(h, app, { slug: 'epic', children: ['- a', '- b (started 2026-11-01)', '- done (retired 2026-11-02)'] });
@@ -629,7 +743,7 @@ test('ledger retire only warns when the parent named in the ledger is not found'
 
 test('ledger retire resolves no slug in the main checkout, an unknown slug and a shared slug to messages', (t) => {
   const { h, app } = setup(t);
-  failed(ledger(h, app, 'retire'), /^No task ledger in or above .*Give a slug/m);
+  failed(ledger(h, app, 'retire'), new RegExp(`^No task ledger in or above .*Give a slug: ${retireCommand} <slug>\\.$`, 'm'));
   failed(ledger(h, app, 'retire', 'nothing'), /^No task ledger is named "nothing"/m);
   for (const folder of ['one', 'two']) {
     const worktree = worktreeOf(app, folder);
@@ -754,7 +868,7 @@ function stopsWith(run: () => void, pattern: RegExp): void {
     assert.ok(error instanceof Failure);
     assert.equal(error.exitCode, 1);
     assert.match(error.message, pattern);
-    assert.match(error.message, /Nothing was removed\. Run ledger retire again\.$/);
+    assert.match(error.message, new RegExp(`Nothing was removed\\. Run ${retireCommand} again\\.$`));
     return true;
   });
 }

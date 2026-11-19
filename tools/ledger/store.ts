@@ -1,4 +1,7 @@
-/** One ledger a store keeps. `location` is where it is, as a person reads it; messages print it as it is. */
+/**
+ * One ledger a store keeps. `location` names it for a person: messages and JSON print it as it is, but nothing outside
+ * the store opens it, as a store need not keep its ledgers in files.
+ */
 export type StoredLedger = {
   repo: string;
   name: string;
@@ -8,11 +11,14 @@ export type StoredLedger = {
   location: string;
 };
 
+/** UTF-16 code-unit order, the order readdir gave the old scans; every store sorts evidence files by it. */
+export const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
 /** Ledgers kept per repo folder, which is named after the main checkout's folder. */
 export interface LedgerCollection {
-  /** Where the ledger `name` of `repo` is or would be, as `StoredLedger.location` gives it. */
+  /** Where the ledger `name` of `repo` is or would be, as `StoredLedger.location` gives it; for display only. */
   location(repo: string, name: string): string;
-  /** Where the ledgers of `repo` are, or without a repo, where the ledgers of every repo are; for messages only. */
+  /** Where the ledgers of `repo` are, or without a repo, where the ledgers of every repo are; for display only. */
   repoLocation(repo?: string): string;
   /** The repo folders, by name. */
   repos(): string[];
@@ -47,6 +53,15 @@ export interface Archive extends LedgerCollection {
   evidenceState(repo: string, name: string, from?: string): EvidenceState;
   /** Whether a copy or an evidence folder, even an empty one, already uses `name`; write refuses such a name. */
   nameTaken(repo: string, name: string): boolean;
+  /** Where the evidence archived with `name` is or would be, apart from every ledger's location; for display only. */
+  evidenceLocation(repo: string, name: string): string;
+  /**
+   * The files archived with `name` as paths relative to its evidence, sorted by `byCodeUnit`; none without evidence.
+   * Folders and symbolic links are not listed.
+   */
+  evidenceFiles(repo: string, name: string): string[];
+  /** The bytes of `file`, one of `evidenceFiles(repo, name)`; undefined for any other path. */
+  readEvidence(repo: string, name: string, file: string): Buffer | undefined;
 }
 
 /** The text of the registry, a cache that a rebuild from the ledgers can always replace. */
@@ -60,4 +75,6 @@ export interface LedgerStore {
   backlog: Backlog;
   archive: Archive;
   registry: Registry;
+  /** Lets go of what the store holds open, such as a database; the store is not used after it. */
+  close?(): void;
 }

@@ -336,12 +336,13 @@ function worktreeRemovalReason(input: HookInput, context: HookContext): string |
     'Retire it instead, which archives the ledger and then removes the worktree:',
     `  ${context.ledgerBin} retire <slug>`,
     '',
-    'Archived ledgers live in ~/.claude/ledger-archive/<repo>/.',
+    `Archived ledgers live in ${context.paths.tilde(context.store.archive.repoLocation('<repo>'))}/.`,
   ].join('\n');
 }
 
 const FILE_TOOLS = ['Write', 'Edit', 'MultiEdit'];
 const WORKTREE_LEDGER = /\/\.claude\/ledger\.md$/;
+// Backlog ledgers are files only with the file store; with SQLite storage no file tool can write one.
 const BACKLOG_LEDGER = /\/\.claude\/ledger-backlog\/.*\/.*\.md$/;
 
 const COMMAND_START = String.raw`(?:^|[;&|({])\s*(?:(?:sudo|xargs|env|command|exec|nohup|then|do|else|[A-Za-z_]\w*=\S*)\s+(?:-\S*\s+)*)*(?:\/\S*\/)?`;

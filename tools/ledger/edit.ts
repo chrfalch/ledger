@@ -68,6 +68,15 @@ export function fillLedger(text: string, fields: Filled): string {
     .join('\n');
 }
 
+/** `text` with a `- design refs:` bullet at the end of ## Location when that section has none; undefined without the section. */
+export function withDesignRefsBullet(text: string): string | undefined {
+  const ledger = parseLedger(text);
+  const location = findSection(ledger.sections, 'Location');
+  if (location === undefined) return undefined;
+  const hasBullet = ledger.lines.slice(location.start + 1, location.end).some((line) => plain(line).startsWith('- design refs:'));
+  return hasBullet ? text : insert(ledger, afterLastText(ledger, location), ['- design refs: <LLP numbers, comma-separated, or none>']);
+}
+
 export const addDecision = (text: string, line: string): string => appendTo(parseLedger(text), 'Decisions', [line]);
 
 /** Puts `marker` first under ## Next step, in place of the marker there, and adds the section when there is none. */

@@ -118,6 +118,11 @@ function readableFile(file: string, { followLinks = false }: Links = {}): Stats 
 
 export const isReadableFile = (file: string): boolean => readableFile(file) !== undefined;
 
+/** The entries of `folder` and its subfolders. Unlike readdir's recursive option, a symbolic link to a folder is not followed. */
+export function treeEntries(folder: string): Dirent[] {
+  return readdirSync(folder, { withFileTypes: true }).flatMap((entry) => (entry.isDirectory() ? [entry, ...treeEntries(path.join(folder, entry.name))] : [entry]));
+}
+
 /** The entries of a folder; none when it cannot be read. */
 export function folderEntries(folder: string): Dirent[] {
   try {

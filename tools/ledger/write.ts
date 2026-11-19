@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { addChild, addDecision, addLocationBullet, fillLedger, markStarted, park, removeChildren, removeLine, unpark } from './edit.js';
+import { addChild, addDecision, addLocationBullet, fillLedger, markStarted, park, removeChildren, removeLine, unpark, withDesignRefsBullet } from './edit.js';
 import { fail } from './failure.js';
 import { exists, isFolder, readText, writeAtomic } from './files.js';
 import { isNewSlug, isReadableSlug, parseLedger, type Child, type ChildMark, type TaskRef } from './format.js';
@@ -46,7 +46,7 @@ export function today(): string {
 const oneLine = (text: string): string => text.trim().split(/\s+/).join(' ');
 
 /** `text` as one shell word: unchanged when no character needs quoting, else in single quotes. */
-const shellWord = (text: string): string => (/^[\w@%+=:,./-]+$/.test(text) ? text : `'${text.replaceAll("'", `'\\''`)}'`);
+export const shellWord = (text: string): string => (/^[\w@%+=:,./-]+$/.test(text) ? text : `'${text.replaceAll("'", `'\\''`)}'`);
 
 const slugRule = (slug: string): string =>
   `"${slug}" cannot name a new task. A new slug starts with a lowercase letter or digit and has only lowercase letters, digits and hyphens.`;
@@ -76,17 +76,21 @@ function currentLedger(cwd: string): string | undefined {
 /** The registry is a cache of the disk; rebuilding it after a write keeps it in line. */
 const refreshRegistry = (context: Context, mains: string[]): void => void loadTasks(context, mains);
 
-function readTemplate(paths: LedgerPaths): string {
+/** The ledger template; with `refs`, it holds a `- design refs:` bullet for fillLedger to fill. */
+function readTemplate(paths: LedgerPaths, refs: string | undefined): string {
   const file = path.join(paths.home, '.claude', 'ledger.template.md');
+  let text: string;
   try {
-    return readText(file);
+    text = readText(file);
   } catch {
     return fail(`No ledger template at ${paths.tilde(file)}. Run ledger deploy to install it.`);
   }
+  if (refs === undefined) return text;
+  return withDesignRefsBullet(text) ?? fail(`--design-refs needs a ## Location section for its - design refs: line, and the template ${paths.tilde(file)} has none. Add the section, or leave out --design-refs.`);
 }
 
-/** A repo with an llp/ folder records its design refs; `none` until a task names some. */
-const designRefs = (root: string): string | null => (isFolder(path.join(root, 'llp')) ? 'none' : null);
+/** The design refs a task names; else a repo with an llp/ folder records `none`, and any other repo no line. */
+const designRefs = (root: string, named?: string): string | null => named ?? (isFolder(path.join(root, 'llp')) ? 'none' : null);
 
 function checkTarget(main: string, slug: string, branch: string): void {
   if (!isBranchName(main, branch)) fail(`${branch} is not a valid branch name.`);
@@ -147,20 +151,21 @@ function startWorktree(main: string, slug: string, branch: string, base: string,
   return started;
 }
 
-export type TaskOptions = { goal?: string; stack?: boolean; here?: boolean; repo?: string };
+export type TaskOptions = { goal?: string; designRefs?: string; stack?: boolean; here?: boolean; repo?: string };
 
-export function createTask(context: Context, slug: string | undefined, { goal: rawGoal, stack = false, here = false, repo }: TaskOptions): CreatedTask {
+export function createTask(context: Context, slug: string | undefined, { goal: rawGoal, designRefs: refs, stack = false, here = false, repo }: TaskOptions): CreatedTask {
   const { paths, cwd, store } = context;
   if (here && stack) fail('--here adds a ledger to this worktree, so it takes no --stack.');
   if (here && repo !== undefined) fail('--here adds a ledger to this worktree, so it takes no --repo.');
   if (stack && repo !== undefined) fail('--stack builds on the current branch, so it takes no --repo.');
   if (slug !== undefined && !isNewSlug(slug)) fail(slugRule(slug));
+  if (refs !== undefined && !/^\d+(?:,\d+)*$/.test(refs)) fail(`--design-refs takes LLP numbers, comma-separated, such as 3,12. "${refs}" is not.`);
   const goal = rawGoal === undefined || oneLine(rawGoal) === '' ? undefined : oneLine(rawGoal);
-  if (here) return hereTask(context, slug, goal);
+  if (here) return hereTask(context, slug, goal, refs);
   if (slug === undefined) return fail('ledger task needs a slug, or --here for this worktree.');
 
   const main = repoOf(cwd, repo === undefined ? cwd : path.resolve(cwd, repo));
-  const template = readTemplate(paths);
+  const template = readTemplate(paths, refs);
   const repoFolder = repoName(main);
   const backlog = store.backlog.location(repoFolder, slug);
   if (store.backlog.has(repoFolder, slug)) fail(`A backlog task ${slug} already exists: ${paths.tilde(backlog)}`);
@@ -169,11 +174,11 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
   if (stack) {
     const base = currentBranch(cwd) ?? fail(`--stack needs a branch, but HEAD is detached in ${cwd}.`);
     const root = checkoutRoot(cwd) ?? cwd;
-    const started = startWorktree(main, slug, slug, base, (filled) => fillLedger(template, { slug, goal, ...filled, designRefs: designRefs(root) }));
+    const started = startWorktree(main, slug, slug, base, (filled) => fillLedger(template, { slug, goal, ...filled, designRefs: designRefs(root, refs) }));
     created = { slug, main, status: 'active', ...started };
   } else {
     checkTarget(main, slug, slug);
-    store.backlog.write(repoFolder, slug, fillLedger(template, { slug, goal, main, designRefs: designRefs(main) }));
+    store.backlog.write(repoFolder, slug, fillLedger(template, { slug, goal, main, designRefs: designRefs(main, refs) }));
     created = { slug, main, status: 'backlog', ledger: backlog };
   }
   const cwdMain = mainCheckout(cwd);
@@ -186,7 +191,7 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
   return { ...created, start };
 }
 
-function hereTask(context: Context, given: string | undefined, goal: string | undefined): CreatedTask {
+function hereTask(context: Context, given: string | undefined, goal: string | undefined, refs: string | undefined): CreatedTask {
   const { paths, cwd } = context;
   const main = repoOf(cwd);
   const worktree = checkoutRoot(cwd) ?? fail(`${cwd} is not inside a git repository.`);
@@ -198,7 +203,7 @@ function hereTask(context: Context, given: string | undefined, goal: string | un
   if (!isNewSlug(slug)) fail(`${slugRule(slug)} Name it: ledger task --here <slug>`);
   const commit = commitOf(cwd, 'HEAD') ?? fail(`This worktree has no commit yet: ${worktree}`);
   const started: Started = { worktree, branch: branch ?? 'detached HEAD', base: `HEAD @ ${short(cwd, commit)}`, ledger };
-  writeAtomic(ledger, fillLedger(readTemplate(paths), { slug, goal, ...started, designRefs: designRefs(worktree) }));
+  writeAtomic(ledger, fillLedger(readTemplate(paths, refs), { slug, goal, ...started, designRefs: designRefs(worktree, refs) }));
   excludeEvidence(main);
   refreshRegistry(context, [main]);
   return { slug, main, status: 'active', ...started };
