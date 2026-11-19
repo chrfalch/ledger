@@ -114,6 +114,11 @@ the commands into
 hook events whole. For every other hook event, it replaces the repo's own
 entries and keeps yours as they are. An entry you edited counts as yours.
 
+Each hook script runs as `"$HOME"/.claude/hooks/logged.sh <script>.sh`. Exit 0
+and exit 2 pass through unchanged. Any other exit lets the action through: it
+adds one line to `~/.claude/ledger-hook-failures.log`, and the next session
+start reports it. Run a new hook script the same way.
+
 If you change or remove a hook entry in the policy of any other hook event, or
 remove a whole event, the old entries stay in upgraded settings beside the new
 ones. Remove them by hand.

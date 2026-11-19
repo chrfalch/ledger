@@ -575,7 +575,7 @@ test('deploy installs usage hooks and preserves the prompt ledger hook', (t) => 
   const home = freshHome(t);
   const result = run(home, DEPLOY, '--no-codex', '--no-githooks');
   assert.equal(result.status, 0, result.stderr);
-  for (const name of ['statusline.sh', 'usage-pace.sh']) {
+  for (const name of ['statusline.sh', 'usage-pace.sh', 'logged.sh']) {
     const file = path.join(home, '.claude/hooks', name);
     assert.ok(lstatSync(file).isSymbolicLink());
     assert.ok(lstatSync(path.join(REPO, 'hooks', name)).mode & 0o111);
@@ -584,7 +584,7 @@ test('deploy installs usage hooks and preserves the prompt ledger hook', (t) => 
   assert.equal(settings.statusLine.command, '"$HOME"/.claude/hooks/statusline.sh');
   const commands = settings.hooks.UserPromptSubmit.flatMap((entry: { hooks: { command: string }[] }) => entry.hooks.map((hook) => hook.command));
   assert.ok(commands.includes('"$HOME"/.claude/bin/ledger hook prompt-submit'));
-  assert.ok(commands.includes('"$HOME"/.claude/hooks/usage-pace.sh'));
+  assert.ok(commands.includes('"$HOME"/.claude/hooks/logged.sh usage-pace.sh'));
 });
 
 test('deploy links bin/ledger into ~/.claude/bin and wires the ledger hooks to it, not to the bash scripts', (t) => {
@@ -599,11 +599,11 @@ test('deploy links bin/ledger into ~/.claude/bin and wires the ledger hooks to i
   );
   const ledger = '"$HOME"/.claude/bin/ledger hook';
   assert.deepEqual(wired, {
-    PreToolUse: ['Bash: "$HOME"/.claude/hooks/derived-data-gate.sh', `Write|Edit|MultiEdit|Bash: ${ledger} pre-tool-use`],
-    PermissionDenied: ['Bash|Read|Grep|Glob|NotebookRead: "$HOME"/.claude/hooks/denied-read-retry.sh'],
+    PreToolUse: ['Bash: "$HOME"/.claude/hooks/logged.sh derived-data-gate.sh', `Write|Edit|MultiEdit|Bash: ${ledger} pre-tool-use`],
+    PermissionDenied: ['Bash|Read|Grep|Glob|NotebookRead: "$HOME"/.claude/hooks/logged.sh denied-read-retry.sh'],
     PreCompact: [`*: ${ledger} pre-compact`],
-    SessionStart: ['startup|resume|clear|fork: "$HOME"/.claude/hooks/deploy-drift.sh', `*: ${ledger} session-start`],
-    UserPromptSubmit: [`*: ${ledger} prompt-submit`, '*: "$HOME"/.claude/hooks/usage-pace.sh'],
+    SessionStart: ['startup|resume|clear|fork: "$HOME"/.claude/hooks/logged.sh deploy-drift.sh', `*: ${ledger} session-start`],
+    UserPromptSubmit: [`*: ${ledger} prompt-submit`, '*: "$HOME"/.claude/hooks/logged.sh usage-pace.sh'],
   });
 });
 

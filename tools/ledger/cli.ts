@@ -9,6 +9,7 @@ import { exists } from './files.js';
 import { planProgress } from './format.js';
 import { mainCheckout } from './git.js';
 import { fileStore } from './file-store.js';
+import { logHookFailure, oneLine } from './hook-failures.js';
 import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookEvent } from './hooks.js';
 import { ledgerBin, ledgerPaths, realPath, repoName } from './paths.js';
 import { migrateStorage } from './migrate.js';
@@ -450,7 +451,9 @@ export async function main(argv: string[]): Promise<number> {
         process.stdout.write(answerHook(event, readFileSync(0, 'utf8'), { ...context, ledgerBin }));
       } catch (error) {
         // Exit 0 with no output: Claude Code then allows the tool call and injects nothing. Exit 2 would block the tool call.
-        console.error(`ledger hook ${event}: ${(error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ')}`);
+        const message = oneLine(error instanceof Error ? error.message : String(error));
+        console.error(`ledger hook ${event}: ${message}`);
+        logHookFailure(paths.home, `ledger hook ${event}`, message);
       }
     });
   program
