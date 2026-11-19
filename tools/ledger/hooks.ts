@@ -8,6 +8,8 @@ import { loadTasks } from './registry.js';
 import { archivedTasks, findNamed, findTasks, folderTask, locateChild, namedChildren, worktreeTasks, type Task } from './tasks.js';
 import type { Context } from './write.js';
 
+// @ref LLP 0000#hooks — the four events, their registration in settings.policy.json, and why a failed hook allows the call.
+
 /** `ledgerBin` is the path deny reasons name, so a reader can run it without `ledger` on PATH. */
 export type HookContext = Context & { ledgerBin: string };
 

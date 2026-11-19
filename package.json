@@ -9,6 +9,7 @@
     "node": ">=20.12"
   },
   "scripts": {
+    "llp": "tsx tools/llp-refs.ts",
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
