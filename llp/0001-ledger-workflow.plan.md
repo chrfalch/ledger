@@ -100,7 +100,8 @@ there during the work, and retire copies it into the archive, as today.
 
 **Decision D29 (2026-11-19):** each task is one structured record. Its fields:
 title, kind, state, stage, parent, order, dependencies, claim, PR, repo
-address and worktree path. Its lists: plan steps, decisions (text, reason, tag,
+address, worktree path and design refs (the LLP numbers the task touches,
+D46). Its lists: plan steps, decisions (text, reason, tag,
 date), constraints, open questions, step reports, the report to the parent,
 general notes, the goal and the next step. Each write command (section 10)
 writes one typed item and checks it on write. The task list is a query over
@@ -227,7 +228,10 @@ Each step names the command the tool provides and the widget the agent shows.
 Every widget also has **Close**.
 
 1. **Create.** `ledger task new <slug> --goal … [--parent <slug>] [--after <slug>]`.
-   A split plan makes the parent first, then each child, in order.
+   A split plan makes the parent first, then each child, in order. In a repo
+   with an `llp/` folder, the agent reads the document titles, picks the LLPs
+   the task touches and passes their numbers with `--design-refs`; with none,
+   the record says none (D46).
 2. **Start.** `ledger go <slug>`. A backlog task gets its worktree and branch.
    A parent starts its next child (section 5.3). The start also (D18):
    - installs the repo's packages in the new worktree, so the first test run
@@ -236,7 +240,10 @@ Every widget also has **Close**.
    - records the task's repo and worktree path in the store (D9).
    
    The session moves into the worktree.
-3. **Plan.** The agent writes the plan with `ledger notes plan`. For a task with more
+3. **Plan.** The agent reads the task's design refs first. A lasting design
+   decision the task makes goes into an LLP document (an existing one or a new
+   one) in the same PR, and the reviewer checks that it did (D47).
+   The agent writes the plan with `ledger notes plan`. For a task with more
    than one file or a design choice, widget: *Approve plan / Change plan /
    Close* (D3).
 4. **Red, build, verify, review.** Delegated to subagents. After each, the
@@ -573,6 +580,12 @@ Decided 2026-11-19:
 - **D45** With D44, `ledger worktrees derived-data` and `ledger worktrees
   prune-orphans` are removed, with their docs and tests: build folders no
   longer collect in Xcode's DerivedData.
+- **D46** In a repo with `llp/`, the task record keeps the LLP numbers the task
+  touches (design refs), picked when the task is made; none when no LLP
+  matches (section 4, step 1). Keeps today's `--design-refs` behaviour.
+- **D47** The plan stage reads the design refs; a lasting design decision goes
+  into an LLP in the same PR; the reviewer checks it (step 3). Replaces the
+  LLP line in the operating-model rule.
 
 ## 15. From today to this spec
 
@@ -593,6 +606,8 @@ Decided 2026-11-19:
 | Repo identity (D10) | folder name | remote address; one-time conversion |
 | Hook failures (D11) | allowed, error not visible | failure log at session start |
 | LLP 0000 upkeep (D12) | none | CONTRIBUTING rule; reviewer check; `npm run llp` warning |
+| Design refs (D46) | `- design refs:` line in the Markdown ledger, picked by `/ledger:task` and `/ledger:go` | a field of the task record; converted once with the other ledgers |
+| LLP decisions (D47) | one line in the operating-model rule | plan stage reads the refs; reviewer checks that lasting decisions reached an LLP |
 | Task kinds (D14) | none; every task is treated as code | `--kind`; stages per kind |
 | Claims (D5, D17) | none | claim with expiry |
 | Clear points (D13) | rule text; operator types `/ledger:next` | offer after review and on size; agent starts `/ledger:next` after the widget choice |
