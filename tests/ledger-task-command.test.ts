@@ -149,7 +149,7 @@ test('the Plan gate requires a parent task for two or more separately shipped pa
   assert.match(gate, /two or more parts that ship separately/);
   assert.match(gate, /make the parent task and each child task/);
   assert.match(gate, /attach each child task to the parent task/);
-  assert.match(gate, /split and the order in the parent task's goal: the `--goal` text of `ledger task`/);
+  assert.match(gate, /split and the order in the parent task's goal: the `--goal` text of `ledger task new`/);
   assert.match(gate, /before any child work starts/);
 });
 
@@ -233,7 +233,7 @@ test('/ledger:task makes the parent task first for a request with separately shi
   assert.match(split, /The parent task's goal from step 2 also states the split and the order/);
   assert.match(split, /attach each child task in that order/);
   assert.doesNotMatch(split, /into the parent ledger|Edit/);
-  assert.match(split, /`bin\/ledger parent <parent> add <child>`/);
+  assert.match(split, /`bin\/ledger tree add <parent> <child>`/);
   assert.match(split, /Never promote the parent task/);
   assert.match(split, /`\/ledger:go <parent>`/);
 });
@@ -245,7 +245,7 @@ test('/ledger:task selects LLP numbers in a separate step before running the scr
 
 test('/ledger:task runs bin/ledger task, which takes no --refs, and writes picked LLPs on the design refs line', () => {
   const task = readFileSync(path.join(REPO, 'mods/ledger/commands/task.md'), 'utf8');
-  const examples = task.split('\n').filter(line => line.includes('/bin/ledger" task <slug>'));
+  const examples = task.split('\n').filter(line => line.includes('/bin/ledger" task new <slug>'));
   assert.equal(examples.length, 1);
   assert.doesNotMatch(task, /--refs/);
   assert.match(task.replace(/\s+/g, ' '), /`- design refs:` line/);
@@ -259,7 +259,7 @@ test('/ledger:task passes picked LLPs to bin/ledger task with --design-refs, and
 
 test('/ledger:go makes a new task with bin/ledger task, then starts it with bin/ledger go', () => {
   const go = read('mods/ledger/commands/go.md');
-  assert.match(go, /\/bin\/ledger" task <slug> --goal '<goal>'/);
+  assert.match(go, /\/bin\/ledger" task new <slug> --goal '<goal>'/);
   assert.match(go, /`bin\/ledger go <slug>`/);
   assert.doesNotMatch(go, /--promote|--refs/);
   assert.match(go, /`- design refs:` line/);

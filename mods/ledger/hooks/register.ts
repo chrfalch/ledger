@@ -137,7 +137,7 @@ async function disarmedOnFailure<T>($: EngineInterface, arm: GoArm, answer: Prom
 }
 
 async function parkOther($: EngineInterface, slug: string, reason: string): Promise<string> {
-  const parked = await ledgerJson<Parked>($, ['park', slug, '--reason', reason])
+  const parked = await ledgerJson<Parked>($, ['task', 'park', slug, '--reason', reason])
   return parked.ok ? `Parked ${slug}. Parked: ${parked.parked.date} — ${parked.parked.reason}` : `Could not park ${slug}. ${parked.error}`
 }
 
@@ -149,9 +149,9 @@ async function hasTask($: EngineInterface, slug: string, main: string): Promise<
   return listed.ok ? listed.tasks.some(task => task.slug === slug && task.main === main) : { error: listed.error }
 }
 
-/** What `ledger retire --dry-run` tells of the branch of a finished task; a failed dry run only makes the hint plainer. */
+/** What `ledger task retire --dry-run` tells of the branch of a finished task; a failed dry run only makes the hint plainer. */
 async function branchFacts($: EngineInterface, slug: string): Promise<BranchFacts> {
-  const plan = await ledgerJson<RetirePlan>($, ['retire', slug, '--dry-run'], LONG_TIMEOUT_MS)
+  const plan = await ledgerJson<RetirePlan>($, ['task', 'retire', slug, '--dry-run'], LONG_TIMEOUT_MS)
   if (!plan.ok || plan.worktree === undefined) return undefined
   return { ...plan.worktree, blockedBy: plan.blocked ? plan.blockers.map(({ reason }) => reason) : [] }
 }
@@ -163,7 +163,7 @@ async function branchFacts($: EngineInterface, slug: string): Promise<BranchFact
  * run asks git and gh whether the branch is merged, which can take seconds.
  */
 async function showRetireHint($: EngineInterface, previous: PreviousTask, namesNextChild: boolean): Promise<void> {
-  const pruned = await ledgerJson<AutoPruned>($, ['auto-prune', previous.ledger])
+  const pruned = await ledgerJson<AutoPruned>($, ['worktrees', 'auto-prune', previous.ledger])
   if (!pruned.ok) return
   if (pruned.message) await $.ui.log(pruned.message)
   if (!pruned.finished) return
@@ -171,7 +171,7 @@ async function showRetireHint($: EngineInterface, previous: PreviousTask, namesN
   const { parent, main: here } = previous
   if (!namesNextChild || parent === undefined) return
   const ref = { slug: parent.slug, main: parent.main ?? here ?? '' }
-  const next = await ledgerJson<NextChild>($, ['parent', `${ref.slug}@${ref.main}`, 'next'])
+  const next = await ledgerJson<NextChild>($, ['tree', 'next', `${ref.slug}@${ref.main}`])
   const child = next.ok ? next.chain.at(-1) : undefined
   if (next.ok) await $.ui.log(nextChildHint(taskName(ref, here), child && taskName(child, here)))
 }
@@ -197,13 +197,20 @@ async function finishTurn($: EngineInterface): Promise<void> {
   if (session.title !== undefined) await titleSession($, session.title)
   const own = ownTask(session)
   if (own === undefined) return
-  const pruned = await ledgerJson<AutoPruned>($, ['auto-prune', own.path])
+  const pruned = await ledgerJson<AutoPruned>($, ['worktrees', 'auto-prune', own.path])
   if (pruned.ok && pruned.message) await $.ui.log(pruned.message)
 }
 
 function archiveArgs(given: string[]): string[] {
   const term = given.filter(word => word !== '--all').join(' ')
-  return ['archive', ...(term === '' ? [] : [term]), ...(given.includes('--all') ? ['--all'] : [])]
+  return ['task', 'archive', ...(term === '' ? [] : [term]), ...(given.includes('--all') ? ['--all'] : [])]
+}
+
+/** /ledger:parent takes `<slug> [<action> <child>]`; `ledger tree` takes the action first, and `show` for none. */
+function treeArgs(given: string[]): string[] {
+  const options = given.filter(word => word.startsWith('-'))
+  const [slug = '', action = 'show', ...rest] = given.filter(word => !word.startsWith('-'))
+  return ['tree', action, slug, ...rest, ...options]
 }
 
 // The hook sees the model's raw input: the name may be missing, or carry a leading slash the Skill tool strips later.
@@ -224,11 +231,11 @@ function answerOf($: EngineInterface, command: string, args: string | undefined)
     case 'ledger:archive':
       return ledgerText($, archiveArgs(given))
     case 'ledger:parent':
-      return given.length === 0 ? Promise.resolve(PARENT_USAGE) : ledgerText($, ['parent', ...given])
+      return given.every(word => word.startsWith('-')) ? Promise.resolve(PARENT_USAGE) : ledgerText($, treeArgs(given))
     case 'ledger:worktrees':
       return ledgerText($, ['worktrees', ...given], LONG_TIMEOUT_MS)
     case 'ledger:retire':
-      return ledgerText($, ['retire', ...given], LONG_TIMEOUT_MS)
+      return ledgerText($, ['task', 'retire', ...given], LONG_TIMEOUT_MS)
     case 'ledger:help':
       return Promise.resolve(HELP)
   }
@@ -390,7 +397,7 @@ export const register: Register = on => {
     }
     // After the model's turn, so its own edits to the ledger cannot move or drop the marker.
     if (value.mode === 'park') {
-      const parked = await ledgerJson<Parked>($, ['park', value.slug, '--reason', value.reason])
+      const parked = await ledgerJson<Parked>($, ['task', 'park', value.slug, '--reason', value.reason])
       if (!parked.ok) {
         await $.ui.log(parkFailedMessage(value.slug, parked.error))
         return next(e)

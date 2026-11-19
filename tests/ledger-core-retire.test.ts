@@ -57,10 +57,10 @@ function commitIn(h: string, worktree: string, name = 'work.txt'): string {
 
 test('ledger retire --help names the slug, --dry-run and --force', (t) => {
   const { h } = setup(t);
-  const stdout = ok(ledger(h, h, 'retire', '--help'));
-  assert.match(stdout, /^Usage: ledger retire \[options\] \[slug\]/m);
+  const stdout = ok(ledger(h, h, 'task', 'retire', '--help'));
+  assert.match(stdout, /^Usage: ledger task retire \[options\] \[slug\]/m);
   for (const pattern of [/--dry-run/, /--force/]) assert.match(stdout, pattern);
-  assert.match(ok(ledger(h, h, '--help')), /^\s+retire\b/m);
+  assert.match(ok(ledger(h, h, 'task', '--help')), /^\s+retire\b/m);
 });
 
 test('ledger retire with no slug retires the task of the worktree it runs in: archive copy, worktree gone, branch deleted, registry archived', (t) => {
@@ -68,7 +68,7 @@ test('ledger retire with no slug retires the task of the worktree it runs in: ar
   const file = worktreeTask(h, app, { slug: 'fix-login' });
   const text = read(file);
   const worktree = worktreeOf(app, 'fix-login');
-  const stdout = ok(ledger(h, worktree, 'retire'));
+  const stdout = ok(ledger(h, worktree, 'task', 'retire'));
   const copy = path.join(archiveFolder(h, app), `${today()}-fix-login.md`);
   assert.equal(read(copy), text);
   assert.match(stdout, new RegExp(`archived ${copy.replaceAll('/', '\\/')}`));
@@ -86,7 +86,7 @@ test('ledger retire names the archive copy after the ledger title, not the branc
   git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/wip', worktree, 'main');
   mkdirSync(path.join(worktree, '.claude'));
   writeFileSync(path.join(worktree, '.claude/ledger.md'), ledgerText({ slug: 'login-fix', worktree, branch: 'me/wip' }));
-  ok(ledger(h, app, 'retire', 'login-fix'));
+  ok(ledger(h, app, 'task', 'retire', 'login-fix'));
   assert.deepEqual(archiveList(h, app), [`${today()}-login-fix.md`]);
 });
 
@@ -95,7 +95,7 @@ test('ledger retire adds -2 when the day already has a different copy of that na
   worktreeTask(h, app, { slug: 'fix-login' });
   mkdirSync(archiveFolder(h, app), { recursive: true });
   writeFileSync(path.join(archiveFolder(h, app), `${today()}-fix-login.md`), 'an older task with the same slug\n');
-  ok(ledger(h, app, 'retire', 'fix-login'));
+  ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   assert.deepEqual(archiveList(h, app), [`${today()}-fix-login-2.md`, `${today()}-fix-login.md`]);
 });
 
@@ -105,7 +105,7 @@ test('ledger retire finds an identical copy already in the archive and archives 
   mkdirSync(archiveFolder(h, app), { recursive: true });
   const earlier = path.join(archiveFolder(h, app), '2026-01-02-fix-login.md');
   copyFileSync(file, earlier);
-  const stdout = ok(ledger(h, app, 'retire', 'fix-login'));
+  const stdout = ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   assert.match(stdout, new RegExp(`already archived ${earlier.replaceAll('/', '\\/')}`));
   assert.deepEqual(archiveList(h, app), ['2026-01-02-fix-login.md']);
   assert.equal(existsSync(worktreeOf(app, 'fix-login')), false);
@@ -118,7 +118,7 @@ test('ledger retire copies .claude/evidence next to the archive copy, under the 
   mkdirSync(path.join(evidence, 'logs'), { recursive: true });
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
   writeFileSync(path.join(evidence, 'logs/build.log'), 'built\n');
-  const stdout = ok(ledger(h, app, 'retire', 'fix-login'));
+  const stdout = ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   const copied = path.join(archiveFolder(h, app), `${today()}-fix-login`);
   assert.equal(read(path.join(copied, 'red.txt')), 'failing\n');
   assert.equal(read(path.join(copied, 'logs/build.log')), 'built\n');
@@ -134,14 +134,14 @@ function retiredOnceLocked(t: TestContext) {
   mkdirSync(evidence, { recursive: true });
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
   git(h, app, 'worktree', 'lock', worktree);
-  failed(ledger(h, app, 'retire', 'fix-login'), new RegExp(`^Could not remove the worktree [^]*run ${retireCommand} again once git can remove the worktree\\.$`, 'm'));
+  failed(ledger(h, app, 'task', 'retire', 'fix-login'), new RegExp(`^Could not remove the worktree [^]*run ${retireCommand} again once git can remove the worktree\\.$`, 'm'));
   assert.ok(existsSync(worktree));
   git(h, app, 'worktree', 'unlock', worktree);
   return { h, app, worktree, evidence };
 }
 
 const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const retireCommand = `${escapeRegExp(shellWord(LEDGER_BIN))} retire`;
+const retireCommand = `${escapeRegExp(shellWord(LEDGER_BIN))} task retire`;
 
 /**
  * The remedy names no file operation, so it holds for every store: it lists the archived evidence with show, through
@@ -154,7 +154,7 @@ const differs = new RegExp(
 
 test('ledger retire runs again after git could not remove the worktree: the same evidence is archived already, so it goes on with one archive copy', (t) => {
   const { h, app, worktree } = retiredOnceLocked(t);
-  const ran = ledger(h, app, 'retire', 'fix-login');
+  const ran = ledger(h, app, 'task', 'retire', 'fix-login');
   assert.equal(ran.status, 0, ran.stderr);
   assert.match(ran.stdout, /^already archived /m);
   assert.doesNotMatch(ran.stderr, /evidence/);
@@ -167,7 +167,7 @@ test('ledger retire refuses, even with --force, a rerun whose worktree got more 
   const { h, app, worktree, evidence } = retiredOnceLocked(t);
   writeFileSync(path.join(evidence, 'later.txt'), 'added after the first run\n');
   for (const flags of [[], ['--force']]) {
-    failed(ledger(h, app, 'retire', 'fix-login', ...flags), differs);
+    failed(ledger(h, app, 'task', 'retire', 'fix-login', ...flags), differs);
     assert.ok(existsSync(path.join(evidence, 'later.txt')));
     assert.ok(existsSync(worktree));
     assert.deepEqual(archiveList(h, app), [`${today()}-fix-login`, `${today()}-fix-login.md`]);
@@ -183,7 +183,7 @@ test('ledger retire refuses, even with --force, an identical archive copy that h
   mkdirSync(evidence, { recursive: true });
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
   for (const flags of [[], ['--force']]) {
-    failed(ledger(h, app, 'retire', 'fix-login', ...flags), differs);
+    failed(ledger(h, app, 'task', 'retire', 'fix-login', ...flags), differs);
     assert.ok(existsSync(file));
     assert.deepEqual(archiveList(h, app), ['2026-01-02-fix-login.md']);
   }
@@ -197,7 +197,7 @@ test('ledger retire quotes the archive name as one shell word in the show comman
   mkdirSync(path.join(worktreeOf(app, 'fix-login'), '.claude/evidence'));
   writeFileSync(path.join(worktreeOf(app, 'fix-login'), '.claude/evidence/red.txt'), 'failing\n');
   const name = escapeRegExp(shellWord("2026-01-02-fix login's copy"));
-  failed(ledger(h, app, 'retire', 'fix-login'), new RegExp(`with \`${escapeRegExp(shellWord(LEDGER_BIN))} show ${name} --evidence\`, then make the two match`));
+  failed(ledger(h, app, 'task', 'retire', 'fix-login'), new RegExp(`with \`${escapeRegExp(shellWord(LEDGER_BIN))} show ${name} --evidence\`, then make the two match`));
 });
 
 /**
@@ -272,13 +272,13 @@ test('ledger retire names its own bin/ledger in what to run, quoted as one shell
   const { h, app } = setup(t);
   const bin = spacedLedgerBin(h);
   const command = escapeRegExp(shellWord(bin));
-  failed(spawn(h, h, bin, ['retire', 'fix-login']), new RegExp(`is not inside a git repository\\. Run ${command} retire in the repo of the task\\.$`, 'm'));
+  failed(spawn(h, h, bin, ['task', 'retire', 'fix-login']), new RegExp(`is not inside a git repository\\. Run ${command} task retire in the repo of the task\\.$`, 'm'));
   const file = worktreeTask(h, app, { slug: 'fix-login' });
   mkdirSync(archiveFolder(h, app), { recursive: true });
   copyFileSync(file, path.join(archiveFolder(h, app), '2026-01-02-fix-login.md'));
   mkdirSync(path.join(worktreeOf(app, 'fix-login'), '.claude/evidence'));
   writeFileSync(path.join(worktreeOf(app, 'fix-login'), '.claude/evidence/red.txt'), 'failing\n');
-  failed(spawn(h, app, bin, ['retire', 'fix-login']), new RegExp(`with \`${command} show 2026-01-02-fix-login --evidence\`, then make the two match`));
+  failed(spawn(h, app, bin, ['task', 'retire', 'fix-login']), new RegExp(`with \`${command} show 2026-01-02-fix-login --evidence\`, then make the two match`));
 });
 
 test('ledger retire stops with a message, and no stack trace, when the archive copy cannot be written; it retires once the cause is fixed', { skip: process.getuid?.() === 0 }, (t) => {
@@ -292,7 +292,7 @@ test('ledger retire stops with a message, and no stack trace, when the archive c
   mkdirSync(archive, { recursive: true });
   chmodSync(archive, 0o555);
   try {
-    const first = ledger(h, app, 'retire', 'fix-login');
+    const first = ledger(h, app, 'task', 'retire', 'fix-login');
     failed(first, new RegExp(`^Could not archive fix-login: .*Fix the cause, then run ${retireCommand} again\\.$`, 'm'));
     assert.doesNotMatch(first.stderr, /^\s+at /m);
     assert.ok(first.stderr.includes(path.join(archive, `${today()}-fix-login.md`)), first.stderr);
@@ -300,7 +300,7 @@ test('ledger retire stops with a message, and no stack trace, when the archive c
   } finally {
     chmodSync(archive, 0o755);
   }
-  ok(ledger(h, app, 'retire', 'fix-login'));
+  ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   assert.equal(read(path.join(archive, `${today()}-fix-login/red.txt`)), 'failing\n');
 });
 
@@ -314,7 +314,7 @@ test('ledger retire refuses, even with --force, an evidence file it cannot read,
   writeFileSync(secret, 'secret\n');
   chmodSync(secret, 0o000);
   t.after(() => existsSync(secret) && chmodSync(secret, 0o644));
-  const plan = ok(ledger(h, app, 'retire', 'fix-login', '--dry-run'));
+  const plan = ok(ledger(h, app, 'task', 'retire', 'fix-login', '--dry-run'));
   assert.match(plan, /^It cannot be retired, not even with --force: .*\/\.claude\/evidence\/logs\/secret\.txt cannot be read \(EACCES\)/m);
   refusedEvenForced(h, app, new RegExp(`^Not retired: .*\\/\\.claude\\/evidence\\/logs\\/secret\\.txt cannot be read \\(EACCES\\), so the evidence cannot be archived\\. Make it readable, then run ${retireCommand} again\\.$`, 'm'));
 });
@@ -326,7 +326,7 @@ test('ledger retire archives a relative symbolic link in the evidence as the sam
   mkdirSync(evidence, { recursive: true });
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
   symlinkSync('red.txt', path.join(evidence, 'latest'));
-  ok(ledger(h, app, 'retire', 'fix-login'));
+  ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   const copied = path.join(archiveFolder(h, app), `${today()}-fix-login`);
   assert.equal(readlinkSync(path.join(copied, 'latest')), 'red.txt');
   assert.equal(read(path.join(copied, 'latest')), 'failing\n');
@@ -335,7 +335,7 @@ test('ledger retire archives a relative symbolic link in the evidence as the sam
 /** Retire refuses, even with --force, and leaves the worktree and the archive as they were. */
 function refusedEvenForced(h: string, app: string, pattern: RegExp): void {
   for (const flags of [[], ['--force']]) {
-    failed(ledger(h, app, 'retire', 'fix-login', ...flags), pattern);
+    failed(ledger(h, app, 'task', 'retire', 'fix-login', ...flags), pattern);
     assert.ok(existsSync(path.join(worktreeOf(app, 'fix-login'), '.claude/ledger.md')));
     assert.deepEqual(archiveList(h, app), []);
   }
@@ -438,7 +438,7 @@ test('ledger retire archives a link in a subfolder whose text steps up only insi
   mkdirSync(path.join(evidence, 'logs'), { recursive: true });
   writeFileSync(path.join(evidence, 'logs/b'), 'failing\n');
   symlinkSync('../logs/b', path.join(evidence, 'logs/a'));
-  ok(ledger(h, app, 'retire', 'fix-login'));
+  ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   const copied = path.join(archiveFolder(h, app), `${today()}-fix-login`);
   assert.equal(readlinkSync(path.join(copied, 'logs/a')), '../logs/b');
   assert.equal(read(path.join(copied, 'logs/a')), 'failing\n');
@@ -519,7 +519,7 @@ test('ledger retire never attaches a leftover evidence folder to a new copy: a t
   mkdirSync(leftover, { recursive: true });
   writeFileSync(path.join(leftover, 'old.txt'), 'from an earlier run\n');
   const text = read(file);
-  ok(ledger(h, app, 'retire', 'fix-login'));
+  ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   assert.deepEqual(archiveList(h, app), [`${today()}-fix-login`, `${today()}-fix-login-2.md`]);
   assert.equal(read(path.join(archiveFolder(h, app), `${today()}-fix-login-2.md`)), text);
   assert.deepEqual(readdirSync(leftover), ['old.txt']);
@@ -529,10 +529,10 @@ test('ledger retire refuses uncommitted changes without --force, and --force ret
   const { h, app } = setup(t);
   const file = worktreeTask(h, app, { slug: 'fix-login' });
   writeFileSync(path.join(worktreeOf(app, 'fix-login'), 'scratch.txt'), 'not committed\n');
-  failed(ledger(h, app, 'retire', 'fix-login'), /^Not retired: it has 1 uncommitted change\. Add --force to retire it anyway\. Uncommitted changes are lost with the worktree\.$/m);
+  failed(ledger(h, app, 'task', 'retire', 'fix-login'), /^Not retired: it has 1 uncommitted change\. Add --force to retire it anyway\. Uncommitted changes are lost with the worktree\.$/m);
   assert.ok(existsSync(file));
   assert.deepEqual(archiveList(h, app), []);
-  ok(ledger(h, app, 'retire', 'fix-login', '--force'));
+  ok(ledger(h, app, 'task', 'retire', 'fix-login', '--force'));
   assert.equal(existsSync(worktreeOf(app, 'fix-login')), false);
   assert.deepEqual(archiveList(h, app), [`${today()}-fix-login.md`]);
 });
@@ -542,9 +542,9 @@ test('ledger retire refuses an unmerged branch without --force; --force retires 
   worktreeTask(h, app, { slug: 'fix-login' });
   const head = commitIn(h, worktreeOf(app, 'fix-login'));
   noPr(h);
-  failed(ledger(h, app, 'retire', 'fix-login'), /^Not retired: its branch is not merged\. Add --force/m);
+  failed(ledger(h, app, 'task', 'retire', 'fix-login'), /^Not retired: its branch is not merged\. Add --force/m);
   assert.ok(existsSync(worktreeOf(app, 'fix-login')));
-  const stdout = ok(ledger(h, app, 'retire', 'fix-login', '--force'));
+  const stdout = ok(ledger(h, app, 'task', 'retire', 'fix-login', '--force'));
   assert.match(stdout, /kept +branch me\/fix-login, because it is not merged/);
   assert.equal(git(h, app, 'rev-parse', 'me/fix-login'), head);
 });
@@ -556,7 +556,7 @@ test('ledger retire lists every reason together when a worktree is both dirty an
   writeFileSync(path.join(worktreeOf(app, 'fix-login'), 'a.txt'), 'x');
   writeFileSync(path.join(worktreeOf(app, 'fix-login'), 'b.txt'), 'x');
   noPr(h);
-  failed(ledger(h, app, 'retire', 'fix-login'), /^Not retired: it has 2 uncommitted changes and its branch is not merged\. Add --force/m);
+  failed(ledger(h, app, 'task', 'retire', 'fix-login'), /^Not retired: it has 2 uncommitted changes and its branch is not merged\. Add --force/m);
 });
 
 test('ledger retire counts a merged PR that ends at HEAD as merged: no --force, and the branch is deleted', (t) => {
@@ -564,7 +564,7 @@ test('ledger retire counts a merged PR that ends at HEAD as merged: no --force, 
   worktreeTask(h, app, { slug: 'fix-login' });
   const head = commitIn(h, worktreeOf(app, 'fix-login'));
   mergedPr(h, head);
-  const stdout = ok(ledger(h, app, 'retire', 'fix-login'));
+  const stdout = ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   assert.match(stdout, /deleted +branch me\/fix-login/);
   assert.equal(git(h, app, 'branch', '--list', 'me/fix-login'), '');
 });
@@ -575,8 +575,8 @@ test('ledger retire does not count a merged PR that ends at another commit: it n
   const merged = commitIn(h, worktreeOf(app, 'fix-login'), 'one.txt');
   const head = commitIn(h, worktreeOf(app, 'fix-login'), 'two.txt');
   mergedPr(h, merged);
-  failed(ledger(h, app, 'retire', 'fix-login'), /^Not retired: its branch is not merged\./m);
-  const stdout = ok(ledger(h, app, 'retire', 'fix-login', '--force'));
+  failed(ledger(h, app, 'task', 'retire', 'fix-login'), /^Not retired: its branch is not merged\./m);
+  const stdout = ok(ledger(h, app, 'task', 'retire', 'fix-login', '--force'));
   assert.match(stdout, /kept +branch me\/fix-login, because/);
   assert.equal(git(h, app, 'rev-parse', 'me/fix-login'), head);
 });
@@ -589,7 +589,7 @@ test('ledger retire fetches the default branch first, so work merged on origin s
   noPr(h);
   // Pushed by URL, so this checkout's origin/main stays where it was until a fetch.
   git(h, worktree, 'push', '--quiet', path.join(h, 'remotes/app.git'), 'HEAD:main');
-  const stdout = ok(ledger(h, app, 'retire', 'fix-login'));
+  const stdout = ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   assert.match(stdout, /deleted +branch me\/fix-login/);
 });
 
@@ -597,7 +597,7 @@ test('ledger retire warns when the fetch fails and still decides on origin/main 
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'fix-login' });
   git(h, app, 'remote', 'set-url', 'origin', path.join(h, 'remotes/missing.git'));
-  const ran = ledger(h, app, 'retire', 'fix-login');
+  const ran = ledger(h, app, 'task', 'retire', 'fix-login');
   assert.equal(ran.status, 0, ran.stderr);
   assert.match(ran.stderr, /^warning: .*fetch.*origin main/m);
   assert.equal(existsSync(worktreeOf(app, 'fix-login')), false);
@@ -606,7 +606,7 @@ test('ledger retire warns when the fetch fails and still decides on origin/main 
 test('ledger retire warns when gh cannot tell about PRs, and decides on the commit count alone', (t) => {
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'fix-login' });
-  const ran = ledger(h, app, 'retire', 'fix-login');
+  const ran = ledger(h, app, 'task', 'retire', 'fix-login');
   assert.equal(ran.status, 0, ran.stderr);
   assert.match(ran.stderr, /^warning: .*gh pr list/m);
 });
@@ -620,7 +620,7 @@ test('ledger retire --dry-run prints the plan and changes nothing, blockers incl
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
   writeFileSync(path.join(worktreeOf(app, 'fix-login'), 'scratch.txt'), 'x');
   const before = snapshot(h);
-  const stdout = ok(ledger(h, app, 'retire', 'fix-login', '--dry-run'));
+  const stdout = ok(ledger(h, app, 'task', 'retire', 'fix-login', '--dry-run'));
   assert.deepEqual(snapshot(h), before);
   assert.match(stdout, /dry run/i);
   assert.match(lineWith(stdout, `${today()}-fix-login.md`), /archive/);
@@ -635,7 +635,7 @@ test('ledger retire --dry-run of a parent lists its active children', (t) => {
   worktreeTask(h, app, { slug: 'epic', children: ['- part'] });
   backlogTask(h, app, { slug: 'part', parent: 'epic' });
   const before = snapshot(h);
-  const stdout = ok(ledger(h, app, 'retire', 'epic', '--dry-run'));
+  const stdout = ok(ledger(h, app, 'task', 'retire', 'epic', '--dry-run'));
   assert.deepEqual(snapshot(h), before);
   assert.match(stdout, /active children: part/);
 });
@@ -645,7 +645,7 @@ test('ledger retire of a backlog task archives and deletes its ledger, and never
   const file = backlogTask(h, app, { slug: 'later' });
   const text = read(file);
   stubGh(h, `touch ${JSON.stringify(path.join(h, 'gh-was-called'))}; exit 1`);
-  const stdout = ok(ledger(h, app, 'retire', 'later'));
+  const stdout = ok(ledger(h, app, 'task', 'retire', 'later'));
   assert.equal(existsSync(file), false);
   assert.equal(read(path.join(archiveFolder(h, app), `${today()}-later.md`)), text);
   assert.match(stdout, /removed +.*later\.md/);
@@ -658,7 +658,7 @@ test('ledger retire stops with a message when the backlog ledger cannot be delet
   const file = backlogTask(h, app, { slug: 'later' });
   chmodSync(path.dirname(file), 0o555);
   try {
-    failed(ledger(h, app, 'retire', 'later'), new RegExp(`^Could not delete the backlog ledger .*later\\.md: .*Fix the cause, then run ${retireCommand} again\\.$`, 'm'));
+    failed(ledger(h, app, 'task', 'retire', 'later'), new RegExp(`^Could not delete the backlog ledger .*later\\.md: .*Fix the cause, then run ${retireCommand} again\\.$`, 'm'));
     assert.ok(existsSync(file));
   } finally {
     chmodSync(path.dirname(file), 0o755);
@@ -671,10 +671,10 @@ test('ledger retire refuses a parent with active children, names them, and --for
   backlogTask(h, app, { slug: 'a', parent: 'epic' });
   worktreeTask(h, app, { slug: 'b', parent: 'epic' });
   archivedTask(h, app, '2026-11-02', { slug: 'done', parent: 'epic' });
-  failed(ledger(h, app, 'retire', 'epic'), /^epic has active children: a, b\. Retire them first, or pass --force\.$/m);
+  failed(ledger(h, app, 'task', 'retire', 'epic'), /^epic has active children: a, b\. Retire them first, or pass --force\.$/m);
   assert.ok(existsSync(epic));
   assert.deepEqual(archiveList(h, app), ['2026-11-02-done.md']);
-  ok(ledger(h, app, 'retire', 'epic', '--force'));
+  ok(ledger(h, app, 'task', 'retire', 'epic', '--force'));
   assert.equal(existsSync(worktreeOf(app, 'epic')), false);
 });
 
@@ -683,7 +683,7 @@ test('ledger retire reads child status from disk: children archived with no (ret
   worktreeTask(h, app, { slug: 'epic', children: ['- a', '- b (started 2026-11-01)'] });
   archivedTask(h, app, '2026-11-03', { slug: 'a', parent: 'epic' });
   archivedTask(h, app, '2026-11-04', { slug: 'b', parent: 'epic' });
-  ok(ledger(h, app, 'retire', 'epic'));
+  ok(ledger(h, app, 'task', 'retire', 'epic'));
   assert.equal(existsSync(worktreeOf(app, 'epic')), false);
 });
 
@@ -691,7 +691,7 @@ test('ledger retire of a backlog parent with an active child is refused too', (t
   const { h, app } = setup(t);
   const file = backlogTask(h, app, { slug: 'epic', children: ['- part'] });
   worktreeTask(h, app, { slug: 'part', parent: 'epic' });
-  failed(ledger(h, app, 'retire', 'epic'), /^epic has active children: part\. Retire them first, or pass --force\.$/m);
+  failed(ledger(h, app, 'task', 'retire', 'epic'), /^epic has active children: part\. Retire them first, or pass --force\.$/m);
   assert.ok(existsSync(file));
 });
 
@@ -700,7 +700,7 @@ test('ledger retire marks the child retired in its parent, copies its report, an
   const epic = worktreeTask(h, app, { slug: 'epic', children: ['- part (started 2026-11-01)', '- other'] });
   worktreeTask(h, app, { slug: 'part', parent: 'epic', report: ['PR #12 merged.', '# not a heading'] });
   archivedTask(h, app, '2026-11-02', { slug: 'other', parent: 'epic' });
-  const stdout = ok(ledger(h, app, 'retire', 'part'));
+  const stdout = ok(ledger(h, app, 'task', 'retire', 'part'));
   const text = read(epic);
   assert.match(text, new RegExp(`^- part \\(retired ${today()}\\)$`, 'm'));
   assert.match(text, /^- other$/m);
@@ -713,7 +713,7 @@ test('ledger retire keeps a hand-written suffix when it marks the parent line, a
   const epic = worktreeTask(h, app, { slug: 'epic', children: ['- part (started 2026-11-01; PR #12)', '- sibling'] });
   worktreeTask(h, app, { slug: 'part', parent: 'epic' });
   backlogTask(h, app, { slug: 'sibling', parent: 'epic' });
-  const stdout = ok(ledger(h, app, 'retire', 'part'));
+  const stdout = ok(ledger(h, app, 'task', 'retire', 'part'));
   assert.match(read(epic), new RegExp(`^- part \\(retired ${today()}; PR #12\\)$`, 'm'));
   assert.doesNotMatch(stdout, /no active children left/);
 });
@@ -724,7 +724,7 @@ test('ledger retire marks a child retired in a parent in another repo, and copie
   writeFileSync(path.join(lib, '.git/info/exclude'), '.claude/\n');
   const epic = worktreeTask(h, lib, { slug: 'epic', children: [`- part @ ${app}`] });
   worktreeTask(h, app, { slug: 'part', parent: `epic @ ${lib}`, report: ['Done in app.'] });
-  const stdout = ok(ledger(h, app, 'retire', 'part'));
+  const stdout = ok(ledger(h, app, 'task', 'retire', 'part'));
   const text = read(epic);
   assert.match(text, new RegExp(`^- part @ ${app.replaceAll('/', '\\/')} \\(retired ${today()}\\)$`, 'm'));
   assert.match(text, new RegExp(`### part@${app.replaceAll('/', '\\/')}\\nDone in app\\.`));
@@ -734,7 +734,7 @@ test('ledger retire marks a child retired in a parent in another repo, and copie
 test('ledger retire only warns when the parent named in the ledger is not found', (t) => {
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'part', parent: 'nowhere' });
-  const ran = ledger(h, app, 'retire', 'part');
+  const ran = ledger(h, app, 'task', 'retire', 'part');
   assert.equal(ran.status, 0, ran.stderr);
   assert.match(ran.stderr, /^warning: .*nowhere/m);
   assert.equal(existsSync(worktreeOf(app, 'part')), false);
@@ -742,15 +742,15 @@ test('ledger retire only warns when the parent named in the ledger is not found'
 
 test('ledger retire resolves no slug in the main checkout, an unknown slug and a shared slug to messages', (t) => {
   const { h, app } = setup(t);
-  failed(ledger(h, app, 'retire'), new RegExp(`^No task ledger in or above .*Give a slug: ${retireCommand} <slug>\\.$`, 'm'));
-  failed(ledger(h, app, 'retire', 'nothing'), /^No task ledger is named "nothing"/m);
+  failed(ledger(h, app, 'task', 'retire'), new RegExp(`^No task ledger in or above .*Give a slug: ${retireCommand} <slug>\\.$`, 'm'));
+  failed(ledger(h, app, 'task', 'retire', 'nothing'), /^No task ledger is named "nothing"/m);
   for (const folder of ['one', 'two']) {
     const worktree = worktreeOf(app, folder);
     git(h, app, 'worktree', 'add', '--quiet', '-b', `me/${folder}`, worktree, 'main');
     mkdirSync(path.join(worktree, '.claude'));
     writeFileSync(path.join(worktree, '.claude/ledger.md'), ledgerText({ slug: 'same', worktree, branch: `me/${folder}` }));
   }
-  failed(ledger(h, app, 'retire', 'same'), /^Several task ledgers are named "same"/m);
+  failed(ledger(h, app, 'task', 'retire', 'same'), /^Several task ledgers are named "same"/m);
   assert.deepEqual(archiveList(h, app), []);
 });
 
@@ -758,7 +758,7 @@ test('ledger retire refuses the main checkout', (t) => {
   const { h, app } = setup(t);
   mkdirSync(path.join(app, '.claude'), { recursive: true });
   writeFileSync(path.join(app, '.claude/ledger.md'), ledgerText({ slug: 'in-main' }));
-  failed(ledger(h, app, 'retire', 'in-main', '--force'), /is the main checkout, not a linked worktree/);
+  failed(ledger(h, app, 'task', 'retire', 'in-main', '--force'), /is the main checkout, not a linked worktree/);
   assert.ok(existsSync(path.join(app, '.claude/ledger.md')));
   assert.deepEqual(archiveList(h, app), []);
 });
@@ -784,7 +784,7 @@ test('ledger retire deletes the whole build folder bin/cc-dd-path made for the w
   assert.deepEqual(printed, [path.join(buildRoot(app), 'fix-login/Debug-sim'), path.join(buildRoot(app), 'fix-login/Release-sim')]);
   const kept = [ok(spawn(h, worktreeOf(app, 'fix-login-2'), path.join(REPO, 'bin/cc-dd-path'), ['Debug-sim'])).trim(), ok(spawn(h, app, path.join(REPO, 'bin/cc-dd-path'), ['Debug-sim'])).trim()];
 
-  ok(ledger(h, app, 'retire', 'fix-login'));
+  ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   assert.equal(existsSync(path.join(buildRoot(app), 'fix-login')), false);
   for (const folder of kept) assert.ok(existsSync(folder), folder);
 });
@@ -800,7 +800,7 @@ test('ledger retire deletes no build folder, and warns, when .claude/worktrees/.
     const object = path.join(app, '.claude/worktrees/.build/fix-login/Debug-sim/app.o');
     mkdirSync(path.dirname(object), { recursive: true });
     writeFileSync(object, 'object');
-    const ran = ledger(h, app, 'retire', 'fix-login');
+    const ran = ledger(h, app, 'task', 'retire', 'fix-login');
     assert.match(ran.stdout + ran.stderr, /is a symbolic link/, linked);
     assert.ok(existsSync(object), linked);
   }
@@ -812,7 +812,7 @@ test('ledger retire keeps the build folder of a worktree whose name another work
   git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/other', path.join(h, 'elsewhere/Fix-Login'), 'main');
   const folder = path.join(buildRoot(app), 'fix-login/Debug-sim');
   mkdirSync(folder, { recursive: true });
-  const ran = ledger(h, app, 'retire', 'fix-login');
+  const ran = ledger(h, app, 'task', 'retire', 'fix-login');
   assert.match(ran.stdout + ran.stderr, /Fix-Login/);
   assert.ok(existsSync(folder));
 });
@@ -830,7 +830,7 @@ test("ledger retire moves the worktree's own build folder to a trash folder and 
   writeFileSync(path.join(h, 'stub-bin/rm'), '#!/bin/sh\ncase "$*" in */.claude/worktrees/.build/*) sleep 8 ;; esac\nexec /bin/rm "$@"\n');
   chmodSync(path.join(h, 'stub-bin/rm'), 0o755);
   const started = Date.now();
-  const stdout = ok(ledger(h, app, 'retire', 'fix-login'));
+  const stdout = ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   assert.ok(Date.now() - started < 6000, 'retire does not wait for the delete');
   assert.match(stdout, new RegExp(`deleted +${own.replaceAll('/', '\\/').replaceAll('.', '\\.')}$`, 'm'));
   assert.equal(existsSync(own), false);
@@ -847,7 +847,7 @@ test('ledger retire never takes an archive <name>.md that is a symbolic link to 
   symlinkSync(file, path.join(archiveFolder(h, app), '2026-01-02-fix-login.md'));
   symlinkSync(later, path.join(archiveFolder(h, app), '2026-01-02-later.md'));
   for (const [slug, text] of [['fix-login', texts[0]], ['later', texts[1]]]) {
-    const stdout = ok(ledger(h, app, 'retire', slug));
+    const stdout = ok(ledger(h, app, 'task', 'retire', slug));
     assert.doesNotMatch(stdout, /already archived/);
     const copy = path.join(archiveFolder(h, app), `${today()}-${slug}.md`);
     assert.ok(lstatSync(copy).isFile(), `${copy} is a file`);
@@ -935,10 +935,10 @@ test('ledger retire keeps the backlog ledger when it changes between the check a
 test('ledger retire refuses a parent whose child has no ledger anywhere, even when its line says retired; --force retires it', (t) => {
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'epic', children: [`- lost @ ${app} (retired 2026-10-01)`] });
-  failed(ledger(h, app, 'retire', 'epic'), /^Not retired: child lost has no ledger anywhere\. Remove its line under ## Children, or pass --force\.$/m);
+  failed(ledger(h, app, 'task', 'retire', 'epic'), /^Not retired: child lost has no ledger anywhere\. Remove its line under ## Children, or pass --force\.$/m);
   assert.ok(existsSync(worktreeOf(app, 'epic')));
-  assert.match(ok(ledger(h, app, 'retire', 'epic', '--dry-run')), /^Retiring it needs --force: child lost has no ledger anywhere\.$/m);
-  ok(ledger(h, app, 'retire', 'epic', '--force'));
+  assert.match(ok(ledger(h, app, 'task', 'retire', 'epic', '--dry-run')), /^Retiring it needs --force: child lost has no ledger anywhere\.$/m);
+  ok(ledger(h, app, 'task', 'retire', 'epic', '--force'));
   assert.equal(existsSync(worktreeOf(app, 'epic')), false);
 });
 
@@ -948,7 +948,7 @@ test('ledger retire asks gh for the default branch when origin/HEAD is not set',
   git(h, app, 'push', '--quiet', 'origin', 'main:trunk');
   git(h, app, 'remote', 'set-head', 'origin', '-d');
   stubGh(h, `case "$1 $2" in "repo view") echo '{"defaultBranchRef":{"name":"trunk"}}' ;; *) echo '[]' ;; esac`);
-  const ran = ledger(h, app, 'retire', 'fix-login', '--dry-run');
+  const ran = ledger(h, app, 'task', 'retire', 'fix-login', '--dry-run');
   assert.equal(ran.status, 0, ran.stderr);
   assert.match(ran.stdout, /^branch +me\/fix-login · no commits ahead of origin\/trunk · /m);
   assert.doesNotMatch(ran.stderr, /default branch/);
@@ -958,7 +958,7 @@ test('ledger retire guesses main, with a warning that names the guess, when neit
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'fix-login' });
   git(h, app, 'remote', 'set-head', 'origin', '-d');
-  const ran = ledger(h, app, 'retire', 'fix-login', '--dry-run');
+  const ran = ledger(h, app, 'task', 'retire', 'fix-login', '--dry-run');
   assert.equal(ran.status, 0, ran.stderr);
   assert.match(ran.stderr, /^warning: .*default branch.*gh repo view failed.*guess(es)? main\b/m);
   assert.match(ran.stdout, /^branch +me\/fix-login · no commits ahead of origin\/main · /m);
@@ -969,7 +969,7 @@ test('ledger retire asks gh for merged PRs by head branch and merged state, with
   worktreeTask(h, app, { slug: 'fix-login' });
   const calls = path.join(h, 'gh-calls');
   stubGh(h, `echo "$@" >> ${JSON.stringify(calls)}\necho '[]'`);
-  ok(ledger(h, app, 'retire', 'fix-login'));
+  ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   const lines = read(calls).trim().split('\n');
   const prList = lines.find((line) => line.startsWith('pr list ')) ?? assert.fail(lines.join('\n'));
   assert.match(prList, /--head me\/fix-login\b/);
@@ -987,12 +987,12 @@ test('ledger retire --dry-run --json names the open PR of a branch that is not m
   stubGh(h, `echo "$@" >> ${JSON.stringify(calls)}\ncase "$*" in *"--state all"*) echo '[{"state":"CLOSED","number":11},{"state":"OPEN","number":12}]' ;; *) echo '[]' ;; esac`);
   git(h, worktreeOf(app, 'fix-login'), 'commit', '--quiet', '--allow-empty', '-m', 'work');
 
-  const open = JSON.parse(ledger(h, app, 'retire', 'fix-login', '--dry-run', '--json').stdout);
+  const open = JSON.parse(ledger(h, app, 'task', 'retire', 'fix-login', '--dry-run', '--json').stdout);
   assert.equal(open.worktree.merged, false);
   assert.equal(open.worktree.openPr, 12);
 
   rmSync(calls);
-  const merged = JSON.parse(ledger(h, app, 'retire', 'shipped', '--dry-run', '--json').stdout);
+  const merged = JSON.parse(ledger(h, app, 'task', 'retire', 'shipped', '--dry-run', '--json').stdout);
   assert.equal(merged.worktree.merged, true);
   assert.equal(merged.worktree.openPr, undefined);
   assert.equal(read(calls).includes('--state all'), false, read(calls));

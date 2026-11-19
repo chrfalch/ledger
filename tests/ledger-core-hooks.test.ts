@@ -688,7 +688,7 @@ const mainCheckoutReason = (...targets: string[]): string =>
     '',
     "A ledger belongs in the task's worktree, never in the main checkout.",
     'Start the task first. This writes its ledger to the backlog, with no branch or worktree yet:',
-    `  ${BIN} task <slug> --goal '<one paragraph>'`,
+    `  ${BIN} task new <slug> --goal '<one paragraph>'`,
     'Then give it a branch and a worktree, and move its ledger in:',
     `  ${BIN} go <slug>`,
     'Then work in the worktree that ledger go prints.',
@@ -928,7 +928,7 @@ const removalReason = (...folders: string[]): string =>
     '',
     'The ledger is the record of the task. The worktree is not.',
     'Retire it instead, which archives the ledger and then removes the worktree:',
-    `  ${BIN} retire <slug>`,
+    `  ${BIN} task retire <slug>`,
     '',
     'Archived ledgers live in ~/.claude/ledger-archive/<repo>/.',
   ].join('\n');
@@ -970,8 +970,8 @@ test('an archive copy of another worktree whose path starts with the same text d
 test('a removal by the retire commands is allowed', (t) => {
   const { h, main, task } = removal(t);
 
-  assertAllowed(gate(main, 'Bash', { command: `${BIN} retire task && git worktree remove ${task}` }, h));
-  assertAllowed(gate(main, 'Bash', { command: `ledger retire task --force; rm -rf ${task}` }, h));
+  assertAllowed(gate(main, 'Bash', { command: `${BIN} task retire task && git worktree remove ${task}` }, h));
+  assertAllowed(gate(main, 'Bash', { command: `ledger task retire task --force; rm -rf ${task}` }, h));
 });
 
 test('a removal that names the deleted cc-worktree-retire script is denied', (t) => {

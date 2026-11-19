@@ -28,7 +28,7 @@ task's backlog ledger first, then the ledger of each child task, each with
 steps 1 to 5 and without `--stack`. The parent task's goal from step 2 also
 states the split and the order: each part, in the order they ship. Then
 attach each child task in that order: run
-`bin/ledger parent <parent> add <child>` from the ledger repo, as in step 5.
+`bin/ledger tree add <parent> <child>` from the ledger repo, as in step 5.
 That records the order of the child tasks. Never promote the parent task.
 Steps 6 to 8 do not apply, except that a current ledger gets one line under
 its Decisions that names the parent task.
@@ -60,7 +60,7 @@ parent task.
      l=$(readlink "$f")
      case "$l" in /*) f="$l" ;; *) f="$(dirname "$f")/$l" ;; esac
    done
-   "$(cd -P "$(dirname "$f")/.." && pwd)/bin/ledger" task <slug> --goal '<goal>'
+   "$(cd -P "$(dirname "$f")/.." && pwd)/bin/ledger" task new <slug> --goal '<goal>'
    ```
 
    If step 4 picked LLPs, add `--design-refs` with their numbers,

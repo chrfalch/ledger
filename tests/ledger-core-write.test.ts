@@ -51,16 +51,16 @@ function inserted(text: string, after: string, ...lines: string[]): string {
 test('ledger --help lists the writing commands, and each has its own --help', (t) => {
   const { h } = setup(t);
   const root = ok(ledger(h, h, '--help'));
-  for (const command of ['task', 'go', 'park', 'unpark']) assert.match(root, new RegExp(`^\\s+${command}\\b`, 'm'), `--help lists ${command}`);
+  for (const command of ['task', 'go', 'tree']) assert.match(root, new RegExp(`^\\s+${command}\\b`, 'm'), `--help lists ${command}`);
   const expected: Record<string, RegExp[]> = {
-    task: [/\[slug\]/, /--goal/, /--stack/, /--here/, /--repo/],
-    go: [/<slug>/, /--repo/, /- base:/],
-    park: [/<slug>/, /--reason/],
-    unpark: [/<slug>/],
-    parent: [/<slug>/, /\badd\b/, /\bremove\b/, /\bstart\b/, /\bnext\b/, /--json/],
+    'task new': [/\[slug\]/, /--goal/, /--stack/, /--here/, /--repo/],
+    'task go': [/<slug>/, /--repo/, /- base:/],
+    'task park': [/<slug>/, /--reason/],
+    'task unpark': [/<slug>/],
+    tree: [/<slug>/, /\badd\b/, /\bremove\b/, /\bstart\b/, /\bnext\b/, /--json/],
   };
   for (const [command, patterns] of Object.entries(expected)) {
-    const stdout = ok(ledger(h, h, command, '--help'));
+    const stdout = ok(ledger(h, h, ...command.split(' '), '--help'));
     assert.match(stdout, new RegExp(`^Usage: ledger ${command}\\b`, 'm'));
     for (const pattern of patterns) assert.match(stdout, pattern, `${command} --help`);
   }
@@ -69,14 +69,14 @@ test('ledger --help lists the writing commands, and each has its own --help', (t
 test('ledger task refuses a slug the creation rule does not accept, and writes nothing', (t) => {
   const { h, app } = setup(t);
   for (const slug of ['Fix_Login', 'a.b', '-x']) {
-    failed(ledger(h, app, 'task', '--goal', 'x', '--', slug), /slug/);
+    failed(ledger(h, app, 'task', 'new', '--goal', 'x', '--', slug), /slug/);
     assert.equal(existsSync(backlogFile(h, app, slug)), false);
   }
 });
 
 test('ledger task writes a backlog ledger from ~/.claude/ledger.template.md and prints the start line', (t) => {
   const { h, app } = setup(t);
-  const stdout = ok(ledger(h, app, 'task', 'fix-login', '--goal', 'Users cannot log in. Done when they can.'));
+  const stdout = ok(ledger(h, app, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in. Done when they can.'));
   const file = backlogFile(h, app, 'fix-login');
   assert.equal(stdout, `ledger:  ${file}\nstatus:  backlog\nstart:   /ledger:go fix-login\n`);
   assert.equal(read(file), backlogText('fix-login', 'Users cannot log in. Done when they can.', app));
@@ -89,7 +89,7 @@ test('ledger task writes a backlog ledger from ~/.claude/ledger.template.md and 
 test('ledger task in a repo with llp/ writes "design refs: none"; without --goal the goal stays a placeholder', (t) => {
   const { h, app } = setup(t);
   mkdirSync(path.join(app, 'llp'));
-  ok(ledger(h, app, 'task', 'plain'));
+  ok(ledger(h, app, 'task', 'new', 'plain'));
   const text = read(backlogFile(h, app, 'plain'));
   assert.match(text, /^- design refs: none$/m);
   assert.match(text, /^<one paragraph — what done looks like>$/m);
@@ -97,20 +97,20 @@ test('ledger task in a repo with llp/ writes "design refs: none"; without --goal
 
 test('ledger task refuses a slug that already has a backlog ledger, a branch or a worktree folder', (t) => {
   const { h, app } = setup(t);
-  ok(ledger(h, app, 'task', 'twice'));
+  ok(ledger(h, app, 'task', 'new', 'twice'));
   const before = read(backlogFile(h, app, 'twice'));
-  failed(ledger(h, app, 'task', 'twice', '--goal', 'other'), /already/);
+  failed(ledger(h, app, 'task', 'new', 'twice', '--goal', 'other'), /already/);
   assert.equal(read(backlogFile(h, app, 'twice')), before);
   git(h, app, 'branch', 'taken');
-  failed(ledger(h, app, 'task', 'taken'), /branch/);
+  failed(ledger(h, app, 'task', 'new', 'taken'), /branch/);
   mkdirSync(worktreeOf(app, 'folder'), { recursive: true });
-  failed(ledger(h, app, 'task', 'folder'), /folder/);
+  failed(ledger(h, app, 'task', 'new', 'folder'), /folder/);
 });
 
 test('ledger task fails when ~/.claude/ledger.template.md is missing', (t) => {
   const { h, app } = setup(t);
   rmSync(path.join(h, '.claude/ledger.template.md'));
-  failed(ledger(h, app, 'task', 'no-template'), /ledger\.template\.md/);
+  failed(ledger(h, app, 'task', 'new', 'no-template'), /ledger\.template\.md/);
   assert.equal(existsSync(backlogFile(h, app, 'no-template')), false);
 });
 
@@ -118,7 +118,7 @@ test('ledger task from a worktree with a ledger adds one Decisions line naming t
   const { h, app } = setup(t);
   const current = worktreeTask(h, app, { slug: 'epic' });
   const before = read(current);
-  const stdout = ok(ledger(h, worktreeOf(app, 'epic'), 'task', 'side-quest', '--goal', 'Separate work.'));
+  const stdout = ok(ledger(h, worktreeOf(app, 'epic'), 'task', 'new', 'side-quest', '--goal', 'Separate work.'));
   assert.match(stdout, /^start: {3}\/ledger:go side-quest$/m);
   const beforeLines = before.split('\n');
   const afterLines = read(current).split('\n');
@@ -134,7 +134,7 @@ test('ledger task --repo from a worktree with a ledger names the task in the oth
   const lib = repository(h, path.join(h, 'repos/lib'));
   const current = worktreeTask(h, app, { slug: 'epic' });
   const before = read(current);
-  ok(ledger(h, worktreeOf(app, 'epic'), 'task', 'lib-part', '--repo', lib, '--goal', 'In lib.'));
+  ok(ledger(h, worktreeOf(app, 'epic'), 'task', 'new', 'lib-part', '--repo', lib, '--goal', 'In lib.'));
   const decision = '- Keep the old format — because real ledgers use it [observed]';
   assert.equal(
     read(current),
@@ -146,7 +146,7 @@ test('ledger task from the main checkout leaves every other ledger alone', (t) =
   const { h, app } = setup(t);
   const other = worktreeTask(h, app, { slug: 'epic' });
   const before = read(other);
-  ok(ledger(h, app, 'task', 'lonely'));
+  ok(ledger(h, app, 'task', 'new', 'lonely'));
   assert.equal(read(other), before);
 });
 
@@ -154,7 +154,7 @@ test('ledger task --here adds a ledger to the current linked worktree, named aft
   const { h, app } = setup(t);
   const worktree = worktreeOf(app, 'side');
   git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/side', worktree, 'main');
-  const stdout = ok(ledger(h, worktree, 'task', '--here', '--goal', 'Here it is.'));
+  const stdout = ok(ledger(h, worktree, 'task', 'new', '--here', '--goal', 'Here it is.'));
   const file = ledgerOf(worktree);
   const base = short(h, worktree, 'HEAD');
   assert.equal(stdout, `worktree ${worktree}\nbranch   me/side\nbase     HEAD @ ${base}\nledger   ${file}\n`);
@@ -173,20 +173,20 @@ test('ledger task --here <slug> takes the slug given', (t) => {
   const { h, app } = setup(t);
   const worktree = worktreeOf(app, 'side');
   git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/side', worktree, 'main');
-  ok(ledger(h, worktree, 'task', '--here', 'named'));
+  ok(ledger(h, worktree, 'task', 'new', '--here', 'named'));
   assert.match(read(ledgerOf(worktree)), /^# Task ledger — named$/m);
 });
 
 test('ledger task --here refuses the main checkout, a worktree that has a ledger, --stack and --repo', (t) => {
   const { h, app } = setup(t);
-  failed(ledger(h, app, 'task', '--here', 'x'), /main checkout/);
+  failed(ledger(h, app, 'task', 'new', '--here', 'x'), /main checkout/);
   worktreeTask(h, app, { slug: 'epic' });
   const epic = worktreeOf(app, 'epic');
   const before = read(ledgerOf(epic));
-  failed(ledger(h, epic, 'task', '--here'), /already has a ledger/);
+  failed(ledger(h, epic, 'task', 'new', '--here'), /already has a ledger/);
   assert.equal(read(ledgerOf(epic)), before);
-  failed(ledger(h, epic, 'task', '--here', '--stack'), /--stack/);
-  failed(ledger(h, epic, 'task', '--here', '--repo', app), /--repo/);
+  failed(ledger(h, epic, 'task', 'new', '--here', '--stack'), /--stack/);
+  failed(ledger(h, epic, 'task', 'new', '--here', '--repo', app), /--repo/);
 });
 
 test('ledger task --stack makes the worktree and branch at once, on top of the current branch', (t) => {
@@ -194,7 +194,7 @@ test('ledger task --stack makes the worktree and branch at once, on top of the c
   const current = worktreeTask(h, app, { slug: 'epic' });
   const epic = worktreeOf(app, 'epic');
   git(h, epic, 'commit', '--quiet', '--allow-empty', '-m', 'epic work');
-  const stdout = ok(ledger(h, epic, 'task', 'sub', '--stack', '--goal', 'Builds on epic.'));
+  const stdout = ok(ledger(h, epic, 'task', 'new', 'sub', '--stack', '--goal', 'Builds on epic.'));
   const worktree = worktreeOf(app, 'sub');
   const base = short(h, epic, 'HEAD');
   assert.equal(
@@ -218,14 +218,14 @@ test('ledger task --stack on a detached HEAD fails and makes nothing', (t) => {
   const { h, app } = setup(t);
   const worktree = worktreeOf(app, 'loose');
   git(h, app, 'worktree', 'add', '--quiet', '--detach', worktree, 'main');
-  failed(ledger(h, worktree, 'task', 'sub', '--stack'), /detached/);
+  failed(ledger(h, worktree, 'task', 'new', 'sub', '--stack'), /detached/);
   assert.equal(existsSync(worktreeOf(app, 'sub')), false);
 });
 
 test('ledger task --repo writes the backlog ledger of another repo', (t) => {
   const { h, app } = setup(t);
   const lib = repository(h, path.join(h, 'repos/lib'));
-  const stdout = ok(ledger(h, app, 'task', 'lib-part', '--repo', lib, '--goal', 'In lib.'));
+  const stdout = ok(ledger(h, app, 'task', 'new', 'lib-part', '--repo', lib, '--goal', 'In lib.'));
   const file = backlogFile(h, lib, 'lib-part');
   assert.match(stdout, new RegExp(`^ledger: {2}${file}$`, 'm'));
   assert.equal(read(file), backlogText('lib-part', 'In lib.', lib));
@@ -233,7 +233,7 @@ test('ledger task --repo writes the backlog ledger of another repo', (t) => {
 
 test('ledger go moves a backlog ledger into a new worktree and branch from the default branch, and fills Location', (t) => {
   const { h, app } = setup(t);
-  ok(ledger(h, app, 'task', 'fix-login', '--goal', 'Fix it.'));
+  ok(ledger(h, app, 'task', 'new', 'fix-login', '--goal', 'Fix it.'));
   const backlog = backlogFile(h, app, 'fix-login');
   const before = read(backlog);
   git(h, app, 'checkout', '--quiet', '-b', 'elsewhere');
@@ -279,7 +279,7 @@ test('ledger go refuses a missing backlog task (2), one of a same-named repo (3)
   const twin = path.join(h, 'issues/app');
   mkdirSync(twin, { recursive: true });
   git(h, twin, 'init', '--quiet', '-b', 'main');
-  ok(ledger(h, twin, 'task', 'twin-task'));
+  ok(ledger(h, twin, 'task', 'new', 'twin-task'));
   failed(ledger(h, app, 'go', 'twin-task'), new RegExp(twin), 3);
   const file = backlogFile(h, app, 'no-main');
   writeFileSync(file, ledgerText({ slug: 'no-main' }));
@@ -289,7 +289,7 @@ test('ledger go refuses a missing backlog task (2), one of a same-named repo (3)
 
 test('ledger go fails when the branch exists, and leaves the backlog ledger and no worktree', (t) => {
   const { h, app } = setup(t);
-  ok(ledger(h, app, 'task', 'taken-later'));
+  ok(ledger(h, app, 'task', 'new', 'taken-later'));
   git(h, app, 'branch', 'taken-later');
   failed(ledger(h, app, 'go', 'taken-later'), /branch/);
   assert.equal(existsSync(backlogFile(h, app, 'taken-later')), true);
@@ -298,7 +298,7 @@ test('ledger go fails when the branch exists, and leaves the backlog ledger and 
 
 test('ledger go removes the new worktree and branch again when a later step fails, and keeps the backlog ledger', (t) => {
   const { h, app } = setup(t);
-  ok(ledger(h, app, 'task', 'stuck', '--goal', 'Cannot move.'));
+  ok(ledger(h, app, 'task', 'new', 'stuck', '--goal', 'Cannot move.'));
   const backlog = backlogFile(h, app, 'stuck');
   const before = read(backlog);
   const folder = path.dirname(backlog);
@@ -332,10 +332,10 @@ test('ledger parent add takes a child as <slug>@<relative path> and writes its r
   const lib = repository(h, path.join(h, 'repos/lib'));
   const parent = worktreeTask(h, app, { slug: 'epic' });
   const child = backlogTask(h, lib, { slug: 'part' });
-  ok(ledger(h, path.join(app, '.claude'), 'parent', 'epic', 'add', 'part@../../lib'));
+  ok(ledger(h, path.join(app, '.claude'), 'tree', 'add', 'epic', 'part@../../lib'));
   assert.match(read(parent), new RegExp(`^- part @ ${lib}$`, 'm'));
   assert.match(read(child), new RegExp(`^- parent: epic @ ${app}$`, 'm'));
-  ok(ledger(h, app, 'parent', 'epic', 'remove', 'part@../lib'));
+  ok(ledger(h, app, 'tree', 'remove', 'epic', 'part@../lib'));
   assert.doesNotMatch(read(parent), /^- part\b/m);
 });
 
@@ -356,15 +356,15 @@ test('ledger park puts one marker first under Next step; unpark restores the exa
   const { h, app } = setup(t);
   const file = worktreeTask(h, app, { slug: 'epic' });
   const before = read(file);
-  const stdout = ok(ledger(h, app, 'park', 'epic', '--reason', 'waiting for review'));
+  const stdout = ok(ledger(h, app, 'task', 'park', 'epic', '--reason', 'waiting for review'));
   const marker = `Parked: ${today()} — waiting for review`;
   assert.match(stdout, new RegExp(`${marker}`));
   assert.equal(read(file), inserted(before, '## Next step', marker));
   const listed = (JSON.parse(ok(ledger(h, app, 'list', '--json'))) as { tasks: { slug: string; status: string }[] }).tasks;
   assert.equal(listed.find(({ slug }) => slug === 'epic')?.status, 'parked');
-  ok(ledger(h, app, 'park', 'epic', '--reason', 'still waiting'));
+  ok(ledger(h, app, 'task', 'park', 'epic', '--reason', 'still waiting'));
   assert.equal(read(file), inserted(before, '## Next step', `Parked: ${today()} — still waiting`));
-  ok(ledger(h, app, 'unpark', 'epic'));
+  ok(ledger(h, app, 'task', 'unpark', 'epic'));
   assert.equal(read(file), before);
 });
 
@@ -373,10 +373,10 @@ test('park and unpark keep CRLF line endings; park works on a backlog task', (t)
   const file = backlogTask(h, app, { slug: 'idea' });
   const before = read(file).replace(/\n/g, '\r\n');
   writeFileSync(file, before);
-  ok(ledger(h, app, 'park', 'idea', '--reason', 'no time'));
+  ok(ledger(h, app, 'task', 'park', 'idea', '--reason', 'no time'));
   const after = read(file);
   assert.equal(after, before.replace('\r\n## Next step\r\n', `\r\n## Next step\r\nParked: ${today()} — no time\r\n`));
-  ok(ledger(h, app, 'unpark', 'idea'));
+  ok(ledger(h, app, 'task', 'unpark', 'idea'));
   assert.equal(read(file), before);
 });
 
@@ -384,8 +384,8 @@ test('park requires a reason: without --reason, or with an empty one, it fails a
   const { h, app } = setup(t);
   const file = worktreeTask(h, app, { slug: 'epic' });
   const before = read(file);
-  failed(ledger(h, app, 'park', 'epic'), /--reason/);
-  failed(ledger(h, app, 'park', 'epic', '--reason', '  '), /reason/);
+  failed(ledger(h, app, 'task', 'park', 'epic'), /--reason/);
+  failed(ledger(h, app, 'task', 'park', 'epic', '--reason', '  '), /reason/);
   assert.equal(read(file), before);
 });
 
@@ -393,9 +393,9 @@ test('a later "Parked:" note under ## Next step is no marker: park and unpark le
   const { h, app } = setup(t);
   const file = worktreeTask(h, app, { slug: 'epic', next: 'Run the tests.\nParked: 2026-11-10 — an old note' });
   const before = read(file);
-  ok(ledger(h, app, 'park', 'epic', '--reason', 'later'));
+  ok(ledger(h, app, 'task', 'park', 'epic', '--reason', 'later'));
   assert.equal(read(file), inserted(before, '## Next step', `Parked: ${today()} — later`));
-  ok(ledger(h, app, 'unpark', 'epic'));
+  ok(ledger(h, app, 'task', 'unpark', 'epic'));
   assert.equal(read(file), before);
 });
 
@@ -405,18 +405,18 @@ test('park adds ## Next step when a ledger has none; unpark of a task that is no
   const full = read(file);
   const before = full.slice(0, full.indexOf('## Next step'));
   writeFileSync(file, before);
-  ok(ledger(h, app, 'park', 'epic', '--reason', 'later'));
+  ok(ledger(h, app, 'task', 'park', 'epic', '--reason', 'later'));
   assert.equal(read(file), `${before.trimEnd()}\n\n## Next step\nParked: ${today()} — later\n\n`);
   writeFileSync(file, full);
-  const stdout = ok(ledger(h, app, 'unpark', 'epic'));
+  const stdout = ok(ledger(h, app, 'task', 'unpark', 'epic'));
   assert.match(stdout, /not parked/);
   assert.equal(read(file), full);
 });
 
 test('park and unpark of an unknown slug fail', (t) => {
   const { h, app } = setup(t);
-  failed(ledger(h, app, 'park', 'ghost', '--reason', 'x'), /ghost/);
-  failed(ledger(h, app, 'unpark', 'ghost'), /ghost/);
+  failed(ledger(h, app, 'task', 'park', 'ghost', '--reason', 'x'), /ghost/);
+  failed(ledger(h, app, 'task', 'unpark', 'ghost'), /ghost/);
 });
 
 test('ledger parent add links a child in the same repo; remove restores both ledgers byte for byte', (t) => {
@@ -424,13 +424,13 @@ test('ledger parent add links a child in the same repo; remove restores both led
   const parent = worktreeTask(h, app, { slug: 'epic' });
   const child = backlogTask(h, app, { slug: 'idea' });
   const [parentBefore, childBefore] = [read(parent), read(child)];
-  ok(ledger(h, app, 'parent', 'epic', 'add', 'idea'));
+  ok(ledger(h, app, 'tree', 'add', 'epic', 'idea'));
   assert.equal(read(child), inserted(childBefore, '- design refs: none', '- parent: epic'));
   assert.equal(read(parent), inserted(parentBefore, '- design refs: none', '', '## Children', '- idea'));
-  const shown = JSON.parse(ok(ledger(h, app, 'parent', 'epic', '--json'))) as { children: { slug: string; status: string }[] };
+  const shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'epic', '--json'))) as { children: { slug: string; status: string }[] };
   assert.deepEqual(shown.children.map(({ slug, status }) => [slug, status]), [['idea', 'backlog']]);
   assert.equal(registry(h).find(({ path: entry }) => entry === child)?.parent, 'epic');
-  ok(ledger(h, app, 'parent', 'epic', 'remove', 'idea'));
+  ok(ledger(h, app, 'tree', 'remove', 'epic', 'idea'));
   assert.equal(read(parent), parentBefore);
   assert.equal(read(child), childBefore);
 });
@@ -441,9 +441,9 @@ test('parent add appends to ## Children and keeps a line with an unknown suffix 
   const parent = worktreeTask(h, app, { slug: 'epic', children: [odd] });
   backlogTask(h, app, { slug: 'idea' });
   const before = read(parent);
-  ok(ledger(h, app, 'parent', 'epic', 'add', 'idea'));
+  ok(ledger(h, app, 'tree', 'add', 'epic', 'idea'));
   assert.equal(read(parent), inserted(before, odd, '- idea'));
-  ok(ledger(h, app, 'parent', 'epic', 'remove', 'idea'));
+  ok(ledger(h, app, 'tree', 'remove', 'epic', 'idea'));
   assert.equal(read(parent), before);
 });
 
@@ -453,10 +453,10 @@ test('parent add of a child in another repo writes both mains; remove drops them
   const parent = worktreeTask(h, app, { slug: 'epic' });
   const child = backlogTask(h, lib, { slug: 'lib-part' });
   const [parentBefore, childBefore] = [read(parent), read(child)];
-  ok(ledger(h, app, 'parent', 'epic', 'add', `lib-part@${lib}`));
+  ok(ledger(h, app, 'tree', 'add', 'epic', `lib-part@${lib}`));
   assert.equal(read(child), inserted(childBefore, '- design refs: none', `- parent: epic @ ${app}`));
   assert.equal(read(parent), inserted(parentBefore, '- design refs: none', '', '## Children', `- lib-part @ ${lib}`));
-  ok(ledger(h, lib, 'parent', `epic@${app}`, 'remove', 'lib-part'));
+  ok(ledger(h, lib, 'tree', 'remove', `epic@${app}`, 'lib-part'));
   assert.equal(read(parent), parentBefore);
   assert.equal(read(child), childBefore);
 });
@@ -471,13 +471,13 @@ test('parent add refuses self, a child with another parent, a cycle and a retire
   const loose = backlogTask(h, app, { slug: 'loose' });
   const files = [epic, top, taken, reused, loose];
   const before = files.map(read);
-  failed(ledger(h, app, 'parent', 'epic', 'add', 'epic'), /own parent/);
-  failed(ledger(h, app, 'parent', 'epic', 'add', 'taken'), /already has the parent other/);
-  failed(ledger(h, app, 'parent', 'epic', 'add', 'top'), /cycle/);
-  failed(ledger(h, app, 'parent', 'epic', 'add', 'old-a'), /retired/);
-  failed(ledger(h, app, 'parent', 'epic', 'remove', 'loose'), /not a child/);
-  failed(ledger(h, app, 'parent', 'epic', 'add'), /child/);
-  failed(ledger(h, app, 'parent', 'epic', 'adopt', 'loose'), /adopt/);
+  failed(ledger(h, app, 'tree', 'add', 'epic', 'epic'), /own parent/);
+  failed(ledger(h, app, 'tree', 'add', 'epic', 'taken'), /already has the parent other/);
+  failed(ledger(h, app, 'tree', 'add', 'epic', 'top'), /cycle/);
+  failed(ledger(h, app, 'tree', 'add', 'epic', 'old-a'), /retired/);
+  failed(ledger(h, app, 'tree', 'remove', 'epic', 'loose'), /not a child/);
+  failed(ledger(h, app, 'tree', 'add', 'epic'), /child/);
+  failed(ledger(h, app, 'tree', 'adopt', 'epic', 'loose'), /adopt/);
   assert.deepEqual(files.map(read), before);
 });
 
@@ -487,14 +487,14 @@ test('parent start marks a child started, keeps an unknown suffix verbatim, and 
   const parent = worktreeTask(h, app, { slug: 'epic', children: ['- a', odd, '- b (started 2026-11-01)'] });
   for (const slug of ['a', 'old-d', 'b']) backlogTask(h, app, { slug, parent: 'epic' });
   const before = read(parent);
-  ok(ledger(h, app, 'parent', 'epic', 'start', 'a'));
-  ok(ledger(h, app, 'parent', 'epic', 'start', 'old-d'));
-  ok(ledger(h, app, 'parent', 'epic', 'start', 'b'));
+  ok(ledger(h, app, 'tree', 'start', 'epic', 'a'));
+  ok(ledger(h, app, 'tree', 'start', 'epic', 'old-d'));
+  ok(ledger(h, app, 'tree', 'start', 'epic', 'b'));
   const expected = before
     .replace('\n- a\n', `\n- a (started ${today()})\n`)
     .replace(`\n${odd}\n`, `\n- old-d (started ${today()}) (LANDED 2026-11-03; retire pending)\n`);
   assert.equal(read(parent), expected);
-  failed(ledger(h, app, 'parent', 'epic', 'start', 'unlisted'), /not listed/);
+  failed(ledger(h, app, 'tree', 'start', 'epic', 'unlisted'), /not listed/);
   assert.equal(read(parent), expected);
 });
 
@@ -507,12 +507,12 @@ test('parent next prints the chain from the parent to its first child still in t
   backlogTask(h, app, { slug: 'nested', parent: 'epic', children: ['- deep'] });
   backlogTask(h, app, { slug: 'deep', parent: 'nested' });
   backlogTask(h, app, { slug: 'leaf', parent: 'epic' });
-  assert.equal(ok(ledger(h, app, 'parent', 'epic', 'next')), 'epic nested deep\n');
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic nested deep\n');
   worktreeTask(h, app, { slug: 'cross', children: [`- lib-part @ ${lib}`] });
   backlogTask(h, lib, { slug: 'lib-part', parent: `cross @ ${app}` });
-  assert.equal(ok(ledger(h, app, 'parent', 'cross', 'next')), `cross lib-part@${lib}\n`);
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'cross')), `cross lib-part@${lib}\n`);
   worktreeTask(h, app, { slug: 'finished', children: ['- running'] });
-  const none = ledger(h, app, 'parent', 'finished', 'next');
+  const none = ledger(h, app, 'tree', 'next', 'finished');
   assert.equal(none.status, 0, none.stderr);
   assert.equal(none.stdout, '');
 });
@@ -522,7 +522,7 @@ test('parent next offers a backlog child even when its Children line says starte
   worktreeTask(h, app, { slug: 'epic', children: ['- marked (started 2026-11-01)', '- later'] });
   backlogTask(h, app, { slug: 'marked', parent: 'epic' });
   backlogTask(h, app, { slug: 'later', parent: 'epic' });
-  assert.equal(ok(ledger(h, app, 'parent', 'epic', 'next')), 'epic marked\n');
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic marked\n');
 });
 
 test('parent next passes over a backlog child whose own children are all started or retired', (t) => {
@@ -532,7 +532,7 @@ test('parent next passes over a backlog child whose own children are all started
   worktreeTask(h, app, { slug: 'running', parent: 'nested' });
   archivedTask(h, app, '2026-10-19', { slug: 'done-one', parent: 'nested' });
   backlogTask(h, app, { slug: 'leaf', parent: 'epic' });
-  assert.equal(ok(ledger(h, app, 'parent', 'epic', 'next')), 'epic leaf\n');
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic leaf\n');
 });
 
 /** The command a `start:` line prints, run by a shell: `/ledger:go <slug>` is `ledger go <slug>`. */
@@ -548,7 +548,7 @@ test('ledger task --repo prints the start command the Decisions line names, and 
   const lib = repository(h, path.join(h, 'repos/lib'));
   const here = worktreeOf(app, 'epic');
   const current = worktreeTask(h, app, { slug: 'epic' });
-  const stdout = ok(ledger(h, here, 'task', 'lib-part', '--repo', lib, '--goal', 'In lib.'));
+  const stdout = ok(ledger(h, here, 'task', 'new', 'lib-part', '--repo', lib, '--goal', 'In lib.'));
   assert.match(stdout, new RegExp(`^start: {3}ledger go lib-part --repo ${lib}$`, 'm'));
   assert.match(read(current), new RegExp(`ledger go lib-part --repo ${lib} starts it\\.`));
   ok(runStart(h, here, stdout));
@@ -559,7 +559,7 @@ test('ledger task --repo prints the start command the Decisions line names, and 
 test('ledger task --repo from a main checkout prints a start command that promotes the task from there', (t) => {
   const { h, app } = setup(t);
   const lib = repository(h, path.join(h, 'repos/lib'));
-  const stdout = ok(ledger(h, app, 'task', 'lib-part', '--repo', lib));
+  const stdout = ok(ledger(h, app, 'task', 'new', 'lib-part', '--repo', lib));
   assert.match(stdout, new RegExp(`^start: {3}ledger go lib-part --repo ${lib}$`, 'm'));
   ok(runStart(h, app, stdout));
   assert.equal(git(h, worktreeOf(lib, 'lib-part'), 'branch', '--show-current'), 'lib-part');
@@ -567,7 +567,7 @@ test('ledger task --repo from a main checkout prints a start command that promot
 
 test('ledger task --repo naming this repo keeps the short start command, and it works', (t) => {
   const { h, app } = setup(t);
-  const stdout = ok(ledger(h, app, 'task', 'same-repo', '--repo', app));
+  const stdout = ok(ledger(h, app, 'task', 'new', 'same-repo', '--repo', app));
   assert.match(stdout, /^start: {3}\/ledger:go same-repo$/m);
   ok(runStart(h, app, stdout));
   assert.equal(existsSync(worktreeOf(app, 'same-repo')), true);
@@ -579,7 +579,7 @@ test('ledger task --repo shell-quotes a repo path with a space or a quote, and t
   const quoted = `'${lib.replaceAll("'", "'\\''")}'`;
   const here = worktreeOf(app, 'epic');
   const current = worktreeTask(h, app, { slug: 'epic' });
-  const stdout = ok(ledger(h, here, 'task', 'lib-part', '--repo', lib));
+  const stdout = ok(ledger(h, here, 'task', 'new', 'lib-part', '--repo', lib));
   assert.ok(stdout.includes(`\nstart:   ledger go lib-part --repo ${quoted}\n`), stdout);
   assert.ok(read(current).includes(`ledger go lib-part --repo ${quoted} starts it.`));
   ok(runStart(h, here, stdout));
@@ -590,9 +590,9 @@ test('parent next and parent start ignore a prose bullet under ## Children', (t)
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'epic', children: ['- Superseded by the new plan.', '- nested'] });
   backlogTask(h, app, { slug: 'nested', parent: 'epic', children: ['- RN-side work is tracked elsewhere.'] });
-  assert.equal(ok(ledger(h, app, 'parent', 'epic', 'next')), 'epic nested\n');
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic nested\n');
   const file = ledgerOf(worktreeOf(app, 'epic'));
   const before = read(file);
-  failed(ledger(h, app, 'parent', 'epic', 'start', 'Superseded'), /Superseded.*no task/);
+  failed(ledger(h, app, 'tree', 'start', 'epic', 'Superseded'), /Superseded.*no task/);
   assert.equal(read(file), before);
 });

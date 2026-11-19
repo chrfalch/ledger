@@ -67,7 +67,7 @@ for (const storage of ['file', 'sqlite'] as const) {
     const { h, app, inStore } = setup(t, storage);
     for (let round = 0; round < ROUNDS; round++) {
       const slug = `same-${round}`;
-      const runs = await together(PROCESSES, (index) => ledgerAsync(h, app, 'task', slug, '--goal', `Goal of run ${index}.`));
+      const runs = await together(PROCESSES, (index) => ledgerAsync(h, app, 'task', 'new', slug, '--goal', `Goal of run ${index}.`));
       const made = runs.flatMap((run, index) => (run.status === 0 ? [index] : []));
       assert.equal(made.length, 1, `round ${round}: one run makes the task\n${shown(runs)}`);
       for (const run of runs.filter(({ status }) => status !== 0)) {
@@ -85,7 +85,7 @@ for (const storage of ['file', 'sqlite'] as const) {
     const { h, app, inStore } = setup(t, storage);
     for (let round = 0; round < ROUNDS; round++) {
       const slugs = Array.from({ length: PROCESSES }, (_, index) => `task-${round}-${index}`);
-      const runs = await together(PROCESSES, (index) => ledgerAsync(h, app, 'task', slugs[index]));
+      const runs = await together(PROCESSES, (index) => ledgerAsync(h, app, 'task', 'new', slugs[index]));
       assert.deepEqual(runs.map(({ status }) => status), slugs.map(() => 0), shown(runs));
       inStore((store) => {
         const listed = new Set(store.backlog.list('app').map(({ name }) => name));
@@ -101,8 +101,8 @@ for (const storage of ['file', 'sqlite'] as const) {
   test(`${storage} store: ledger parent add runs at once on one parent list every child`, { skip }, async (t) => {
     const { h, app, inStore } = setup(t, storage);
     const children = Array.from({ length: PROCESSES }, (_, index) => `part-${index}`);
-    for (const slug of ['epic', ...children]) ok(ledger(h, app, 'task', slug));
-    const runs = await together(PROCESSES, (index) => ledgerAsync(h, app, 'parent', 'epic', 'add', children[index]));
+    for (const slug of ['epic', ...children]) ok(ledger(h, app, 'task', 'new', slug));
+    const runs = await together(PROCESSES, (index) => ledgerAsync(h, app, 'tree', 'add', 'epic', children[index]));
     assert.deepEqual(runs.map(({ status }) => status), children.map(() => 0), shown(runs));
     inStore((store) => {
       const parent = store.backlog.read('app', 'epic')?.text ?? '';
@@ -115,7 +115,7 @@ for (const storage of ['file', 'sqlite'] as const) {
 
   test(`${storage} store: a registry another command wrote since it was read is rebuilt outside the registry update, and keeps that command's task`, { skip }, (t) => {
     const { h, app, real, context } = inProcess(t, storage);
-    ok(ledger(h, app, 'task', 'first'));
+    ok(ledger(h, app, 'task', 'new', 'first'));
     assert.ok(real.backlog.create('app', 'mine', ledgerText({ slug: 'mine', main: app, branch: 'mine' })));
     let updating = false;
     let interfered = false;
@@ -149,7 +149,7 @@ for (const storage of ['file', 'sqlite'] as const) {
 
   test(`${storage} store: a registry that other commands change on every try ends the rebuild with a message after a bounded number of tries`, { skip }, (t) => {
     const { h, app, real, context } = inProcess(t, storage);
-    ok(ledger(h, app, 'task', 'first'));
+    ok(ledger(h, app, 'task', 'new', 'first'));
     assert.ok(real.backlog.create('app', 'mine', ledgerText({ slug: 'mine', main: app, branch: 'mine' })));
     let tries = 0;
     const store: LedgerStore = {
@@ -177,7 +177,7 @@ for (const storage of ['file', 'sqlite'] as const) {
 
   test(`${storage} store: ledger go starts nothing, keeps the backlog ledger, and says to run it again, when the ledger changes while the worktree is made`, { skip }, (t) => {
     const { h, app, real, context } = inProcess(t, storage);
-    ok(ledger(h, app, 'task', 'epic'));
+    ok(ledger(h, app, 'task', 'new', 'epic'));
     const late = '- a child added while the worktree was made';
     const store: LedgerStore = {
       ...real,
@@ -224,7 +224,7 @@ const deadPid = (): number => spawnSync(process.execPath, ['-e', '']).pid;
 
 function lockedBacklogTask(t: TestContext, holder: { pid: number; since: string }) {
   const { h, app } = setup(t, 'file');
-  ok(ledger(h, app, 'task', 'fix-login'));
+  ok(ledger(h, app, 'task', 'new', 'fix-login'));
   const file = path.join(h, '.claude/ledger-backlog/app/fix-login.md');
   const lock = `${file}.lock`;
   writeFileSync(lock, JSON.stringify(holder));
@@ -233,14 +233,14 @@ function lockedBacklogTask(t: TestContext, holder: { pid: number; since: string 
 
 test('file store: a lock left by a process that is gone is taken over, and the change is written', (t) => {
   const { h, app, file, lock } = lockedBacklogTask(t, { pid: deadPid(), since: new Date().toISOString() });
-  ok(ledger(h, app, 'park', 'fix-login', '--reason', 'paused'));
+  ok(ledger(h, app, 'task', 'park', 'fix-login', '--reason', 'paused'));
   assert.ok(parked(readFileSync(file, 'utf8')));
   assert.equal(existsSync(lock), false);
 });
 
 test('file store: a lock older than its time limit is taken over, even when its process still runs', (t) => {
   const { h, app, file, lock } = lockedBacklogTask(t, { pid: process.pid, since: new Date(Date.now() - 60 * 60_000).toISOString() });
-  ok(ledger(h, app, 'park', 'fix-login', '--reason', 'paused'));
+  ok(ledger(h, app, 'task', 'park', 'fix-login', '--reason', 'paused'));
   assert.ok(parked(readFileSync(file, 'utf8')));
   assert.equal(existsSync(lock), false);
 });
@@ -248,7 +248,7 @@ test('file store: a lock older than its time limit is taken over, even when its 
 test('file store: a command that waits too long for a lock held by a live process exits 1, names the lock and its process, and writes nothing', (t) => {
   const { h, app, file, lock } = lockedBacklogTask(t, { pid: process.pid, since: new Date().toISOString() });
   const before = readFileSync(file, 'utf8');
-  const ran = ledger(h, app, 'park', 'fix-login', '--reason', 'paused');
+  const ran = ledger(h, app, 'task', 'park', 'fix-login', '--reason', 'paused');
   assert.equal(ran.status, 1, ran.stderr);
   assert.ok(ran.stderr.includes(lock), ran.stderr);
   assert.ok(ran.stderr.includes(`process ${process.pid}`), ran.stderr);
@@ -258,14 +258,14 @@ test('file store: a command that waits too long for a lock held by a live proces
 
 test('sqlite store: a command that waits too long for the database exits 1, says another command holds it, and writes nothing', { skip: noSqlite }, async (t) => {
   const { h, app, inStore } = setup(t, 'sqlite');
-  ok(ledger(h, app, 'task', 'fix-login'));
+  ok(ledger(h, app, 'task', 'new', 'fix-login'));
   const before = inStore((store) => store.backlog.read('app', 'fix-login')?.text);
   const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
   const holder = new DatabaseSync(path.join(h, '.claude/ledgers.db'));
   holder.exec('BEGIN IMMEDIATE');
   let ran: Ran;
   try {
-    ran = await ledgerAsync(h, app, 'park', 'fix-login', '--reason', 'paused');
+    ran = await ledgerAsync(h, app, 'task', 'park', 'fix-login', '--reason', 'paused');
   } finally {
     holder.exec('ROLLBACK');
     holder.close();
@@ -300,7 +300,7 @@ function storeCallAsync(h: string, call: string): Promise<Ran> {
 
 test('sqlite store: every write that waits too long for the database says another command holds it, and writes nothing', { skip: noSqlite }, async (t) => {
   const { h, app, inStore } = setup(t, 'sqlite');
-  ok(ledger(h, app, 'task', 'fix-login'));
+  ok(ledger(h, app, 'task', 'new', 'fix-login'));
   const before = inStore((store) => ({ ledger: store.backlog.read('app', 'fix-login')?.text, registry: store.registry.read() }));
   const calls = {
     'backlog.write': `store.backlog.write('app', 'fix-login', 'changed\\n')`,

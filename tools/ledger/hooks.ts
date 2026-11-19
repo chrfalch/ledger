@@ -312,7 +312,7 @@ function expandGlob(word: string, cwd: string): string[] {
   return existing.length > 0 ? existing : [word];
 }
 
-const RETIRE_COMMANDS = ['ledger retire'];
+const RETIRE_COMMANDS = ['ledger task retire'];
 const REMOVALS = ['worktree remove', 'rm -rf', 'rm -fr'];
 
 /** Denies a Bash removal of a folder whose ledger no archive copy names as its worktree. */
@@ -336,7 +336,7 @@ function worktreeRemovalReason(input: HookInput, context: HookContext): string |
     '',
     'The ledger is the record of the task. The worktree is not.',
     'Retire it instead, which archives the ledger and then removes the worktree:',
-    `  ${context.ledgerBin} retire <slug>`,
+    `  ${context.ledgerBin} task retire <slug>`,
     '',
     `Archived ledgers live in ${context.paths.tilde(context.store.archive.repoLocation('<repo>'))}/.`,
   ].join('\n');
@@ -410,7 +410,7 @@ function ledgerWriteReason(input: HookInput, context: HookContext): string | und
       '',
       "A ledger belongs in the task's worktree, never in the main checkout.",
       'Start the task first. This writes its ledger to the backlog, with no branch or worktree yet:',
-      `  ${context.ledgerBin} task <slug> --goal '<one paragraph>'`,
+      `  ${context.ledgerBin} task new <slug> --goal '<one paragraph>'`,
       'Then give it a branch and a worktree, and move its ledger in:',
       `  ${context.ledgerBin} go <slug>`,
       'Then work in the worktree that ledger go prints.',

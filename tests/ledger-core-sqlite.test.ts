@@ -67,7 +67,7 @@ function failed(ran: Ran): string {
 function retiredWithEvidence(t: TestContext, storage: Storage) {
   const world = setup(t, storage);
   const { h, app } = world;
-  ok(ledger(h, app, 'task', 'fix-login', '--goal', 'Users cannot log in.'));
+  ok(ledger(h, app, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.'));
   ok(ledger(h, app, 'go', 'fix-login'));
   const worktree = path.join(app, '.claude/worktrees/fix-login');
   const evidence = path.join(worktree, '.claude/evidence');
@@ -75,7 +75,7 @@ function retiredWithEvidence(t: TestContext, storage: Storage) {
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
   writeFileSync(path.join(evidence, 'logs/trace.bin'), BYTES);
   const text = readFileSync(path.join(worktree, '.claude/ledger.md'), 'utf8');
-  const stdout = ok(ledger(h, app, 'retire', 'fix-login'));
+  const stdout = ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   return { ...world, worktree, text, stdout, name: `${today()}-fix-login` };
 }
 
@@ -83,14 +83,14 @@ for (const storage of ['file', 'sqlite'] as const) {
   const skip = storage === 'sqlite' && noSqlite;
   test(`${storage} store: ledger task writes the backlog ledger to the store`, { skip }, (t) => {
     const { h, app, store } = setup(t, storage);
-    ok(ledger(h, app, 'task', 'fix-login', '--goal', 'Users cannot log in.'));
+    ok(ledger(h, app, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.'));
     keptIn(h, storage);
     assert.match(store().backlog.read('app', 'fix-login')?.text ?? '', /Users cannot log in\./);
   });
 
   test(`${storage} store: ledger go moves the backlog ledger out of the store into the worktree's .claude/ledger.md`, { skip }, (t) => {
     const { h, app, store } = setup(t, storage);
-    ok(ledger(h, app, 'task', 'fix-login', '--goal', 'Users cannot log in.'));
+    ok(ledger(h, app, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.'));
     ok(ledger(h, app, 'go', 'fix-login'));
     keptIn(h, storage);
     assert.match(readFileSync(path.join(app, '.claude/worktrees/fix-login/.claude/ledger.md'), 'utf8'), /Users cannot log in\./);
@@ -111,15 +111,15 @@ for (const storage of ['file', 'sqlite'] as const) {
 
   test(`${storage} store: ledger archive lists the retired task from the store`, { skip }, (t) => {
     const { h, app, store, name } = retiredWithEvidence(t, storage);
-    assert.match(ok(ledger(h, app, 'archive')), /fix-login/);
-    const { ledgers } = JSON.parse(ok(ledger(h, app, 'archive', '--json'))) as { ledgers: { date: string; slug: string; path: string }[] };
+    assert.match(ok(ledger(h, app, 'task', 'archive')), /fix-login/);
+    const { ledgers } = JSON.parse(ok(ledger(h, app, 'task', 'archive', '--json'))) as { ledgers: { date: string; slug: string; path: string }[] };
     assert.deepEqual(ledgers, [{ ...ledgers[0], date: today(), slug: 'fix-login', path: store().archive.location('app', name) }]);
     keptIn(h, storage);
   });
 
   test(`${storage} store: ledger list shows backlog tasks from the store, and retired ones with --archived`, { skip }, (t) => {
     const { h, app, store } = retiredWithEvidence(t, storage);
-    ok(ledger(h, app, 'task', 'idea', '--goal', 'An idea.'));
+    ok(ledger(h, app, 'task', 'new', 'idea', '--goal', 'An idea.'));
     type Listed = { slug: string; status: string; path: string };
     const listed = (...args: string[]): Listed[] => (JSON.parse(ok(ledger(h, app, 'list', '--json', ...args))) as { tasks: Listed[] }).tasks;
     assert.deepEqual(
@@ -134,7 +134,7 @@ for (const storage of ['file', 'sqlite'] as const) {
   test(`${storage} store: the SessionStart hook names a backlog child and an archived child with the status the store gives them`, { skip }, (t) => {
     const { h, app, store } = setup(t, storage);
     const epic = path.dirname(path.dirname(worktreeTask(h, app, { slug: 'epic', main: app, children: ['- idea', '- old'] })));
-    ok(ledger(h, app, 'task', 'idea', '--goal', 'An idea.'));
+    ok(ledger(h, app, 'task', 'new', 'idea', '--goal', 'An idea.'));
     store().archive.write('app', '2026-10-01-old', ledgerText({ slug: 'old', main: app, worktree: path.join(app, '.claude/worktrees/old'), parent: 'epic' }));
     const input = JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup', cwd: epic });
     const result = spawnSync(LEDGER_BIN, ['hook', 'session-start'], { cwd: h, env: { ...process.env, HOME: h, GIT_CONFIG_GLOBAL: path.join(h, '.gitconfig') }, input, encoding: 'utf8' });
@@ -149,16 +149,16 @@ for (const storage of ['file', 'sqlite'] as const) {
   /** Backlog parent epic with child part started in a worktree, whose ## Report holds `report`; then part is retired. */
   function retiredChildOfBacklogParent(t: TestContext, report: string[]) {
     const { h, app, store } = setup(t, storage);
-    ok(ledger(h, app, 'task', 'epic', '--goal', 'Ship the epic.'));
-    ok(ledger(h, app, 'task', 'part', '--goal', 'Ship a part.'));
-    ok(ledger(h, app, 'parent', 'epic', 'add', 'part'));
+    ok(ledger(h, app, 'task', 'new', 'epic', '--goal', 'Ship the epic.'));
+    ok(ledger(h, app, 'task', 'new', 'part', '--goal', 'Ship a part.'));
+    ok(ledger(h, app, 'tree', 'add', 'epic', 'part'));
     ok(ledger(h, app, 'go', 'part'));
     const file = path.join(app, '.claude/worktrees/part/.claude/ledger.md');
     const text = readFileSync(file, 'utf8');
     const placeholder = '<3–5 lines for the parent task: outcome, PR link, what the parent must know>';
     assert.ok(text.includes(placeholder), text);
     writeFileSync(file, text.replace(placeholder, report.join('\n')));
-    const ran = ledger(h, app, 'retire', 'part');
+    const ran = ledger(h, app, 'task', 'retire', 'part');
     assert.equal(ran.status, 0, ran.stderr);
     keptIn(h, storage);
     return { ran, parent: store().backlog.read('app', 'epic')?.text ?? assert.fail('the backlog parent epic is gone') };
@@ -182,7 +182,7 @@ for (const storage of ['file', 'sqlite'] as const) {
 
   test(`${storage} store: ledger show prints this repo's backlog ledger exactly, before any archive copy of the slug`, { skip }, (t) => {
     const { h, app, store } = setup(t, storage);
-    ok(ledger(h, app, 'task', 'idea', '--goal', 'An idea.'));
+    ok(ledger(h, app, 'task', 'new', 'idea', '--goal', 'An idea.'));
     store().archive.write('app', '2026-10-01-idea', 'an older task with the same slug\n');
     const text = store().backlog.read('app', 'idea')?.text;
     assert.ok(text);
@@ -216,7 +216,7 @@ for (const storage of ['file', 'sqlite'] as const) {
 
   test(`${storage} store: ledger show without --repo does not print the backlog ledger of another repo`, { skip }, (t) => {
     const { h, app, lib } = setup(t, storage);
-    ok(ledger(h, lib, 'task', 'lib-idea', '--goal', 'An idea for lib.'));
+    ok(ledger(h, lib, 'task', 'new', 'lib-idea', '--goal', 'An idea for lib.'));
     const ran = ledger(h, app, 'show', 'lib-idea');
     const stderr = failed(ran);
     assert.match(stderr, /\blib-idea\b/);
@@ -238,7 +238,7 @@ for (const storage of ['file', 'sqlite'] as const) {
 
   test(`${storage} store: ledger show --evidence of a slug only in the backlog exits 1 and says it has no archived copy`, { skip }, (t) => {
     const { h, app } = setup(t, storage);
-    ok(ledger(h, app, 'task', 'idea', '--goal', 'An idea.'));
+    ok(ledger(h, app, 'task', 'new', 'idea', '--goal', 'An idea.'));
     const ran = ledger(h, app, 'show', 'idea', '--evidence');
     const stderr = failed(ran);
     assert.match(stderr, /\bidea\b/);
@@ -306,7 +306,7 @@ for (const storage of ['file', 'sqlite'] as const) {
 
   test(`${storage} store: ledger show --json prints the repo, name, location and text`, { skip }, (t) => {
     const { h, app, store } = setup(t, storage);
-    ok(ledger(h, app, 'task', 'idea', '--goal', 'An idea.'));
+    ok(ledger(h, app, 'task', 'new', 'idea', '--goal', 'An idea.'));
     store().archive.write('app', '2026-11-01-old', 'archived\n');
     type Shown = { repo: string; name: string; location: string; text: string };
     const shown = (slug: string): Shown => {
@@ -320,7 +320,7 @@ for (const storage of ['file', 'sqlite'] as const) {
 
   test(`${storage} store: ledger show refuses a slug or --repo that is empty or holds .., / or \\, exits 1 and names the value`, { skip }, (t) => {
     const { h, app, lib } = setup(t, storage);
-    ok(ledger(h, lib, 'task', 'lib-idea', '--goal', 'An idea for lib.'));
+    ok(ledger(h, lib, 'task', 'new', 'lib-idea', '--goal', 'An idea for lib.'));
     for (const args of [[''], ['..'], ['../lib/lib-idea'], ['lib\\lib-idea'], ['lib-idea', '--repo', ''], ['lib-idea', '--repo', '../lib'], ['lib-idea', '--repo', 'x/../lib'], ['lib-idea', '--repo', 'a\\b']]) {
       const bad = args.length === 1 ? args[0] : args[2];
       const ran = ledger(h, app, 'show', ...args);
@@ -341,9 +341,9 @@ for (const storage of ['file', 'sqlite'] as const) {
   test(`${storage} store: ledger task --design-refs writes the numbers on the design refs line of the backlog ledger`, { skip }, (t) => {
     const { h, app, lib, store } = setup(t, storage);
     mkdirSync(path.join(app, 'llp'));
-    ok(ledger(h, app, 'task', 'fix-login', '--design-refs', '3,12'));
-    ok(ledger(h, app, 'task', 'no-refs'));
-    ok(ledger(h, lib, 'task', 'lib-refs', '--design-refs', '7'));
+    ok(ledger(h, app, 'task', 'new', 'fix-login', '--design-refs', '3,12'));
+    ok(ledger(h, app, 'task', 'new', 'no-refs'));
+    ok(ledger(h, lib, 'task', 'new', 'lib-refs', '--design-refs', '7'));
     assert.match(store().backlog.read('app', 'fix-login')?.text ?? '', /^- design refs: 3,12$/m);
     assert.match(store().backlog.read('app', 'no-refs')?.text ?? '', /^- design refs: none$/m);
     assert.match(store().backlog.read('lib', 'lib-refs')?.text ?? '', /^- design refs: 7$/m);
@@ -353,7 +353,7 @@ for (const storage of ['file', 'sqlite'] as const) {
     const { h, app, store } = setup(t, storage);
     const template = path.join(h, '.claude/ledger.template.md');
     writeFileSync(template, readFileSync(template, 'utf8').replace(/^- design refs:.*\n/m, ''));
-    ok(ledger(h, app, 'task', 'fix-login', '--design-refs', '3,12'));
+    ok(ledger(h, app, 'task', 'new', 'fix-login', '--design-refs', '3,12'));
     const [, location] = /^## Location\n((?:- .*\n)+)/m.exec(store().backlog.read('app', 'fix-login')?.text ?? '') ?? [];
     assert.equal(location?.trimEnd().split('\n').at(-1), '- design refs: 3,12');
   });
@@ -362,14 +362,14 @@ for (const storage of ['file', 'sqlite'] as const) {
     const { h, app, store } = setup(t, storage);
     const template = path.join(h, '.claude/ledger.template.md');
     writeFileSync(template, readFileSync(template, 'utf8').replace(/^## Location\n(?:- .*\n)*\n/m, ''));
-    assert.match(failed(ledger(h, app, 'task', 'fix-login', '--design-refs', '3,12')), /~\/\.claude\/ledger\.template\.md/);
+    assert.match(failed(ledger(h, app, 'task', 'new', 'fix-login', '--design-refs', '3,12')), /~\/\.claude\/ledger\.template\.md/);
     assert.equal(store().backlog.has('app', 'fix-login'), false);
   });
 
   test(`${storage} store: ledger task --design-refs refuses a value that is not comma-separated numbers, and writes no ledger`, { skip }, (t) => {
     const { h, app, store } = setup(t, storage);
     for (const refs of ['', 'none', '3;12', '3,', 'LLP-3']) {
-      assert.ok(failed(ledger(h, app, 'task', 'fix-login', '--design-refs', refs)).includes(`"${refs}"`), refs);
+      assert.ok(failed(ledger(h, app, 'task', 'new', 'fix-login', '--design-refs', refs)).includes(`"${refs}"`), refs);
       assert.equal(store().backlog.has('app', 'fix-login'), false);
     }
   });
@@ -389,7 +389,7 @@ for (const storage of ['file', 'sqlite'] as const) {
 
 test('with no ~/.claude/ledger-settings.json the ledgers stay in files, as before', (t) => {
   const { h, app } = setup(t, 'file');
-  ok(ledger(h, app, 'task', 'fix-login'));
+  ok(ledger(h, app, 'task', 'new', 'fix-login'));
   assert.ok(existsSync(path.join(h, '.claude/ledger-backlog/app/fix-login.md')));
   assert.equal(existsSync(path.join(h, '.claude/ledgers.db')), false);
 });
@@ -401,7 +401,7 @@ for (const [what, settings] of [
   test(`a settings file with ${what} keeps the ledgers in files`, (t) => {
     const { h, app } = setup(t, 'file');
     writeSettings(h, settings);
-    ok(ledger(h, app, 'task', 'fix-login'));
+    ok(ledger(h, app, 'task', 'new', 'fix-login'));
     assert.ok(existsSync(path.join(h, '.claude/ledger-backlog/app/fix-login.md')));
     assert.equal(existsSync(path.join(h, '.claude/ledgers.db')), false);
   });

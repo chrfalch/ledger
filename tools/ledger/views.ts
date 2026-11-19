@@ -73,7 +73,7 @@ function familyOrder(tasks: Task[]): { task: Task; depth: number }[] {
 const nestedName = (slug: string, depth: number): string => (depth === 0 ? slug : `${'  '.repeat(depth - 1)}↳ ${slug}`);
 
 export function listView(tasks: Task[]): string {
-  if (tasks.length === 0) return 'No live tasks. Retired tasks are listed by: ledger archive';
+  if (tasks.length === 0) return 'No live tasks. Retired tasks are listed by: ledger task archive';
   const count = (status: string): number => tasks.filter((task) => task.status === status).length;
   const counts = [`${count('active')} active`, `${count('parked')} parked`, `${count('backlog')} backlog`];
   const rows = familyOrder(tasks).map(({ task, depth }) => [task.repo, nestedName(task.slug, depth), task.status, parentCell(task), localDate(task.mtimeMs), truncate(task.ledger.next)]);
@@ -103,7 +103,7 @@ export function archiveView(rows: ArchiveRow[], repo: string | undefined, term: 
   return [heading('Archived ledgers', repo ?? 'every repo', count), '', ...table(header, cells)].join('\n');
 }
 
-/** A child in another repo is named `<slug>@<main>`, the form `ledger parent` takes. */
+/** A child in another repo is named `<slug>@<main>`, the form `ledger tree` takes. */
 const childName = (child: ChildView, parentMain: string): string => (child.main === parentMain ? child.slug : `${child.slug}@${child.main}`);
 
 export function parentView(parent: Task, parentMain: string, children: ChildView[]): string {

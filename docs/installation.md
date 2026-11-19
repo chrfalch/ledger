@@ -168,7 +168,7 @@ commands:
   task, and adds the mark. With the slug of another task it only adds the mark.
 - `/ledger:worktrees` prints each linked git worktree's size, last commit,
   dirty files, ledger and PR.
-- `/ledger:retire [<slug>]` runs `ledger retire`: it archives the
+- `/ledger:retire [<slug>]` runs `ledger task retire`: it archives the
   task's ledger, removes its worktree and deletes the worktree's build folders.
   It also deletes the local branch when every commit on it is in the default
   branch or in a merged PR. A branch with commits after its PR merged stays.

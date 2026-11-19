@@ -29,37 +29,55 @@ test('/ledger:all --scan says the flag was dropped, then shows the list', async 
 })
 
 test('/ledger:archive passes the search term as one argument and --all as a flag', async ($, on) => {
-  const w = world(on, { 'archive login fix --all': ran(0, 'Archived ledgers · every repo\n') }, { cwd: CWD })
+  const w = world(on, { 'task archive login fix --all': ran(0, 'Archived ledgers · every repo\n') }, { cwd: CWD })
 
   const { text } = await $.command.run({ command: 'ledger:archive', args: ' login  fix --all ' })
 
-  expect(w.argvs()).toEqual([['archive', 'login fix', '--all']])
+  expect(w.argvs()).toEqual([['task', 'archive', 'login fix', '--all']])
   expect(text).toBe('Archived ledgers · every repo')
 })
 
 test('/ledger:archive with no term lists the archive of this repo', async ($, on) => {
-  const w = world(on, { archive: ran(0, 'Archived ledgers · repo\n') }, { cwd: CWD })
+  const w = world(on, { 'task archive': ran(0, 'Archived ledgers · repo\n') }, { cwd: CWD })
 
   await $.command.run({ command: 'ledger:archive', args: '' })
 
-  expect(w.argvs()).toEqual([['archive']])
+  expect(w.argvs()).toEqual([['task', 'archive']])
 })
 
-test('/ledger:parent <slug> shows `ledger parent <slug>`, and a change passes its words on', async ($, on) => {
-  const w = world(on, { 'parent epic': ran(0, 'Parent task epic · 1 child, 1 active\n'), 'parent epic add part': ran(0, 'part is a child of epic.\n') }, { cwd: CWD })
+test('/ledger:parent <slug> shows `ledger tree show <slug>`, and a change runs `ledger tree <action> <slug> <child>`', async ($, on) => {
+  const w = world(on, { 'tree show epic': ran(0, 'Parent task epic · 1 child, 1 active\n'), 'tree add epic part': ran(0, 'part is a child of epic.\n') }, { cwd: CWD })
 
   const shown = await $.command.run({ command: 'ledger:parent', args: 'epic' })
   const added = await $.command.run({ command: 'ledger:parent', args: 'epic add part' })
 
-  expect(w.argvs()).toEqual([['parent', 'epic'], ['parent', 'epic', 'add', 'part']])
+  expect(w.argvs()).toEqual([['tree', 'show', 'epic'], ['tree', 'add', 'epic', 'part']])
   expect(shown.text).toBe('Parent task epic · 1 child, 1 active')
   expect(added.text).toBe('part is a child of epic.')
+})
+
+test('/ledger:parent passes an action with no child, and options, on to ledger tree', async ($, on) => {
+  const w = world(on, { 'tree next epic': ran(0, 'epic part\n'), 'tree show epic --json': ran(0, '{"ok":true}\n') }, { cwd: CWD })
+
+  await $.command.run({ command: 'ledger:parent', args: 'epic next' })
+  await $.command.run({ command: 'ledger:parent', args: 'epic --json' })
+
+  expect(w.argvs()).toEqual([['tree', 'next', 'epic'], ['tree', 'show', 'epic', '--json']])
 })
 
 test('/ledger:parent with no slug answers its usage and runs nothing', async ($, on) => {
   const w = world(on, {}, { cwd: CWD })
 
   const { text } = await $.command.run({ command: 'ledger:parent', args: '' })
+
+  expect(text).toContain('Usage: /ledger:parent <slug>')
+  expect(w.calls).toEqual([])
+})
+
+test('/ledger:parent with options but no slug answers its usage and runs nothing', async ($, on) => {
+  const w = world(on, {}, { cwd: CWD })
+
+  const { text } = await $.command.run({ command: 'ledger:parent', args: '--json' })
 
   expect(text).toContain('Usage: /ledger:parent <slug>')
   expect(w.calls).toEqual([])
@@ -120,19 +138,19 @@ test('a bin/ledger that does not run says so', async ($, on) => {
 })
 
 test('/ledger:retire passes slug, --dry-run and --force on, and waits as long as the engine allows', async ($, on) => {
-  const w = world(on, { 'retire epic --dry-run': ran(0, 'Retire epic · dry run\n'), 'retire part --force': ran(0, 'archived /home/x.md\n') }, { cwd: CWD })
+  const w = world(on, { 'task retire epic --dry-run': ran(0, 'Retire epic · dry run\n'), 'task retire part --force': ran(0, 'archived /home/x.md\n') }, { cwd: CWD })
 
   const planned = await $.command.run({ command: 'ledger:retire', args: 'epic --dry-run' })
   const retired = await $.command.run({ command: 'ledger:retire', args: 'part --force' })
 
-  expect(w.argvs()).toEqual([['retire', 'epic', '--dry-run'], ['retire', 'part', '--force']])
+  expect(w.argvs()).toEqual([['task', 'retire', 'epic', '--dry-run'], ['task', 'retire', 'part', '--force']])
   expect(w.calls.map(({ timeoutMs }) => timeoutMs)).toEqual([LONG, LONG])
   expect(planned.text).toBe('Retire epic · dry run')
   expect(retired.text).toBe('archived /home/x.md')
 })
 
 test('/ledger:retire of a blocked task shows why', async ($, on) => {
-  world(on, { retire: ran(1, '', 'Not retired: 2 uncommitted files. Add --force to retire it anyway.\n') }, { cwd: CWD })
+  world(on, { 'task retire': ran(1, '', 'Not retired: 2 uncommitted files. Add --force to retire it anyway.\n') }, { cwd: CWD })
 
   const { text } = await $.command.run({ command: 'ledger:retire', args: '' })
 
@@ -194,10 +212,10 @@ test('/ledger says the session ledgers could not be read when bin/ledger refuses
 
 for (const [command, args, key] of [
   ['ledger:all', '', 'list --archived'],
-  ['ledger:archive', 'login', 'archive login'],
-  ['ledger:parent', 'epic', 'parent epic'],
+  ['ledger:archive', 'login', 'task archive login'],
+  ['ledger:parent', 'epic', 'tree show epic'],
   ['ledger:worktrees', '', 'worktrees'],
-  ['ledger:retire', 'epic --dry-run', 'retire epic --dry-run'],
+  ['ledger:retire', 'epic --dry-run', 'task retire epic --dry-run'],
 ] as const) {
   test(`/${command} through the Skill tool answers with the text the typed command shows`, async ($, on) => {
     const w = world(on, { [key]: ran(0, `${key} output\n`) }, { cwd: CWD })
@@ -266,10 +284,10 @@ test('no command runs a program other than bin/ledger', async ($, on) => {
     on,
     {
       'list --archived': LIST,
-      archive: ran(0, 'a\n'),
-      'parent epic': ran(0, 'p\n'),
+      'task archive': ran(0, 'a\n'),
+      'tree show epic': ran(0, 'p\n'),
       worktrees: ran(0, 'w\n'),
-      'retire --dry-run': ran(0, 'r\n'),
+      'task retire --dry-run': ran(0, 'r\n'),
       [`session ${CWD} --json`]: session(CWD, task('epic')),
     },
     { cwd: CWD },

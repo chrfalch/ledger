@@ -218,17 +218,17 @@ A ledger is Markdown. `tools/ledger/format.ts` parses and writes it.
 
 ## Task life today
 
-1. `ledger task` writes a backlog ledger from the template.
+1. `ledger task new` writes a backlog ledger from the template.
 2. `ledger go <slug>` makes the worktree and branch, and moves the ledger
    into the worktree. The branch starts at the ledger's `- base:` line, or at
    the default branch.
 3. The agent edits `.claude/ledger.md` by hand during the work. The rules say
    when.
-4. `ledger park` and `ledger unpark` mark a task that waits.
-5. `ledger retire` archives the ledger and removes the worktree.
+4. `ledger task park` and `ledger task unpark` mark a task that waits.
+5. `ledger task retire` archives the ledger and removes the worktree.
 
 A parent task stays in the backlog. Its ledger lists its child tasks.
-`ledger parent` adds and removes child tasks and shows their status.
+`ledger tree` adds and removes child tasks and shows their status.
 
 ## Known gaps
 
