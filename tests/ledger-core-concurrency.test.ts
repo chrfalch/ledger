@@ -10,6 +10,7 @@ import { ledgerPaths } from '../tools/ledger/paths.js';
 import { loadTasks, type RegistryEntry } from '../tools/ledger/registry.js';
 import { sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
+import { pauseForTest } from '../tools/ledger/wait.js';
 import { goTask, type Context } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
 import { asCli, commandEnv, home, LEDGER_BIN, ledger, ledgerText, noSqlite, ok, repository, type Ran } from './ledger-core-fixtures.js';
@@ -340,4 +341,25 @@ test('sqlite store: a write that fails, and whose rollback fails too, reports wh
       }),
     /^Error: the change failed$/,
   );
+});
+
+test('LEDGER_TEST_DELAY_MS pauses for at most a finite, non-negative value, capped at 10 s; any other value pauses not at all', (t) => {
+  const pauses: number[] = [];
+  t.mock.method(Atomics, 'wait', (_array: Int32Array, _index: number, _value: number, ms?: number) => {
+    pauses.push(ms ?? Infinity);
+    return 'timed-out';
+  });
+  t.mock.method(Math, 'random', () => 1);
+  const before = process.env.LEDGER_TEST_DELAY_MS;
+  try {
+    for (const value of ['250', '1e9', 'Infinity', '1e400', 'NaN', '-5', '0', '']) {
+      process.env.LEDGER_TEST_DELAY_MS = value;
+      pauseForTest();
+    }
+  } finally {
+    if (before === undefined) delete process.env.LEDGER_TEST_DELAY_MS;
+    else process.env.LEDGER_TEST_DELAY_MS = before;
+  }
+
+  assert.deepEqual(pauses, [250, 10_000]);
 });

@@ -96,6 +96,13 @@ The backlog ledgers, the archive and the list of tasks are files under
   or its evidence with `ledger show <slug>` and `ledger show <slug> --evidence`.
 - Changing the setting does not copy the ledgers to the other storage.
 - The active ledger stays `.claude/ledger.md` in the task's worktree.
+- `"storage": "git"` keeps the backlog and the archive in a clone of a private
+  GitHub repository, `~/.claude/ledger-data`, so several machines share them.
+  It needs `git` and `gh`, logged in. Set it up with `ledger store sync init <url>`,
+  then `ledger store migrate --to git`. Without the clone, every `ledger` command
+  that uses the storage exits 1 and says to run `ledger store sync init`. The clone
+  sets its own `core.hooksPath`, so hooks from a global `core.hooksPath` do not
+  run in it. See [usage.md](usage.md) for what is pushed and what stays.
 
 ## Environment variables
 
@@ -265,7 +272,9 @@ failures not yet reported.
 - **SessionStart, `ledger hook session-start`** — reads the task ledger into the new
   session. It reads ledgers from linked worktrees, never from the main
   checkout. With several ledgers it prints a summary of each instead. This is
-  what makes `/clear` then `go` work.
+  what makes `/clear` then `go` work. With git storage it first pulls the
+  ledgers of your other machines, for at most four of its five seconds, and
+  adds one line when the last sync stopped.
 - **SessionStart, `deploy-drift.sh`** — warns when `~/.claude` is behind this
   repo.
 - **UserPromptSubmit, `ledger hook prompt-submit`** — names the session

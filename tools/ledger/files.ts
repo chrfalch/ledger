@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   accessSync,
   closeSync,
@@ -68,6 +69,31 @@ export function createFile(file: string, text: string): boolean {
       throw error;
     }
   });
+}
+
+/**
+ * Moves `file` to a new name next to it and gives that name, so the caller can check what it moved before it removes it:
+ * a write to `file` from then on makes a new file, which stays. Undefined when there is no `file`.
+ */
+export function moveAside(file: string): string | undefined {
+  const aside = `${file}.removing-${randomUUID()}`;
+  try {
+    renameSync(file, aside);
+    return aside;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+/** Puts a file that moveAside moved back at `file`, unless a newer file is there by now, which then stays. */
+export function putBack(aside: string, file: string): void {
+  try {
+    linkSync(aside, file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  }
+  rmSync(aside);
 }
 
 export const readText = (file: string): string => readFileSync(file, 'utf8');

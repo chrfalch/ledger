@@ -1,4 +1,6 @@
 // @ref LLP 0000#the-store — what each store keeps, and how the storage setting picks one.
+import { Failure } from './failure.js';
+import { holdsAnything } from './files.js';
 
 /**
  * One ledger a store keeps. `location` names it for a person: messages and JSON print it as it is, but nothing outside
@@ -52,11 +54,25 @@ export interface Backlog extends LedgerCollection {
 
 export type EvidenceState = 'none' | 'same' | 'differs';
 
+/** What `Archive.write` throws for a name that is taken, so a caller knows the copy there is not its own. */
+export class NameTaken extends Failure {}
+
+const createdHere = new Set<string>();
+
+/** For each store's `Archive.write`: this process made the archive copy at `location`, with an exclusive create. */
+export const noteCreated = (location: string): void => void createdHere.add(location);
+
+/**
+ * Whether this process made the archive copy at `location`. After a write that failed, only such a copy is the caller's
+ * to remove: another command may have written the very same text.
+ */
+export const wasCreatedHere = (location: string): boolean => createdHere.has(location);
+
 /** Copies of retired ledgers; the name is `<YYYY-MM-DD>-<slug>`. */
 export interface Archive extends LedgerCollection {
   /**
    * `evidenceFrom` is a folder whose files are copied to sit with the copy, under the same name. A name that is taken,
-   * or an evidence copy that is already there, throws before anything is written: an archive copy is never replaced.
+   * or an evidence copy that is already there, throws NameTaken before anything is written: an archive copy is never replaced.
    * An evidence copy that does not match its folder afterwards throws too, and is left as it is.
    */
   write(repo: string, name: string, text: string, evidenceFrom?: string): void;
@@ -82,9 +98,20 @@ export interface Archive extends LedgerCollection {
    * links, as `write` took them. Without evidence it writes nothing.
    */
   copyEvidence(repo: string, name: string, to: string): void;
-  /** Removes the copy `name` and its evidence. */
-  remove(repo: string, name: string): void;
+  /**
+   * Removes the evidence of the copy `name`, then the copy, and gives true; fails when there is no such copy. With
+   * `expected`, only while the copy still holds its text and its evidence matches the folder `expected.evidence`, which
+   * stands for none when it holds nothing; otherwise it removes nothing and gives false.
+   */
+  remove(repo: string, name: string, expected?: CheckedCopy): boolean;
 }
+
+/** An archive copy as it was checked: its text, and a folder that holds its evidence as it was then. */
+export type CheckedCopy = { text: string; evidence: string };
+
+/** Whether the copy `name` of `archive` is still as `checked` says. */
+export const isAsChecked = (archive: Pick<Archive, 'read' | 'evidenceState'>, repo: string, name: string, { text, evidence }: CheckedCopy): boolean =>
+  archive.read(repo, name)?.text === text && archive.evidenceState(repo, name, evidence) === (holdsAnything(evidence) ? 'same' : 'none');
 
 /** The text of the registry, a cache that a rebuild from the ledgers can always replace. */
 export interface Registry {
@@ -96,11 +123,19 @@ export interface Registry {
   remove(): void;
 }
 
+/** A ledger with the text a caller wrote to it. */
+export type WrittenLedger = { place: 'backlog' | 'archive'; repo: string; name: string; text: string };
+
 /** Where backlog ledgers, archive copies and the registry are kept. A worktree's .claude/ledger.md is not in it. */
 export interface LedgerStore {
   backlog: Backlog;
   archive: Archive;
   registry: Registry;
+  /**
+   * Records what the store wrote where it must be recorded, as git storage commits it; throws when it cannot, and when
+   * it recorded a ledger of `expected` with any other text.
+   */
+  commit?(expected?: WrittenLedger[]): void;
   /** Lets go of what the store holds open, such as a database; the store is not used after it. */
   close?(): void;
 }

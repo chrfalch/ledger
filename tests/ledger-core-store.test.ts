@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import fs, { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
+import { gitStore } from '../tools/ledger/git-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { loadTasks } from '../tools/ledger/registry.js';
-import { sqliteStore } from '../tools/ledger/sqlite-store.js';
+import { loadSqlite, sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { createTask, goTask, parkTask, type Context } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
@@ -303,8 +307,244 @@ function fileHome(t: TestContext) {
   return { h, paths, store: fileStore(paths) };
 }
 
+const openGitStore = (h: string): LedgerStore => {
+  const clone = path.join(h, '.claude/ledger-data');
+  spawnSync('git', ['init', '--quiet', clone]);
+  writeFileSync(path.join(clone, '.ledger-data'), '{"format":1}\n');
+  return gitStore(ledgerPaths(h), { backgroundSync: false });
+};
+
 storeContract('file store', (h) => fileStore(ledgerPaths(h)));
 storeContract('sqlite store', (h) => sqliteStore({ home: h }), noSqlite);
+storeContract('git store', openGitStore);
+
+for (const [name, open] of [['file store', (h: string) => fileStore(ledgerPaths(h))], ['git store', openGitStore]] as const) {
+  for (const linked of ['repo folder', 'evidence folder'] as const) {
+    test(`${name}: copyEvidence and remove refuse evidence whose ${linked} is a symbolic link, and change nothing behind it`, (t) => {
+      const h = home(t);
+      const store = open(h);
+      store.archive.write('app', '2026-11-01-old', text('old'));
+      const evidence = store.archive.evidenceLocation('app', '2026-11-01-old');
+      const outside = path.join(h, 'outside');
+      const repoFolder = path.dirname(evidence);
+      if (linked === 'repo folder') {
+        // The file store keeps the copy in that folder too, so it moves along and the copy stays readable.
+        if (existsSync(repoFolder)) renameSync(repoFolder, outside);
+        mkdirSync(path.join(outside, '2026-11-01-old'), { recursive: true });
+        mkdirSync(path.dirname(repoFolder), { recursive: true });
+        symlinkSync(outside, repoFolder);
+      } else {
+        mkdirSync(path.join(outside, '2026-11-01-old'), { recursive: true });
+        mkdirSync(repoFolder, { recursive: true });
+        symlinkSync(path.join(outside, '2026-11-01-old'), evidence);
+      }
+      const kept = path.join(outside, '2026-11-01-old/red.txt');
+      writeFileSync(kept, 'not evidence\n');
+      const to = path.join(h, 'copy');
+
+      assert.throws(() => store.archive.copyEvidence('app', '2026-11-01-old', to), /symbolic link/);
+      assert.equal(existsSync(to), false);
+      assert.throws(() => store.archive.remove('app', '2026-11-01-old'), /symbolic link/);
+      assert.equal(readFileSync(kept, 'utf8'), 'not evidence\n');
+      assert.ok(store.archive.has('app', '2026-11-01-old'), 'the copy was removed');
+    });
+  }
+}
+
+for (const [name, open] of [['file store', (h: string) => fileStore(ledgerPaths(h))], ['git store', openGitStore]] as const) {
+  test(`${name}: an archive write refuses evidence whose repo folder is a symbolic link, and writes nothing`, (t) => {
+    const h = home(t);
+    const store = open(h);
+    const evidence = store.archive.evidenceLocation('app', '2026-11-01-old');
+    const outside = path.join(h, 'outside');
+    mkdirSync(outside);
+    mkdirSync(path.dirname(path.dirname(evidence)), { recursive: true });
+    symlinkSync(outside, path.dirname(evidence));
+    const from = path.join(h, 'from');
+    mkdirSync(from);
+    writeFileSync(path.join(from, 'red.txt'), 'failing\n');
+
+    assert.throws(() => store.archive.write('app', '2026-11-01-old', text('old'), from), /symbolic link/);
+
+    assert.deepEqual(readdirSync(outside), []);
+    assert.equal(store.archive.has('app', '2026-11-01-old'), false);
+  });
+
+  for (const place of ['backlog', 'archive'] as const) {
+    test(`${name}: a new ${place} ledger, without evidence, is refused when the ${place} root is a symbolic link, and nothing is written behind it`, (t) => {
+      const h = home(t);
+      const store = open(h);
+      const root = store[place].repoLocation();
+      const outside = path.join(h, 'outside');
+      mkdirSync(outside);
+      rmSync(root, { recursive: true, force: true });
+      mkdirSync(path.dirname(root), { recursive: true });
+      symlinkSync(outside, root);
+      const create = place === 'backlog' ? () => store.backlog.create('app', 'new', text('new')) : () => store.archive.write('app', '2026-11-02-new', text('new'));
+
+      assert.throws(create, /symbolic link/);
+
+      assert.deepEqual(readdirSync(outside), []);
+    });
+  }
+
+  test(`${name}: an archive write, copyEvidence and remove refuse an evidence root that is a symbolic link, and change nothing behind it`, (t) => {
+    const h = home(t);
+    const store = open(h);
+    const from = path.join(h, 'from');
+    mkdirSync(from);
+    writeFileSync(path.join(from, 'red.txt'), 'failing\n');
+    store.archive.write('app', '2026-11-01-old', text('old'), from);
+    const root = path.dirname(path.dirname(store.archive.evidenceLocation('app', '2026-11-01-old')));
+    const outside = path.join(h, 'outside');
+    renameSync(root, outside);
+    symlinkSync(outside, root);
+    const to = path.join(h, 'copy');
+
+    assert.throws(() => store.archive.write('app', '2026-11-02-new', text('new'), from), /symbolic link/);
+    assert.throws(() => store.archive.copyEvidence('app', '2026-11-01-old', to), /symbolic link/);
+    assert.throws(() => store.archive.remove('app', '2026-11-01-old'), /symbolic link/);
+
+    assert.equal(existsSync(to), false);
+    assert.equal(readFileSync(path.join(outside, 'app/2026-11-01-old/red.txt'), 'utf8'), 'failing\n');
+    assert.deepEqual(
+      readdirSync(path.join(outside, 'app')).filter((entry) => entry.startsWith('2026-11-02-new')),
+      [],
+    );
+    assert.ok(store.archive.has('app', '2026-11-01-old'), 'the copy was removed');
+  });
+
+  test(`${name}: remove deletes the evidence before the copy, so a failed evidence delete leaves the copy to find`, { skip: process.getuid?.() === 0 }, (t) => {
+    const h = home(t);
+    const store = open(h);
+    const from = path.join(h, 'from');
+    mkdirSync(path.join(from, 'kept'), { recursive: true });
+    writeFileSync(path.join(from, 'kept/red.txt'), 'failing\n');
+    store.archive.write('app', '2026-11-01-old', text('old'), from);
+    const kept = path.join(store.archive.evidenceLocation('app', '2026-11-01-old'), 'kept');
+    chmodSync(kept, 0o500);
+    try {
+      assert.throws(() => store.archive.remove('app', '2026-11-01-old'));
+    } finally {
+      // Before the temporary home is removed.
+      chmodSync(kept, 0o700);
+    }
+
+    assert.ok(store.archive.has('app', '2026-11-01-old'), 'the copy was removed before its evidence');
+  });
+}
+
+/** Runs `edit` once, just before the first call of `method` on `file`, as another program that edits it at that moment would. */
+function editBefore(t: TestContext, method: 'rmSync' | 'renameSync', file: string, edit: () => void): () => boolean {
+  let edited = false;
+  const real = fs[method] as (...args: unknown[]) => unknown;
+  t.mock.method(fs, method, (...args: unknown[]) => {
+    if (!edited && args[0] === file) {
+      edited = true;
+      edit();
+    }
+    return real(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  return () => edited;
+}
+
+test('file store: an archive remove keeps an edit made to the copy while its evidence is removed', (t) => {
+  const { h, store } = fileHome(t);
+  const from = path.join(h, 'from');
+  mkdirSync(from);
+  writeFileSync(path.join(from, 'red.txt'), 'failing\n');
+  store.archive.write('app', '2026-11-01-old', text('old'), from);
+  const file = store.archive.location('app', '2026-11-01-old');
+  const edited = `${text('old')}Edited meanwhile.\n`;
+  const didEdit = editBefore(t, 'rmSync', store.archive.evidenceLocation('app', '2026-11-01-old'), () => writeFileSync(file, edited));
+
+  store.archive.remove('app', '2026-11-01-old', { text: text('old'), evidence: from });
+
+  assert.ok(didEdit(), 'the evidence was not removed');
+  assert.equal(readFileSync(file, 'utf8'), edited);
+});
+
+test('file store: an archive remove that finds the copy changed as it deletes it puts the copy back, keeps the evidence and gives false', (t) => {
+  const { h, store } = fileHome(t);
+  const from = path.join(h, 'from');
+  mkdirSync(from);
+  writeFileSync(path.join(from, 'red.txt'), 'failing\n');
+  store.archive.write('app', '2026-11-01-old', text('old'), from);
+  const file = store.archive.location('app', '2026-11-01-old');
+  const edited = `${text('old')}Edited meanwhile.\n`;
+  const didEdit = editBefore(t, 'renameSync', file, () => writeFileSync(file, edited));
+
+  const removed = store.archive.remove('app', '2026-11-01-old', { text: text('old'), evidence: from });
+
+  assert.ok(didEdit(), 'the copy was not moved aside before its delete');
+  assert.equal(removed, false);
+  assert.equal(readFileSync(file, 'utf8'), edited);
+  assert.deepEqual(store.archive.evidenceFiles('app', '2026-11-01-old'), ['red.txt']);
+  assert.deepEqual(
+    readdirSync(path.dirname(file)).filter((entry) => entry.startsWith('2026-11-01-old.md')),
+    ['2026-11-01-old.md'],
+  );
+});
+
+test('sqlite store: copyEvidence refuses a path through a link it wrote under a name that differs only in case, on a volume that ignores case', { skip: noSqlite }, (t) => {
+  const h = home(t);
+  writeFileSync(path.join(h, 'Case'), '');
+  if (!existsSync(path.join(h, 'case'))) return t.skip('this volume tells case apart');
+  const store = sqliteStore({ home: h });
+  store.archive.write('app', '2026-11-01-old', text('old'));
+  store.close?.();
+  const { DatabaseSync } = loadSqlite() ?? assert.fail('no node:sqlite');
+  const db = new DatabaseSync(path.join(h, '.claude/ledgers.db'));
+  for (const [file, kind, data] of [
+    ['Up', 'link', '..'],
+    ['up/escaped.txt', 'file', 'out'],
+  ]) {
+    db.prepare('INSERT INTO evidence VALUES (?, ?, ?, ?, ?)').run('app', '2026-11-01-old', file, kind, Buffer.from(data));
+  }
+  db.close();
+  const parent = path.join(h, 'parent');
+  const to = path.join(parent, 'copy');
+  mkdirSync(parent);
+
+  const reopened = sqliteStore({ home: h });
+  t.after(() => reopened.close?.());
+  assert.throws(() => reopened.archive.copyEvidence('app', '2026-11-01-old', to), /evidence path/);
+
+  assert.equal(existsSync(path.join(parent, 'escaped.txt')), false);
+});
+
+test('sqlite store: copyEvidence refuses an evidence path that leaves its folder: .., absolute, or through a link it wrote', { skip: noSqlite }, (t) => {
+  const cases: [string, [path: string, kind: 'file' | 'folder' | 'link', data: string][]][] = [
+    ['..', [['../escaped.txt', 'file', 'out']]],
+    ['an absolute path', [['/escaped.txt', 'file', 'out']]],
+    ['a link', [['up', 'link', '..'], ['up/escaped.txt', 'file', 'out']]],
+  ];
+  for (const [what, entries] of cases) {
+    const h = home(t);
+    const store = sqliteStore({ home: h });
+    store.archive.write('app', '2026-11-01-old', text('old'));
+    store.close?.();
+    const { DatabaseSync } = loadSqlite() ?? assert.fail('no node:sqlite');
+    const db = new DatabaseSync(path.join(h, '.claude/ledgers.db'));
+    for (const [file, kind, data] of entries) db.prepare('INSERT INTO evidence VALUES (?, ?, ?, ?, ?)').run('app', '2026-11-01-old', file, kind, Buffer.from(data));
+    db.close();
+    const parent = path.join(h, 'parent');
+    const to = path.join(parent, 'copy');
+    mkdirSync(parent);
+
+    const reopened = sqliteStore({ home: h });
+    t.after(() => reopened.close?.());
+    assert.throws(() => reopened.archive.copyEvidence('app', '2026-11-01-old', to), /evidence path/, what);
+
+    assert.equal(existsSync(path.join(parent, 'escaped.txt')), false, what);
+    assert.equal(existsSync(path.join(to, 'escaped.txt')), false, what);
+  }
+});
 
 test('sqlite store: everything is in <home>/.claude/ledgers.db, with no other file under <home>/.claude but its journal files', { skip: noSqlite }, (t) => {
   const h = home(t);
@@ -358,6 +598,27 @@ test('file store: an evidence location is the folder next to the archive copy, n
   const folder = path.join(h, '.claude/ledger-archive/app/2026-11-01-fix-login');
   assert.equal(store.archive.evidenceLocation('app', '2026-11-01-fix-login'), folder);
   assert.equal(readFileSync(path.join(folder, 'red.txt'), 'utf8'), 'failing');
+});
+
+test('file store: a repo or name that is empty, . or .., or holds a path separator, is refused, and a list leaves such a file out', (t) => {
+  const { h, store } = fileHome(t);
+  const archive = path.join(h, '.claude/ledger-archive');
+  store.archive.write('app', '2026-11-01-fix-login', 'archive');
+  for (const file of ['...md', '..md']) writeFileSync(path.join(archive, 'app', file), 'dots');
+  writeFileSync(path.join(archive, 'keep.txt'), 'kept');
+
+  assert.deepEqual(
+    store.archive.list('app').map(({ name }) => name),
+    ['2026-11-01-fix-login'],
+  );
+  for (const [repo, name] of [['app', '..'], ['app', '.'], ['app', ''], ['app', 'a/b'], ['app', 'a\\b'], ['..', 'x'], ['.', 'x'], ['a/b', 'x']]) {
+    assert.throws(() => store.archive.remove(repo, name), Failure, `archive remove ${repo} ${name}`);
+    assert.throws(() => store.archive.evidenceLocation(repo, name), Failure, `evidence location ${repo} ${name}`);
+    assert.throws(() => store.backlog.write(repo, name, 'text'), Failure, `backlog write ${repo} ${name}`);
+  }
+  assert.equal(readFileSync(path.join(archive, 'keep.txt'), 'utf8'), 'kept');
+  assert.ok(store.archive.has('app', '2026-11-01-fix-login'));
+  assert.equal(existsSync(path.join(h, '.claude/x.md')), false);
 });
 
 test('file store: a list skips what is not a .md file, such as an evidence folder next to an archive copy', (t) => {

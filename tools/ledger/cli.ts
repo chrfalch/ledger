@@ -8,17 +8,17 @@ import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
 import { planProgress } from './format.js';
 import { mainCheckout } from './git.js';
-import { fileStore } from './file-store.js';
 import { logHookFailure, oneLine } from './hook-failures.js';
-import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookEvent } from './hooks.js';
+import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookContext, type HookEvent } from './hooks.js';
 import { ledgerBin, ledgerPaths, realPath, repoName } from './paths.js';
 import { migrateStorage } from './migrate.js';
+import { openStore } from './open-store.js';
 import { loadTasks } from './registry.js';
 import { retireTask, retireText } from './retire.js';
 import { readStorage, STORAGES, type Storage } from './settings.js';
 import { shownLedger } from './show.js';
-import { sqliteStore } from './sqlite-store.js';
 import type { LedgerStore } from './store.js';
+import { initSync, syncInBackground, syncLedgers } from './sync.js';
 import {
   autoPrune,
   listWorktrees,
@@ -190,7 +190,7 @@ export async function main(argv: string[]): Promise<number> {
     cwd,
     // Opened on first use, so help and deploy work with a broken settings file, and its error reaches the handler below.
     get store() {
-      return (store ??= readStorage(paths.home) === 'sqlite' ? sqliteStore(paths) : fileStore(paths));
+      return (store ??= openStore(paths, readStorage(paths.home)));
     },
   };
   // From argv rather than the parsed options, so a command line commander refuses still gets a JSON answer.
@@ -369,13 +369,14 @@ export async function main(argv: string[]): Promise<number> {
     .option('--json', JSON_HELP)
     .action((slug: string) => changeChildren(slug, 'next'));
 
-  const storeGroup = program.command('store').description('Change where the ledgers are kept: in files or in SQLite.');
+  const storeGroup = program.command('store').description('Change where the ledgers are kept, in files, in SQLite or in a private git repository, and sync that repository.');
   storeGroup
     .command('migrate')
     .description(
-      'Move the backlog ledgers, the archive with its evidence, and the registry from the other storage to the storage --to names. It copies everything, reads every copy back, and then sets "storage" in ~/.claude/ledger-settings.json. Exits 1, with nothing changed, when the target already has a name to copy.',
+      'Move the backlog ledgers, the archive with its evidence, and the registry from one storage to the storage --to names. It copies everything, reads every copy back, and then sets "storage" in ~/.claude/ledger-settings.json. Exits 1, with nothing changed, when the target already has a name to copy. A move into or out of git storage commits and pushes; a failed push is reported, and ledger store sync pushes later.',
     )
     .addOption(new Option('--to <storage>', 'the storage to move the ledgers to').choices(STORAGES).makeOptionMandatory())
+    .addOption(new Option('--from <storage>', 'the storage to move the ledgers from; by default the one "storage" names, and when that is --to, the other of file and sqlite').choices(STORAGES))
     .option('--remove-source', 'remove what was copied from the other storage, after the check')
     .option('--dry-run', 'print what would be copied, switched and removed, and change nothing')
     .addHelpText(
@@ -386,9 +387,43 @@ export async function main(argv: string[]): Promise<number> {
         '  ledger store migrate --to sqlite --dry-run      show what moving to SQLite would copy',
         '  ledger store migrate --to sqlite                copy to SQLite and use it; the files stay',
         '  ledger store migrate --to file --remove-source  copy back to files, then empty the database',
+        '  ledger store migrate --to git                   copy into the clone ledger store sync init made, commit and push',
+        '  ledger store migrate --from git --to file       copy from git storage back to files',
       ].join('\n'),
     )
-    .action(({ to, removeSource = false, dryRun = false }: { to: Storage; removeSource?: boolean; dryRun?: boolean }) => migrateStorage(paths, to, { removeSource, dryRun }, print));
+    .action(({ to, from, removeSource = false, dryRun = false }: { to: Storage; from?: Storage; removeSource?: boolean; dryRun?: boolean }) =>
+      migrateStorage(paths, to, { from, removeSource, dryRun }, print),
+    );
+  const sync = storeGroup
+    .command('sync')
+    .description(
+      'Push the ledgers of git storage to their private GitHub repository, and pull those of your other machines: it commits, pulls with a rebase, checks that only ledgers and no secret-like text go out, and pushes. Exits 1, with nothing pushed, when a check or the pull stops it.',
+    )
+    .option('--quiet', 'print nothing, and only record a problem in ~/.claude/ledger-data.status.json; for the push after each command')
+    .addHelpText(
+      'after',
+      [
+        '',
+        'Examples:',
+        '  ledger store sync init https://github.com/<you>/ledgers.git   set up git storage from an empty private repository',
+        '  ledger store sync                                              commit, pull and push now',
+      ].join('\n'),
+    )
+    .action(({ quiet = false }: { quiet?: boolean }) => {
+      if (!quiet) return syncLedgers(paths, print);
+      try {
+        syncInBackground(paths);
+      } catch {
+        exitCode = 1;
+      }
+    });
+  sync
+    .command('init')
+    .description(
+      'Set up git storage: check with gh that the GitHub repository is private, and clone it to ~/.claude/ledger-data. An empty repository gets a .ledger-data marker and a .gitignore, pushed at once; a repository another machine set up is used as it is; the clone gets a pre-push hook of its own that blocks secret-like text; any other repository is refused. The storage setting stays as it is: ledger store migrate --to git switches it.',
+    )
+    .argument('<url>', 'the private repository, as https://github.com/<owner>/<repo>.git or git@github.com:<owner>/<repo>.git')
+    .action((url: string) => initSync(paths, url, print));
 
   const worktrees = program
     .command('worktrees')
@@ -447,8 +482,17 @@ export async function main(argv: string[]): Promise<number> {
     .description('Answer a Claude Code hook: read its JSON input on stdin and print the hook output. For settings.json, not for a person.')
     .addArgument(new Argument('<event>', 'the hook event').choices(HOOK_EVENTS))
     .action((event: HookEvent) => {
+      // Not { ...context }, which would open the store before the hook's time limit starts.
+      const hookContext: HookContext = {
+        paths,
+        cwd,
+        ledgerBin,
+        get store() {
+          return context.store;
+        },
+      };
       try {
-        process.stdout.write(answerHook(event, readFileSync(0, 'utf8'), { ...context, ledgerBin }));
+        process.stdout.write(answerHook(event, readFileSync(0, 'utf8'), hookContext));
       } catch (error) {
         // Exit 0 with no output: Claude Code then allows the tool call and injects nothing. Exit 2 would block the tool call.
         const message = oneLine(error instanceof Error ? error.message : String(error));

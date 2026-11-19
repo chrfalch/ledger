@@ -114,7 +114,9 @@ ledgers; each edit changes only the lines it names.
 | `ledger task park <slug> --reason <text>` | Marks a task parked: `Parked: <date> — <reason>` becomes the first line under `## Next step`. The reason is required. |
 | `ledger task unpark <slug>` | Removes the parked mark. |
 | `ledger task retire [<slug>] [--dry-run] [--force]` | Retires a task. Without a slug, it retires the task of the worktree you are in. It copies the ledger to `~/.claude/ledger-archive/<repo>/<date>-<slug>.md`, and `.claude/evidence/` to the folder of the same name. Then it removes the worktree, or the backlog ledger. It marks the task `(retired <date>)` in its parent and copies its `## Report` to the parent's `## Child reports`. It deletes the branch when the branch is merged: no commits ahead of the default branch, or a merged PR that ends at HEAD. Uncommitted changes, an unmerged branch and child tasks that are not retired each need `--force`. Evidence that cannot be archived whole stops it even with `--force`: a `.claude/evidence` that is not a folder or cannot be read, a symbolic link in it that leaves it, or an archive copy whose evidence differs. `--dry-run` prints the checks and steps; it fetches origin's default branch and changes nothing else. It exits 1 when a check stops it. |
-| `ledger store migrate --to <file\|sqlite> [--remove-source] [--dry-run]` | Moves the backlog ledgers, the archive with its evidence, and the registry from the other storage to the one you name. It copies everything, reads each copy back, and then sets `"storage"` in `~/.claude/ledger-settings.json`. The other storage keeps its ledgers unless you add `--remove-source`. It exits 1, with nothing changed, when the target already has a ledger of the same name. `--dry-run` prints the plan and changes nothing. |
+| `ledger store migrate --to <file\|sqlite\|git> [--from <storage>] [--remove-source] [--dry-run]` | Moves the backlog ledgers, the archive with its evidence, and the registry from the storage the setting names, or from `--from`, to the one you name. It copies everything, reads each copy back, and then sets `"storage"` in `~/.claude/ledger-settings.json`. The other storage keeps its ledgers unless you add `--remove-source`. It exits 1, with nothing changed, when the target already has a ledger of the same name. A move into git storage commits and pushes; a failed push is reported, and the setting still switches. `--dry-run` prints the plan and changes nothing. |
+| `ledger store sync init <url>` | Sets up git storage in `~/.claude/ledger-data` from a private GitHub repository. It asks `gh` whether the repository is private, and stops when it is not, or when `gh` cannot tell. An empty repository gets its layout, pushed at once; a repository another machine set up keeps its contents; any other repository is refused. It does not change the storage setting. |
+| `ledger store sync [--quiet]` | With git storage: asks `gh` whether the repository is still private, commits the ledgers, pulls with a rebase, checks that the commits hold only ledgers and no secret-like text, and pushes. It exits 1, with nothing pushed, on a conflict, a check that fails, or a network failure, and names the file or `file:line`. `--quiet` prints nothing, asks `gh` once a day, and exits at once when another `--quiet` sync runs; the background push after each command uses it. |
 | `ledger worktrees` | Shows each linked worktree of this repo: size, last commit, uncommitted files, ledger and PR, largest first. |
 | `ledger worktrees prune <name>\|--all [--dry-run]` | Deletes the git-ignored build folders (`.build`, `.expo-prebuild`, `.cache`, `build`, `.DerivedData`) and the worktree's own Xcode build folder, `.claude/worktrees/.build/<name>` in the main checkout, each of 0.05 GB or more. It never deletes anything else in `.claude`, nor anything in `node_modules` or `Pods`. `--dry-run` only lists the folders. It exits 1 when a folder could not be deleted. |
 | `ledger worktrees prune-orphans [--dry-run]` | Deletes the Xcode build folders in `.claude/worktrees/.build/` whose worktree git no longer lists. It keeps `.main`, the folder of the main checkout. `--dry-run` only lists the folders. It exits 1 when a folder could not be deleted. |
@@ -140,6 +142,32 @@ The database also holds the evidence files of each archive copy. Read a ledger o
 `ledger show`. A change of the setting by hand does not move the ledgers.
 Use `ledger store migrate --to sqlite` or `ledger store migrate --to file`: it
 copies the ledgers, checks the copy, and then changes the setting.
+
+To share the backlog and the archive between machines, use git storage: a
+clone of a private GitHub repository at `~/.claude/ledger-data`. Run
+`ledger store sync init <url>` once on each machine, then `ledger store migrate --to git`.
+Each command that changes a ledger commits it and pushes in the background,
+and each session start pulls. Evidence, the registry and the active
+`.claude/ledger.md` stay on the machine. A secret scan and an allowlist guard
+every push, a manual `git push` in the clone too: the clone sets its own
+`core.hooksPath`, so hooks from a global one do not run there.
+`git push --no-verify` skips that pre-push hook, and with it the scan and the
+allowlist.
+[docs/usage.md](docs/usage.md) explains setup, what is pushed, what the scan
+does not find, and what to do on a conflict.
+
+#### Security limits of git storage
+
+The secret scan looks for known key formats, line by line, in UTF-8 text. It
+does not find a key split over two lines, a key in UTF-16 text, or a
+random-looking string that matches no known key format: it has no entropy
+check. These gaps are accepted. Keep keys out of ledgers; the repository must
+stay private.
+
+Do not run `git push` in the clone yourself: that is not supported. The
+pre-push hook still checks such a push, but ledger puts a changed hook back
+only when a ledger command, `ledger store sync` or a session start runs. Push with
+`ledger store sync`.
 
 ## Commands
 

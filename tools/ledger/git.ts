@@ -1,17 +1,21 @@
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
+import { redacted } from './clone.js';
 import { mainOfTaskWorktree } from './paths.js';
 
 let timeoutMs: number | undefined;
+let deadline = Infinity;
 const unanswered = new Set<string>();
 
 /**
  * Stops each later git call of this process after `ms`. A folder whose call was stopped counts as no repository from
  * then on and is not asked again, nor is any folder inside it, nor, for a task worktree, its main checkout and the
- * other worktrees there. So a hanging repo costs one wait. For hooks, which must not stall Claude Code.
+ * other worktrees there. So a hanging repo costs one wait. For hooks, which must not stall Claude Code. With `until`, a
+ * time from Date.now(), a call also stops then, and none starts after it.
  */
-export function limitGitCalls(ms: number): void {
+export function limitGitCalls(ms: number, until = Infinity): void {
   timeoutMs = ms;
+  deadline = until;
 }
 
 /** Whether a git call in `folder` or a folder that holds it was stopped by the limit of limitGitCalls. */
@@ -23,12 +27,19 @@ export function gitTimedOut(folder: string): boolean {
 }
 
 function run(folder: string, args: string[]): { ok: boolean; stdout: string; stderr: string } {
-  if (gitTimedOut(folder)) return { ok: false, stdout: '', stderr: `git did not answer in ${folder}` };
-  const result = spawnSync('git', ['-C', folder, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs });
-  if (result.error !== undefined && 'code' in result.error && result.error.code === 'ETIMEDOUT') {
+  const unanswering = { ok: false, stdout: '', stderr: `git did not answer in ${folder}` };
+  const markUnanswered = (): void => {
     const stopped = path.resolve(folder);
     unanswered.add(mainOfTaskWorktree(stopped) ?? stopped);
+  };
+  if (gitTimedOut(folder)) return unanswering;
+  const timeout = timeoutMs === undefined ? undefined : Math.min(timeoutMs, deadline - Date.now());
+  if (timeout !== undefined && timeout <= 0) {
+    markUnanswered();
+    return unanswering;
   }
+  const result = spawnSync('git', ['-C', folder, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout });
+  if (result.error !== undefined && 'code' in result.error && result.error.code === 'ETIMEDOUT') markUnanswered();
   return { ok: result.status === 0, stdout: result.stdout ?? '', stderr: (result.stderr ?? '').trim() };
 }
 
@@ -149,11 +160,13 @@ export function deleteBranchAt(main: string, branch: string, commit: string): 'd
   return commitOf(main, `refs/heads/${branch}`) === commit ? { error: result.stderr || 'git update-ref failed' } : 'moved';
 }
 
-function gh(folder: string, args: string[]): { ok: boolean; stdout: string; error: string } {
-  const result = spawnSync('gh', args, { cwd: folder, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+/** gh in `folder`; with `timeoutMs`, it is stopped then, and that is an error too. */
+export function gh(folder: string, args: string[], { timeoutMs }: { timeoutMs?: number } = {}): { ok: boolean; stdout: string; error: string } {
+  const result = spawnSync('gh', args, { cwd: folder, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs });
+  if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') return { ok: false, stdout: '', error: `gh did not answer in ${(timeoutMs ?? 0) / 1000} s` };
   if (result.error) return { ok: false, stdout: '', error: `gh did not run: ${result.error.message}` };
-  // One line without a closing period, as callers put it inside their own sentence.
-  const stderr = (result.stderr ?? '').replace(/\s+/g, ' ').replace(/[.\s]+$/, '').trim();
+  // One line without a closing period, as callers put it inside their own sentence; gh may name a token.
+  const stderr = redacted((result.stderr ?? '').replace(/\s+/g, ' ').replace(/[.\s]+$/, '').trim());
   return { ok: result.status === 0, stdout: result.stdout ?? '', error: `gh ${args.slice(0, 2).join(' ')} failed (exit ${result.status ?? 'none'})${stderr ? `: ${stderr}` : ''}` };
 }
 

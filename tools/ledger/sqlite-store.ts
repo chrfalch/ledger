@@ -1,11 +1,11 @@
-import { lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { fail } from './failure.js';
 import { holdsAnything, treeEntries } from './files.js';
 import { shownSettingsFile } from './settings.js';
-import { byCodeUnit, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
+import { byCodeUnit, isAsChecked, NameTaken, noteCreated, type Archive, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
 import { pauseForTest } from './wait.js';
 
 // The text of a ledger is UTF-8 in a BLOB: node:sqlite on Node 22 cuts a TEXT value short at a NUL byte.
@@ -118,6 +118,21 @@ function sameEvidence(a: EvidenceEntry[], b: EvidenceEntry[]): boolean {
 }
 
 /**
+ * The folder `relative` in `root`, a real path, with each missing part made. Each part that is there must be a folder
+ * whose real path, as the volume spells it, is the one asked for; a symbolic link is not, nor, on a volume that ignores
+ * case, a name that differs only in case. Otherwise `outside` fails.
+ */
+function realFolderIn(root: string, relative: string, outside: () => never): string {
+  let folder = root;
+  for (const part of relative.split('/').filter((part) => part !== '.')) {
+    folder = path.join(folder, part);
+    if (lstatSync(folder, { throwIfNoEntry: false }) === undefined) mkdirSync(folder);
+    else if (realpathSync.native(folder) !== folder) outside();
+  }
+  return folder;
+}
+
+/**
  * The ledger store as one SQLite database, <home>/.claude/ledgers.db: backlog ledgers, archive copies with the bytes of
  * their evidence, and the registry. A location is the database file and a place in it, such as
  * ~/.claude/ledgers.db:archive/app/2026-11-01-fix-login, and names no file of its own.
@@ -202,6 +217,17 @@ export function sqliteStore({ home }: { home: string }): LedgerStore {
       .map(({ path: relative }) => relative)
       // Not ORDER BY: SQLite compares UTF-8 bytes, which order some names apart from the file store's code units.
       .sort(byCodeUnit);
+  const evidenceState: Archive['evidenceState'] = (repo, name, from) => {
+    try {
+      const kept = archived(repo, name);
+      const folder = from !== undefined && holdsAnything(from) ? evidenceIn(from) : undefined;
+      if (kept.length === 0) return folder === undefined ? 'none' : 'differs';
+      return folder !== undefined && sameEvidence(kept, folder) ? 'same' : 'differs';
+    } catch {
+      // A folder that cannot be read may hold anything.
+      return 'differs';
+    }
+  };
 
   const existing = (repo: string, slug: string): string => (backlog.read(repo, slug) ?? fail(`${backlog.location(repo, slug)} does not exist.`)).text;
   const readRegistry = (): string | undefined => one<{ text: string }>('SELECT text FROM registry WHERE id = 1')?.text;
@@ -245,26 +271,17 @@ export function sqliteStore({ home }: { home: string }): LedgerStore {
         const evidence = evidenceFrom === undefined ? [] : evidenceIn(evidenceFrom);
         const now = Date.now();
         transaction(() => {
-          if (archive.has(repo, name)) fail(`${archive.location(repo, name)} already exists. An archive copy is never replaced.`);
+          if (archive.has(repo, name)) throw new NameTaken(`${archive.location(repo, name)} already exists. An archive copy is never replaced.`);
           run(`INSERT INTO ledgers VALUES ('archive', ?, ?, ?, ?, ?)`, repo, name, Buffer.from(text), now, now);
           for (const entry of evidence) run('INSERT INTO evidence VALUES (?, ?, ?, ?, ?)', repo, name, entry.path, entry.kind, entry.data);
         });
+        noteCreated(archive.location(repo, name));
         // The folder may have changed while it was read; then the worktree that holds it must stay.
         if (evidenceFrom !== undefined && !sameEvidence(archived(repo, name), evidenceIn(evidenceFrom))) {
           fail(`The evidence copy ${evidenceLocation(repo, name)}/ differs from ${evidenceFrom}/.`);
         }
       },
-      evidenceState: (repo, name, from) => {
-        try {
-          const kept = archived(repo, name);
-          const folder = from !== undefined && holdsAnything(from) ? evidenceIn(from) : undefined;
-          if (kept.length === 0) return folder === undefined ? 'none' : 'differs';
-          return folder !== undefined && sameEvidence(kept, folder) ? 'same' : 'differs';
-        } catch {
-          // A folder that cannot be read may hold anything.
-          return 'differs';
-        }
-      },
+      evidenceState,
       // Evidence is written with its copy in one transaction, so a name without a copy has no evidence.
       nameTaken: (repo, name) => archive.has(repo, name),
       evidenceLocation,
@@ -274,17 +291,33 @@ export function sqliteStore({ home }: { home: string }): LedgerStore {
         return row && Buffer.from(row.data);
       },
       copyEvidence: (repo, name, to) => {
-        for (const entry of archived(repo, name)) {
-          const target = path.join(to, entry.path);
-          mkdirSync(entry.kind === 'folder' ? target : path.dirname(target), { recursive: true });
+        const entries = archived(repo, name);
+        const links = new Set(entries.flatMap((entry) => (entry.kind === 'link' ? [entry.path] : [])));
+        for (const { path: relative } of entries) {
+          const parts = relative.split('/');
+          const throughLink = parts.slice(0, -1).some((_, index) => links.has(parts.slice(0, index + 1).join('/')));
+          if (path.isAbsolute(relative) || parts.some((part) => ['', '.', '..'].includes(part)) || throughLink) {
+            fail(`The evidence path ${relative} of ${evidenceLocation(repo, name)} leads outside its folder, so no evidence was copied.`);
+          }
+        }
+        if (entries.length === 0) return;
+        mkdirSync(to, { recursive: true });
+        const root = realpathSync.native(to);
+        for (const entry of entries) {
+          const throughLink = (): never => fail(`The evidence path ${entry.path} of ${evidenceLocation(repo, name)} leads outside its folder through a link, so the copy in ${to} stopped there.`);
+          const folder = realFolderIn(root, entry.kind === 'folder' ? entry.path : path.posix.dirname(entry.path), throughLink);
+          const target = path.join(folder, path.posix.basename(entry.path));
           if (entry.kind === 'file') writeFileSync(target, entry.data, { flag: 'wx' });
           if (entry.kind === 'link') symlinkSync(Buffer.from(entry.data), target);
         }
       },
-      remove: (repo, name) =>
+      remove: (repo, name, expected) =>
         transaction(() => {
-          if (run(`DELETE FROM ledgers WHERE place = 'archive' AND repo = ? AND name = ?`, repo, name) === 0) fail(`${archive.location(repo, name)} does not exist.`);
+          if (!archive.has(repo, name)) fail(`${archive.location(repo, name)} does not exist.`);
+          if (expected !== undefined && !isAsChecked({ read: archive.read, evidenceState }, repo, name, expected)) return false;
           run('DELETE FROM evidence WHERE repo = ? AND name = ?', repo, name);
+          run(`DELETE FROM ledgers WHERE place = 'archive' AND repo = ? AND name = ?`, repo, name);
+          return true;
         }),
     },
     registry: {

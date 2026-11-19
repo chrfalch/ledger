@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { migrateStorage } from '../tools/ledger/migrate.js';
@@ -174,9 +175,14 @@ for (const from of ['file', 'sqlite'] as const) {
   });
 
   test(`migrate ${from} → ${to} --remove-source removes every copied ledger, archive copy and the registry from the source`, { skip }, (t) => {
-    const { h, app, source } = populated(t, from);
+    const { h, app, source, archived } = populated(t, from);
     const stdout = ok(ledger(h, app, 'store', 'migrate', '--to', to, '--remove-source'));
     assert.deepEqual(withStore(h, from, contents), { backlog: [], archive: [], registry: undefined });
+    assert.deepEqual(
+      withStore(h, from, (store) => [store.archive.nameTaken('app', archived), store.archive.evidenceFiles('app', archived)]),
+      [false, []],
+      'an evidence folder is left without its copy',
+    );
     const target = withStore(h, to, contents);
     assert.deepEqual(target.backlog, source.backlog);
     assert.deepEqual(target.archive, source.archive);
@@ -287,6 +293,24 @@ const disk = (): never => {
   throw new Error('disk full');
 };
 
+const moduleUrl = (file: string): string => JSON.stringify(pathToFileURL(path.join(REPO, 'tools/ledger', file)).href);
+
+/** Writes an archive copy to the `storage` of `h` from a process of its own, as another ledger command does. */
+function writeArchiveElsewhere(h: string, storage: Storage, repo: string, name: string, text: string): void {
+  const code = [
+    "import { register } from 'tsx/esm/api';",
+    'register();',
+    `const { openStore } = await import(${moduleUrl('open-store.ts')});`,
+    `const { ledgerPaths } = await import(${moduleUrl('paths.ts')});`,
+    'const store = openStore(ledgerPaths(process.env.HOME), process.env.STORAGE);',
+    'store.archive.write(process.env.REPO_NAME, process.env.LEDGER_NAME, process.env.LEDGER_TEXT);',
+    'store.close?.();',
+  ].join('\n');
+  const env = { ...process.env, HOME: h, STORAGE: storage, REPO_NAME: repo, LEDGER_NAME: name, LEDGER_TEXT: text };
+  const ran = spawnSync(process.execPath, ['--input-type=module', '-e', code], { cwd: REPO, env, encoding: 'utf8' });
+  assert.equal(ran.status, 0, ran.stderr);
+}
+
 for (const from of ['file', 'sqlite'] as const) {
   const to = otherThan(from);
   const skip = noSqlite;
@@ -317,6 +341,35 @@ for (const from of ['file', 'sqlite'] as const) {
       assert.deepEqual(withStore(h, to, contents), { backlog: [], archive: [], registry: earlier });
     });
   }
+
+  test(`migrate ${from} → ${to} keeps an archive copy another command wrote under the same name during the copy`, { skip }, (t) => {
+    const { h, archived } = populated(t, from);
+    const theirs = 'Another command wrote this copy.\n';
+    let target: LedgerStore | undefined;
+    const inner = () => (target ??= openStore({ home: h }, to));
+    try {
+      const write: Archive['write'] = (repo, name, text, evidenceFrom) => {
+        inner().archive.write(repo, name, theirs);
+        inner().archive.write(repo, name, text, evidenceFrom);
+      };
+      assert.match(failure(() => migrateWith(h, to, { archive: { write } })), /already exists/);
+    } finally {
+      target?.close?.();
+    }
+    assert.equal(withStore(h, to, (store) => store.archive.read('app', archived)?.text), theirs);
+  });
+
+  test(`migrate ${from} → ${to} keeps an archive copy another command wrote with the same text when its own write then fails before it writes`, { skip }, (t) => {
+    const { h, archived } = populated(t, from);
+    const write: Archive['write'] = (repo, name, text) => {
+      writeArchiveElsewhere(h, to, repo, name, text);
+      disk();
+    };
+    assert.match(failure(() => migrateWith(h, to, { archive: { write } })), /disk full/);
+    const text = withStore(h, from, (store) => store.archive.read('app', archived)?.text);
+    assert.ok(text !== undefined);
+    assert.equal(withStore(h, to, (store) => store.archive.read('app', archived)?.text), text);
+  });
 
   test(`migrate ${from} → ${to} with no registry in the target removes the registry it wrote when the check fails`, { skip }, (t) => {
     const { h, source } = populated(t, from);
@@ -495,3 +548,69 @@ test('migrate copies an archive copy whose evidence folder is empty with that em
   migrateStorage(ledgerPaths(h), 'sqlite', { removeSource: false, dryRun: false }, () => {}, open);
   assert.ok(existsSync(evidence(other)) && statSync(evidence(other)).isDirectory(), 'the copy has no evidence folder');
 });
+
+test('ledger store migrate names the storage it copies from on its first line, also when --from is not given', { skip: noSqlite }, (t) => {
+  const h = home(t);
+  const firstLine = (): string => ok(ledger(h, h, 'store', 'migrate', '--to', 'sqlite', '--dry-run')).split('\n')[0];
+  writeFileSync(settingsFile(h), JSON.stringify({ storage: 'file' }));
+  assert.equal(firstLine(), 'Migrate from file storage to SQLite storage · dry run, nothing changed');
+  writeFileSync(settingsFile(h), JSON.stringify({ storage: 'sqlite' }));
+  assert.equal(firstLine(), 'Migrate from file storage to SQLite storage · dry run, nothing changed');
+});
+
+test('migrate --remove-source withholds a secret-like ledger name in each line it prints about that ledger', { skip: noSqlite }, (t) => {
+  const { h } = populated(t, 'file');
+  // Built at run time, so no secret-like text sits in this file for a scanner to find.
+  const changedName = `${['s', 'k-'].join('')}${'a1b2c3d4'.repeat(5)}`;
+  const goneName = `${['s', 'k-'].join('')}${'e5f6g7h8'.repeat(5)}`;
+  for (const name of [changedName, goneName]) writeFileSync(path.join(h, '.claude/ledger-backlog/app', `${name}.md`), '# a secret-like name\n');
+  const lines = migrateWith(
+    h,
+    'sqlite',
+    {
+      backlog: {
+        create: (repo, name, text) => {
+          const created = withStore(h, 'sqlite', (store) => store.backlog.create(repo, name, text));
+          withStore(h, 'file', (store) => {
+            if (name === changedName) store.backlog.write(repo, name, 'Changed after the copy.\n');
+            if (name === goneName) store.backlog.remove(repo, name, text);
+          });
+          return created;
+        },
+      },
+    },
+    { removeSource: true },
+  );
+  for (const start of ['kept backlog <file name withheld>', 'backlog <file name withheld> is already gone']) assert.ok(lines.some((line) => line.startsWith(start)), lines.join('\n'));
+  for (const name of [changedName, goneName]) assert.ok(!lines.some((line) => line.includes(name)), lines.join('\n'));
+});
+
+for (const what of ['text', 'evidence'] as const) {
+  test(`migrate --remove-source keeps an archive copy whose ${what} changed after the check, and names it`, { skip: noSqlite }, (t) => {
+    const { h, archived } = populated(t, 'file');
+    const lines: string[] = [];
+    // Another command changes the source copy once migrate has checked it, just before the remove.
+    const changeFirst = (store: LedgerStore): LedgerStore =>
+      changed(store, {
+        archive: {
+          remove: (...args: Parameters<Archive['remove']>) => {
+            const [repo, name] = args;
+            if (what === 'text') writeFileSync(store.archive.location(repo, name), 'Changed after the check.\n');
+            else writeFileSync(path.join(store.archive.evidenceLocation(repo, name), 'late.txt'), 'late\n');
+            return store.archive.remove(...args);
+          },
+        },
+      });
+    const open = (paths: LedgerPaths, storage: Storage): LedgerStore => (storage === 'file' ? changeFirst(openStore(paths, storage)) : openStore(paths, storage));
+
+    migrateStorage(ledgerPaths(h), 'sqlite', { removeSource: true, dryRun: false }, (line) => lines.push(line), open);
+
+    assert.ok(
+      lines.some((line) => line.includes(`kept archive app/${archived}`)),
+      lines.join('\n'),
+    );
+    const kept = withStore(h, 'file', (store) => ({ has: store.archive.has('app', archived), evidence: store.archive.evidenceFiles('app', archived) }));
+    assert.ok(kept.has, 'the changed copy was removed');
+    assert.ok(kept.evidence.includes('red.txt'), 'the evidence of the changed copy was removed');
+  });
+}

@@ -4,7 +4,7 @@ import { fail } from './failure.js';
 import { exists, writeAtomic } from './files.js';
 import { ledgerPaths } from './paths.js';
 
-export const STORAGES = ['file', 'sqlite'] as const;
+export const STORAGES = ['file', 'sqlite', 'git'] as const;
 export type Storage = (typeof STORAGES)[number];
 
 export const settingsFile = (home: string): string => path.join(home, '.claude', 'ledger-settings.json');

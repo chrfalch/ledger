@@ -1174,3 +1174,129 @@ folder is missing. Trash folders, `.cc-trash-*`, are never orphans: a
 background delete may still be working on them. `ledger worktrees derived-data`
 is removed with its tests, as nothing else needs it. Old `cc-*` folders in
 Xcode's DerivedData are deleted once, by hand.
+
+## 2026-11-19 — Git storage shares the ledgers between machines
+
+The backlog and the archive lived on one machine. A second machine could not
+see a task, and a lost disk lost every task record. A third storage, `git`,
+keeps them in a clone of a private GitHub repository, `~/.claude/ledger-data`.
+`ledger store sync init <url>` sets it up, and `ledger store migrate --to git` moves the
+ledgers into it. An October prototype in bash pushed only the archive; its
+reviews gave most of the safety rules below.
+
+**A third storage, not a sync of the file storage.** The git store is the file
+store with other folders: `backlog/<repo>/<slug>.md` and
+`archive/<repo>/<name>.md` in the clone. `fileStoreAt` takes those folders as
+parameters, so both storages share one implementation. After a command's
+writes, the store commits once, in `close`. One factory, `openStore`, opens
+every storage for the CLI and for `ledger store migrate`.
+
+**Evidence stays outside the clone.** Evidence is logs and screenshots, which
+can be large and can hold tokens; the prototype found a live-looking token in
+three logs. It goes to `~/.claude/ledger-evidence/<repo>/<name>/` and is never
+committed.
+
+**The registry stays local.** The registry is a cache of this machine's repos
+and worktrees, by absolute path. Another machine would rebuild it anyway. Git
+storage keeps it in its own file, `~/.claude/ledgers-git.json`: with the file
+of file storage, a migrate between the two merged one registry into itself,
+and `--remove-source` then removed the entries git storage kept.
+
+**The push runs in the background.** A command commits, then starts
+`ledger store sync --quiet` as a detached process, and exits. A command never waits
+for the network. The clone lock, `~/.claude/ledger-data.lock`, covers every
+write and every git call that changes the clone, a fetch too, so no other
+fetch moves the remote-tracking branch before a sync reads the commit its
+fetch found. Only the push runs outside it, so a slow push never makes a
+ledger command wait; a slow fetch can, and a command gives up after five
+seconds. A process that still runs keeps the clone lock however long it holds
+it; only a lock whose process is gone is taken over. Every removal of a lock
+runs under a second lock, `<lock>.reclaim`, made by an exclusive create, and
+reads the lock again first, so no process removes or moves a lock another one
+holds. One background sync runs at a time: a second one leaves a note and
+exits, and the running one syncs once more for it. The whole session-start
+hook has one five-second deadline: the pull ends a second before it, every git
+step and the wait for the status lock included, and the git calls of the
+ledgers that follow get what is left. A rebase that runs out of time is
+aborted. A sync that stops writes the reason to
+`~/.claude/ledger-data.status.json`, outside the clone, with a number that
+counts up for each sync, so a sync that started earlier never clears or
+replaces the record of a later one, also in the same millisecond. The next session start shows one line about it.
+`LEDGER_TEST_NO_BACKGROUND_SYNC=1` turns the background push off, so a test
+pushes when it chooses.
+
+**Only an allowlist is pushed.** The `.gitignore` ignores everything but the
+ledgers, the marker and itself. A nested `.gitignore` can un-ignore any file,
+so the sync also checks each path itself: any changed path outside the
+allowlist, staged or not, stops the commit, and one in a commit to push stops
+the push. Before it rebases, a sync checks the tree it pulls: a path outside
+the allowlist, a symbolic link or a mode other than 644 stops it before
+anything is checked out. Setup checks a repository it clones the same way.
+
+**The clone runs no hook from the repository.** The first version tracked its
+pre-push hook in the repository and pointed `core.hooksPath` at it. Then a
+commit from the remote could change a hook that the next sync runs. Now
+`ledger` writes its own copy into `.git/hooks/pre-push` at setup and at each
+sync when it differs, and sets the clone's own `core.hooksPath` to that
+folder, in place of any other value. It never writes into the folder a global
+`core.hooksPath` names, as that folder holds the hooks of every repository.
+The clone's own setting wins over a global one, so a `git push` by hand in the
+clone is scanned too; the global hooks do not run there.
+
+**The secret scan runs in two places.** `ledger store sync` scans the lines that the
+commits to push add, and their commit messages, before it pushes. The commits
+to push are those HEAD has and the fetched remote branch does not; the push
+goes to that same branch. The pre-push hook runs the same scan from the object
+the remote has, as git passes it, so no local ref can hide a commit, and it
+checks the same allowlist and plain-file rule as `ledger store sync`. Both read
+objects as they are, without replace refs or grafts, which could show the scan
+other commits than those pushed. Both read
+one pattern list in `tools/ledger/secret-scan.ts`; each pattern is valid both
+as a JavaScript and as a POSIX regular expression. The scan diffs a merge
+against its first parent, so text added while a conflict was resolved counts,
+and it reads binary files as text. It prints only `file:line` or the commit
+and line of a message, and hides a file name that is itself secret-like, in
+every message and in the status file. The hook is bash, so it runs where
+`ledger` is not installed, and any error in it blocks the push. Accepted gaps:
+a key split over two lines, a key in UTF-16 text, and a random-looking string
+that matches no pattern; there is no entropy scan.
+
+**Setup accepts only a private GitHub repository.** `ledger store sync init` asks
+`gh repo view github.com/<owner>/<repo>` for the visibility and whether it is
+empty, and stops when it is not `PRIVATE`, when `gh` and `git ls-remote`
+disagree on empty, when `gh` fails, and for any URL but a plain github.com one:
+https with no port, query or fragment, or ssh as the user `git`. A manual sync
+asks again each time, and the background sync once a day. An answer that is
+not `PRIVATE` leaves `~/.claude/ledger-data.not-private`, which only a later
+`PRIVATE` answer removes; while it is there, every sync asks `gh`. It does not
+depend on the status file, which a later problem of another kind replaces. A sync fetches from
+and pushes to the URL of `origin` itself, so a `pushurl` is never used, and
+stops when `url.<base>.insteadOf` or `pushInsteadOf` sends it anywhere but the
+same GitHub repository. There is no flag to skip the check in this version.
+Tests send the URL to a bare repository with `insteadOf`; `LEDGER_TEST_REMOTE`
+names that one repository, the only rewrite the check lets through.
+
+**A marker file names a ledger repository.** `.ledger-data` holds
+`{"format":1}`. Init writes it into an empty repository: one with no ref at
+all, as `git ls-remote` shows, not only one whose default branch is missing.
+It refuses a repository with commits but no marker, so it never pushes ledgers
+into an unrelated repository. It also refuses a marker of an unknown format,
+so an older `ledger` never writes a layout it does not know. A lock lets only
+one init run at a time, so a second init never removes the clone of the
+first.
+
+**`ledger store migrate --from`.** With three storages, "the other storage" no
+longer names one. The source is now the storage the setting names. When that
+is already `--to`, file and SQLite storage each default to the other, as they
+did before, and git storage asks for `--from`. A move into git storage commits
+the copies before the setting switches or `--remove-source` removes anything;
+a commit git storage refuses stops migrate and removes the copies again. Then
+migrate pushes in the foreground and reports a failed push without failing:
+the ledgers are committed in the clone, so the setting switches. An archive
+write that fails because another command took the name since the check throws
+`NameTaken`, so migrate never removes that command's copy.
+
+Not covered: a ledger names its repository by absolute path, so a command
+such as `ledger task park <slug>` finds another machine's task only when the
+repository is at the same path. A clone whose hook was deleted pushes by hand
+without the scan until the next `ledger store sync` writes the hook again.
