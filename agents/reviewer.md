@@ -47,7 +47,9 @@ You will be given: the original spec, the acceptance criteria, and the changed f
 
 8. **Durable decisions.** If the repo has `llp/` and the change makes or changes
    a durable design decision, check that an LLP document in the diff records it.
-   A missing document is a finding.
+   A missing document is a finding. If the diff changes how the system works,
+   or touches a file with an `@ref` comment that names LLP 0000, check that the diff
+   updates `llp/0000-ledger-architecture.explainer.md`.
 9. **Claim tags.** Check that each claim in the report carries `[observed]`
    (seen in a file, command output or tool result), `[confirmed]` (checked by
    a test or a second source), or `[inferred]` (not checked).

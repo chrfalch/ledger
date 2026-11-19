@@ -98,4 +98,5 @@ document headers, links and `@ref LLP` comments; `npm test` runs the same check.
 
 A change to how the system works updates
 `llp/0000-ledger-architecture.explainer.md` in the same PR. The reviewer checks
-this.
+this. `npm run llp` warns, without failing, when a branch changes a file with an
+`@ref` comment that names LLP 0000 but does not change LLP 0000.
