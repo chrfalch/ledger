@@ -570,16 +570,30 @@ Decided 2026-11-19:
   `/ledger:go` moves a session from one sibling worktree to another through
   the main checkout. If that test fails, worktrees stay in
   `.claude/worktrees/` and D42 is the safeguard. Own task.
-- **D44** (decided 2026-11-19, same task as D6, only if D6's test passes)
-  Xcode build folders move to `<repo>.worktrees/.build/<slug>/<configuration>`:
-  next to the worktrees, never inside a worktree or the main checkout.
-  `bin/cc-dd-path`, the build rule and the build-path hook change with it;
-  retire deletes the task's folder. Old folders in Xcode's DerivedData are
-  deleted once during the move. If D6's test fails, build folders stay in
-  Xcode's DerivedData.
-- **D45** With D44, `ledger worktrees derived-data` and `ledger worktrees
-  prune-orphans` are removed, with their docs and tests: build folders no
-  longer collect in Xcode's DerivedData.
+  Result (2026-11-19, Claude Code 2.1.328): the test failed, so worktrees
+  stay in `.claude/worktrees/`. The switch itself works through the main
+  checkout, but every `EnterWorktree` outside `.claude/worktrees/` asks for a
+  "permission-root relocation" confirmation, and no settings allow rule
+  removes it. Headless sessions cannot answer it, and an interactive session
+  would ask on every task switch.
+- **D44** (decided 2026-11-19, revised the same day after D6 failed) Xcode
+  build folders move out of Xcode's DerivedData to
+  `<main checkout>/.claude/worktrees/.build/<name>/<configuration>`, where
+  `<name>` is the worktree folder's name and `.main` stands for the main
+  checkout. Reason: DerivedData folders are named by a path hash, so a
+  removed worktree's folders are hard to match and pile up. A folder named
+  after its worktree is easy to match. The folder sits next to the
+  worktrees, not inside one, because the React Native bundler (Metro), Jest,
+  editor file watchers and Spotlight ignore `.gitignore` and would walk a
+  build folder inside a worktree. `bin/cc-dd-path` hides the folder from git
+  through the repo's shared `info/exclude`. `bin/cc-dd-path`, the build rule
+  and the build-path hook change with it, and retire deletes the task's
+  folder. Old `cc-*` folders in Xcode's DerivedData are deleted once, by
+  hand, after the change merges.
+- **D45** With D44, `ledger worktrees derived-data` is removed with its docs
+  and tests. `ledger worktrees prune-orphans` keeps its name but deletes the
+  `.build/<name>` folders that no linked worktree matches, instead of
+  DerivedData folders.
 - **D46** In a repo with `llp/`, the task record keeps the LLP numbers the task
   touches (design refs), picked when the task is made; none when no LLP
   matches (section 4, step 1). Keeps today's `--design-refs` behaviour.
@@ -619,5 +633,5 @@ Decided 2026-11-19:
 | Deploy permissions (D32) | permission prompt on ledger writes | deploy allows the `ledger` commands |
 | Merge and goal gates (D4, D15) | rule text | *Merge now* gate after checks and review; *Goal met* gate for tasks with no PR |
 | Session name (D43) | operator renames by hand with `/rename` | session renamed to the task slug on every task change |
-| Worktree location (D6) | inside the main checkout | separate task: test the session switch first; then `<repo>.worktrees/<slug>`, main checkout found through git, existing worktrees moved |
-| Build folders (D44, D45) | Xcode's DerivedData, named by worktree path hash | same task as D6: `<repo>.worktrees/.build/<slug>/<configuration>`; `cc-dd-path`, build rule and hook changed; old folders deleted once; `derived-data` and `prune-orphans` removed |
+| Worktree location (D6) | inside the main checkout | unchanged: the session-switch test failed (confirmation on every switch); D42 is the safeguard |
+| Build folders (D44, D45) | Xcode's DerivedData, named by worktree path hash | `.claude/worktrees/.build/<name>/<configuration>`; `cc-dd-path`, build rule and hook changed; old folders deleted once by hand; `derived-data` removed; `prune-orphans` matches folder names to worktrees |

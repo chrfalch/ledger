@@ -1,11 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fail } from './failure.js';
 import { exists, folderEntries, isFolder, readTimedText, writeAtomic } from './files.js';
 import { parseLedger, planProgress } from './format.js';
-import { branchPrs, changedFiles, checkoutRoot, gitDir, ignoredPaths, lastCommitDate, mainCheckout, worktrees, type PullRequest, type Worktree } from './git.js';
+import { branchPrs, changedFiles, checkoutRoot, gitDir, ignoredPaths, inMainCheckout, lastCommitDate, mainCheckout, worktrees, type PullRequest, type Worktree } from './git.js';
 import { samePath, worktreeLedger, type LedgerPaths } from './paths.js';
 import { findTasks, locateChild, namedChildren, type Task } from './tasks.js';
 import { heading, plural, table } from './views.js';
@@ -27,35 +26,56 @@ const real = (file: string): string | undefined => {
   }
 };
 
+/** The name bin/cc-dd-path gives the build folder of the main checkout. */
+const MAIN_BUILD_FOLDER = '.main';
+
+/** Where bin/cc-dd-path puts the Xcode build folders of every checkout of the repo at `main`: beside its worktrees, inside none. */
+const buildRootOf = (main: string): string => path.join(main, '.claude', 'worktrees', '.build');
+
 /**
- * The path prefix bin/cc-dd-path gives the Xcode build folders of the checkout that holds `folder`:
- * <DerivedData>/cc-<folder name>-<first 6 hex of the sha1 of its real path>-. Undefined outside a git checkout.
+ * The symbolic link among the build root `root`, <main>/.claude/worktrees and <main>/.claude, when there is one. A delete
+ * in the build root would then land outside the main checkout, so every delete there is refused.
  */
-export function buildFolderPrefix(paths: LedgerPaths, folder: string): string | undefined {
+export const linkAboveBuildFolders = (root: string): string | undefined =>
+  [root, path.dirname(root), path.dirname(path.dirname(root))].find((folder) => lstatSync(folder, { throwIfNoEntry: false })?.isSymbolicLink());
+
+/** `keptBecause` says why the folder must not be deleted; `refused` when a symbolic link above it refuses every delete there. */
+export type XcodeFolder = { path: string; keptBecause?: string; refused?: boolean };
+
+/**
+ * The Xcode build folder bin/cc-dd-path made for the checkout that holds `folder`, when there is one. Its name is the
+ * checkout's folder name alone, so it is kept when it may also be another checkout's: when it is .main, or when another
+ * linked worktree git lists has the same name in any case, which APFS takes for the same folder.
+ */
+export function xcodeFolderOf(folder: string): XcodeFolder | undefined {
+  const main = mainCheckout(folder);
   const top = checkoutRoot(folder);
-  const root = top === undefined ? undefined : real(top);
-  if (root === undefined) return undefined;
-  const hash = createHash('sha1').update(root).digest('hex').slice(0, 6);
-  return path.join(paths.derivedData, `cc-${path.basename(root)}-${hash}-`);
+  const root = main === undefined ? undefined : real(main);
+  if (main === undefined || root === undefined || top === undefined) return undefined;
+  const own = path.join(buildRootOf(root), inMainCheckout(folder) ? MAIN_BUILD_FOLDER : path.basename(top));
+  if (!isFolder(own)) return undefined;
+  const link = linkAboveBuildFolders(path.dirname(own));
+  if (link !== undefined) return { path: own, keptBecause: `${link} is a symbolic link`, refused: true };
+  const name = path.basename(own).toLowerCase();
+  if (name === MAIN_BUILD_FOLDER) return { path: own, keptBecause: 'it is the build folder of the main checkout' };
+  const listed = worktrees(main);
+  if (listed.length === 0) return { path: own, keptBecause: `git could not list the worktrees of ${main}, so another may share it` };
+  const twin = listed.slice(1).find((worktree) => nameOf(worktree).toLowerCase() === name && !samePath(worktree.path, top));
+  return twin === undefined ? { path: own } : { path: own, keptBecause: `the worktree ${twin.path} has the same name, so it may be its build folder too` };
 }
 
-/** The rest after the prefix has no `<hex6>-` of its own, which would make it the folder of a worktree whose name starts with `<name>-<hex6>`. */
-const isOwnXcodeFolder = (name: string, prefix: string): boolean => name.startsWith(prefix) && !/(^|-)[0-9a-f]{6}-/.test(name.slice(prefix.length));
-
-/** The Xcode build folders bin/cc-dd-path made for the checkout that holds `folder`. */
-export function ownXcodeFolders(paths: LedgerPaths, folder: string): string[] {
-  const prefix = buildFolderPrefix(paths, folder);
-  if (prefix === undefined) return [];
-  return folderEntries(paths.derivedData)
-    .map(({ name }) => name)
-    .filter((name) => isOwnXcodeFolder(name, path.basename(prefix)) && isFolder(path.join(paths.derivedData, name)))
-    .map((name) => path.join(paths.derivedData, name));
+/** The Xcode build folder bin/cc-dd-path made for the checkout that holds `folder`, when there is one that may be deleted. */
+export function ownXcodeFolders(folder: string): string[] {
+  const own = xcodeFolderOf(folder);
+  return own === undefined || own.keptBecause !== undefined ? [] : [own.path];
 }
+
+const TRASH_PREFIX = '.cc-trash-';
 
 /**
  * Moves the folders into one new trash folder in `trashParent`, which is instant on one disk, then deletes the trash in a
  * process of its own with no inherited output, so nothing waits for the delete. A folder that cannot be moved is deleted
- * at once. The trash name starts with a dot, so it never matches a build folder prefix.
+ * at once. prune-orphans never takes a trash folder for a build folder.
  */
 export function deleteInBackground(folders: string[], trashParent: string): void {
   const trash = trashCan();
@@ -75,7 +95,7 @@ function trashCan(): { move: (folder: string, trashParent: string) => void; empt
       try {
         let trash = trashes.find((known) => path.dirname(known) === trashParent && !existsSync(path.join(known, name)));
         if (trash === undefined) {
-          trash = mkdtempSync(path.join(trashParent, '.cc-trash-'));
+          trash = mkdtempSync(path.join(trashParent, TRASH_PREFIX));
           trashes.push(trash);
         }
         renameSync(folder, path.join(trash, name));
@@ -216,7 +236,9 @@ function deletionProblem(folder: string, base: string, isAllowed: (inside: strin
 const outsideKept = (segments: string[]): boolean => segments.every((segment) => !KEPT_FOLDER_NAMES.has(segment));
 
 /** `skipped` are the folders a safety rule kept; `failures` the folders that could not be deleted. */
-type Pruned = { planned: Folder[] } | { deleted: Folder[]; skipped: string[]; failures: string[] } | { error: string };
+type Deleted = { deleted: Folder[]; skipped: string[]; failures: string[] };
+
+type Pruned = { planned: Folder[] } | Deleted | { error: string };
 
 const hasFailed = (pruned: Pruned): boolean => 'error' in pruned || ('failures' in pruned && pruned.failures.length > 0);
 
@@ -227,12 +249,17 @@ const report = (text: string | string[], failed = false): PruneReport => ({ text
 
 const removeNow = (folder: string): void => rmSync(folder, { recursive: true, force: true });
 
-function deleteFolders(folders: Folder[], problemOf: (folder: Folder) => string | undefined, remove = removeNow): Pruned {
+/** `problemOf` gives why a folder is skipped, or a `stop` failure that leaves it and every folder after it. */
+function deleteFolders(folders: Folder[], problemOf: (folder: Folder) => string | { stop: string } | undefined, remove = removeNow): Deleted {
   const deleted: Folder[] = [];
   const skipped: string[] = [];
   const failures: string[] = [];
   for (const folder of folders) {
     const problem = problemOf(folder);
+    if (typeof problem === 'object') {
+      failures.push(problem.stop);
+      break;
+    }
     if (problem !== undefined) {
       skipped.push(`Skipped ${folder.path}: ${problem}`);
       continue;
@@ -247,7 +274,7 @@ function deleteFolders(folders: Folder[], problemOf: (folder: Folder) => string 
   return { deleted, skipped, failures };
 }
 
-/** The git-ignored build folders and own Xcode folders of the linked worktree at `root` of at least 0.05 GB; deleted unless `dryRun`. */
+/** The git-ignored build folders of the linked worktree, and its folder in `.claude/worktrees/.build`, at `root` of at least 0.05 GB; deleted unless `dryRun`. */
 function pruneBuildFolders(paths: LedgerPaths, root: string, dryRun: boolean, remove = removeNow): Pruned {
   const ignored = ignoredPaths(root);
   if (ignored === undefined) return { error: `Could not read the ignored files of ${path.basename(root)}: git status failed.` };
@@ -256,21 +283,26 @@ function pruneBuildFolders(paths: LedgerPaths, root: string, dryRun: boolean, re
     .map((entry) => entry.slice(0, -1).split('/'))
     .filter((segments) => BUILD_FOLDER_NAMES.has(segments.at(-1) ?? '') && outsideKept(segments))
     .map((segments) => sized(path.join(root, ...segments), segments.join('/')));
-  const xcode = ownXcodeFolders(paths, root).map((folder) => sized(folder, `${paths.tilde(paths.derivedData)}/${path.basename(folder)}`));
-  const prefix = path.basename(buildFolderPrefix(paths, root) ?? '');
-  const folders = [...inWorktree, ...xcode].filter(({ sizeGb: size }) => size === undefined || size >= PRUNE_FLOOR_GB);
-  if (dryRun || folders.length === 0) return { planned: folders };
-  return deleteFolders(
+  const xcode = xcodeFolderOf(root);
+  const own = xcode?.keptBecause === undefined ? xcode?.path : undefined;
+  const folders = [...inWorktree, ...(own === undefined ? [] : [sized(own, paths.tilde(own))])].filter(({ sizeGb: size }) => size === undefined || size >= PRUNE_FLOOR_GB);
+  const kept = xcode?.keptBecause === undefined ? undefined : `Skipped ${xcode.path}: ${xcode.keptBecause}.`;
+  if (dryRun || (folders.length === 0 && kept === undefined)) return { planned: folders };
+  const pruned = deleteFolders(
     folders,
-    ({ path: folder }) =>
-      folder.startsWith(`${root}${path.sep}`)
-        ? deletionProblem(folder, root, outsideKept)
-        : deletionProblem(folder, paths.derivedData, (inside) => inside.length === 1 && prefix !== '' && isOwnXcodeFolder(inside[0], prefix)),
+    ({ path: folder }) => {
+      if (folder.startsWith(`${root}${path.sep}`) || own === undefined) return deletionProblem(folder, root, outsideKept);
+      const link = linkAboveBuildFolders(path.dirname(own));
+      if (link !== undefined) return { stop: `Skipped ${own}: ${link} is a symbolic link.` };
+      return deletionProblem(folder, path.dirname(own), (inside) => inside.length === 1 && inside[0] === path.basename(own));
+    },
     remove,
   );
+  if (kept !== undefined) (xcode?.refused ? pruned.failures : pruned.skipped).push(kept);
+  return pruned;
 }
 
-const KEPT_NOTES = ['Folders inside a .claude folder are never deleted.', 'node_modules and Pods folders are kept, so the worktree still builds.'];
+const KEPT_NOTES = ["Folders inside the worktree's .claude folder are never deleted.", 'node_modules and Pods folders are kept, so the worktree still builds.'];
 
 const folderCount = (folders: Folder[]): string => plural(folders.length, 'folder');
 
@@ -415,9 +447,9 @@ export function autoPrune({ paths }: Context, ledger: string): AutoPruneResult {
 
 function prunedOf(pruned: Exclude<Pruned, { error: string }>, name: string): Pick<AutoPruneResult, 'folders' | 'failures' | 'message'> {
   if ('planned' in pruned) return { folders: [], failures: [], message: `The task is finished, and ${name} has no build folders to prune.` };
-  const left = pruned.failures.length;
   const line = `Pruned the build folders of ${name}, because its task is finished: ${freed(pruned.deleted)}.`;
   const failures = [...pruned.skipped, ...pruned.failures];
+  const left = failures.length;
   return {
     folders: pruned.deleted,
     failures,
@@ -425,114 +457,37 @@ function prunedOf(pruned: Exclude<Pruned, { error: string }>, name: string): Pic
   };
 }
 
-type Group = { kind: 'main' } | { kind: 'worktree'; name: string } | { kind: 'other' } | { kind: 'disk-not-connected' } | { kind: 'orphan' } | { kind: 'no-source' } | { kind: 'cache' };
+const ORPHAN_NOTE = 'An orphan is the build folder of a worktree that git no longer lists.';
 
-const GROUP_ORDER: Group['kind'][] = ['main', 'worktree', 'other', 'disk-not-connected', 'orphan', 'no-source', 'cache'];
-
-const GROUP_LABELS = {
-  main: 'Main checkout',
-  other: 'Other location',
-  'disk-not-connected': 'Disk not connected',
-  orphan: 'Orphan',
-  'no-source': 'No source recorded',
-  cache: 'Shared caches',
-} as const;
-
-const groupLabel = (group: Group): string => (group.kind === 'worktree' ? `Linked worktree ${group.name}` : GROUP_LABELS[group.kind]);
-
-/** The WorkspacePath of a DerivedData folder's info.plist, with . and .. resolved; plutil reads the binary and the XML form alike. */
-function workspacePath(folder: string): string | undefined {
-  const plutil = spawnSync('plutil', ['-extract', 'WorkspacePath', 'raw', '-o', '-', path.join(folder, 'info.plist')], { encoding: 'utf8' });
-  const value = plutil.status === 0 ? (plutil.stdout ?? '').replace(/\n$/, '') : '';
-  return value.startsWith('/') ? path.resolve(value) : undefined;
-}
-
-/**
- * A disk is mounted at /Volumes/<name> on another device than /Volumes; an unmount can leave an empty folder behind on the
- * /Volumes device itself. The boot disk is the exception: macOS links it there to /.
- */
-function isDiskConnected(file: string): boolean {
-  const volume = /^\/Volumes\/[^/]+(?=\/.)/.exec(file)?.[0];
-  if (volume === undefined) return true;
-  try {
-    return real(volume) === '/' || statSync(volume).dev !== statSync('/Volumes').dev;
-  } catch {
-    return false;
-  }
-}
-
-/** Whether nothing is at `file`; any error but "no such entry" leaves that unknown, so the folder built from it is not an orphan. */
-function isGone(file: string, folder: string): boolean {
-  try {
-    statSync(file);
-    return false;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return true;
-    console.error(`warning: could not check ${file} (${code ?? String(error)}), so ${path.basename(folder)} is not counted as an orphan.`);
-    return false;
-  }
-}
-
-/** By the folder's WorkspacePath, never its name; the linked worktree with the longest matching path wins, as worktrees can sit inside each other. */
-function groupOf(folder: string, { main, linked }: Repo): Group {
-  const name = path.basename(folder);
-  if (name.endsWith('.noindex') || name === 'SDKExplicitPrecompiledModules') return { kind: 'cache' };
-  const workspace = workspacePath(folder);
-  if (workspace === undefined) return { kind: 'no-source' };
-  if (isGone(workspace, folder)) return isDiskConnected(workspace) ? { kind: 'orphan' } : { kind: 'disk-not-connected' };
-  const [worktree] = linked.filter(({ path: root }) => workspace.startsWith(`${root}/`)).sort((a, b) => b.path.length - a.path.length);
-  if (worktree !== undefined) return { kind: 'worktree', name: nameOf(worktree) };
-  return workspace.startsWith(`${main}/`) ? { kind: 'main' } : { kind: 'other' };
-}
-
-type Grouped = Folder & { group: Group };
-
-function derivedDataFolders(paths: LedgerPaths, repo: Repo): Grouped[] {
-  return folderEntries(paths.derivedData)
-    .filter((entry) => entry.isDirectory())
-    .map(({ name }) => {
-      const folder = path.join(paths.derivedData, name);
-      return { ...sized(folder, name), group: groupOf(folder, repo) };
-    });
-}
-
-const ORPHAN_NOTE = 'An orphan was built from a project that no longer exists on disk.';
-
-/** `ledger worktrees derived-data`: every DerivedData folder, grouped by the project it was built from. */
-export function derivedDataView({ paths, cwd }: Context): string {
-  const folders = derivedDataFolders(paths, repoOf(cwd));
-  const label = paths.tilde(paths.derivedData);
-  if (folders.length === 0) return `No folders in ${label}.`;
-  const groups = new Map<string, Grouped[]>();
-  const order = (folder: Grouped): number => GROUP_ORDER.indexOf(folder.group.kind);
-  for (const folder of [...folders].sort((a, b) => order(a) - order(b) || groupLabel(a.group).localeCompare(groupLabel(b.group)))) {
-    const key = groupLabel(folder.group);
-    groups.set(key, [...(groups.get(key) ?? []), folder]);
-  }
-  const hasOrphans = folders.some(({ group }) => group.kind === 'orphan');
-  return [
-    heading(label, `${totalGb(folders)} GB in ${folderCount(folders)}`),
-    ...[...groups].flatMap(([title, members]) => [
-      '',
-      heading(title, `${totalGb(members)} GB in ${folderCount(members)}`),
-      ...folderTable(members),
-      ...(members[0].group.kind === 'disk-not-connected' ? ['A folder here was built from a project on a disk that is not connected, so it is never deleted.'] : []),
-    ]),
-    ...(hasOrphans ? ['', ORPHAN_NOTE, 'Run ledger worktrees prune-orphans to delete the orphans.'] : []),
-  ].join('\n');
-}
-
-/** `ledger worktrees prune-orphans [--dry-run]`: deletes the DerivedData folders whose project is gone from a connected disk. */
+/** `ledger worktrees prune-orphans [--dry-run]`: deletes the Xcode build folders that no checkout of the repo is named for. */
 export function pruneOrphans({ paths, cwd }: Context, dryRun: boolean): PruneReport {
-  const repo = repoOf(cwd);
-  const orphans = derivedDataFolders(paths, repo).filter(({ group }) => group.kind === 'orphan');
-  const title = `orphans in ${paths.tilde(paths.derivedData)}`;
+  const { main } = repoOf(cwd);
+  const root = buildRootOf(real(main) ?? main);
+  // Every worktree git lists counts, also one whose folder is gone for now. Lower case, because
+  // APFS matches names regardless of case. Undefined when git lists nothing, not even the main
+  // checkout: a failed list must not make every build folder an orphan.
+  const linkedNames = (): Set<string> | undefined => {
+    const listed = worktrees(main);
+    return listed.length === 0 ? undefined : new Set(listed.slice(1).map((worktree) => nameOf(worktree).toLowerCase()));
+  };
+  const isOrphan = (name: string, linked: Set<string>): boolean => name !== MAIN_BUILD_FOLDER && !name.startsWith(TRASH_PREFIX) && !linked.has(name.toLowerCase());
+  const link = linkAboveBuildFolders(root);
+  if (link !== undefined) return report(`${paths.tilde(link)} is a symbolic link, so nothing was pruned.`, true);
+  const linked = linkedNames();
+  if (linked === undefined) return report(`Could not list the worktrees of ${paths.tilde(main)}, so nothing was pruned.`, true);
+  const orphans = folderEntries(root)
+    .map(({ name }) => name)
+    .filter((name) => isFolder(path.join(root, name)) && isOrphan(name, linked))
+    .map((name) => sized(path.join(root, name), name));
+  const title = `orphans in ${paths.tilde(root)}`;
   if (orphans.length === 0) return report(`Nothing to prune: no ${title}.`);
   if (dryRun) return report([heading(`Prune ${title}`, 'dry run', `${totalGb(orphans)} GB in ${folderCount(orphans)}`), '', ...folderTable(orphans), '', ORPHAN_NOTE, 'Run ledger worktrees prune-orphans to delete them.']);
   const pruned = deleteFolders(orphans, ({ path: folder }) => {
-    const problem = deletionProblem(folder, paths.derivedData, (inside) => inside.length === 1);
-    return problem ?? (groupOf(folder, repo).kind === 'orphan' ? undefined : 'it is no longer an orphan.');
+    const linkNow = linkAboveBuildFolders(root);
+    if (linkNow !== undefined) return { stop: `${paths.tilde(linkNow)} is a symbolic link, so ${folder} and the folders after it were not pruned.` };
+    const linkedNow = linkedNames();
+    if (linkedNow === undefined) return { stop: `Could not list the worktrees of ${paths.tilde(main)} again, so ${folder} and the folders after it were not pruned.` };
+    return deletionProblem(folder, root, (inside) => inside.length === 1) ?? (isOrphan(path.basename(folder), linkedNow) ? undefined : 'it is no longer an orphan.');
   });
   return report(prunedLines(`Pruned ${title}`, pruned), hasFailed(pruned));
 }

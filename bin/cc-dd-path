@@ -1,5 +1,6 @@
 #!/bin/bash
-# Prints the single derived-data folder for this worktree and configuration.
+# Prints the single Xcode build folder for this checkout and configuration, and creates it:
+# <main checkout>/.claude/worktrees/.build/<worktree folder name, or .main>/<configuration>
 # Usage: cc-dd-path <configuration>      example: cc-dd-path Debug-sim
 set -eu
 
@@ -8,10 +9,30 @@ if [ -z "$config" ]; then
   echo "usage: cc-dd-path <configuration>" >&2
   exit 1
 fi
+# One folder name that does not start with a dot, so it can be neither . nor .. and never climbs out. The hook checks the same.
+if ! [[ "$config" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]]; then
+  echo "usage: cc-dd-path <configuration>" >&2
+  echo "The configuration is one folder name of letters, digits, '.', '_' and '-' that does not start with '.', such as Debug-sim." >&2
+  exit 1
+fi
 
-root=$(git rev-parse --show-toplevel)
-hash=$(printf '%s' "$root" | shasum | cut -c1-6)
-path="$HOME/Library/Developer/Xcode/DerivedData/cc-$(basename "$root")-$hash-$config"
+common=$(git rev-parse --path-format=absolute --git-common-dir)
+main=$(cd "$(dirname "$common")" && pwd -P)
+if [ "$(git rev-parse --path-format=absolute --git-dir)" = "$common" ]; then
+  name=.main
+else
+  name=$(basename "$(git rev-parse --show-toplevel)")
+fi
+path="$main/.claude/worktrees/.build/$name/$config"
+
+# The shared exclude file hides the folder from git in every checkout, without a change to the repo's .gitignore.
+exclude="$common/info/exclude"
+line=/.claude/worktrees/.build/
+if ! grep -qxF -- "$line" "$exclude" 2>/dev/null; then
+  mkdir -p "$common/info"
+  if [ -s "$exclude" ] && [ -n "$(tail -c 1 "$exclude")" ]; then echo >> "$exclude"; fi
+  printf '%s\n' "$line" >> "$exclude"
+fi
 
 mkdir -p "$path"
 printf '%s\n' "$path"

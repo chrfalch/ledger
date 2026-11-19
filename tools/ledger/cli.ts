@@ -20,7 +20,6 @@ import { sqliteStore } from './sqlite-store.js';
 import type { LedgerStore } from './store.js';
 import {
   autoPrune,
-  derivedDataView,
   listWorktrees,
   pruneOrphans,
   prunedFields,
@@ -366,7 +365,7 @@ export async function main(argv: string[]): Promise<number> {
   worktrees
     .command('prune')
     .description(
-      'Delete the git-ignored build folders (.build, .expo-prebuild, .cache, build, .DerivedData) and own Xcode build folders of a linked worktree, those of 0.05 GB or more. Nothing in .claude, node_modules or Pods is deleted.',
+      'Delete the git-ignored build folders (.build, .expo-prebuild, .cache, build, .DerivedData) of a linked worktree and its Xcode build folder in .claude/worktrees/.build of the main checkout, those of 0.05 GB or more. Nothing else in .claude, and nothing in node_modules or Pods, is deleted.',
     )
     .argument('[name]', 'the linked worktree, by its folder name')
     .option('--all', 'prune every linked worktree')
@@ -381,12 +380,8 @@ export async function main(argv: string[]): Promise<number> {
       printJson({ all, dryRun, worktrees: fields }, problems.length > 0 ? problems.join('\n') : undefined);
     });
   worktrees
-    .command('derived-data')
-    .description("Group the folders in ~/Library/Developer/Xcode/DerivedData by the project they were built from: this repo's main checkout, a linked worktree, elsewhere, or gone.")
-    .action(() => console.log(derivedDataView(context)));
-  worktrees
     .command('prune-orphans')
-    .description('Delete the DerivedData folders whose project is gone from a connected disk.')
+    .description('Delete the Xcode build folders in .claude/worktrees/.build whose worktree git no longer lists. The main checkout keeps its folder, .main.')
     .option('--dry-run', 'only list the folders')
     .action(({ dryRun = false }: { dryRun?: boolean }) => printPruned(pruneOrphans(context, dryRun)));
   program

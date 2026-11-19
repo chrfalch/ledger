@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { deleteInBackground } from '../tools/ledger/worktrees.js';
@@ -16,11 +16,7 @@ function setup(t: TestContext) {
 }
 
 const worktreeOf = (main: string, slug: string): string => path.join(main, '.claude/worktrees', slug);
-const derivedData = (h: string): string => path.join(h, 'Library/Developer/Xcode/DerivedData');
-const ownXcodeFolder = (h: string, worktree: string, config: string): string => {
-  const real = realpathSync(worktree);
-  return path.join(derivedData(h), `cc-${path.basename(real)}-${createHash('sha1').update(real).digest('hex').slice(0, 6)}-${config}`);
-};
+const buildRoot = (main: string): string => path.join(realpathSync(main), '.claude/worktrees/.build');
 
 /** A file of `megabytes` MB of real blocks, so du counts it; the prune floor is 0.05 GB. */
 function bigFile(file: string, megabytes = 55): void {
@@ -48,23 +44,11 @@ function failed(ran: Ran, pattern: RegExp): void {
   assert.match(ran.stderr, pattern);
 }
 
-function plist(folder: string, workspace: string): void {
-  mkdirSync(folder, { recursive: true });
-  writeFileSync(
-    path.join(folder, 'info.plist'),
-    [
-      '<?xml version="1.0" encoding="UTF-8"?>',
-      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-      '<plist version="1.0"><dict><key>WorkspacePath</key><string>' + workspace + '</string></dict></plist>',
-      '',
-    ].join('\n'),
-  );
-}
-
 test('ledger worktrees --help names the table and each subcommand, and each subcommand has its own --help', (t) => {
   const { h } = setup(t);
   const stdout = ok(ledger(h, h, 'worktrees', '--help'));
-  for (const command of ['prune', 'derived-data', 'prune-orphans']) assert.match(stdout, new RegExp(`^\\s+${command}\\b`, 'm'));
+  for (const command of ['prune', 'prune-orphans']) assert.match(stdout, new RegExp(`^\\s+${command}\\b`, 'm'));
+  assert.doesNotMatch(stdout, /derived-data/);
   assert.match(ok(ledger(h, h, 'worktrees', 'prune', '--help')), /--all[\s\S]*--dry-run|--dry-run[\s\S]*--all/);
   assert.match(ok(ledger(h, h, 'worktrees', 'prune-orphans', '--help')), /--dry-run/);
   assert.match(ok(ledger(h, h, '--help')), /^\s+worktrees\b/m);
@@ -97,25 +81,25 @@ test('ledger worktrees shows ? for a PR gh cannot look up, and says why', (t) =>
   assert.match(stdout, /gh pr list/);
 });
 
-test('ledger worktrees prune --dry-run lists the ignored build folders and own Xcode folders above 0.05 GB, and changes nothing; prune deletes them', (t) => {
+test("ledger worktrees prune --dry-run lists the ignored build folders and the worktree's folder in .claude/worktrees/.build above 0.05 GB, and changes nothing; prune deletes them", (t) => {
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'fix-login' });
   const worktree = worktreeOf(app, 'fix-login');
   bigFile(path.join(worktree, 'build/out.bin'));
   bigFile(path.join(worktree, 'node_modules/pkg/build/out.bin'));
   smallFile(path.join(worktree, '.cache/small.txt'));
-  const xcode = ownXcodeFolder(h, worktree, 'Debug-sim');
-  bigFile(path.join(xcode, 'Build/app.o'));
-  const otherXcode = path.join(derivedData(h), 'cc-fix-login-000000-Debug-sim');
-  bigFile(path.join(otherXcode, 'Build/app.o'), 1);
+  const xcode = path.join(buildRoot(app), 'fix-login');
+  bigFile(path.join(xcode, 'Debug-sim/Build/app.o'));
+  const otherXcode = [path.join(buildRoot(app), 'fix-login-2'), path.join(buildRoot(app), '.main')];
+  for (const other of otherXcode) bigFile(path.join(other, 'Debug-sim/Build/app.o'));
 
   const before = snapshot(h);
   const plan = ok(ledger(h, app, 'worktrees', 'prune', 'fix-login', '--dry-run'));
   assert.deepEqual(snapshot(h), before);
   assert.match(plan, /dry run/i);
   assert.match(lineWith(plan, 'build'), /0\.1/);
-  assert.ok(plan.includes(path.basename(xcode)));
-  for (const kept of ['node_modules', '.cache', 'cc-fix-login-000000']) assert.ok(!plan.includes(kept) || /never|kept/.test(lineWith(plan, kept)), `${kept} is not planned`);
+  assert.match(lineWith(plan, '.claude/worktrees/.build/fix-login '), /0\.1/);
+  for (const kept of ['node_modules', '.cache', '.build/fix-login-2', '.build/.main']) assert.ok(!plan.includes(kept) || /never|kept/.test(lineWith(plan, kept)), `${kept} is not planned`);
 
   const pruned = ok(ledger(h, app, 'worktrees', 'prune', 'fix-login'));
   assert.match(pruned, /freed/);
@@ -123,15 +107,55 @@ test('ledger worktrees prune --dry-run lists the ignored build folders and own X
   assert.equal(existsSync(xcode), false);
   assert.ok(existsSync(path.join(worktree, 'node_modules/pkg/build/out.bin')));
   assert.ok(existsSync(path.join(worktree, '.cache/small.txt')));
-  assert.ok(existsSync(otherXcode));
+  for (const other of otherXcode) assert.ok(existsSync(other), other);
 });
 
-test('ledger worktrees prune skips an own Xcode folder that is a symbolic link, and leaves the link and its target as they were', (t) => {
+/** The folders whose symbolic link would send a delete in the build root outside the main checkout. */
+const LINKABLE = ['.claude', '.claude/worktrees', '.claude/worktrees/.build'];
+
+/** Makes `<app>/<linked>` a symbolic link to an empty folder outside the repo, and returns that folder. */
+function linkOut(h: string, app: string, linked: string): string {
+  const target = path.join(h, 'elsewhere', linked);
+  mkdirSync(target, { recursive: true });
+  mkdirSync(path.dirname(path.join(app, linked)), { recursive: true });
+  symlinkSync(target, path.join(app, linked));
+  return target;
+}
+
+test('ledger worktrees prune exits 1 and deletes no build folder in .claude/worktrees/.build when it, or a folder above it, is a symbolic link', (t) => {
+  for (const linked of LINKABLE) {
+    const { h, app } = setup(t);
+    linkOut(h, app, linked);
+    worktreeTask(h, app, { slug: 'fix-login' });
+    const object = path.join(app, '.claude/worktrees/.build/fix-login/Debug-sim/Build/app.o');
+    bigFile(object);
+    const ran = ledger(h, app, 'worktrees', 'prune', 'fix-login');
+    assert.equal(ran.status, 1, `${linked}: ${ran.stdout}${ran.stderr}`);
+    assert.match(ran.stdout, /is a symbolic link/, linked);
+    assert.ok(existsSync(object), linked);
+  }
+});
+
+test('ledger worktrees prune keeps the build folder of a worktree whose name another worktree shares regardless of case, or whose name is .main', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/other', path.join(h, 'elsewhere/Fix-Login'), 'main');
+  git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/dot', worktreeOf(app, '.main'), 'main');
+  for (const name of ['fix-login', '.main']) {
+    const object = path.join(buildRoot(app), name, 'Debug-sim/Build/app.o');
+    bigFile(object);
+    const stdout = ok(ledger(h, app, 'worktrees', 'prune', name));
+    assert.ok(stdout.includes(`Skipped ${path.join(buildRoot(app), name)}: `), stdout);
+    assert.ok(existsSync(object), name);
+  }
+});
+
+test("ledger worktrees prune skips the worktree's build folder in .claude/worktrees/.build when that folder is a symbolic link, and leaves the link and its target as they were", (t) => {
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'fix-login' });
   const target = path.join(h, 'precious');
   smallFile(path.join(target, 'keep.txt'));
-  const link = ownXcodeFolder(h, worktreeOf(app, 'fix-login'), 'Debug-link');
+  const link = path.join(buildRoot(app), 'fix-login');
   mkdirSync(path.dirname(link), { recursive: true });
   symlinkSync(target, link);
   // A du that reports 60 MB for any folder, so the link passes the 0.05 GB floor and reaches the safety check.
@@ -198,84 +222,138 @@ test('ledger worktrees prune refuses an unknown name, a name with --all, and nei
   failed(ledger(h, app, 'worktrees', 'prune'), /either/i);
 });
 
-/** DerivedData folders of every group: main checkout, linked worktree, other location, orphan, no source, shared cache. */
-function derivedDataWorld(t: TestContext) {
+/** The build folders of the main checkout, of the linked worktree fix-login, and of the removed worktree gone. */
+function orphanWorld(t: TestContext) {
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'fix-login' });
-  const worktree = worktreeOf(app, 'fix-login');
-  mkdirSync(path.join(app, 'App.xcworkspace'));
-  mkdirSync(path.join(worktree, 'App.xcworkspace'));
-  mkdirSync(path.join(h, 'other/Other.xcodeproj'), { recursive: true });
-  const dd = derivedData(h);
-  plist(path.join(dd, 'App-main'), path.join(app, 'App.xcworkspace'));
-  plist(path.join(dd, 'App-wt'), path.join(worktree, 'App.xcworkspace'));
-  plist(path.join(dd, 'Other-x'), path.join(h, 'other/Other.xcodeproj'));
-  plist(path.join(dd, 'Gone-y'), path.join(h, 'gone/Gone.xcodeproj'));
-  mkdirSync(path.join(dd, 'NoPlist-z'));
-  mkdirSync(path.join(dd, 'ModuleCache.noindex'));
-  return { h, app, dd };
+  const root = buildRoot(app);
+  for (const name of ['.main', 'fix-login', 'gone']) smallFile(path.join(root, name, 'Debug-sim/info.plist'));
+  return { h, app, root };
 }
 
-test('ledger worktrees derived-data groups the DerivedData folders by the project they were built from', (t) => {
-  const { h, app } = derivedDataWorld(t);
-  const stdout = ok(ledger(h, app, 'worktrees', 'derived-data'));
-  const groups: [string, string][] = [
-    ['Main checkout', 'App-main'],
-    ['Linked worktree fix-login', 'App-wt'],
-    ['Other location', 'Other-x'],
-    ['Orphan', 'Gone-y'],
-    ['No source recorded', 'NoPlist-z'],
-    ['Shared caches', 'ModuleCache.noindex'],
-  ];
-  let last = -1;
-  for (const [label, folder] of groups) {
-    const at = stdout.indexOf(label);
-    assert.ok(at > last, `${label} comes after the group before it:\n${stdout}`);
-    const next = groups.map(([other]) => stdout.indexOf(other)).filter((index) => index > at).sort((a, b) => a - b)[0] ?? stdout.length;
-    const folderAt = stdout.indexOf(folder, at);
-    assert.ok(folderAt > at && folderAt < next, `${folder} is under ${label}:\n${stdout}`);
-    last = at;
-  }
-  assert.match(stdout, /prune-orphans/);
+test('ledger worktrees derived-data is gone', (t) => {
+  const { h, app } = setup(t);
+  const ran = ledger(h, app, 'worktrees', 'derived-data');
+  assert.notEqual(ran.status, 0);
 });
 
-test('ledger worktrees prune-orphans --dry-run lists only the orphans and changes nothing; without it, it deletes them', (t) => {
-  const { h, app, dd } = derivedDataWorld(t);
+test('ledger worktrees prune-orphans --dry-run lists only the build folders no worktree matches and changes nothing; without it, it deletes them', (t) => {
+  const { h, app, root } = orphanWorld(t);
   const before = snapshot(h);
   const plan = ok(ledger(h, app, 'worktrees', 'prune-orphans', '--dry-run'));
   assert.deepEqual(snapshot(h), before);
-  assert.ok(plan.includes('Gone-y'));
-  for (const kept of ['App-main', 'App-wt', 'Other-x', 'NoPlist-z', 'ModuleCache.noindex']) assert.ok(!plan.includes(kept), `${kept} is no orphan`);
-  ok(ledger(h, app, 'worktrees', 'prune-orphans'));
-  assert.equal(existsSync(path.join(dd, 'Gone-y')), false);
-  for (const kept of ['App-main', 'App-wt', 'Other-x', 'NoPlist-z', 'ModuleCache.noindex']) assert.ok(existsSync(path.join(dd, kept)), kept);
+  assert.match(plan, /dry run/i);
+  assert.match(plan, /^gone\s/m);
+  for (const kept of ['.main', 'fix-login']) assert.doesNotMatch(plan, new RegExp(`^${kept.replace('.', '\\.')}\\s`, 'm'), `${kept} is no orphan`);
+  const pruned = ok(ledger(h, app, 'worktrees', 'prune-orphans'));
+  assert.match(pruned, /freed/);
+  assert.equal(existsSync(path.join(root, 'gone')), false);
+  for (const kept of ['.main', 'fix-login']) assert.ok(existsSync(path.join(root, kept)), kept);
 });
 
-test('ledger worktrees prune-orphans keeps, with a warning, a folder whose project cannot be checked; only a missing project makes an orphan', { skip: process.getuid?.() === 0 }, (t) => {
-  const { h, app, dd } = derivedDataWorld(t);
-  const locked = path.join(h, 'locked');
-  mkdirSync(path.join(locked, 'Locked.xcodeproj'), { recursive: true });
-  plist(path.join(dd, 'Locked-q'), path.join(locked, 'Locked.xcodeproj'));
-  chmodSync(locked, 0o000);
-  let ran: Ran;
-  try {
-    const plan = ledger(h, app, 'worktrees', 'prune-orphans', '--dry-run');
-    assert.equal(plan.status, 0, plan.stderr);
-    assert.ok(!plan.stdout.includes('Locked-q'), plan.stdout);
-    ran = ledger(h, app, 'worktrees', 'prune-orphans');
-  } finally {
-    chmodSync(locked, 0o755);
+test('ledger worktrees prune-orphans from a linked worktree prunes the build folders of its repo', (t) => {
+  const { h, app, root } = orphanWorld(t);
+  ok(ledger(h, worktreeOf(app, 'fix-login'), 'worktrees', 'prune-orphans'));
+  assert.equal(existsSync(path.join(root, 'gone')), false);
+  assert.ok(existsSync(path.join(root, 'fix-login')));
+});
+
+test('ledger worktrees prune-orphans keeps the build folder of a worktree git still lists while its folder is missing', (t) => {
+  const { h, app, root } = orphanWorld(t);
+  rmSync(worktreeOf(app, 'fix-login'), { recursive: true, force: true });
+  ok(ledger(h, app, 'worktrees', 'prune-orphans'));
+  assert.ok(existsSync(path.join(root, 'fix-login')));
+});
+
+test('ledger worktrees prune-orphans skips an orphan that is a symbolic link, and leaves the link and its target as they were', (t) => {
+  const { h, app, root } = orphanWorld(t);
+  const target = path.join(h, 'precious');
+  smallFile(path.join(target, 'keep.txt'));
+  const link = path.join(root, 'linked');
+  symlinkSync(target, link);
+  const stdout = ok(ledger(h, app, 'worktrees', 'prune-orphans'));
+  assert.ok(stdout.includes(`Skipped ${link}: it is a symbolic link.`), stdout);
+  assert.ok(lstatSync(link).isSymbolicLink());
+  assert.ok(existsSync(path.join(target, 'keep.txt')));
+});
+
+test('ledger worktrees prune-orphans exits 1 and deletes nothing when git cannot list the worktrees', (t) => {
+  const { h, app, root } = orphanWorld(t);
+  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  // A git that fails only for `worktree list`, so the CLI still finds the repo.
+  writeFileSync(path.join(h, 'stub-bin/git'), `#!/bin/sh\ncase "$*" in *"worktree list"*) echo "fatal: no list" >&2; exit 128 ;; esac\nexec ${JSON.stringify(realGit)} "$@"\n`);
+  chmodSync(path.join(h, 'stub-bin/git'), 0o755);
+  const before = snapshot(h);
+  for (const args of [[], ['--dry-run']]) {
+    const ran = ledger(h, app, 'worktrees', 'prune-orphans', ...args);
+    assert.equal(ran.status, 1, `prune-orphans ${args.join(' ')}: ${ran.stdout}${ran.stderr}`);
+    assert.ok(`${ran.stdout}${ran.stderr}`.includes('Could not list the worktrees of ~/repos/app, so nothing was pruned.'), ran.stdout + ran.stderr);
   }
-  assert.equal(ran.status, 0, ran.stderr);
-  assert.match(ran.stderr, /^warning: .*Locked\.xcodeproj.*EACCES.*Locked-q/m);
-  assert.ok(existsSync(path.join(dd, 'Locked-q')));
-  assert.equal(existsSync(path.join(dd, 'Gone-y')), false);
+  assert.deepEqual(snapshot(h), before);
+  for (const name of ['.main', 'fix-login', 'gone']) assert.ok(existsSync(path.join(root, name)), name);
+});
+
+test('ledger worktrees prune-orphans stops and exits 1 when git cannot list the worktrees again before a delete', (t) => {
+  const { h, app, root } = orphanWorld(t);
+  smallFile(path.join(root, 'gone-2/Debug-sim/info.plist'));
+  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  const [calls, limit] = [path.join(h, 'list-calls'), path.join(h, 'list-limit')];
+  // A git that counts each `worktree list` and fails every one after the number in list-limit.
+  writeFileSync(
+    path.join(h, 'stub-bin/git'),
+    `#!/bin/sh\ncase "$*" in *"worktree list"*) echo x >> ${JSON.stringify(calls)}; if [ "$(wc -l < ${JSON.stringify(calls)})" -gt "$(cat ${JSON.stringify(limit)} 2>/dev/null || echo 1000)" ]; then echo "fatal: no list" >&2; exit 128; fi ;; esac\nexec ${JSON.stringify(realGit)} "$@"\n`,
+  );
+  chmodSync(path.join(h, 'stub-bin/git'), 0o755);
+  // A dry run lists as often as a prune does before its first delete; one more list lets exactly one delete through.
+  ok(ledger(h, app, 'worktrees', 'prune-orphans', '--dry-run'));
+  const beforeTheDeletes = readFileSync(calls, 'utf8').trim().split('\n').length;
+  rmSync(calls);
+  writeFileSync(limit, String(beforeTheDeletes + 1));
+  const ran = ledger(h, app, 'worktrees', 'prune-orphans');
+  assert.equal(ran.status, 1, ran.stdout + ran.stderr);
+  assert.match(ran.stdout, /Could not list the worktrees/);
+  assert.equal(['gone', 'gone-2'].filter((name) => existsSync(path.join(root, name))).length, 1);
+});
+
+test('ledger worktrees prune-orphans exits 1 and deletes nothing when .claude/worktrees/.build, or a folder above it, is a symbolic link', (t) => {
+  for (const linked of LINKABLE) {
+    const { h, app } = setup(t);
+    const target = linkOut(h, app, linked);
+    const orphan = path.join(app, '.claude/worktrees/.build/gone/Debug-sim/info.plist');
+    smallFile(orphan);
+    for (const args of [[], ['--dry-run']]) {
+      const ran = ledger(h, app, 'worktrees', 'prune-orphans', ...args);
+      assert.equal(ran.status, 1, `${linked} ${args.join(' ')}: ${ran.stdout}${ran.stderr}`);
+      assert.match(ran.stdout + ran.stderr, /is a symbolic link, so nothing was pruned/, linked);
+    }
+    assert.ok(existsSync(orphan), linked);
+    assert.ok(existsSync(target), linked);
+  }
+});
+
+test('ledger worktrees prune-orphans keeps a build folder whose name differs from its worktree only in case', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const folder = path.join(buildRoot(app), 'Fix-Login');
+  smallFile(path.join(folder, 'Debug-sim/info.plist'));
+  assert.match(ok(ledger(h, app, 'worktrees', 'prune-orphans', '--dry-run')), /^Nothing to prune: no orphans in /);
+  ok(ledger(h, app, 'worktrees', 'prune-orphans'));
+  assert.ok(existsSync(path.join(folder, 'Debug-sim/info.plist')));
+});
+
+test('ledger worktrees prune-orphans with no build folders, or only those of live checkouts, has nothing to prune', (t) => {
+  const { h, app } = setup(t);
+  assert.match(ok(ledger(h, app, 'worktrees', 'prune-orphans')), /^Nothing to prune: no orphans in /);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  smallFile(path.join(buildRoot(app), 'fix-login/Debug-sim/info.plist'));
+  smallFile(path.join(buildRoot(app), '.main/Debug-sim/info.plist'));
+  assert.match(ok(ledger(h, app, 'worktrees', 'prune-orphans', '--dry-run')), /^Nothing to prune: no orphans in /);
 });
 
 test('deleteInBackground warns, and does not crash, when the background rm cannot start', async (t) => {
   const { h } = setup(t);
   const trashParent = path.join(h, 'trash-parent');
-  const folder = path.join(trashParent, 'cc-app-000000-Debug-sim');
+  const folder = path.join(trashParent, 'fix-login');
   mkdirSync(folder, { recursive: true });
   const saved = process.env.PATH;
   process.env.PATH = path.join(h, 'no-programs-here');

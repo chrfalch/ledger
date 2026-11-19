@@ -89,7 +89,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 The `ledger` command reads and changes the task ledgers from a terminal,
 without a Claude Code session. It also runs deploy. `list`, `archive`, `show`,
-`parent <slug>`, `worktrees` and `worktrees derived-data` only read. `task`,
+`parent <slug>` and `worktrees` only read. `task`,
 `go`, `park`, `unpark`, `retire` and the `parent` actions change ledgers; each
 edit changes only the lines it names.
 
@@ -112,9 +112,8 @@ edit changes only the lines it names.
 | `ledger retire [<slug>] [--dry-run] [--force]` | Retires a task. Without a slug, it retires the task of the worktree you are in. It copies the ledger to `~/.claude/ledger-archive/<repo>/<date>-<slug>.md`, and `.claude/evidence/` to the folder of the same name. Then it removes the worktree, or the backlog ledger. It marks the task `(retired <date>)` in its parent and copies its `## Report` to the parent's `## Child reports`. It deletes the branch when the branch is merged: no commits ahead of the default branch, or a merged PR that ends at HEAD. Uncommitted changes, an unmerged branch and child tasks that are not retired each need `--force`. Evidence that cannot be archived whole stops it even with `--force`: a `.claude/evidence` that is not a folder or cannot be read, a symbolic link in it that leaves it, or an archive copy whose evidence differs. `--dry-run` prints the checks and steps; it fetches origin's default branch and changes nothing else. It exits 1 when a check stops it. |
 | `ledger migrate --to <file\|sqlite> [--remove-source] [--dry-run]` | Moves the backlog ledgers, the archive with its evidence, and the registry from the other storage to the one you name. It copies everything, reads each copy back, and then sets `"storage"` in `~/.claude/ledger-settings.json`. The other storage keeps its ledgers unless you add `--remove-source`. It exits 1, with nothing changed, when the target already has a ledger of the same name. `--dry-run` prints the plan and changes nothing. |
 | `ledger worktrees` | Shows each linked worktree of this repo: size, last commit, uncommitted files, ledger and PR, largest first. |
-| `ledger worktrees prune <name>\|--all [--dry-run]` | Deletes the git-ignored build folders (`.build`, `.expo-prebuild`, `.cache`, `build`, `.DerivedData`) and the worktree's own Xcode build folders, each of 0.05 GB or more. It never deletes anything in `.claude`, `node_modules` or `Pods`. `--dry-run` only lists the folders. It exits 1 when a folder could not be deleted. |
-| `ledger worktrees derived-data` | Groups the folders in `~/Library/Developer/Xcode/DerivedData` by the project they were built from. |
-| `ledger worktrees prune-orphans [--dry-run]` | Deletes the DerivedData folders whose project is gone from a connected disk. |
+| `ledger worktrees prune <name>\|--all [--dry-run]` | Deletes the git-ignored build folders (`.build`, `.expo-prebuild`, `.cache`, `build`, `.DerivedData`) and the worktree's own Xcode build folder, `.claude/worktrees/.build/<name>` in the main checkout, each of 0.05 GB or more. It never deletes anything else in `.claude`, nor anything in `node_modules` or `Pods`. `--dry-run` only lists the folders. It exits 1 when a folder could not be deleted. |
+| `ledger worktrees prune-orphans [--dry-run]` | Deletes the Xcode build folders in `.claude/worktrees/.build/` whose worktree git no longer lists. It keeps `.main`, the folder of the main checkout. `--dry-run` only lists the folders. It exits 1 when a folder could not be deleted. |
 | `ledger deploy [options]` | Runs `bin/deploy` from this repo. The options pass through, so `ledger deploy --dry-run` prints every change and writes nothing. |
 | `ledger help [command]` | Prints help for `ledger`, or for one of its commands. |
 
@@ -211,13 +210,9 @@ without a prompt box, such as SDK hosts, still show them.
 | `/ledger:worktrees prune <name> --dry-run` | Lists those build folders and their sizes. It deletes nothing. |
 | `/ledger:worktrees prune --all` | Deletes the build folders of every linked worktree, never the main checkout. It shows one table per worktree and the total freed. A worktree that fails is reported, and the others are still pruned. |
 | `/ledger:worktrees prune --all --dry-run` | Lists the build folders of every linked worktree and their sizes. It deletes nothing. |
-| `/ledger:worktrees derived-data` | Lists every folder in `~/Library/Developer/Xcode/DerivedData` with its size. It groups them by where the project is: the main checkout, a linked worktree, another location, or gone. Folders with no source project, and shared caches, have their own groups. |
-| `/ledger:worktrees prune-orphans` | Deletes the DerivedData folders whose project no longer exists. It never deletes shared caches or folders without a recorded project. |
+| `/ledger:worktrees prune-orphans` | Deletes the Xcode build folders of worktrees that no longer exist. Each folder is named after its worktree, so a folder no worktree matches is an orphan. It never deletes `.main`, the folder of the main checkout. |
 | `/ledger:worktrees prune-orphans --dry-run` | Lists those folders. It deletes nothing. |
 | `/ledger:all` | Prints one table of every task ledger on the machine, from every repo, newest first, with its parent and next step. A status column gives each task's status: active, parked, backlog or retired. The title line counts the live tasks: active, parked and backlog. A child task follows its parent as `↳ <child>`, also when the parent is in another repo. `~/.claude/ledgers.json` names the repos to read; each run brings it in line with the ledgers on disk. |
-
-A build folder whose project is on a disk that is not connected goes in its own
-group, **Disk not connected**, and is never deleted.
 
 To remove a finished worktree, use `/ledger:retire <slug>` or
 `ledger retire <slug>`. It archives the ledger first, then removes the
@@ -385,7 +380,7 @@ tools/                    the deploy code, its wizard and CLI, the settings merg
 tests/                    the tests for tools/, bin/ and hooks/
 bin/deploy                installs everything above
 bin/ledger                the terminal command: lists tasks, the archive and parents; writes task, go, park, unpark and parent changes; retires tasks; shows and prunes worktrees; runs deploy; keeps the registry, the list of every task ledger
-bin/cc-dd-path            prints the shared Xcode build folder for a worktree
+bin/cc-dd-path            prints and creates the Xcode build folder for a worktree and configuration
 CONTRIBUTING.md           forking, what to send back, what must never be committed
 ```
 

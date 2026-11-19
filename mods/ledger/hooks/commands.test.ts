@@ -74,7 +74,7 @@ test('/ledger:worktrees shows the table from `ledger worktrees`', async ($, on) 
   expect(text).toBe('Worktrees of repo · 2 linked')
 })
 
-for (const args of ['prune app', 'prune --all --dry-run', 'derived-data', 'prune-orphans --dry-run']) {
+for (const args of ['prune app', 'prune --all --dry-run', 'prune-orphans --dry-run']) {
   test(`/ledger:worktrees ${args} passes its words to \`ledger worktrees\``, async ($, on) => {
     const w = world(on, { [`worktrees ${args}`]: ran(0, 'done\n') }, { cwd: CWD })
 

@@ -1147,3 +1147,30 @@ and keeps each one it has. An entry for a moved ledger gets the copy's
 location, so the next load keeps its created time. An archived entry with no
 archive path names no ledger. The merge skips it and counts it, and
 `--remove-source` leaves it in the source.
+
+## 2026-11-19 — Xcode build folders sit beside the worktrees
+
+**`bin/cc-dd-path` prints a folder named after the worktree.** The path is
+`<main checkout>/.claude/worktrees/.build/<worktree>/<configuration>`. The main
+checkout's folder is `.main`. Before, the folder sat in Xcode's DerivedData,
+named by a hash of the worktree path. A removed worktree's folders were hard to
+match there, so they piled up. A folder named after its worktree is easy to
+match.
+
+**The folder sits next to the worktrees, not inside one.** Metro, Jest, editor
+file watchers and Spotlight ignore `.gitignore`, so they would walk a build
+folder inside a worktree. `cc-dd-path` adds `/.claude/worktrees/.build/` once to
+the repo's shared `info/exclude`, so git does not show the folder in any
+checkout. The build-path hook accepts only `<that folder>/<configuration>` for
+the checkout the command builds, and its deny message names that path.
+
+**Prune and retire delete the whole `<worktree>` folder.** `ledger worktrees
+prune`, `auto-prune` and retire delete it, with the same safety checks as
+before: a real folder, directly in `.build`, with the worktree's name.
+`ledger worktrees prune-orphans` keeps its name. It now deletes each folder in
+`.build` that is not `.main` and that no worktree in `git worktree list` is
+named for. A worktree git still lists keeps its folder, also while its own
+folder is missing. Trash folders, `.cc-trash-*`, are never orphans: a
+background delete may still be working on them. `ledger worktrees derived-data`
+is removed with its tests, as nothing else needs it. Old `cc-*` folders in
+Xcode's DerivedData are deleted once, by hand.

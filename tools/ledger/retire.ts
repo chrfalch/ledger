@@ -24,7 +24,7 @@ import { loadTasks } from './registry.js';
 import type { EvidenceState } from './store.js';
 import { findNamed, findTasks, inRepo, locateChild, namedChildren, sameTask, type Task } from './tasks.js';
 import { plural } from './views.js';
-import { below, deleteInBackground, ownXcodeFolders } from './worktrees.js';
+import { below, deleteInBackground, linkAboveBuildFolders, xcodeFolderOf } from './worktrees.js';
 import { readLedger, shellWord, today, updateLedger, type Context } from './write.js';
 
 /** bin/ledger as one shell word, so the commands that messages name can be pasted as they are. */
@@ -360,7 +360,7 @@ function evidenceProblem(evidence: string): EvidenceProblem | undefined {
 
 /** Reads what planRetire needs. It writes nothing; the fetch of the default branch only moves origin/<default>. */
 export function readRetire(context: Context, slug: string | undefined): RetireFacts {
-  const { cwd, store, paths } = context;
+  const { cwd, store } = context;
   const main = mainCheckout(cwd) ?? fail(`${cwd} is not inside a git repository. Run ${ledgerCommand} retire in the repo of the task.`);
   const tasks = findTasks(store, [main]);
   const task = findTarget(tasks, cwd, main, slug);
@@ -372,12 +372,14 @@ export function readRetire(context: Context, slug: string | undefined): RetireFa
     if (samePath(folder, main)) fail(`${folder} is the main checkout, not a linked worktree. ledger retire removes only linked worktrees.`);
     evidence = path.join(folder, '.claude', 'evidence');
     const problem = evidenceProblem(evidence);
+    const xcode = xcodeFolderOf(folder);
+    if (xcode?.keptBecause !== undefined) warnings.push(`the build folder ${xcode.path} is kept: ${xcode.keptBecause}.`);
     worktree = {
       folder,
       state: stateFacts(folder, main, warnings),
       ...(folderEntries(evidence).length > 0 ? { evidence } : {}),
       ...(problem === undefined ? {} : { evidenceProblem: problem }),
-      buildFolders: ownXcodeFolders(paths, folder),
+      buildFolders: xcode === undefined || xcode.keptBecause !== undefined ? [] : [xcode.path],
     };
   }
   const text = readLedger(context, task);
@@ -652,7 +654,12 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
       case 'keep-branch':
         out.line(`kept     branch ${action.branch}, because ${action.reason}`);
         break;
-      case 'delete-build-folders':
+      case 'delete-build-folders': {
+        const link = linkAboveBuildFolders(path.dirname(action.folders[0]));
+        if (link !== undefined) {
+          out.warn(`kept the build folders ${action.folders.join(', ')}: ${link} is a symbolic link.`);
+          break;
+        }
         try {
           deleteInBackground(action.folders, path.dirname(action.folders[0]));
           for (const folder of action.folders) out.line(`deleted  ${folder}`);
@@ -660,6 +667,7 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
           out.warn(`could not delete the build folders ${action.folders.join(', ')}: ${message(error)}`);
         }
         break;
+      }
       case 'hint':
         if (parentMarked) out.line(action.text);
         break;
