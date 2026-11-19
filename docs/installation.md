@@ -4,7 +4,8 @@
 
 Required: Claude Code, Node.js 20.12 or later, and `bash`. Deploy runs on Node.
 `bash` runs the git hook dispatcher that deploy installs. Python is no longer
-needed.
+needed. SQLite storage for the ledgers needs Node.js 22.13 or later, and 23.4
+or later on Node.js 23; see [Ledger storage](#ledger-storage).
 
 The first run of `bin/deploy` runs `npm ci`. It installs dependencies into
 `node_modules` and writes the npm cache in `~/.npm`. That first run needs
@@ -33,7 +34,8 @@ named `agent-config`. Deploy works from any folder name. To rename the folder,
 run `bin/deploy` again from the new path. Then move
 `~/.claude/ledger-backlog/<old name>/` and `~/.claude/ledger-archive/<old name>/`
 to the new folder name, because ledgers are filed under the folder name of the
-checkout.
+checkout. With SQLite storage, the ledgers stay filed under the old name in the
+database.
 
 Run the dry run first. It tells you which files would be linked, which policy
 keys would change, and whether any file of your own would be replaced.
@@ -71,6 +73,29 @@ bin/deploy --no-codex                    # Claude-only fleet
 bin/deploy --models opus-5.5,sonnet-5.5  # drop models your plan lacks
 bin/deploy --agents runner,reviewer      # a minimal two-agent setup
 ```
+
+## Ledger storage
+
+The backlog ledgers, the archive and the list of tasks are files under
+`~/.claude` by default: `ledger-backlog/`, `ledger-archive/` and
+`ledgers.json`. To keep them in one SQLite database instead,
+`~/.claude/ledgers.db`, write `~/.claude/ledger-settings.json`:
+
+```json
+{ "storage": "sqlite" }
+```
+
+- SQLite storage needs Node.js 22.13 or later, and 23.4 or later on
+  Node.js 23.
+- `"storage": "file"`, no `storage` key, or no settings file keeps the files.
+- Any other value, or a file that is not valid JSON, makes every `ledger`
+  command that uses the storage exit 1 with a message that names the
+  settings file. `ledger --help` still works. A hook prints the message to
+  stderr and exits 0, so Claude Code goes on.
+- The database also holds the evidence of each archive copy. Read a ledger
+  or its evidence with `ledger show <slug>` and `ledger show <slug> --evidence`.
+- Changing the setting does not copy the ledgers to the other storage.
+- The active ledger stays `.claude/ledger.md` in the task's worktree.
 
 ## Environment variables
 

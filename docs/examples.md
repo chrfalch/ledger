@@ -83,6 +83,10 @@ task's Decisions. I am continuing with `image-clear-disk-cache`.
 
 The new task has a ledger with its goal, but no branch or worktree yet. The
 current task is not changed. `/ledger:all` lists it in its **Backlog** section.
+`ledger show router-modal-e2e-flake` prints the ledger in a terminal. With
+SQLite storage, the `ledger:` line is
+`~/.claude/ledgers.db:backlog/expo/router-modal-e2e-flake`, a place in the
+database and not a file.
 
 When you are ready for it:
 

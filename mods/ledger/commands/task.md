@@ -25,11 +25,13 @@ Otherwise, if that request is empty, ask what the task is and stop.
 If the request clearly holds two or more parts that ship separately, as
 separate PRs or separate merges, it needs a parent task. Write the parent
 task's backlog ledger first, then the ledger of each child task, each with
-steps 1 to 5 and without `--stack`. Then attach each child task in the order
-they ship: run `bin/ledger parent <parent> add <child>` from the
-ledger repo, as in step 5. Write the split and the order into the parent
-ledger. Never promote the parent task. Steps 6 to 8 do not apply, except that
-a current ledger gets one line under its Decisions that names the parent task.
+steps 1 to 5 and without `--stack`. The parent task's goal from step 2 also
+states the split and the order: each part, in the order they ship. Then
+attach each child task in that order: run
+`bin/ledger parent <parent> add <child>` from the ledger repo, as in step 5.
+That records the order of the child tasks. Never promote the parent task.
+Steps 6 to 8 do not apply, except that a current ledger gets one line under
+its Decisions that names the parent task.
 Reply with `/ledger:go <parent>` as the start line: it starts the first child
 task. If the split shows up while you plan the current ledger's task, the Plan
 gate applies instead: the current task becomes the first child task of a new
@@ -61,9 +63,9 @@ parent task.
    "$(cd -P "$(dirname "$f")/.." && pwd)/bin/ledger" task <slug> --goal '<goal>'
    ```
 
-   If step 4 picked LLPs, write their numbers, comma-separated, on the
-   `- design refs:` line of the ledger at the path on the `ledger` line the
-   script printed. Use Edit.
+   If step 4 picked LLPs, add `--design-refs` with their numbers,
+   comma-separated, such as `--design-refs 3,12`. The script writes them on
+   the `- design refs:` line of the new ledger.
 6. Check for a current ledger: `.claude/ledger.md` in the working directory of
    this session. In the main checkout, treat it as none.
 7. If there is a current ledger, the script already added one line under its

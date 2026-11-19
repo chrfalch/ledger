@@ -311,6 +311,19 @@ task whose work all shipped in its child tasks. It has no worktree and no
 branch, so `/ledger:retire <name>` archives its ledger, then deletes the
 backlog file. A backlog task of another repo is not found.
 
+`ledger show <name>` prints a task's ledger from the terminal: its backlog
+ledger, else its newest archive copy. `ledger show <name> --evidence` lists
+the evidence files of that copy, and `--evidence <file>` prints one.
+
+The paths in this guide are for file storage, the default. With
+`{"storage": "sqlite"}` in `~/.claude/ledger-settings.json`, the backlog, the
+archive with its evidence, and the list of tasks are in one database,
+`~/.claude/ledgers.db`. Retire then prints locations such as
+`~/.claude/ledgers.db:archive/expo/2026-10-26-image-clear-disk-cache`. They
+name a place in the database, not a file. Use `ledger show` to read it. A bad
+settings file makes every command that uses the storage exit 1, but
+`ledger --help` still works, and hooks print the error and exit 0.
+
 ### Parent tasks
 
 A parent task ties together two or more tasks that ship separately: one

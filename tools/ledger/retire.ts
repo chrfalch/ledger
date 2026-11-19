@@ -19,13 +19,16 @@ import {
   originHead,
   removeLinkedWorktree,
 } from './git.js';
-import { samePath, worktreeLedger } from './paths.js';
+import { ledgerBin, samePath, worktreeLedger } from './paths.js';
 import { loadTasks } from './registry.js';
 import type { EvidenceState } from './store.js';
 import { findNamed, findTasks, inRepo, locateChild, namedChildren, sameTask, type Task } from './tasks.js';
 import { plural } from './views.js';
 import { below, deleteInBackground, ownXcodeFolders } from './worktrees.js';
-import { readLedger, saveLedger, today, type Context } from './write.js';
+import { readLedger, saveLedger, shellWord, today, type Context } from './write.js';
+
+/** bin/ledger as one shell word, so the commands that messages name can be pasted as they are. */
+const ledgerCommand = shellWord(ledgerBin);
 
 type Ref = { slug: string; main: string };
 
@@ -62,6 +65,7 @@ export type RetireFacts = {
   /** An archive copy with the ledger's text, and how its evidence compares with the worktree's. */
   alreadyArchived?: { name: string; location: string; evidence: EvidenceState };
   archiveLocation: (name: string) => string;
+  archiveEvidenceLocation: (name: string) => string;
   today: string;
   warnings: string[];
 };
@@ -72,13 +76,13 @@ export type Blocker =
   | { kind: 'missing-child'; name: string }
   | { kind: 'dirty'; count: number }
   | { kind: 'unmerged' }
-  | { kind: 'evidence'; copy: string; evidence: string }
+  | { kind: 'evidence'; name: string; copy: string; evidenceLocation: string; evidence: string }
   | EvidenceProblem;
 
 const isForceable = ({ kind }: Blocker): boolean => kind === 'children' || kind === 'missing-child' || kind === 'dirty' || kind === 'unmerged';
 
 export type RetireAction =
-  | { kind: 'archive'; repo: string; name: string; location: string; text: string; evidence?: string }
+  | { kind: 'archive'; repo: string; name: string; location: string; evidenceLocation: string; text: string; evidence?: string }
   | { kind: 'already-archived'; repo: string; name: string; location: string }
   | { kind: 'remove-worktree'; main: string; folder: string; force: boolean }
   | { kind: 'remove-backlog'; repo: string; name: string; location: string }
@@ -183,11 +187,19 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
     actions.push({ kind: 'already-archived', repo: task.repo, name: archived.name, location: archived.location });
     if (archived.evidence === 'differs') {
       const evidence = worktree === undefined ? 'the backlog task, which has none' : `${path.join(worktree.folder, '.claude', 'evidence')}/`;
-      blockers.push({ kind: 'evidence', copy: archived.location, evidence });
+      blockers.push({ kind: 'evidence', name: archived.name, copy: archived.location, evidenceLocation: facts.archiveEvidenceLocation(archived.name), evidence });
     }
   } else {
     const name = archiveName(facts);
-    actions.push({ kind: 'archive', repo: task.repo, name, location: facts.archiveLocation(name), text, ...(worktree?.evidence === undefined ? {} : { evidence: worktree.evidence }) });
+    actions.push({
+      kind: 'archive',
+      repo: task.repo,
+      name,
+      location: facts.archiveLocation(name),
+      evidenceLocation: facts.archiveEvidenceLocation(name),
+      text,
+      ...(worktree?.evidence === undefined ? {} : { evidence: worktree.evidence }),
+    });
   }
   actions.push(
     worktree === undefined
@@ -255,7 +267,7 @@ function findTarget(tasks: Task[], cwd: string, main: string, slug: string | und
   if (slug === undefined) {
     const root = checkoutRoot(cwd);
     const own = root === undefined ? undefined : tasks.find(({ place, file }) => place === 'worktree' && samePath(file, worktreeLedger(root)));
-    return own ?? fail(`No task ledger in or above ${cwd}. Give a slug: ledger retire <slug>.`);
+    return own ?? fail(`No task ledger in or above ${cwd}. Give a slug: ${ledgerCommand} retire <slug>.`);
   }
   const named = findNamed(tasks, { slug, main });
   if (named.length === 1 && named[0].place === 'archive') fail(`${slug} is retired already: ${named[0].file}`);
@@ -349,7 +361,7 @@ function evidenceProblem(evidence: string): EvidenceProblem | undefined {
 /** Reads what planRetire needs. It writes nothing; the fetch of the default branch only moves origin/<default>. */
 export function readRetire(context: Context, slug: string | undefined): RetireFacts {
   const { cwd, store, paths } = context;
-  const main = mainCheckout(cwd) ?? fail(`${cwd} is not inside a git repository. Run ledger retire in the repo of the task.`);
+  const main = mainCheckout(cwd) ?? fail(`${cwd} is not inside a git repository. Run ${ledgerCommand} retire in the repo of the task.`);
   const tasks = findTasks(store, [main]);
   const task = findTarget(tasks, cwd, main, slug);
   const warnings: string[] = [];
@@ -379,6 +391,7 @@ export function readRetire(context: Context, slug: string | undefined): RetireFa
     archiveNameTaken: (name) => store.archive.nameTaken(task.repo, name),
     ...(identical === undefined ? {} : { alreadyArchived: { name: identical.name, location: identical.location, evidence: store.archive.evidenceState(task.repo, identical.name, evidence) } }),
     archiveLocation: (name) => store.archive.location(task.repo, name),
+    archiveEvidenceLocation: (name) => store.archive.evidenceLocation(task.repo, name),
     today: today(),
     warnings,
   };
@@ -419,19 +432,19 @@ function reasonOf(blocker: Blocker): string {
 function remedy(blocker: Blocker): string {
   switch (blocker.kind) {
     case 'evidence':
-      return `Move ${blocker.copy} and ${blocker.copy.replace(/\.md$/, '')}/ away, then run retire again.`;
+      return `See what is archived in ${blocker.evidenceLocation}/ with \`${ledgerCommand} show ${shellWord(blocker.name)} --evidence\`, then make the two match and run ${ledgerCommand} retire again.`;
     case 'evidence-link':
-      return `Replace it with the ${blocker.isFolder ? 'folder' : 'file'} it points to, then run retire again.`;
+      return `Replace it with the ${blocker.isFolder ? 'folder' : 'file'} it points to, then run ${ledgerCommand} retire again.`;
     case 'evidence-link-text':
-      return `The link would break in the archive. Change its text to ${blocker.inside}, then run retire again.`;
+      return `The link would break in the archive. Change its text to ${blocker.inside}, then run ${ledgerCommand} retire again.`;
     case 'evidence-link-loop':
-      return 'Remove the link, then run retire again.';
+      return `Remove the link, then run ${ledgerCommand} retire again.`;
     case 'evidence-not-folder':
-      return 'Move it into a folder at that path, then run retire again.';
+      return `Move it into a folder at that path, then run ${ledgerCommand} retire again.`;
     case 'evidence-special':
-      return 'Move it out of the evidence folder, then run retire again.';
+      return `Move it out of the evidence folder, then run ${ledgerCommand} retire again.`;
     case 'evidence-unreadable':
-      return 'Make it readable, then run retire again.';
+      return `Make it readable, then run ${ledgerCommand} retire again.`;
     default:
       return '';
   }
@@ -455,7 +468,7 @@ function refusal({ task, blockers }: RetirePlan, force: boolean): string {
 function stepText(action: RetireAction): string | string[] | undefined {
   switch (action.kind) {
     case 'archive':
-      return [`archive the ledger to ${action.location}`, ...(action.evidence === undefined ? [] : [`archive ${action.evidence}/ to ${action.location.replace(/\.md$/, '')}/`])];
+      return [`archive the ledger to ${action.location}`, ...(action.evidence === undefined ? [] : [`archive ${action.evidence}/ to ${action.evidenceLocation}/`])];
     case 'already-archived':
       return `leave the archive as it is: the ledger is archived already at ${action.location}`;
     case 'remove-worktree':
@@ -553,7 +566,7 @@ function stopIfChanged(context: Context, plan: RetirePlan, copy: ArchiveCopy, re
     ...(archive.evidenceState(copy.repo, copy.name, evidence) === 'differs' ? [evidence === undefined ? 'the archived evidence' : `the evidence ${evidence}/`] : []),
   ];
   if (changed.length > 0) {
-    fail(`Stopped before removing ${removal}: ${changed.join(' and ')} changed after the archive copy ${copy.location} was written. Nothing was removed. Run ledger retire again.`);
+    fail(`Stopped before removing ${removal}: ${changed.join(' and ')} changed after the archive copy ${copy.location} was written. Nothing was removed. Run ${ledgerCommand} retire again.`);
   }
 }
 
@@ -570,13 +583,13 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
   for (const action of plan.actions) {
     switch (action.kind) {
       case 'archive': {
-        const evidenceCopy = `${path.join(store.archive.repoLocation(action.repo), action.name)}/`;
+        const evidenceCopy = `${action.evidenceLocation}/`;
         try {
           store.archive.write(action.repo, action.name, action.text, action.evidence);
           if (store.archive.read(action.repo, action.name)?.text !== action.text) fail(`the archive copy does not match the ledger`);
         } catch (error) {
           const copies = action.evidence === undefined ? `The ledger copy ${action.location} may exist` : `The ledger copy ${action.location} and the evidence copy ${evidenceCopy} may exist`;
-          fail(`Could not archive ${plan.task.slug}: ${sentence(message(error))} ${copies} already. Fix the cause, then run ledger retire again.`);
+          fail(`Could not archive ${plan.task.slug}: ${sentence(message(error))} ${copies} already. Fix the cause, then run ${ledgerCommand} retire again.`);
         }
         out.line(`archived ${action.location}`);
         if (action.evidence !== undefined) out.line(`archived evidence ${evidenceCopy}`);
@@ -588,7 +601,7 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
       case 'remove-worktree': {
         stopIfChanged(context, plan, copy, `the worktree ${action.folder}`);
         const error = removeLinkedWorktree(action.main, action.folder, action.force);
-        if (error !== undefined) fail(`Could not remove the worktree ${action.folder}: ${error}\nThe ledger is archived; run ledger retire again once git can remove the worktree.`);
+        if (error !== undefined) fail(`Could not remove the worktree ${action.folder}: ${error}\nThe ledger is archived; run ${ledgerCommand} retire again once git can remove the worktree.`);
         out.line(`removed  ${action.folder}`);
         break;
       }
@@ -597,7 +610,7 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
         try {
           store.backlog.remove(action.repo, action.name);
         } catch (error) {
-          fail(`Could not delete the backlog ledger ${action.location}: ${sentence(message(error))} Its archive copy is written. Fix the cause, then run ledger retire again.`);
+          fail(`Could not delete the backlog ledger ${action.location}: ${sentence(message(error))} Its archive copy is written. Fix the cause, then run ${ledgerCommand} retire again.`);
         }
         out.line(`removed  ${action.location}`);
         break;

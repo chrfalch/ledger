@@ -7,6 +7,20 @@ import { freshHome, REPO } from './helpers.js';
 
 export const LEDGER_BIN = path.join(REPO, 'bin/ledger');
 
+/**
+ * Why the SQLite store cannot run on the Node at `node`, or false where it can: the skip reason of its tests. A child
+ * process loads node:sqlite through require, as the store does, so this process neither loads it nor prints its warning.
+ */
+export function noSqliteOn(node: string): string | false {
+  const env = { ...process.env };
+  delete env.NODE_OPTIONS;
+  const probe = spawnSync(node, ['-e', "process.stdout.write(process.versions.node); require('node:sqlite')"], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  if (probe.error) throw probe.error;
+  return probe.status !== 0 && `node:sqlite loads without a flag only from Node 22.13, and from 23.4 on Node 23; this is Node ${probe.stdout}`;
+}
+
+export const noSqlite = noSqliteOn(process.execPath);
+
 export type Ran = { status: number | null; stdout: string; stderr: string };
 
 export type Fields = {

@@ -1,12 +1,9 @@
-import { cpSync, rmSync } from 'node:fs';
+import { cpSync, lstatSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fail } from './failure.js';
-import { createFile, folderEntries, holdsAnything, isFolder, isReadableFile, isTaken, readText, readTimedText, sameTree, writeAtomic } from './files.js';
+import { createFile, folderEntries, holdsAnything, isFolder, isReadableFile, isTaken, readText, readTimedText, sameTree, treeEntries, writeAtomic } from './files.js';
 import type { LedgerPaths } from './paths.js';
-import type { LedgerCollection, LedgerStore, StoredLedger } from './store.js';
-
-/** Plain code-unit order, the order readdir gave the old scans. */
-const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+import { byCodeUnit, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
 
 /**
  * Ledgers as files <root>/<repo>/<name>.md. A ledger is a readable regular file, never a symbolic link; a repo is a
@@ -49,6 +46,15 @@ export function fileStore({ home }: LedgerPaths): LedgerStore {
   const archive = collection(path.join(claude, 'ledger-archive'));
   const registry = path.join(claude, 'ledgers.json');
   const evidenceOf = (repo: string, name: string): string => path.join(archive.repoLocation(repo), name);
+  const evidenceFiles = (repo: string, name: string): string[] => {
+    const folder = evidenceOf(repo, name);
+    // Not through a symbolic link, as with a ledger, so reading evidence never leaves the archive.
+    if (!lstatSync(folder, { throwIfNoEntry: false })?.isDirectory()) return [];
+    return treeEntries(folder)
+      .filter((entry) => entry.isFile())
+      .map((entry) => path.relative(folder, path.join(entry.parentPath, entry.name)))
+      .sort(byCodeUnit);
+  };
   return {
     backlog: {
       ...backlog,
@@ -80,6 +86,10 @@ export function fileStore({ home }: LedgerPaths): LedgerStore {
         }
       },
       nameTaken: (repo, name) => isTaken(archive.location(repo, name)) || isTaken(evidenceOf(repo, name)),
+      evidenceLocation: evidenceOf,
+      evidenceFiles,
+      // Only a listed file, so a path such as ../<name>.md cannot read past the evidence folder.
+      readEvidence: (repo, name, file) => (evidenceFiles(repo, name).includes(file) ? readFileSync(path.join(evidenceOf(repo, name), file)) : undefined),
     },
     registry: {
       read: () => {

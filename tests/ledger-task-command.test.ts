@@ -149,7 +149,7 @@ test('the Plan gate requires a parent task for two or more separately shipped pa
   assert.match(gate, /two or more parts that ship separately/);
   assert.match(gate, /make the parent task and each child task/);
   assert.match(gate, /attach each child task to the parent task/);
-  assert.match(gate, /split and the order .*parent ledger/);
+  assert.match(gate, /split and the order in the parent task's goal: the `--goal` text of `ledger task`/);
   assert.match(gate, /before any child work starts/);
 });
 
@@ -230,8 +230,9 @@ test('/ledger:help says /ledger:next names the next child task of a finished chi
 test('/ledger:task makes the parent task first for a request with separately shipped parts', () => {
   const split = read('mods/ledger/commands/task.md').match(/two or more parts that ship separately.*? 1\. Pick/)?.[0] ?? '';
   assert.match(split, /parent task's backlog ledger first, then the ledger of each child task/);
-  assert.match(split, /attach each child task in the order they ship/);
-  assert.match(split, /Write the split and the order into the parent ledger/);
+  assert.match(split, /The parent task's goal from step 2 also states the split and the order/);
+  assert.match(split, /attach each child task in that order/);
+  assert.doesNotMatch(split, /into the parent ledger|Edit/);
   assert.match(split, /`bin\/ledger parent <parent> add <child>`/);
   assert.match(split, /Never promote the parent task/);
   assert.match(split, /`\/ledger:go <parent>`/);
@@ -250,12 +251,25 @@ test('/ledger:task runs bin/ledger task, which takes no --refs, and writes picke
   assert.match(task.replace(/\s+/g, ' '), /`- design refs:` line/);
 });
 
+test('/ledger:task passes picked LLPs to bin/ledger task with --design-refs, and does not edit the backlog ledger', () => {
+  const task = read('mods/ledger/commands/task.md');
+  assert.match(task, /`--design-refs[ `]/);
+  assert.doesNotMatch(task, /design refs:` line [^.]*\. Use Edit\./);
+});
+
 test('/ledger:go makes a new task with bin/ledger task, then starts it with bin/ledger go', () => {
   const go = read('mods/ledger/commands/go.md');
   assert.match(go, /\/bin\/ledger" task <slug> --goal '<goal>'/);
   assert.match(go, /`bin\/ledger go <slug>`/);
   assert.doesNotMatch(go, /--promote|--refs/);
   assert.match(go, /`- design refs:` line/);
+});
+
+test('/ledger:go passes picked LLPs to bin/ledger task with --design-refs, and its new-task steps edit no ledger', () => {
+  const go = read('mods/ledger/commands/go.md');
+  const newTaskSteps = go.slice(go.indexOf('If there is a `new:` line'), go.indexOf('If `ledger:` is `none`'));
+  assert.match(newTaskSteps, /`--design-refs[ `]/);
+  assert.doesNotMatch(newTaskSteps, /Use Edit/);
 });
 
 test('no ledger mod command names a removed script', () => {

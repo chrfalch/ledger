@@ -1,4 +1,4 @@
-import { Argument, Command, CommanderError } from 'commander';
+import { Argument, Command, CommanderError, Option } from 'commander';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -10,9 +10,13 @@ import { planProgress } from './format.js';
 import { mainCheckout } from './git.js';
 import { fileStore } from './file-store.js';
 import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookEvent } from './hooks.js';
-import { ledgerPaths, realPath, repoName } from './paths.js';
+import { ledgerBin, ledgerPaths, realPath, repoName } from './paths.js';
 import { loadTasks } from './registry.js';
 import { retireTask, retireText } from './retire.js';
+import { readStorage } from './settings.js';
+import { shownLedger } from './show.js';
+import { sqliteStore } from './sqlite-store.js';
+import type { LedgerStore } from './store.js';
 import {
   autoPrune,
   derivedDataView,
@@ -178,7 +182,15 @@ const JSON_HELP = 'print one JSON object: {"ok":true,...} or {"ok":false,"error"
 export async function main(argv: string[]): Promise<number> {
   const paths = ledgerPaths(process.env.HOME || homedir());
   const cwd = process.cwd();
-  const context: Context = { paths, cwd, store: fileStore(paths) };
+  let store: LedgerStore | undefined;
+  const context: Context = {
+    paths,
+    cwd,
+    // Opened on first use, so help and deploy work with a broken settings file, and its error reaches the handler below.
+    get store() {
+      return (store ??= readStorage(paths.home) === 'sqlite' ? sqliteStore(paths) : fileStore(paths));
+    },
+  };
   // From argv rather than the parsed options, so a command line commander refuses still gets a JSON answer.
   const json = argv.includes('--json');
   let exitCode = 0;
@@ -220,6 +232,29 @@ export async function main(argv: string[]): Promise<number> {
       else console.log(archiveView(found.rows, found.repo, found.term, `${paths.tilde(found.folder)}/`));
     });
   program
+    .command('show')
+    .description("Print a task's ledger: its backlog ledger in this repo, else its newest archive copy.")
+    .argument('<slug>', 'the task, or a full archive name <date>-<slug>[-N] for that one copy')
+    .option('--repo <name>', 'read the ledgers of the repo folder <name> instead')
+    .addOption(new Option('--evidence [file]', "list the archive copy's evidence files, one path per line, or print the bytes of one").conflicts('json'))
+    .option('--json', 'print one JSON object: {"ok":true,"repo":...,"name":...,"location":...,"text":...}')
+    .action((slug: string, { repo, evidence }: { repo?: string; evidence?: string | true }) => {
+      // Every failure goes to stderr as plain text, also with --json, whose stdout is only ever the ledger.
+      try {
+        const found = shownLedger(context, slug, { repo, archived: evidence !== undefined });
+        if (evidence === true) process.stdout.write(context.store.archive.evidenceFiles(found.repo, found.name).map((file) => `${file}\n`).join(''));
+        else if (evidence !== undefined) {
+          const bytes = context.store.archive.readEvidence(found.repo, found.name, evidence) ?? fail(`${evidence} is not an evidence file of ${slug}, archived as ${found.name} in the repo ${found.repo}.`);
+          process.stdout.write(bytes);
+        } else if (json) printJson({ repo: found.repo, name: found.name, location: found.location, text: found.text });
+        else process.stdout.write(found.text);
+      } catch (error) {
+        if (!(error instanceof Failure)) throw error;
+        console.error(error.message);
+        exitCode = error.exitCode;
+      }
+    });
+  program
     .command('parent')
     .description('Show a parent task and the status of each child task, or change its children.')
     .argument('<slug>', 'the parent task in this repo, or <slug>@<path> for the repo at <path>')
@@ -255,6 +290,7 @@ export async function main(argv: string[]): Promise<number> {
     .description('Write a backlog ledger for a new task, from ~/.claude/ledger.template.md. /ledger:go <slug> starts it.')
     .argument('[slug]', 'the new task: lowercase letters, digits and hyphens; with --here, the branch name by default')
     .option('--goal <text>', 'one paragraph: the problem, then what done looks like')
+    .option('--design-refs <n,n>', 'the LLP numbers for the "- design refs:" line, comma-separated')
     .option('--stack', 'make the worktree and branch at once, on top of the current branch')
     .option('--here', 'add a ledger to this linked worktree instead; prints no start line')
     .option('--repo <path>', 'write the task for the repo that holds <path>')
@@ -358,7 +394,7 @@ export async function main(argv: string[]): Promise<number> {
     .addArgument(new Argument('<event>', 'the hook event').choices(HOOK_EVENTS))
     .action((event: HookEvent) => {
       try {
-        process.stdout.write(answerHook(event, readFileSync(0, 'utf8'), { ...context, ledgerBin: fileURLToPath(new URL('../../bin/ledger', import.meta.url)) }));
+        process.stdout.write(answerHook(event, readFileSync(0, 'utf8'), { ...context, ledgerBin }));
       } catch (error) {
         // Exit 0 with no output: Claude Code then allows the tool call and injects nothing. Exit 2 would block the tool call.
         console.error(`ledger hook ${event}: ${(error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ')}`);
@@ -389,6 +425,8 @@ export async function main(argv: string[]): Promise<number> {
     if (!json) throw error;
     printJson({}, error instanceof Error ? error.message : String(error));
     return 1;
+  } finally {
+    store?.close?.();
   }
   return exitCode;
 }

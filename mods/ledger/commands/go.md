@@ -56,17 +56,17 @@ ledger steps below still apply.
    "$(cd -P "$(dirname "$f")/.." && pwd)/bin/ledger" task <slug> --goal '<goal>'
    ```
 
+   If new-task step 3 picked LLPs, add `--design-refs` with their numbers,
+   comma-separated, such as `--design-refs 3,12`. The script writes them on
+   the `- design refs:` line of the new ledger.
 5. Run the same `bin/ledger` as `bin/ledger go <slug>`, with nothing else. It
    makes the worktree and branch. Do not move this session into the worktree:
    the next session does.
-6. If new-task step 3 picked LLPs, write their numbers, comma-separated, on
-   the `- design refs:` line of the new ledger. Its path is on the `ledger`
-   line that the last `bin/ledger` run printed. Use Edit.
-7. If `ledger task` fails, nothing was made. Reply with its error and stop:
+6. If `ledger task` fails, nothing was made. Reply with its error and stop:
    the session does not clear. If only `ledger go` fails, the backlog ledger
    exists, so the session still clears, and the next session tries to start
    it again. Then still do the ledger steps, and put the error in your reply.
-8. If `ledger:` is not `none` and `ledger task` printed no `noted` line, add
+7. If `ledger:` is not `none` and `ledger task` printed no `noted` line, add
    one line under that ledger's Decisions that names the new task, together
    with the ledger steps below. A `noted` line means the script already wrote
    that line.

@@ -1,5 +1,9 @@
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/** The bin/ledger of this checkout, which messages name so a reader can run it without `ledger` on PATH. */
+export const ledgerBin = fileURLToPath(new URL('../../bin/ledger', import.meta.url));
 
 /** The folders the ledger system uses under one HOME. Where the store keeps its ledgers is the store's own business. */
 export function ledgerPaths(home: string) {
