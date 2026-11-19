@@ -25,7 +25,7 @@ const isEntry = (value: unknown): value is RegistryEntry =>
   typeof value === 'object' && value !== null && 'path' in value && typeof value.path === 'string' && 'status' in value && typeof value.status === 'string';
 
 /** The stored entries, or undefined when the text is not a JSON array. */
-function parseRegistry(text: string): RegistryEntry[] | undefined {
+export function parseRegistry(text: string): RegistryEntry[] | undefined {
   try {
     const entries: unknown = JSON.parse(text);
     return Array.isArray(entries) ? entries.filter(isEntry) : undefined;

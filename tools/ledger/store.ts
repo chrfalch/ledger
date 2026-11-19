@@ -27,6 +27,8 @@ export interface LedgerCollection {
   read(repo: string, name: string): StoredLedger | undefined;
   /** The same as `read(repo, name) !== undefined`, without reading the text. */
   has(repo: string, name: string): boolean;
+  /** Sets the `mtimeMs` that `read` gives the ledger, so a copy keeps the time of its original. */
+  setModified?(repo: string, name: string, mtimeMs: number): void;
 }
 
 /**
@@ -73,6 +75,13 @@ export interface Archive extends LedgerCollection {
   evidenceFiles(repo: string, name: string): string[];
   /** The bytes of `file`, one of `evidenceFiles(repo, name)`; undefined for any other path. */
   readEvidence(repo: string, name: string, file: string): Buffer | undefined;
+  /**
+   * Writes the evidence archived with `name` to the folder `to`, which must not exist yet: its files, folders and symbolic
+   * links, as `write` took them. Without evidence it writes nothing.
+   */
+  copyEvidence(repo: string, name: string, to: string): void;
+  /** Removes the copy `name` and its evidence. */
+  remove(repo: string, name: string): void;
 }
 
 /** The text of the registry, a cache that a rebuild from the ledgers can always replace. */
@@ -81,6 +90,8 @@ export interface Registry {
   write(text: string): void;
   /** Rewrites the text with `change`, which gets undefined for no registry; no other write can come between. */
   update(change: Change<string | undefined>): void;
+  /** After it, `read` gives undefined, so the next load rebuilds the registry. */
+  remove(): void;
 }
 
 /** Where backlog ledgers, archive copies and the registry are kept. A worktree's .claude/ledger.md is not in it. */

@@ -1090,3 +1090,51 @@ the task list in the registry.
 many milliseconds, between a read and the write that depends on it. The
 tests in `tests/ledger-core-concurrency.test.ts` set it, so the commands
 they start together overlap every time.
+
+## 2026-11-19 — `ledger migrate` moves the ledgers between storages
+
+The SQLite entry of 2026-11-18 said there is no migration. Now `ledger migrate --to
+<file|sqlite>` moves the backlog ledgers, the archive copies with their
+evidence, and the registry from the other storage.
+
+**It copies by default.** The other storage keeps every ledger. A person who
+wants it emptied adds `--remove-source`. It removes only what it copied and
+checked. A backlog ledger that changed after the copy stays, and so does its
+registry entry.
+
+**The setting changes after a checked copy.** The command reads every copy
+back and compares the text and the evidence bytes. Only then does it write
+`"storage"` to `~/.claude/ledger-settings.json`.
+
+**A failed copy is undone.** A copy that throws or reads back different stops
+the command with exit 1. It first removes each ledger it wrote to the target
+and puts back the target's earlier registry. The setting stays as it was, and
+nothing is removed from the source. A half copy would otherwise block the next
+run as a conflict.
+
+**It is safe next to other ledger commands.** It writes each backlog ledger
+with `Backlog.create`, so a name another command took after the check fails
+the copy, and the undo does not remove that ledger. The undo and
+`--remove-source` delete a backlog ledger only while it is the text that was
+copied. A copy another command changed in the target stays, and the message
+names it. Both registry writes go through `Registry.update`, so an entry
+another command added in between stays.
+
+**It needs node:sqlite, also for a dry run.** One side is always the
+database. The dry run loads node:sqlite but does not make the database file.
+So a dry run fails where the real run would, with its own message, not the
+one that says to set `"storage"` to `"file"`.
+
+**A conflict refuses the whole run.** When the target already has a backlog
+ledger or archive name to copy, the command lists each one and changes
+nothing. A ledger with identical text counts too. One rule is safer than a
+compare that decides which copy wins.
+
+**The registry is merged, not rebuilt.** The registry is a cache, but it
+also names the repos to look in. Without it, a load finds the repos under
+`~/repos` and `~/issues`, the repo you are in, and the repos that backlog
+ledgers name, but no other active task. The merge adds each entry the target does not have,
+and keeps each one it has. An entry for a moved ledger gets the copy's
+location, so the next load keeps its created time. An archived entry with no
+archive path names no ledger. The merge skips it and counts it, and
+`--remove-source` leaves it in the source.

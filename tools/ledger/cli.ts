@@ -11,9 +11,10 @@ import { mainCheckout } from './git.js';
 import { fileStore } from './file-store.js';
 import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookEvent } from './hooks.js';
 import { ledgerBin, ledgerPaths, realPath, repoName } from './paths.js';
+import { migrateStorage } from './migrate.js';
 import { loadTasks } from './registry.js';
 import { retireTask, retireText } from './retire.js';
-import { readStorage } from './settings.js';
+import { readStorage, STORAGES, type Storage } from './settings.js';
 import { shownLedger } from './show.js';
 import { sqliteStore } from './sqlite-store.js';
 import type { LedgerStore } from './store.js';
@@ -336,6 +337,25 @@ export async function main(argv: string[]): Promise<number> {
       const silent = { line: () => {}, warn: () => {} };
       show(json ? retireTask(context, slug, { dryRun, force }, silent) : retireTask(context, slug, { dryRun, force }), retireText);
     });
+  program
+    .command('migrate')
+    .description(
+      'Move the backlog ledgers, the archive with its evidence, and the registry from the other storage to the storage --to names. It copies everything, reads every copy back, and then sets "storage" in ~/.claude/ledger-settings.json. Exits 1, with nothing changed, when the target already has a name to copy.',
+    )
+    .addOption(new Option('--to <storage>', 'the storage to move the ledgers to').choices(STORAGES).makeOptionMandatory())
+    .option('--remove-source', 'remove what was copied from the other storage, after the check')
+    .option('--dry-run', 'print what would be copied, switched and removed, and change nothing')
+    .addHelpText(
+      'after',
+      [
+        '',
+        'Examples:',
+        '  ledger migrate --to sqlite --dry-run          show what moving to SQLite would copy',
+        '  ledger migrate --to sqlite                    copy to SQLite and use it; the files stay',
+        '  ledger migrate --to file --remove-source      copy back to files, then empty the database',
+      ].join('\n'),
+    )
+    .action(({ to, removeSource = false, dryRun = false }: { to: Storage; removeSource?: boolean; dryRun?: boolean }) => migrateStorage(paths, to, { removeSource, dryRun }, print));
   const worktrees = program
     .command('worktrees')
     .description("Show each linked worktree of this repo with its size, last commit, uncommitted files, ledger and PR, largest first; or prune its build folders.");

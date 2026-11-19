@@ -335,6 +335,32 @@ backlog ledger while `ledger go` starts it, `ledger go` starts nothing. It
 removes the new worktree, keeps the backlog ledger, and exits 1. Run
 `ledger go` again.
 
+#### Switching storage
+
+A change of the setting by hand hides the ledgers in the other storage. To
+switch, run `ledger migrate` from a terminal:
+
+```
+ledger migrate --to sqlite --dry-run
+ledger migrate --to sqlite
+```
+
+The first command prints what it would copy and changes nothing. The second
+one copies the backlog ledgers, the archive with its evidence files, and the
+list of tasks into the database. It reads every copy back and compares it.
+Only then does it write `"storage": "sqlite"` to
+`~/.claude/ledger-settings.json`. The other keys in that file stay.
+
+The files stay where they are. Add `--remove-source` to remove them after the
+check. To go back to files, run `ledger migrate --to file`.
+
+When the database already has a ledger of the same name, the command lists
+each one, exits 1, and changes nothing. A ledger with identical text counts
+too.
+
+If a copy fails, or reads back different, the command removes the copies it
+made and exits 1. The setting and the original files stay as they were.
+
 ### Parent tasks
 
 A parent task ties together two or more tasks that ship separately: one

@@ -110,6 +110,7 @@ edit changes only the lines it names.
 | `ledger park <slug> --reason <text>` | Marks a task parked: `Parked: <date> — <reason>` becomes the first line under `## Next step`. The reason is required. |
 | `ledger unpark <slug>` | Removes the parked mark. |
 | `ledger retire [<slug>] [--dry-run] [--force]` | Retires a task. Without a slug, it retires the task of the worktree you are in. It copies the ledger to `~/.claude/ledger-archive/<repo>/<date>-<slug>.md`, and `.claude/evidence/` to the folder of the same name. Then it removes the worktree, or the backlog ledger. It marks the task `(retired <date>)` in its parent and copies its `## Report` to the parent's `## Child reports`. It deletes the branch when the branch is merged: no commits ahead of the default branch, or a merged PR that ends at HEAD. Uncommitted changes, an unmerged branch and child tasks that are not retired each need `--force`. Evidence that cannot be archived whole stops it even with `--force`: a `.claude/evidence` that is not a folder or cannot be read, a symbolic link in it that leaves it, or an archive copy whose evidence differs. `--dry-run` prints the checks and steps; it fetches origin's default branch and changes nothing else. It exits 1 when a check stops it. |
+| `ledger migrate --to <file\|sqlite> [--remove-source] [--dry-run]` | Moves the backlog ledgers, the archive with its evidence, and the registry from the other storage to the one you name. It copies everything, reads each copy back, and then sets `"storage"` in `~/.claude/ledger-settings.json`. The other storage keeps its ledgers unless you add `--remove-source`. It exits 1, with nothing changed, when the target already has a ledger of the same name. `--dry-run` prints the plan and changes nothing. |
 | `ledger worktrees` | Shows each linked worktree of this repo: size, last commit, uncommitted files, ledger and PR, largest first. |
 | `ledger worktrees prune <name>\|--all [--dry-run]` | Deletes the git-ignored build folders (`.build`, `.expo-prebuild`, `.cache`, `build`, `.DerivedData`) and the worktree's own Xcode build folders, each of 0.05 GB or more. It never deletes anything in `.claude`, `node_modules` or `Pods`. `--dry-run` only lists the folders. It exits 1 when a folder could not be deleted. |
 | `ledger worktrees derived-data` | Groups the folders in `~/Library/Developer/Xcode/DerivedData` by the project they were built from. |
@@ -133,8 +134,9 @@ A settings file that is not valid
 JSON, or names another storage, makes every command that uses the storage
 exit 1; `ledger --help` still works, and hooks print the error and exit 0.
 The database also holds the evidence files of each archive copy. Read a ledger or its evidence with
-`ledger show`. The other storage is not copied over when you change the
-setting.
+`ledger show`. A change of the setting by hand does not move the ledgers.
+Use `ledger migrate --to sqlite` or `ledger migrate --to file`: it copies the
+ledgers, checks the copy, and then changes the setting.
 
 ## Commands
 
