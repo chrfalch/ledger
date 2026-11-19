@@ -299,13 +299,24 @@ function remove(
   const kept = new Set<string>();
   for (const ledger of backlog) {
     // Another session may have written to it since the copy; that text is in no copy, so it stays.
-    if (!source.backlog.has(ledger.repo, ledger.name) || !source.backlog.remove(ledger.repo, ledger.name, ledger.text)) {
+    if (!source.backlog.has(ledger.repo, ledger.name)) {
+      line(`backlog ${shortName(ledger)} is already gone from the source`);
+      kept.add(ledger.location);
+    } else if (!source.backlog.remove(ledger.repo, ledger.name, ledger.text)) {
       line(`kept backlog ${shortName(ledger)} in the source: it changed after the copy`);
       kept.add(ledger.location);
     }
   }
-  for (const { repo, name } of archive) source.archive.remove(repo, name);
-  const removed = { backlog: backlog.length - kept.size, archive: archive.length };
+  let archiveRemoved = 0;
+  for (const copy of archive) {
+    if (!source.archive.nameTaken(copy.repo, copy.name)) {
+      line(`archive ${shortName(copy)} is already gone from the source`);
+      continue;
+    }
+    source.archive.remove(copy.repo, copy.name);
+    archiveRemoved++;
+  }
+  const removed = { backlog: backlog.length - kept.size, archive: archiveRemoved };
   if (entries === undefined) return { ...removed, registry: undefined };
   const copied = new Set(entries.flatMap((entry) => entryKey(entry) ?? []).filter((key) => !kept.has(key)));
   let before = 0;

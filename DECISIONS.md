@@ -1118,7 +1118,16 @@ the copy, and the undo does not remove that ledger. The undo and
 `--remove-source` delete a backlog ledger only while it is the text that was
 copied. A copy another command changed in the target stays, and the message
 names it. Both registry writes go through `Registry.update`, so an entry
-another command added in between stays.
+another command added in between stays. A source copy that another command
+removed after the copy is reported as already gone, and the run finishes.
+
+Not covered: an archive copy is counted as written before its write, so the
+undo can remove one that another command archived under the same name after
+the check. `Archive.write` would need to report a taken name apart from
+other failures. Two registry steps read and then remove the whole registry:
+the undo when the target had none, and an emptied source registry after
+`--remove-source`. A registry write between the two is lost. The registry is
+a cache that the next command rebuilds, so this loses no ledger.
 
 **It needs node:sqlite, also for a dry run.** One side is always the
 database. The dry run loads node:sqlite but does not make the database file.

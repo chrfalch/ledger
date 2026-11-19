@@ -325,6 +325,28 @@ for (const from of ['file', 'sqlite'] as const) {
     assert.deepEqual(withStore(h, to, contents), { backlog: [], archive: [], registry: undefined });
   });
 
+  test(`migrate ${from} → ${to} --remove-source finishes when another command removed a source archive copy after the copy, and says so`, { skip }, (t) => {
+    const { h } = populated(t, from);
+    const gone = withStore(h, from, (store) => store.archive.repos().flatMap((repo) => store.archive.list(repo)));
+    assert.ok(gone.length > 0);
+    const lines = migrateWith(
+      h,
+      to,
+      {
+        backlog: {
+          create: (repo, name, text) => {
+            const created = withStore(h, to, (store) => store.backlog.create(repo, name, text));
+            withStore(h, from, (store) => gone.forEach((copy) => store.archive.nameTaken(copy.repo, copy.name) && store.archive.remove(copy.repo, copy.name)));
+            return created;
+          },
+        },
+      },
+      { removeSource: true },
+    );
+    for (const copy of gone) assert.ok(lines.some((line) => line.includes(`archive ${copy.repo}/${copy.name}`) && line.includes('already gone')), lines.join('\n'));
+    assert.match(readFileSync(settingsFile(h), 'utf8'), new RegExp(`"storage": "${to}"`));
+  });
+
   test(`migrate ${from} → ${to} --remove-source keeps a backlog ledger that changed after the copy, and its registry entry, and says so`, { skip }, (t) => {
     const { h, source } = populated(t, from);
     const changedText = 'Written by another session after the copy.\n';
