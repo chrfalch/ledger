@@ -1074,6 +1074,121 @@ test('an internal error in a hook injects nothing', (t) => {
   for (const [event, input] of Object.entries(inputs)) assertFailedOpen(runHook(h, event, JSON.stringify(input)), event);
 });
 
+// Failures are logged and reported at the next session start
+
+const failureLog = (h: string): string => path.join(h, '.claude/ledger-hook-failures.log');
+const failureLine = (time: string, hook = 'ledger hook pre-tool-use'): string => `${time}\t${hook}\tsomething broke\n`;
+const failureReport = (count: string, since: string): string => `⚠ ${count} since ${since}, not yet reported. Log: ~/.claude/ledger-hook-failures.log`;
+
+function sessionStartIn(h: string, cwd: string): SessionStartOutput['hookSpecificOutput'] | undefined {
+  const stdout = hook(h, 'session-start', { cwd });
+  return stdout === '' ? undefined : (JSON.parse(stdout) as SessionStartOutput).hookSpecificOutput;
+}
+
+test('a failing ledger hook appends one line to ~/.claude/ledger-hook-failures.log, creating ~/.claude', (t) => {
+  const h = home(t);
+  rmSync(path.join(h, '.claude'), { recursive: true, force: true });
+
+  assertFailedOpen(runHook(h, 'pre-tool-use', '{not json'), 'pre-tool-use');
+  assertFailedOpen(runHook(h, 'pre-compact', '[]'), 'pre-compact');
+
+  const lines = readFileSync(failureLog(h), 'utf8').split('\n');
+  assert.equal(lines.length, 3, lines.join('\n'));
+  assert.match(lines[0], /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\tledger hook pre-tool-use\t\S[^\t]*$/);
+  assert.match(lines[1], /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\tledger hook pre-compact\tthe hook input is not a JSON object$/);
+  assert.equal(lines[2], '');
+});
+
+test('a failing ledger hook that cannot write its log still prints nothing and exits 0', (t) => {
+  const h = home(t);
+  rmSync(path.join(h, '.claude'), { recursive: true, force: true });
+  writeFileSync(path.join(h, '.claude'), 'a file, so no log can be written under it');
+
+  for (const event of EVENTS) assertFailedOpen(runHook(h, event, '{not json'), event);
+});
+
+test('session-start reports the unreported hook failures above the ledger, once', (t) => {
+  const h = home(t);
+  const sibling = worktree(h, checkout(h, 'main'), path.join(h, 'sibling'));
+  const ledger = ledgerIn(sibling);
+  writeFileSync(failureLog(h), failureLine('2026-11-01T10:00:00Z') + failureLine('2026-11-02T11:00:00Z', 'usage-pace.sh'));
+
+  const first = sessionStartIn(h, sibling);
+  assert.equal(first?.additionalContext, `${failureReport('2 hook failures', '2026-11-01T10:00:00Z')}\n\n${fullLedgerText(ledger)}`);
+  assert.equal(first?.sessionTitle, 'sibling');
+  assert.equal(sessionStartIn(h, sibling)?.additionalContext, fullLedgerText(ledger));
+
+  writeFileSync(failureLog(h), failureLine('2026-11-03T12:00:00Z'), { flag: 'a' });
+  assert.equal(sessionStartIn(h, sibling)?.additionalContext, `${failureReport('1 hook failure', '2026-11-03T12:00:00Z')}\n\n${fullLedgerText(ledger)}`);
+});
+
+test('session-start with no ledger reports the hook failures alone, then prints nothing', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  writeFileSync(failureLog(h), failureLine('2026-11-01T10:00:00Z'));
+
+  assert.deepEqual(sessionStartIn(h, main), { hookEventName: 'SessionStart', additionalContext: failureReport('1 hook failure', '2026-11-01T10:00:00Z') });
+  assert.equal(hook(h, 'session-start', { cwd: main }), '');
+});
+
+test('session-start reports a crash of an earlier ledger hook', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  assertFailedOpen(runHook(h, 'session-start', '{not json'), 'session-start');
+
+  assert.match(sessionStartIn(h, main)?.additionalContext ?? '', /^⚠ 1 hook failure since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ, not yet reported\. Log: ~\/\.claude\/ledger-hook-failures\.log$/);
+});
+
+test('session-start whose ledger part throws still reports the earlier failures alone, and logs its own for the next report', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  writeFileSync(failureLog(h), failureLine('2026-11-01T10:00:00Z'));
+
+  // git refuses an argument with a NUL byte, so the ledger part throws.
+  assert.deepEqual(sessionStartIn(h, `${h}/broken\u0000folder`), { hookEventName: 'SessionStart', additionalContext: failureReport('1 hook failure', '2026-11-01T10:00:00Z') });
+
+  assert.match(sessionStartIn(h, main)?.additionalContext ?? '', /^⚠ 1 hook failure since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ, not yet reported\./);
+  const lines = readFileSync(failureLog(h), 'utf8').trimEnd().split('\n');
+  assert.equal(lines.length, 2);
+  assert.match(lines[1], /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\tledger hook session-start\t\S/);
+});
+
+test('session-start whose ledger part throws with no unreported failures fails open as before', (t) => {
+  const h = home(t);
+  assertFailedOpen(runHook(h, 'session-start', JSON.stringify({ cwd: `${h}/broken\u0000folder` })), 'session-start');
+  const lines = readFileSync(failureLog(h), 'utf8').trimEnd().split('\n');
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /\tledger hook session-start\t\S/);
+});
+
+test('session-start reports the whole log again when it is shorter than the part already reported', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  writeFileSync(failureLog(h), failureLine('2026-11-01T10:00:00Z') + failureLine('2026-11-02T10:00:00Z'));
+  sessionStartIn(h, main);
+
+  writeFileSync(failureLog(h), failureLine('2026-11-05T10:00:00Z'));
+  assert.equal(sessionStartIn(h, main)?.additionalContext, failureReport('1 hook failure', '2026-11-05T10:00:00Z'));
+});
+
+test('session-start that cannot record what it reported still reports and exits 0', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  writeFileSync(failureLog(h), failureLine('2026-11-01T10:00:00Z'));
+  mkdirSync(path.join(h, '.claude/ledger-hook-failures.reported'));
+
+  assert.equal(sessionStartIn(h, main)?.additionalContext, failureReport('1 hook failure', '2026-11-01T10:00:00Z'));
+  assert.equal(sessionStartIn(h, main)?.additionalContext, failureReport('1 hook failure', '2026-11-01T10:00:00Z'));
+});
+
+test('session-start that cannot read the log prints what it prints with no failures', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  mkdirSync(failureLog(h));
+
+  assert.equal(hook(h, 'session-start', { cwd: main }), '');
+});
+
 test('a path the gates cannot check counts as no ledger, and the rest of the command is still checked', (t) => {
   const { h, main, task } = removal(t);
   const tooLong = 'a'.repeat(300);

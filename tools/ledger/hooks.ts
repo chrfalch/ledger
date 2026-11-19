@@ -1,6 +1,7 @@
 import { statSync, type Stats } from 'node:fs';
 import path from 'node:path';
 import { folderEntries } from './files.js';
+import { logHookFailure, markHookFailuresReported, unreportedHookFailures } from './hook-failures.js';
 import { findSection, serializeLedger, type Child, type Ledger, type TaskRef } from './format.js';
 import { checkoutRoot, gitTimedOut, inMainCheckout, limitGitCalls, mainCheckout } from './git.js';
 import { repoName, samePath, worktreeLedger } from './paths.js';
@@ -161,16 +162,35 @@ function tasksOnDisk(context: HookContext, mains: string[]): Task[] {
   }
 }
 
-export function sessionStart(input: HookInput, context: HookContext): SessionStartOutput | undefined {
+function sessionLedgerContext(input: HookInput, context: HookContext): { text?: string; title?: string } {
   const found = sessionLedgers(folderOf(input, context));
-  if (found.tasks.length === 0) return undefined;
+  if (found.tasks.length === 0) return {};
   const mains = found.tasks.flatMap(({ main, ledger: { location, children } }) => [main, location.parent?.main, ...children.map((child) => child.main)].filter((known) => known !== undefined));
-  const title = sessionTitle(found);
+  return { text: sessionStartText(found, tasksOnDisk(context, mains)), title: sessionTitle(found) };
+}
+
+/**
+ * Hook failures since the last report come first, above the ledgers, and count as reported once the output is built.
+ * When the ledger part throws, the report still goes out alone and the new failure waits for the next one.
+ */
+export function sessionStart(input: HookInput, context: HookContext): SessionStartOutput | undefined {
+  const failures = unreportedHookFailures(context.paths);
+  let ledgers: { text?: string; title?: string };
+  try {
+    ledgers = sessionLedgerContext(input, context);
+  } catch (error) {
+    if (failures === undefined) throw error;
+    logHookFailure(context.paths.home, 'ledger hook session-start', error instanceof Error ? error.message : String(error));
+    ledgers = {};
+  }
+  const additionalContext = [failures?.text, ledgers.text].filter((part) => part !== undefined).join('\n\n');
+  if (additionalContext === '') return undefined;
+  if (failures !== undefined) markHookFailuresReported(context.paths.home, failures);
   return {
     hookSpecificOutput: {
       hookEventName: 'SessionStart',
-      additionalContext: sessionStartText(found, tasksOnDisk(context, mains)),
-      ...(title === undefined ? {} : { sessionTitle: title }),
+      additionalContext,
+      ...(ledgers.title === undefined ? {} : { sessionTitle: ledgers.title }),
     },
   };
 }

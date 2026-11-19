@@ -322,7 +322,9 @@ archive with its evidence, and the list of tasks are in one database,
 `~/.claude/ledgers.db:archive/expo/2026-10-26-image-clear-disk-cache`. They
 name a place in the database, not a file. Use `ledger show` to read it. A bad
 settings file makes every command that uses the storage exit 1, but
-`ledger --help` still works, and hooks print the error and exit 0.
+`ledger --help` still works, and hooks print the error and exit 0. Each hook
+failure is logged in `~/.claude/ledger-hook-failures.log`, and the next session
+start says how many there were since the last report.
 
 Two `ledger` commands can run at the same time, for example in two sessions.
 Neither loses the other's change, and only one of them can make a task with a

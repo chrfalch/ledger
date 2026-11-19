@@ -150,6 +150,11 @@ because its turn end does not clear the session.
 
 When a hook fails, `tools/ledger/cli.ts` prints the error to stderr and exits
 0. Claude Code then allows the tool call. A hook never blocks work by accident.
+The failure is also appended as one line to `~/.claude/ledger-hook-failures.log`
+(`tools/ledger/hook-failures.ts`). The shell hooks run through `hooks/logged.sh`,
+which logs any exit other than 0 or 2 the same way and exits 0. The next
+`session-start` puts the number of failures not yet reported, and the time of
+the first, above the ledgers.
 
 `settings.policy.json` registers the four events. Each entry runs
 `"$HOME"/.claude/bin/ledger hook <event>`. Deploy merges these keys into

@@ -75,8 +75,8 @@ function applyToHooks(t: TestContext, hooks: Record<string, unknown[]>): Record<
   return readSettings(target);
 }
 
-const GATE = '"$HOME"/.claude/hooks/derived-data-gate.sh';
-const RETRY = '"$HOME"/.claude/hooks/denied-read-retry.sh';
+const GATE = '"$HOME"/.claude/hooks/logged.sh derived-data-gate.sh';
+const RETRY = '"$HOME"/.claude/hooks/logged.sh denied-read-retry.sh';
 
 test('a group that mixes an owned command with a prompt hook is yours and survives unchanged', (t) => {
   const mixed = {
@@ -155,6 +155,21 @@ test('removing the bash ledger hooks keeps your own hooks, also in an entry that
   const policy = readSettings(POLICY);
   assert.deepEqual(hookEntries(out, 'PreToolUse'), [mine, { matcher: 'Edit', hooks: [commandHook('echo also mine')] }, ...hookEntries(policy, 'PreToolUse')]);
   assert.deepEqual(hookEntries(out, 'UserPromptSubmit'), [{ hooks: [commandHook('echo prompt')] }, ...hookEntries(policy, 'UserPromptSubmit')]);
+});
+
+test('settings from before logged.sh end with each hook script once, run through logged.sh', (t) => {
+  const unwrapped = (name: string) => commandHook(`"$HOME"/.claude/hooks/${name}`);
+  const out = applyToHooks(t, {
+    PreToolUse: [{ matcher: 'Bash', hooks: [unwrapped('derived-data-gate.sh')] }],
+    PermissionDenied: [{ matcher: 'Bash|Read|Grep|Glob|NotebookRead', hooks: [unwrapped('denied-read-retry.sh')] }],
+    SessionStart: [{ matcher: 'startup|resume|clear|fork', hooks: [unwrapped('deploy-drift.sh')] }],
+    UserPromptSubmit: [{ hooks: [unwrapped('usage-pace.sh'), commandHook('echo mine')] }],
+  });
+  const policy = readSettings(POLICY);
+  for (const event of ['PreToolUse', 'PermissionDenied', 'SessionStart']) assert.deepEqual(hookEntries(out, event), hookEntries(policy, event), event);
+  assert.deepEqual(hookEntries(out, 'UserPromptSubmit'), [{ hooks: [commandHook('echo mine')] }, ...hookEntries(policy, 'UserPromptSubmit')]);
+  const scripts = Object.keys(out.hooks as object).flatMap((event) => commandsOf(hookEntries(out, event))).filter((command) => command.includes('/.claude/hooks/'));
+  assert.deepEqual(scripts.sort(), ['denied-read-retry.sh', 'deploy-drift.sh', 'derived-data-gate.sh', 'usage-pace.sh'].map((name) => `"$HOME"/.claude/hooks/logged.sh ${name}`));
 });
 
 test('applying policy a second time reports no changes', (t) => {

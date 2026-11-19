@@ -54,14 +54,19 @@ const takePolicy: MergeChild = (_key, _liveValue, policyValue) => policyValue;
 // whole rather than merged entry by entry.
 const ASSERTED_HOOK_EVENTS = new Set(['PreCompact', 'SessionStart']);
 
-// Earlier deploys wired these bash ledger hooks, which `ledger hook` replaced. They are removed
-// from any entry, also one with hooks of your own, so that no ledger hook runs twice.
+// Earlier deploys wired these bash ledger hooks, which `ledger hook` replaced, and these hook
+// scripts without logged.sh. They are removed from any entry, also one with hooks of your own,
+// so that no hook runs twice.
 const RETIRED_HOOK_COMMANDS = new Set([
   '"$HOME"/.claude/hooks/worktree-gate.sh',
   '"$HOME"/.claude/hooks/ledger-gate.sh',
   '"$HOME"/.claude/hooks/ledger-list.sh',
   '"$HOME"/.claude/hooks/ledger-list.sh prompt-submit',
   '"$HOME"/.claude/hooks/ledger-list.sh pre-compact',
+  '"$HOME"/.claude/hooks/derived-data-gate.sh',
+  '"$HOME"/.claude/hooks/denied-read-retry.sh',
+  '"$HOME"/.claude/hooks/deploy-drift.sh',
+  '"$HOME"/.claude/hooks/usage-pace.sh',
 ]);
 
 const isRetiredHook = (hook: unknown): boolean => isObject(hook) && typeof hook.command === 'string' && RETIRED_HOOK_COMMANDS.has(hook.command);

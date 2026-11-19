@@ -10,7 +10,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME\"/.claude/hooks/derived-data-gate.sh"
+            "command": "\"$HOME\"/.claude/hooks/logged.sh derived-data-gate.sh"
           }
         ]
       },
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME\"/.claude/hooks/denied-read-retry.sh"
+            "command": "\"$HOME\"/.claude/hooks/logged.sh denied-read-retry.sh"
           }
         ]
       }
@@ -51,7 +51,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME\"/.claude/hooks/deploy-drift.sh"
+            "command": "\"$HOME\"/.claude/hooks/logged.sh deploy-drift.sh"
           }
         ]
       },
@@ -77,7 +77,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME\"/.claude/hooks/usage-pace.sh"
+            "command": "\"$HOME\"/.claude/hooks/logged.sh usage-pace.sh"
           }
         ]
       }

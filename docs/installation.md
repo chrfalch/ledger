@@ -257,7 +257,10 @@ Deploy asserts five hook events in `~/.claude/settings.json`. They run four
 hook scripts from `hooks/`, excluding the status line, and `ledger hook
 <event>`. Deploy links `bin/ledger` to `~/.claude/bin/ledger` for these hooks.
 When its dependencies are not installed, `ledger hook` writes one line to
-stderr and lets the call through.
+stderr and lets the call through. Each hook script runs through
+`hooks/logged.sh`. A hook that fails lets the call through and adds one line to
+`~/.claude/ledger-hook-failures.log`; the next session start reports the
+failures not yet reported.
 
 - **SessionStart, `ledger hook session-start`** — reads the task ledger into the new
   session. It reads ledgers from linked worktrees, never from the main
