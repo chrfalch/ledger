@@ -1,4 +1,5 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isMain } from './cli.js';
@@ -40,6 +41,21 @@ export function checkLlp(root: string): string[] {
     });
   }
   return problems;
+}
+
+/** Changed files that reference LLP 0000 while LLP 0000 itself is unchanged; `changed` holds repo-relative paths. */
+export function llp0000Warnings(root: string, changed: string[]): string[] {
+  const architecture = readDocs(root).find((doc) => doc.number === '0000');
+  if (!architecture || changed.includes(architecture.file)) return [];
+  return changed
+    .filter((file) => !file.startsWith('llp/0000-') && SCANNED_EXTENSIONS.has(path.extname(file)))
+    .filter((file) => statSync(path.join(root, file), { throwIfNoEntry: false })?.isFile())
+    .filter((file) =>
+      readFileSync(path.join(root, file), 'utf8')
+        .split('\n')
+        .some((line) => [...line.matchAll(REF)].some(([, number]) => number === '0000')),
+    )
+    .map((file) => `${file}: references LLP 0000, but this branch does not change ${architecture.file}`);
 }
 
 function readDocs(root: string): Doc[] {
@@ -139,8 +155,23 @@ function scannedFiles(root: string, dir = ''): string[] {
     });
 }
 
+function changedFiles(root: string): string[] {
+  const git = (...args: string[]) =>
+    execFileSync('git', ['-c', 'core.quotePath=false', ...args], { cwd: root, encoding: 'utf8', stdio: 'pipe' });
+  try {
+    const base = git('merge-base', 'HEAD', 'origin/main').trim();
+    const tracked = git('diff', '-z', '--name-only', base);
+    const untracked = git('ls-files', '-z', '--others', '--exclude-standard');
+    return `${tracked}${untracked}`.split('\0').filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 if (isMain(import.meta.url)) {
-  const problems = checkLlp(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
+  const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+  const problems = checkLlp(root);
   for (const problem of problems) console.error(problem);
+  for (const warning of llp0000Warnings(root, changedFiles(root))) console.error(`warning: ${warning}`);
   process.exitCode = problems.length === 0 ? 0 : 1;
 }

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { checkLlp } from '../tools/llp-refs.js';
+import { checkLlp, llp0000Warnings } from '../tools/llp-refs.js';
 import { REPO } from './helpers.js';
 
 function repo(t: TestContext, files: Record<string, string>): string {
@@ -154,4 +154,49 @@ test('llp-refs still reports a dangling @ref in a repo without an llp folder', (
 
 test('llp-refs finds no problems in this repo', () => {
   assert.deepEqual(checkLlp(REPO), []);
+});
+
+function llp0000Repo(t: TestContext): string {
+  return repo(t, {
+    'llp/0000-base.explainer.md': doc('0000', fields('Explainer')),
+    'tools/a.ts': `// ${ref('0000')}\n`,
+    'tools/b.ts': `// ${ref('0000#summary')}\n`,
+    'tools/c.ts': 'export {};\n',
+  });
+}
+
+test('llp-refs warns when a changed file references LLP 0000 but LLP 0000 is unchanged', (t) => {
+  assert.deepEqual(llp0000Warnings(llp0000Repo(t), ['tools/a.ts', 'tools/c.ts']), [
+    'tools/a.ts: references LLP 0000, but this branch does not change llp/0000-base.explainer.md',
+  ]);
+});
+
+test('llp-refs does not warn when LLP 0000 changes too', (t) => {
+  assert.deepEqual(llp0000Warnings(llp0000Repo(t), ['tools/a.ts', 'llp/0000-base.explainer.md']), []);
+});
+
+test('llp-refs does not warn for a changed file without an LLP 0000 reference', (t) => {
+  assert.deepEqual(llp0000Warnings(llp0000Repo(t), ['tools/c.ts']), []);
+});
+
+test('llp-refs warns for an LLP 0000 reference with an anchor', (t) => {
+  assert.deepEqual(llp0000Warnings(llp0000Repo(t), ['tools/b.ts']), [
+    'tools/b.ts: references LLP 0000, but this branch does not change llp/0000-base.explainer.md',
+  ]);
+});
+
+test('llp-refs skips a changed path that no longer exists', (t) => {
+  assert.deepEqual(llp0000Warnings(llp0000Repo(t), ['tools/deleted.ts']), []);
+});
+
+test('llp-refs skips a changed path that is a directory', (t) => {
+  const root = llp0000Repo(t);
+  mkdirSync(path.join(root, 'tools/dir.ts'));
+  assert.deepEqual(llp0000Warnings(root, ['tools/dir.ts']), []);
+});
+
+test('llp-refs does not join a reference across lines', (t) => {
+  const root = llp0000Repo(t);
+  writeFileSync(path.join(root, 'tools/split.ts'), `// @${'ref'}\n// LLP 0000\n`);
+  assert.deepEqual(llp0000Warnings(root, ['tools/split.ts']), []);
 });
