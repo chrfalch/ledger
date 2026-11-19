@@ -2,7 +2,7 @@ import path from 'node:path';
 import { addChild, addDecision, addLocationBullet, fillLedger, markStarted, park, removeChildren, removeLine, unpark, withDesignRefsBullet } from './edit.js';
 import { fail } from './failure.js';
 import { exists, isFolder, readText, writeAtomic } from './files.js';
-import { isNewSlug, isReadableSlug, parseLedger, type Child, type ChildMark, type TaskRef } from './format.js';
+import { isNewSlug, isReadableSlug, parseLedger, type Child, type ChildMark, type Location, type TaskRef } from './format.js';
 import {
   addWorktree,
   branchExists,
@@ -18,7 +18,8 @@ import {
 } from './git.js';
 import { repoName, samePath, taskWorktree, worktreeLedger, type LedgerPaths } from './paths.js';
 import { loadTasks } from './registry.js';
-import type { LedgerStore } from './store.js';
+import type { Change, LedgerStore } from './store.js';
+import { pauseForTest } from './wait.js';
 import { childrenOf, findNamed, inRepo, locateChild, namedChildren, notASlug, sameTask, taskRef, theTask, wasChildOf, type ChildStatus, type Task } from './tasks.js';
 
 type Ref = Required<TaskRef>;
@@ -31,10 +32,13 @@ export function readLedger({ store }: Context, task: Task): string {
   return (collection.read(task.repo, task.name) ?? fail(`The ledger ${task.file} is gone.`)).text;
 }
 
-export function saveLedger({ store }: Context, task: Task, text: string): void {
-  if (task.place === 'worktree') writeAtomic(task.file, text);
-  else if (task.place === 'backlog') store.backlog.write(task.repo, task.name, text);
-  else throw new Error(`An archive copy is never changed: ${task.file}`);
+/** Rewrites a live ledger with `change` of its text as it is now, which may differ from the text in `task`. True when it was written. */
+export function updateLedger({ store }: Context, task: Task, change: Change<string>): boolean {
+  if (task.place === 'archive') throw new Error(`An archive copy is never changed: ${task.file}`);
+  if (task.place === 'backlog') return store.backlog.update(task.repo, task.name, change);
+  const text = change(readText(task.file));
+  if (text !== undefined) writeAtomic(task.file, text);
+  return text !== undefined;
 }
 
 /** The local date, as the old scripts wrote it. */
@@ -168,7 +172,8 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
   const template = readTemplate(paths, refs);
   const repoFolder = repoName(main);
   const backlog = store.backlog.location(repoFolder, slug);
-  if (store.backlog.has(repoFolder, slug)) fail(`A backlog task ${slug} already exists: ${paths.tilde(backlog)}`);
+  const taken = (): never => fail(`A backlog task ${slug} already exists: ${paths.tilde(backlog)}`);
+  if (store.backlog.has(repoFolder, slug)) taken();
   const current = currentLedger(cwd);
   let created: CreatedTask;
   if (stack) {
@@ -178,7 +183,8 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
     created = { slug, main, status: 'active', ...started };
   } else {
     checkTarget(main, slug, slug);
-    store.backlog.write(repoFolder, slug, fillLedger(template, { slug, goal, main, designRefs: designRefs(main, refs) }));
+    pauseForTest();
+    if (!store.backlog.create(repoFolder, slug, fillLedger(template, { slug, goal, main, designRefs: designRefs(main, refs) }))) taken();
     created = { slug, main, status: 'backlog', ledger: backlog };
   }
   const cwdMain = mainCheckout(cwd);
@@ -224,7 +230,12 @@ function promote(context: Context, slug: string, main: string): Started {
     location.branch ?? slug,
     base,
     ({ worktree, branch, base: from }) => fillLedger(text, { slug, worktree, branch, base: from }),
-    () => store.backlog.remove(backlog.repo, backlog.name),
+    () => {
+      // A throw here makes startWorktree remove the new worktree and branch, so the task stays one backlog ledger.
+      if (!store.backlog.remove(backlog.repo, backlog.name, text)) {
+        fail(`Another command changed the backlog ledger ${backlog.location} while ${slug} was being started. Nothing was started. Run ledger go ${slug} again.`);
+      }
+    },
   );
   refreshRegistry(context, [main]);
   return started;
@@ -354,7 +365,7 @@ export function parkTask(context: Context, name: string, reason: string): ParkRe
   if (oneLine(reason) === '') fail('A parked task needs a reason: ledger park <slug> --reason <text>');
   const { task, ref } = liveTask(context, name);
   const parked = { date: today(), reason: oneLine(reason) };
-  saveLedger(context, task, park(readLedger(context, task), parkMarker(parked)));
+  updateLedger(context, task, (text) => park(text, parkMarker(parked)));
   refreshRegistry(context, [ref.main]);
   return { ...ref, ledger: task.file, parked };
 }
@@ -367,7 +378,7 @@ export function unparkTask(context: Context, name: string): UnparkResult {
   const { task, ref } = liveTask(context, name);
   const { parked } = task.ledger;
   if (parked === undefined) return { ...ref, ledger: task.file, unparked: false };
-  saveLedger(context, task, unpark(readLedger(context, task)));
+  updateLedger(context, task, unpark);
   refreshRegistry(context, [ref.main]);
   return { ...ref, ledger: task.file, unparked: true, parked: { date: parked.date, reason: parked.reason } };
 }
@@ -426,9 +437,15 @@ export function changeParent(context: Context, parentName: string, action: strin
 }
 
 type Linked = { task: Task; ref: Ref };
+type ParentLine = NonNullable<Location['parent']>;
 
-/** The lines under the parent's ## Children that name `child`. */
-const linesOf = ({ task, ref }: Linked, child: Ref): Child[] => task.ledger.children.filter((line) => sameTask({ slug: line.slug, main: line.main ?? ref.main }, child));
+/** The lines under the parent's ## Children that name `child`: in the parent as it was read, or else in `text`. */
+const linesOf = ({ task, ref }: Linked, child: Ref, text?: string): Child[] =>
+  (text === undefined ? task.ledger : parseLedger(text)).children.filter((line) => sameTask({ slug: line.slug, main: line.main ?? ref.main }, child));
+
+/** Whether the `- parent:` line of a child in `childMain` names `parent`. */
+const namesParent = (bullet: ParentLine | undefined, childMain: string, parent: Ref): bullet is ParentLine =>
+  bullet !== undefined && sameTask({ slug: bullet.slug, main: bullet.main ?? childMain }, parent);
 
 /** The parent a ledger's Location names, in the task's own repo unless the line names another. */
 function parentOf(task: Task, main: string): Ref | undefined {
@@ -467,36 +484,46 @@ function addChildTask(context: Context, tasks: Task[], parent: Linked, childRef:
 
   // The child's line first: once it is written, running the same add again finishes the parent.
   if (current === undefined) {
-    const text = addLocationBullet(readLedger(context, child), `- parent: ${linkFrom(childRef.main, parent.ref)}`) ?? fail(`${child.file} has no ## Location section.`);
-    saveLedger(context, child, text);
+    updateLedger(context, child, (text) => addLocationBullet(text, `- parent: ${linkFrom(childRef.main, parent.ref)}`) ?? fail(`${child.file} has no ## Location section.`));
   }
-  if (linesOf(parent, childRef).length === 0) saveLedger(context, parent.task, addChild(readLedger(context, parent.task), `- ${linkFrom(parent.ref.main, childRef)}`));
+  updateLedger(context, parent.task, (text) => (linesOf(parent, childRef, text).length > 0 ? undefined : addChild(text, `- ${linkFrom(parent.ref.main, childRef)}`)));
   return { action: 'add', parent: parent.ref, child: childRef };
 }
 
 function removeChildTask(context: Context, tasks: Task[], parent: Linked, childRef: Ref): ParentChange {
   const name = nameFrom(context.cwd);
   const child = theTask(tasks, childRef, { live: true });
-  const bullet = child.ledger.location.parent;
-  if (bullet === undefined || !sameTask({ slug: bullet.slug, main: bullet.main ?? childRef.main }, parent.ref)) fail(`${name(childRef)} is not a child of ${name(parent.ref)}.`);
+  if (!namesParent(child.ledger.location.parent, childRef.main, parent.ref)) fail(`${name(childRef)} is not a child of ${name(parent.ref)}.`);
   // The parent first: until the child's line is gone, running the same remove again still finds the pair.
-  const listed = linesOf(parent, childRef);
-  if (listed.length > 0) saveLedger(context, parent.task, removeChildren(readLedger(context, parent.task), listed.map(({ line }) => line)));
-  saveLedger(context, child, removeLine(readLedger(context, child), bullet.line));
+  updateLedger(context, parent.task, (text) => {
+    const listed = linesOf(parent, childRef, text);
+    return listed.length === 0 ? undefined : removeChildren(text, listed.map(({ line }) => line));
+  });
+  updateLedger(context, child, (text) => {
+    const bullet = parseLedger(text).location.parent;
+    return namesParent(bullet, childRef.main, parent.ref) ? removeLine(text, bullet.line) : undefined;
+  });
   return { action: 'remove', parent: parent.ref, child: childRef };
 }
 
 /** The Children mark is only a hint, so a marked line and a retired child are both left as they are. */
 function startChildTask(context: Context, tasks: Task[], parent: Linked, childRef: Ref): ParentChange {
   const name = nameFrom(context.cwd);
+  const notListed = (): never => fail(`${name(childRef)} is not listed under ## Children of ${name(parent.ref)}. Add it with: ledger parent ${name(parent.ref)} add ${name(childRef)}`);
   const [line] = linesOf(parent, childRef);
-  if (line === undefined) fail(`${name(childRef)} is not listed under ## Children of ${name(parent.ref)}. Add it with: ledger parent ${name(parent.ref)} add ${name(childRef)}`);
+  if (line === undefined) notListed();
   if (!namedChildren(parent.task, tasks).includes(line)) fail(`${name(childRef)} names no task: its line under ## Children of ${name(parent.ref)} is a note, not a child.`);
   const started = { action: 'start', parent: parent.ref, child: childRef, ledger: parent.task.file } as const;
   if (line.mark !== undefined) return { ...started, marked: false, reason: 'already-marked', mark: line.mark.kind };
   if (locateChild(tasks, childRef, parent.ref)?.status === 'retired') return { ...started, marked: false, reason: 'retired' };
-  saveLedger(context, parent.task, markStarted(readLedger(context, parent.task), line, today()));
-  return { ...started, marked: true };
+  let mark: ChildMark['kind'] | undefined;
+  updateLedger(context, parent.task, (text) => {
+    const [now] = linesOf(parent, childRef, text);
+    if (now === undefined) return notListed();
+    mark = now.mark?.kind;
+    return mark === undefined ? markStarted(text, now, today()) : undefined;
+  });
+  return mark === undefined ? { ...started, marked: true } : { ...started, marked: false, reason: 'already-marked', mark };
 }
 
 /**

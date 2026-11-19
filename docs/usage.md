@@ -324,6 +324,17 @@ name a place in the database, not a file. Use `ledger show` to read it. A bad
 settings file makes every command that uses the storage exit 1, but
 `ledger --help` still works, and hooks print the error and exit 0.
 
+Two `ledger` commands can run at the same time, for example in two sessions.
+Neither loses the other's change, and only one of them can make a task with a
+given name. With file storage, a command that changes a backlog ledger or
+`~/.claude/ledgers.json` holds a lock file next to it for that moment, such as
+`~/.claude/ledgers.json.lock`. A command that waits more than five seconds for
+another stops with exit 1 and says so; run it again. The next command takes
+over a lock that a killed command left behind. If another command changes a
+backlog ledger while `ledger go` starts it, `ledger go` starts nothing. It
+removes the new worktree, keeps the backlog ledger, and exits 1. Run
+`ledger go` again.
+
 ### Parent tasks
 
 A parent task ties together two or more tasks that ship separately: one

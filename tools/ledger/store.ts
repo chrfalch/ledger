@@ -29,10 +29,21 @@ export interface LedgerCollection {
   has(repo: string, name: string): boolean;
 }
 
+/**
+ * A change to a text that another command may change at the same time: it gets the text as it is now, and returns the
+ * new text, or undefined to leave it as it is. A throw leaves it as it is too. It may read the store but not write to it.
+ */
+export type Change<T> = (text: T) => string | undefined;
+
 /** Ledgers of tasks not started yet; the name is the slug. */
 export interface Backlog extends LedgerCollection {
   write(repo: string, slug: string, text: string): void;
-  remove(repo: string, slug: string): void;
+  /** Writes a new ledger, at once and whole. False, with nothing written, when `slug` is taken, also by a command running now. */
+  create(repo: string, slug: string, text: string): boolean;
+  /** Rewrites the ledger with `change`, which no other write can come between. True when it was written; throws when it does not exist. */
+  update(repo: string, slug: string, change: Change<string>): boolean;
+  /** Deletes the ledger while its text is still `expected`. False, with nothing deleted, when another command changed it; throws when it does not exist. */
+  remove(repo: string, slug: string, expected: string): boolean;
 }
 
 export type EvidenceState = 'none' | 'same' | 'differs';
@@ -68,6 +79,8 @@ export interface Archive extends LedgerCollection {
 export interface Registry {
   read(): string | undefined;
   write(text: string): void;
+  /** Rewrites the text with `change`, which gets undefined for no registry; no other write can come between. */
+  update(change: Change<string | undefined>): void;
 }
 
 /** Where backlog ledgers, archive copies and the registry are kept. A worktree's .claude/ledger.md is not in it. */

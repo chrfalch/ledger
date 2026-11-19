@@ -25,7 +25,7 @@ import type { EvidenceState } from './store.js';
 import { findNamed, findTasks, inRepo, locateChild, namedChildren, sameTask, type Task } from './tasks.js';
 import { plural } from './views.js';
 import { below, deleteInBackground, ownXcodeFolders } from './worktrees.js';
-import { readLedger, saveLedger, shellWord, today, type Context } from './write.js';
+import { readLedger, shellWord, today, updateLedger, type Context } from './write.js';
 
 /** bin/ledger as one shell word, so the commands that messages name can be pasted as they are. */
 const ledgerCommand = shellWord(ledgerBin);
@@ -539,20 +539,14 @@ const message = (error: unknown): string => (error instanceof Error ? error.mess
 /** `text` as one sentence that ends in a period, so the next one can follow it. */
 const sentence = (text: string): string => `${text.replace(/[.\s]+$/, '')}.`;
 
-/** Rewrites the parent's ledger as it is on disk now; another session may have changed it since the plan read it. */
-function changeParent(context: Context, parent: Task, change: (text: string) => string | undefined): boolean {
-  const text = change(readLedger(context, parent));
-  if (text !== undefined) saveLedger(context, parent, text);
-  return text !== undefined;
-}
-
 type ArchiveCopy = { repo: string; name: string; location: string };
 
 /**
  * Stops the retire, before `removal` deletes the task, when the ledger or its evidence no longer matches the archive
- * copy: another session may have written to them since the copy was made, and that work would be lost.
+ * copy: another session may have written to them since the copy was made, and that work would be lost. Returns the
+ * text of the ledger, which is the text of the copy.
  */
-function stopIfChanged(context: Context, plan: RetirePlan, copy: ArchiveCopy, removal: string): void {
+function stopIfChanged(context: Context, plan: RetirePlan, copy: ArchiveCopy, removal: string): string {
   const { archive } = context.store;
   const evidence = plan.worktree === undefined ? undefined : path.join(plan.worktree.folder, '.claude', 'evidence');
   let text: string | undefined;
@@ -565,9 +559,12 @@ function stopIfChanged(context: Context, plan: RetirePlan, copy: ArchiveCopy, re
     ...(text === undefined || text !== archive.read(copy.repo, copy.name)?.text ? [`the ledger ${plan.task.file}`] : []),
     ...(archive.evidenceState(copy.repo, copy.name, evidence) === 'differs' ? [evidence === undefined ? 'the archived evidence' : `the evidence ${evidence}/`] : []),
   ];
-  if (changed.length > 0) {
-    fail(`Stopped before removing ${removal}: ${changed.join(' and ')} changed after the archive copy ${copy.location} was written. Nothing was removed. Run ${ledgerCommand} retire again.`);
-  }
+  if (text === undefined || changed.length > 0) stopBefore(removal, changed, copy);
+  return text;
+}
+
+function stopBefore(removal: string, changed: string[], copy: ArchiveCopy): never {
+  return fail(`Stopped before removing ${removal}: ${changed.join(' and ')} changed after the archive copy ${copy.location} was written. Nothing was removed. Run ${ledgerCommand} retire again.`);
 }
 
 /**
@@ -605,18 +602,22 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
         out.line(`removed  ${action.folder}`);
         break;
       }
-      case 'remove-backlog':
-        stopIfChanged(context, plan, copy, `the backlog ledger ${action.location}`);
+      case 'remove-backlog': {
+        const removal = `the backlog ledger ${action.location}`;
+        const text = stopIfChanged(context, plan, copy, removal);
+        let removed: boolean;
         try {
-          store.backlog.remove(action.repo, action.name);
+          removed = store.backlog.remove(action.repo, action.name, text);
         } catch (error) {
           fail(`Could not delete the backlog ledger ${action.location}: ${sentence(message(error))} Its archive copy is written. Fix the cause, then run ${ledgerCommand} retire again.`);
         }
+        if (!removed) stopBefore(removal, [`the ledger ${plan.task.file}`], copy);
         out.line(`removed  ${action.location}`);
         break;
+      }
       case 'mark-parent':
         try {
-          const marked = changeParent(context, action.parent, (text) => {
+          const marked = updateLedger(context, action.parent, (text) => {
             const line = parseLedger(text).children.find((child) => sameTask(lineRef(child, action.parentRef.main), action.child));
             return line === undefined || line.mark?.kind === 'retired' ? undefined : markRetired(text, line, today());
           });
@@ -628,7 +629,7 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
         break;
       case 'copy-report':
         try {
-          changeParent(context, action.parent, (text) => putChildReport(text, action.heading, action.report));
+          updateLedger(context, action.parent, (text) => putChildReport(text, action.heading, action.report));
           out.line(`copied the report of ${action.childName} to ${action.parent.file}`);
         } catch (error) {
           out.warn(`could not copy the report of ${action.childName} to ${action.parent.file}: ${message(error)}`);
