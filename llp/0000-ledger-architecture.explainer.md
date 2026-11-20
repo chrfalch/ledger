@@ -110,7 +110,9 @@ that the setting names.
 accepts only a private GitHub repository. `ledger store sync`
 (`tools/ledger/sync.ts`) commits, pulls with a rebase, checks that only ledgers
 and no secret-like text go out, and pushes. A pre-push hook in the clone runs
-the same secret scan (`tools/ledger/secret-scan.ts`).
+the same secret scan (`tools/ledger/secret-scan.ts`). Both read a line of a task
+record also with its JSON escapes undone, so a secret after an escaped line
+break starts a line, as it does in Markdown.
 
 `migrateStorage` in `tools/ledger/migrate.ts` copies everything from one store
 to another, between any two of the three. It reads every copy back before it
@@ -254,8 +256,8 @@ Close last.
 
 | Data | File store | SQLite store | Git store |
 |---|---|---|---|
-| Backlog ledger | `~/.claude/ledger-backlog/<repo key>/<slug>.md` | `~/.claude/ledgers.db` | `~/.claude/ledger-data/backlog/<repo key>/<slug>.md`, committed |
-| Archive copy | `~/.claude/ledger-archive/<repo key>/<YYYY-MM-DD>-<slug>.md` | `~/.claude/ledgers.db` | `~/.claude/ledger-data/archive/<repo key>/<YYYY-MM-DD>-<slug>.md`, committed |
+| Backlog ledger | `~/.claude/ledger-backlog/<repo key>/<slug>.json` | `~/.claude/ledgers.db`, table `records` | `~/.claude/ledger-data/backlog/<repo key>/<slug>.json`, committed |
+| Archive copy | `~/.claude/ledger-archive/<repo key>/<YYYY-MM-DD>-<slug>.json` | `~/.claude/ledgers.db`, table `records` | `~/.claude/ledger-data/archive/<repo key>/<YYYY-MM-DD>-<slug>.json`, committed |
 | Archive evidence | `~/.claude/ledger-archive/<repo key>/<YYYY-MM-DD>-<slug>/` | `~/.claude/ledgers.db`, as bytes | `~/.claude/ledger-evidence/<repo key>/<YYYY-MM-DD>-<slug>/`, never committed |
 | Registry | `~/.claude/ledgers.json` | `~/.claude/ledgers.db` | `~/.claude/ledgers-git.json`, never committed |
 | Repo aliases | `~/.claude/ledger-aliases.json` | `~/.claude/ledgers.db` | `~/.claude/ledger-aliases-git.json`, never committed |
@@ -270,7 +272,62 @@ lock file, `<target>.lock`, during each such write. `withLock` in `tools/ledger/
 up to five seconds for a lock. It takes over a lock whose process is gone or
 that is older than one minute.
 
-A ledger is Markdown. `tools/ledger/format.ts` parses and writes it.
+A worktree ledger is Markdown. `tools/ledger/format.ts` parses and writes it.
+
+A backlog ledger or archive copy is a task record: JSON with one field or list
+per part of the ledger (LLP 0001 D29). `tools/ledger/record.ts` defines it.
+`parseRecord` reads Markdown into a record, and `renderRecord` writes the
+record back as Markdown in the template's layout. A wrapped or indented line
+stays with the item above it. The tag of a decision or constraint, such as
+`[observed]`, is read only at the end of the item, so a tag on the first line
+of a wrapped item stays in the item's text. A line that fits no field goes to
+the record's general notes, under a copy of its heading. The conversion drops
+only these:
+
+- the template's placeholder lines and preamble, and the plan table's header
+  and separator rows of five cells;
+- blank lines, except one blank line between paragraphs of the goal, the next
+  step, the report, the notes or a section's lines that go to the notes, and
+  every blank line inside a wrapped item;
+- spacing at a line's end and around the parts of an item, such as a bullet's
+  dash, a table cell or a Location value;
+- Windows line endings.
+
+The stores keep their text interface: a read renders the record, and a write
+parses the Markdown it is given. So `text` reads back as
+`renderRecord(parseRecord(text))`, not always as the bytes written. A write
+whose record would not read back the same fails and changes nothing
+(`recordToWrite`). When the file or git store puts a record in place of
+Markdown, in a conversion or a write, the new file keeps the Markdown's mode,
+and the store keeps the Markdown's birth time as `created` beside the record,
+as a new file's birth time cannot be set. The Markdown does not show
+`created`, so it is no field of the record: each later write carries it over.
+
+A store still reads a ledger kept as Markdown from before records: a
+`<name>.md` file, or a row of the SQLite table `ledgers`. A write replaces
+that Markdown with a record. It holds the lock of `<name>.md` as well as that
+of `<name>.json`, as a writer from before records locks only the Markdown.
+When a task has both, as after an older machine wrote one, the record is read
+and the Markdown is hidden; no write removes it. Removing such a task fails,
+as the Markdown would be read again without the record; a move takes both
+along. `ledger store migrate --records` converts all Markdown at once, and
+names each task kept both ways as a conflict for a person to merge. Its dry
+run checks each ledger as the conversion does, so it fails where the
+conversion would.
+
+Known limits of task records:
+
+- A number above 2^53 in a record field, such as `- order:` or the step a
+  question blocks, is rounded.
+- The template's example plan row is dropped even next to real rows, so the
+  plugin's plan progress, which counts it, can change.
+- A numbered plan row of other than five cells is no step of the record; it
+  stays as text, in the note of the step above it or in the general notes.
+- `ledger store migrate --to` copies the text, so the copy has no `created`
+  and its birth time is that of the copy.
+- `ledger store migrate --to git --dry-run` puts back a pre-push hook that
+  differs, as it opens git storage for writing (`openForMigrate` in
+  `tools/ledger/migrate.ts`).
 
 ## Task life today
 

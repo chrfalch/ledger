@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { REPO } from './helpers.js';
-import { archivedTask, backlogTask, git, home, ledger, ledgerText, lineWith, repoKeyOf, repository, storeFolder, worktreeTask, type Fields, type Ran } from './ledger-core-fixtures.js';
+import { archivedTask, backlogTask, git, home, ledger, ledgerText, lineWith, readLedgerFile, recordFile, repoKeyOf, repository, storeFolder, worktreeTask, type Fields, type Ran } from './ledger-core-fixtures.js';
 
 /** A HOME with the template and ~/repos/app, whose build/ and .claude/ folders git ignores. */
 function setup(t: TestContext) {
@@ -40,7 +40,7 @@ function refused(ran: Ran, pattern: RegExp, status = 1): void {
 }
 
 const json = (h: string, cwd: string, ...args: string[]): Ran => ledger(h, cwd, ...args, '--json');
-const read = (file: string): string => readFileSync(file, 'utf8');
+const read = readLedgerFile;
 const worktreeOf = (main: string, slug: string): string => path.join(main, '.claude/worktrees', slug);
 const ledgerOf = (worktree: string): string => path.join(worktree, '.claude/ledger.md');
 const today = (): string => {
@@ -172,7 +172,7 @@ test('go --json of a parent starts its first backlog child, marks it started and
   assert.equal(started.worktree, worktreeOf(app, 'part-a'));
   assert.deepEqual(started.unparked, { date: '2026-11-10', reason: 'not yet' });
   const epicBacklog = path.join(storeFolder(h, 'ledger-backlog', app), 'epic.md');
-  assert.deepEqual(started.marked, { parent: { slug: 'epic', main: app }, ledger: epicBacklog });
+  assert.deepEqual(started.marked, { parent: { slug: 'epic', main: app }, ledger: recordFile(epicBacklog) });
   assert.equal(lineWith(read(epicBacklog), '- part-a @'), `- part-a @ ${app} (started ${today()})`);
   assert.doesNotMatch(read(ledgerOf(worktreeOf(app, 'part-a'))), /^Parked:/m);
 });
@@ -262,7 +262,7 @@ test('task --json reports a backlog task and its start command, a stacked task w
     slug: 'fix-login',
     main: app,
     status: 'backlog',
-    ledger: path.join(storeFolder(h, 'ledger-backlog', app), 'fix-login.md'),
+    ledger: path.join(storeFolder(h, 'ledger-backlog', app), 'fix-login.json'),
     start: '/ledger:go fix-login',
   });
 
@@ -317,7 +317,7 @@ test('retire --dry-run --json gives the plan and its blockers; retire --json lis
   assert.equal(existsSync(worktree), true);
 
   const retired = done(json(h, app, 'task', 'retire', 'idea'));
-  const archive = path.join(storeFolder(h, 'ledger-archive', app), `${today()}-idea.md`);
+  const archive = path.join(storeFolder(h, 'ledger-archive', app), `${today()}-idea.json`);
   assert.equal(retired.dryRun, false);
   assert.equal(retired.archive, archive);
   assert.deepEqual(retired.parent, { slug: 'epic', main: app });

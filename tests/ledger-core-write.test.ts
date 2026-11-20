@@ -3,7 +3,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, w
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { REPO } from './helpers.js';
-import { archivedTask, backlogTask, git, home, ledger, LEDGER_BIN, ledgerText, ok, repository, spawn, storeFolder, worktreeTask } from './ledger-core-fixtures.js';
+import { archivedTask, backlogTask, git, home, ledger, LEDGER_BIN, ledgerText, ok, readLedgerFile, recordFile, repository, spawn, storeFolder, worktreeTask } from './ledger-core-fixtures.js';
 
 const TEMPLATE = readFileSync(path.join(REPO, 'ledger.template.md'), 'utf8');
 
@@ -15,13 +15,13 @@ function setup(t: TestContext) {
   return { h, app };
 }
 
-const read = (file: string): string => readFileSync(file, 'utf8');
-const backlogFile = (h: string, main: string, slug: string): string => path.join(storeFolder(h, 'ledger-backlog', main), `${slug}.md`);
+const read = readLedgerFile;
+const backlogFile = (h: string, main: string, slug: string): string => path.join(storeFolder(h, 'ledger-backlog', main), `${slug}.json`);
 const worktreeOf = (main: string, slug: string): string => path.join(main, '.claude/worktrees', slug);
 const ledgerOf = (worktree: string): string => path.join(worktree, '.claude/ledger.md');
 const short = (h: string, cwd: string, ref: string): string => git(h, cwd, 'rev-parse', '--short', ref);
 type RegistryEntry = { path: string; status: string; slug: string; parent?: string };
-const registry = (h: string): RegistryEntry[] => JSON.parse(read(path.join(h, '.claude/ledgers.json')));
+const registry = (h: string): RegistryEntry[] => JSON.parse(readFileSync(path.join(h, '.claude/ledgers.json'), 'utf8'));
 
 function today(): string {
   const date = new Date();
@@ -281,7 +281,7 @@ test('ledger go refuses a missing backlog task (2), one of a same-named repo (3)
   git(h, twin, 'init', '--quiet', '-b', 'main');
   ok(ledger(h, twin, 'task', 'new', 'twin-task'));
   failed(ledger(h, app, 'go', 'twin-task'), new RegExp(twin), 3);
-  const file = backlogFile(h, app, 'no-main');
+  const file = path.join(storeFolder(h, 'ledger-backlog', app), 'no-main.md');
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, ledgerText({ slug: 'no-main' }));
   failed(ledger(h, app, 'go', 'no-main'), /main/, 4);
@@ -369,14 +369,25 @@ test('ledger park puts one marker first under Next step; unpark restores the exa
   assert.equal(read(file), before);
 });
 
-test('park and unpark keep CRLF line endings; park works on a backlog task', (t) => {
+test('park and unpark keep CRLF line endings of a worktree ledger', (t) => {
   const { h, app } = setup(t);
-  const file = backlogTask(h, app, { slug: 'idea' });
+  const file = worktreeTask(h, app, { slug: 'idea' });
   const before = read(file).replace(/\n/g, '\r\n');
   writeFileSync(file, before);
   ok(ledger(h, app, 'task', 'park', 'idea', '--reason', 'no time'));
   const after = read(file);
   assert.equal(after, before.replace('\r\n## Next step\r\n', `\r\n## Next step\r\nParked: ${today()} — no time\r\n`));
+  ok(ledger(h, app, 'task', 'unpark', 'idea'));
+  assert.equal(read(file), before);
+});
+
+test('park and unpark work on a backlog task kept as Markdown with CRLF line endings; the record it becomes reads with LF', (t) => {
+  const { h, app } = setup(t);
+  const file = backlogTask(h, app, { slug: 'idea' });
+  const before = read(file);
+  writeFileSync(file, before.replace(/\n/g, '\r\n'));
+  ok(ledger(h, app, 'task', 'park', 'idea', '--reason', 'no time'));
+  assert.equal(read(file), before.replace('\n## Next step\n', `\n## Next step\nParked: ${today()} — no time\n`));
   ok(ledger(h, app, 'task', 'unpark', 'idea'));
   assert.equal(read(file), before);
 });
@@ -430,7 +441,7 @@ test('ledger parent add links a child in the same repo; remove restores both led
   assert.equal(read(parent), inserted(parentBefore, '- design refs: none', '', '## Children', '- idea'));
   const shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'epic', '--json'))) as { children: { slug: string; status: string }[] };
   assert.deepEqual(shown.children.map(({ slug, status }) => [slug, status]), [['idea', 'backlog']]);
-  assert.equal(registry(h).find(({ path: entry }) => entry === child)?.parent, 'epic');
+  assert.equal(registry(h).find(({ path: entry }) => entry === recordFile(child))?.parent, 'epic');
   ok(ledger(h, app, 'tree', 'remove', 'epic', 'idea'));
   assert.equal(read(parent), parentBefore);
   assert.equal(read(child), childBefore);

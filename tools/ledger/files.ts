@@ -48,19 +48,20 @@ function throughTemporary<T>(file: string, text: string, mode: number | undefine
 
 /**
  * Writes through a temporary file and a rename, so a reader such as the ledger plugin never sees half a file and a
- * failed write leaves the old file whole. An existing file keeps its mode, which the umask would otherwise narrow.
+ * failed write leaves the old file whole. The file gets `mode`; by default an existing file keeps its own, which the
+ * umask would otherwise narrow.
  */
-export function writeAtomic(file: string, text: string): void {
-  const mode = statSync(file, { throwIfNoEntry: false })?.mode;
+export function writeAtomic(file: string, text: string, mode = statSync(file, { throwIfNoEntry: false })?.mode): void {
   throughTemporary(file, text, mode, (temporary) => renameSync(temporary, file));
 }
 
 /**
- * Writes a new file whole: a temporary file, then a hard link to the name, which fails on any entry that is there, a
- * dangling symbolic link included. False when the name is taken; nothing is replaced and no temporary file is left.
+ * Writes a new file whole, with `mode` when given: a temporary file, then a hard link to the name, which fails on any
+ * entry that is there, a dangling symbolic link included. False when the name is taken; nothing is replaced and no
+ * temporary file is left.
  */
-export function createFile(file: string, text: string): boolean {
-  return throughTemporary(file, text, undefined, (temporary) => {
+export function createFile(file: string, text: string, mode?: number): boolean {
+  return throughTemporary(file, text, mode, (temporary) => {
     try {
       linkSync(temporary, file);
       return true;

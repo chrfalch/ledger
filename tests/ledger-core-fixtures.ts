@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
 import module from 'node:module';
 import path from 'node:path';
 import type { TestContext } from 'node:test';
 import { pathToFileURL } from 'node:url';
+import { readRecordJson, renderRecord } from '../tools/ledger/record.js';
 import { freshHome, REPO } from './helpers.js';
 
 export const LEDGER_BIN = path.join(REPO, 'bin/ledger');
@@ -205,6 +206,21 @@ export function archivedTask(h: string, main: string, date: string, fields: Fiel
   utimesSync(file, time, time);
   return file;
 }
+
+/** <name>.json, where the file store kept <name>.md before task records. */
+export const recordFile = (file: string): string => file.replace(/\.md$/, '.json');
+
+/**
+ * The text of a ledger file as a reader of the store sees it: a task record <name>.json rendered to Markdown, and a
+ * <name>.md that a record replaced read as that record. Any other file, such as a worktree's ledger.md, as it is.
+ */
+export function readLedgerFile(file: string): string {
+  const record = file.endsWith('.json') ? file : recordFile(file);
+  return existsSync(record) && (record !== file || file.endsWith('.json')) ? renderRecord(readRecordJson(readFileSync(record, 'utf8'), record)) : readFileSync(file, 'utf8');
+}
+
+/** Whether the store holds the ledger of `file`, as <name>.md from before task records or as its record <name>.json. */
+export const hasLedgerFile = (file: string): boolean => existsSync(file) || existsSync(recordFile(file));
 
 export function touch(file: string, iso: string): void {
   const time = new Date(iso);

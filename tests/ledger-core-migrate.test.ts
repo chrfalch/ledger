@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
+import { parseRecord, recordJson, storedText } from '../tools/ledger/record.js';
 import { migrateStorage } from '../tools/ledger/migrate.js';
 import { ledgerPaths, type LedgerPaths } from '../tools/ledger/paths.js';
 import { sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
@@ -296,6 +298,16 @@ const disk = (): never => {
   throw new Error('disk full');
 };
 
+/** Puts Markdown from before records beside the record `name` of `place`, which the record then hides. */
+function hideMarkdown(h: string, storage: Storage, place: 'backlog' | 'archive', repo: string, name: string): void {
+  const markdown = '# Task ledger — hidden\n\n## Goal\nAn older copy.\n';
+  if (storage === 'sqlite') {
+    const db = new (createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')).DatabaseSync(sqliteFile(h));
+    db.prepare('INSERT INTO ledgers VALUES (?, ?, ?, ?, ?, ?)').run(place, repo, name, Buffer.from(markdown), Date.now(), Date.now());
+    db.close();
+  } else writeFileSync(withStore(h, storage, (store) => store[place].location(repo, name)).replace(/\.json$/, '.md'), markdown);
+}
+
 const moduleUrl = (file: string): string => JSON.stringify(pathToFileURL(path.join(REPO, 'tools/ledger', file)).href);
 
 /** Writes an archive copy to the `storage` of `h` from a process of its own, as another ledger command does. */
@@ -347,7 +359,7 @@ for (const from of ['file', 'sqlite'] as const) {
 
   test(`migrate ${from} → ${to} keeps an archive copy another command wrote under the same name during the copy`, { skip }, (t) => {
     const { h, archived } = populated(t, from);
-    const theirs = 'Another command wrote this copy.\n';
+    const theirs = storedText('Another command wrote this copy.\n');
     let target: LedgerStore | undefined;
     const inner = () => (target ??= openStore({ home: h }, to));
     try {
@@ -405,7 +417,7 @@ for (const from of ['file', 'sqlite'] as const) {
 
   test(`migrate ${from} → ${to} --remove-source keeps a backlog ledger that changed after the copy, and its registry entry, and says so`, { skip }, (t) => {
     const { h, source } = populated(t, from);
-    const changedText = 'Written by another session after the copy.\n';
+    const changedText = storedText('Written by another session after the copy.\n');
     const lines = migrateWith(
       h,
       to,
@@ -432,7 +444,7 @@ for (const from of ['file', 'sqlite'] as const) {
 
   test(`migrate ${from} → ${to} exits 1 when a backlog name is taken in the target after the check, keeps that ledger, and removes its own copies`, { skip }, (t) => {
     const { h, source } = populated(t, from);
-    const theirs = 'Started by another session after the check.\n';
+    const theirs = storedText('Started by another session after the check.\n');
     let raced = false;
     const settings = readFileSync(settingsFile(h), 'utf8');
     // The check for taken archive names runs after the one for backlog names, so this write comes between that check and the copy.
@@ -470,7 +482,7 @@ for (const from of ['file', 'sqlite'] as const) {
 
   test(`migrate ${from} → ${to} rolls back but keeps a backlog copy another command changed after the copy, and says so`, { skip }, (t) => {
     const { h, source } = populated(t, from);
-    const changedText = 'Written in the target by another session after the copy.\n';
+    const changedText = storedText('Written in the target by another session after the copy.\n');
     const message = failure(() =>
       migrateWith(h, to, {
         archive: {
@@ -485,6 +497,44 @@ for (const from of ['file', 'sqlite'] as const) {
     assert.doesNotMatch(message, /Every copy it made in the .* was removed again\./);
     assert.deepEqual(withStore(h, from, contents), source);
     assert.deepEqual(withStore(h, to, contents), { backlog: [{ repo: keyOf(h, 'app'), name: 'fix-login', text: changedText }], archive: [], registry: undefined });
+  });
+
+  test(`migrate ${from} → ${to} --remove-source keeps a backlog ledger and an archive copy whose record hides Markdown, says so, and removes the rest`, { skip }, (t) => {
+    const { h, archived } = populated(t, from);
+    const app = keyOf(h, 'app');
+    hideMarkdown(h, from, 'backlog', app, 'fix-login');
+    hideMarkdown(h, from, 'archive', app, archived);
+
+    const lines = migrateWith(h, to, {}, { removeSource: true });
+
+    for (const kept of [`kept backlog ${app}/fix-login in the source`, `kept archive ${app}/${archived} in the source`]) {
+      assert.ok(lines.some((line) => line.startsWith(kept) && line.includes('its record hides Markdown')), lines.join('\n'));
+    }
+    const left = withStore(h, from, (store) => ({ backlog: store.backlog.hiddenMarkdown?.(app), archive: store.archive.hiddenMarkdown?.(app), lib: store.backlog.list(keyOf(h, 'lib')) }));
+    assert.deepEqual(left, { backlog: ['fix-login'], archive: [archived], lib: [] });
+    assert.ok(lines.at(-1)?.includes('removed 1 backlog ledger, 0 archive copies'), lines.join('\n'));
+  });
+
+  test(`migrate ${from} → ${to} rolls back but keeps a copy whose record hides Markdown in the target, and says so`, { skip }, (t) => {
+    const { h, source } = populated(t, from);
+    const app = keyOf(h, 'app');
+    const message = failure(() =>
+      migrateWith(h, to, {
+        archive: {
+          write: () => {
+            hideMarkdown(h, to, 'backlog', app, 'fix-login');
+            disk();
+          },
+        },
+      }),
+    );
+    assert.ok(message.includes(`backlog ${app}/fix-login`) && message.includes('hides Markdown'), message);
+    assert.doesNotMatch(message, /Removing the copies it made failed too/);
+    assert.deepEqual(withStore(h, from, contents), source);
+    assert.deepEqual(
+      withStore(h, to, (store) => [store.backlog.hiddenMarkdown?.(app), store.backlog.list(keyOf(h, 'lib'))]),
+      [['fix-login'], []],
+    );
   });
 }
 
@@ -598,7 +648,7 @@ for (const what of ['text', 'evidence'] as const) {
         archive: {
           remove: (...args: Parameters<Archive['remove']>) => {
             const [repo, name] = args;
-            if (what === 'text') writeFileSync(store.archive.location(repo, name), 'Changed after the check.\n');
+            if (what === 'text') writeFileSync(store.archive.location(repo, name), recordJson(parseRecord('Changed after the check.\n')));
             else writeFileSync(path.join(store.archive.evidenceLocation(repo, name), 'late.txt'), 'late\n');
             return store.archive.remove(...args);
           },

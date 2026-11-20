@@ -38,10 +38,10 @@ const entryLocation = (entry: RegistryEntry): string | undefined => (entry.statu
 
 const shown = (key: string): string => `${repoLabel(key)} (${key})`;
 
-/** The name whose ledger of `place` under `repo` is at `location`, if any: a file store adds .md to a name, SQLite does not. */
+/** The name whose ledger of `place` under `repo` is at `location`, if any: a file store adds .json, or .md before task records, to a name; SQLite adds nothing. */
 function nameAt(store: LedgerStore, place: Place, repo: string, location: string): string | undefined {
   const base = path.basename(location);
-  return [base, base.replace(/\.md$/, '')].find((name) => isEntryName(name) && store[place].location(repo, name) === location);
+  return [base, base.replace(/\.(md|json)$/, '')].find((name) => isEntryName(name) && store[place].location(repo, name) === location);
 }
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));

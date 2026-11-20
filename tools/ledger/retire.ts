@@ -20,6 +20,7 @@ import {
   removeLinkedWorktree,
 } from './git.js';
 import { ledgerBin, samePath, worktreeLedger } from './paths.js';
+import { storedText } from './record.js';
 import { loadTasks } from './registry.js';
 import { repoKey } from './repo-key.js';
 import type { EvidenceState } from './store.js';
@@ -387,7 +388,7 @@ export function readRetire(context: Context, slug: string | undefined): RetireFa
   }
   const text = readLedger(context, task);
   const archiveRepo = repoKey(main);
-  const identical = store.archive.list(archiveRepo).find((copy) => copy.text === text);
+  const identical = store.archive.list(archiveRepo).find((copy) => copy.text === storedText(text));
   return {
     task,
     ref: { slug: task.slug, main },
@@ -551,7 +552,7 @@ type ArchiveCopy = { repo: string; name: string; location: string };
 /**
  * Stops the retire, before `removal` deletes the task, when the ledger or its evidence no longer matches the archive
  * copy: another session may have written to them since the copy was made, and that work would be lost. Returns the
- * text of the ledger, which is the text of the copy.
+ * text of the ledger, which the copy holds as a record.
  */
 function stopIfChanged(context: Context, plan: RetirePlan, copy: ArchiveCopy, removal: string): string {
   const { archive } = context.store;
@@ -563,7 +564,7 @@ function stopIfChanged(context: Context, plan: RetirePlan, copy: ArchiveCopy, re
     text = undefined;
   }
   const changed = [
-    ...(text === undefined || text !== archive.read(copy.repo, copy.name)?.text ? [`the ledger ${plan.task.file}`] : []),
+    ...(text === undefined || storedText(text) !== archive.read(copy.repo, copy.name)?.text ? [`the ledger ${plan.task.file}`] : []),
     ...(archive.evidenceState(copy.repo, copy.name, evidence) === 'differs' ? [evidence === undefined ? 'the archived evidence' : `the evidence ${evidence}/`] : []),
   ];
   if (text === undefined || changed.length > 0) stopBefore(removal, changed, copy);
@@ -590,7 +591,7 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
         const evidenceCopy = `${action.evidenceLocation}/`;
         try {
           store.archive.write(action.repo, action.name, action.text, action.evidence);
-          if (store.archive.read(action.repo, action.name)?.text !== action.text) fail(`the archive copy does not match the ledger`);
+          if (store.archive.read(action.repo, action.name)?.text !== storedText(action.text)) fail(`the archive copy does not match the ledger`);
         } catch (error) {
           const copies = action.evidence === undefined ? `The ledger copy ${action.location} may exist` : `The ledger copy ${action.location} and the evidence copy ${evidenceCopy} may exist`;
           fail(`Could not archive ${plan.task.slug}: ${sentence(message(error))} ${copies} already. Fix the cause, then run ${ledgerCommand} task retire again.`);

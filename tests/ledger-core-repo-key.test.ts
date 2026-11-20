@@ -6,6 +6,7 @@ import test, { type TestContext } from 'node:test';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
+import { storedText } from '../tools/ledger/record.js';
 import { remoteKey, repoKey, repoLabel } from '../tools/ledger/repo-key.js';
 import { shownLedger } from '../tools/ledger/show.js';
 import { sqliteStore } from '../tools/ledger/sqlite-store.js';
@@ -153,7 +154,7 @@ test('ledger task new in a linked worktree files the backlog ledger under the ke
   const main = repoWithRemotes(h, path.join(h, 'repos/app'), { origin: 'git@github.com:me/app.git' });
   const worktree = path.dirname(path.dirname(worktreeTask(h, main, { slug: 'epic' })));
   ok(ledger(h, worktree, 'task', 'new', 'idea', '--goal', 'An idea.'));
-  assert.ok(existsSync(path.join(h, '.claude/ledger-backlog/github.com%2Fme%2Fapp/idea.md')));
+  assert.ok(existsSync(path.join(h, '.claude/ledger-backlog/github.com%2Fme%2Fapp/idea.json')));
 });
 
 // --- The short label people see ---
@@ -228,7 +229,7 @@ test('the file store keeps a repo in one folder named by the URI-encoded key, an
   assert.deepEqual(store.backlog.repos(), ['/Users/me/repos/app', 'github.com/chrfalch/ledger']);
   assert.deepEqual(store.archive.repos(), ['github.com/chrfalch/ledger']);
   assert.equal(store.backlog.list('github.com/chrfalch/ledger')[0]?.name, 'fix-login');
-  assert.equal(store.backlog.location('github.com/chrfalch/ledger', 'x'), path.join(h, '.claude/ledger-backlog/github.com%2Fchrfalch%2Fledger/x.md'));
+  assert.equal(store.backlog.location('github.com/chrfalch/ledger', 'x'), path.join(h, '.claude/ledger-backlog/github.com%2Fchrfalch%2Fledger/x.json'));
 });
 
 test('the file store still reads a folder named after an old folder-name key, also one with characters an encoding would change', (t) => {
@@ -260,8 +261,8 @@ for (const storage of ['file', 'sqlite'] as const) {
     assert.deepEqual([after.text, after.mtimeMs], [before.text, before.mtimeMs]);
     store.backlog.write('app', 'fix-login', 'other text');
     assert.equal(store.backlog.move('app', 'fix-login', 'github.com/me/app'), false);
-    assert.equal(store.backlog.read('app', 'fix-login')?.text, 'other text');
-    assert.equal(store.backlog.read('github.com/me/app', 'fix-login')?.text, 'old text');
+    assert.equal(store.backlog.read('app', 'fix-login')?.text, storedText('other text'));
+    assert.equal(store.backlog.read('github.com/me/app', 'fix-login')?.text, storedText('old text'));
   });
 
   test(`${storage} store: an archive copy moves to another repo key with its evidence, and not onto a name taken there`, { skip }, (t) => {
@@ -276,12 +277,12 @@ for (const storage of ['file', 'sqlite'] as const) {
     assert.equal(store.archive.move('app', '2026-11-01-old', 'github.com/me/app'), true);
     assert.equal(store.archive.has('app', '2026-11-01-old'), false);
     assert.deepEqual(store.archive.evidenceFiles('app', '2026-11-01-old'), []);
-    assert.equal(store.archive.read('github.com/me/app', '2026-11-01-old')?.text, 'old text');
+    assert.equal(store.archive.read('github.com/me/app', '2026-11-01-old')?.text, storedText('old text'));
     assert.deepEqual(store.archive.evidenceFiles('github.com/me/app', '2026-11-01-old'), ['logs/build.log', 'red.txt']);
     assert.equal(store.archive.evidenceState('github.com/me/app', '2026-11-01-old', evidence), 'same');
     store.archive.write('app', '2026-11-01-old', 'other text');
     assert.equal(store.archive.move('app', '2026-11-01-old', 'github.com/me/app'), false);
-    assert.equal(store.archive.read('app', '2026-11-01-old')?.text, 'other text');
+    assert.equal(store.archive.read('app', '2026-11-01-old')?.text, storedText('other text'));
   });
 
   test(`${storage} store: aliases are none at first, and an added alias reads back after the store is opened again`, { skip }, (t) => {
@@ -327,18 +328,18 @@ function showWorld(t: TestContext) {
 
 test('ledger show --repo takes the full key of a repo', (t) => {
   const { show } = showWorld(t);
-  assert.equal(show('gitlab.com/me/app'), 'idea in gitlab\n');
-  assert.equal(show('/Users/me/repos/tool'), 'idea in tool\n');
+  assert.equal(show('gitlab.com/me/app'), storedText('idea in gitlab\n'));
+  assert.equal(show('/Users/me/repos/tool'), storedText('idea in tool\n'));
 });
 
 test('ledger show --repo takes an alias of a repo', (t) => {
   const { show } = showWorld(t);
-  assert.equal(show('old-app'), 'idea in github\n');
+  assert.equal(show('old-app'), storedText('idea in github\n'));
 });
 
 test('ledger show --repo takes the short label of a repo when one repo has it', (t) => {
   const { show } = showWorld(t);
-  assert.equal(show('tool'), 'idea in tool\n');
+  assert.equal(show('tool'), storedText('idea in tool\n'));
 });
 
 test('ledger show --repo with a short label two repos share fails and names both keys', (t) => {

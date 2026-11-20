@@ -9,11 +9,12 @@ import { fileStore } from '../tools/ledger/file-store.js';
 import { conversionHint, migrateRepoIds } from '../tools/ledger/migrate-repo-ids.js';
 import { migrateStorage } from '../tools/ledger/migrate.js';
 import { ledgerPaths, type LedgerPaths } from '../tools/ledger/paths.js';
+import { storedText } from '../tools/ledger/record.js';
 import { repoLabel } from '../tools/ledger/repo-key.js';
 import { sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { REPO } from './helpers.js';
-import { commandEnv, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, noSqlite, ok, repoKeyOf, repository, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { commandEnv, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, noSqlite, ok, readLedgerFile, repoKeyOf, repository, worktreeTask, type Ran } from './ledger-core-fixtures.js';
 
 type Storage = 'file' | 'sqlite';
 
@@ -94,8 +95,8 @@ test('file store: a backlog move onto a hard link of the ledger is refused, and 
   linkSync(store.backlog.location('app', 'x'), store.backlog.location('github.com/me/app', 'x'));
   assert.equal(store.backlog.canMove('app', 'x', 'github.com/me/app'), false);
   assert.equal(store.backlog.move('app', 'x', 'github.com/me/app'), false);
-  assert.equal(store.backlog.read('app', 'x')?.text, 'same\n');
-  assert.equal(store.backlog.read('github.com/me/app', 'x')?.text, 'same\n');
+  assert.equal(store.backlog.read('app', 'x')?.text, storedText('same\n'));
+  assert.equal(store.backlog.read('github.com/me/app', 'x')?.text, storedText('same\n'));
 });
 
 /** An archive copy app/2026-01-01-old with the evidence file red.txt. */
@@ -113,7 +114,7 @@ test('file store: an archive move onto evidence the target has, with the copy st
   renameSync(store.archive.evidenceLocation('app', '2026-01-01-old'), store.archive.evidenceLocation(OTHER, '2026-01-01-old'));
   assert.equal(store.archive.canMove('app', '2026-01-01-old', OTHER), false);
   assert.equal(store.archive.move('app', '2026-01-01-old', OTHER), false);
-  assert.equal(store.archive.read('app', '2026-01-01-old')?.text, 'old\n');
+  assert.equal(store.archive.read('app', '2026-01-01-old')?.text, storedText('old\n'));
   assert.deepEqual(store.archive.evidenceFiles(OTHER, '2026-01-01-old'), ['red.txt']);
 });
 
@@ -135,7 +136,7 @@ for (const storage of ['file', 'sqlite'] as const) {
     if (storage === 'file') rmSync(store.archive.location('app', '2026-01-01-old'));
     else {
       const db = sqliteDb(h);
-      db.exec(`DELETE FROM ledgers WHERE place = 'archive' AND repo = 'app'`);
+      db.exec(`DELETE FROM records WHERE place = 'archive' AND repo = 'app'`);
       db.close();
     }
     assert.equal(store.archive.canMove('app', '2026-01-01-old', OTHER), true);
@@ -160,8 +161,8 @@ test('file store: a move onto a name that differs only in case is refused where 
   if (!existsSync(store.backlog.location(OTHER, 'fix'))) return t.skip('this disk tells case apart');
   assert.equal(store.backlog.canMove('app', 'fix', OTHER), false);
   assert.equal(store.backlog.move('app', 'fix', OTHER), false);
-  assert.equal(store.backlog.read('app', 'fix')?.text, 'mine\n');
-  assert.equal(readFileSync(store.backlog.location(OTHER, 'Fix'), 'utf8'), 'theirs\n');
+  assert.equal(store.backlog.read('app', 'fix')?.text, storedText('mine\n'));
+  assert.equal(readLedgerFile(store.backlog.location(OTHER, 'Fix')), storedText('theirs\n'));
 });
 
 test('file store: an archive move that fails leaves the copy and its evidence where they were', (t) => {
@@ -172,7 +173,7 @@ test('file store: an archive move that fails leaves the copy and its evidence wh
   chmodSync(target, 0o555);
   assert.throws(() => store.archive.move('app', '2026-01-01-old', 'github.com/me/app'));
   chmodSync(target, 0o755);
-  assert.equal(store.archive.read('app', '2026-01-01-old')?.text, 'old\n');
+  assert.equal(store.archive.read('app', '2026-01-01-old')?.text, storedText('old\n'));
   assert.deepEqual(store.archive.evidenceFiles('app', '2026-01-01-old'), ['red.txt']);
 });
 
@@ -182,7 +183,7 @@ test('file store: an archive move onto a different copy of the same name is refu
   store.archive.write('github.com/me/app', '2026-01-01-old', 'another\n');
   assert.equal(store.archive.move('app', '2026-01-01-old', 'github.com/me/app'), false);
   assert.deepEqual(store.archive.evidenceFiles('app', '2026-01-01-old'), ['red.txt']);
-  assert.equal(store.archive.read('github.com/me/app', '2026-01-01-old')?.text, 'another\n');
+  assert.equal(store.archive.read('github.com/me/app', '2026-01-01-old')?.text, storedText('another\n'));
 });
 
 // --- 4. SQLite evidence that is already in the target ---
@@ -321,7 +322,7 @@ test('file store: a folder name that is no exact encoding of a key, such as one 
   writeFileSync(path.join(folder, 'idea.md'), 'idea\n');
   const store = fileStore(ledgerPaths(h));
   assert.deepEqual(store.backlog.repos(), ['host%2fteam%2fapp']);
-  assert.equal(store.backlog.read('host%2fteam%2fapp', 'idea')?.text, 'idea\n');
+  assert.equal(store.backlog.read('host%2fteam%2fapp', 'idea')?.text, storedText('idea\n'));
 });
 
 // --- 13. An alias whose target is no key ---
@@ -346,8 +347,8 @@ test('ledger show --repo <old folder name> reads both what stayed under it and w
   store.backlog.write('app', 'dup', 'left under app\n');
   store.backlog.write(key, 'fix-login', 'moved\n');
   store.aliases.add('app', key);
-  assert.equal(ok(ledger(h, h, 'show', 'dup', '--repo', 'app')), 'left under app\n');
-  assert.equal(ok(ledger(h, h, 'show', 'fix-login', '--repo', 'app')), 'moved\n');
+  assert.equal(ok(ledger(h, h, 'show', 'dup', '--repo', 'app')), storedText('left under app\n'));
+  assert.equal(ok(ledger(h, h, 'show', 'fix-login', '--repo', 'app')), storedText('moved\n'));
 });
 
 // --- 15. Two clones of one origin share their tasks ---
@@ -400,7 +401,7 @@ test('file store: the files ...md and .md are no ledgers, and the names .., ., e
     assert.throws(() => store.archive.evidenceLocation('app', name), Failure, name);
     assert.throws(() => store.backlog.write('app', name, 'x\n'), Failure, name);
   }
-  assert.equal(store.archive.read('lost', '2026-01-03-x')?.text, 'kept\n');
+  assert.equal(store.archive.read('lost', '2026-01-03-x')?.text, storedText('kept\n'));
 });
 
 test('a conversion leaves an archive file named ...md where it is, and the rest of the archive stays', (t) => {
@@ -432,14 +433,15 @@ for (const kind of ['another file with the same bytes', 'a symbolic link to the 
   test(`file store: a backlog move onto ${kind} is refused, and both stay`, (t) => {
     const { store } = appWorld(t);
     store.backlog.write('app', 'x', 'same\n');
+    const bytes = readFileSync(store.backlog.location('app', 'x'), 'utf8');
     const target = store.backlog.location(OTHER, 'x');
     mkdirSync(path.dirname(target), { recursive: true });
-    if (kind === 'another file with the same bytes') writeFileSync(target, 'same\n');
+    if (kind === 'another file with the same bytes') writeFileSync(target, bytes);
     else symlinkSync(store.backlog.location('app', 'x'), target);
     assert.equal(store.backlog.move('app', 'x', OTHER), false);
-    assert.equal(store.backlog.read('app', 'x')?.text, 'same\n');
+    assert.equal(store.backlog.read('app', 'x')?.text, storedText('same\n'));
     assert.equal(lstatSync(target).isSymbolicLink(), kind === 'a symbolic link to the ledger');
-    assert.equal(readFileSync(target, 'utf8'), 'same\n');
+    assert.equal(readFileSync(target, 'utf8'), bytes);
   });
 }
 
@@ -498,12 +500,12 @@ test('file store: a move to another disk leaves the ledger, its evidence and no 
   const otherDisk = fileStore(ledgerPaths(h), { rename: failed('EXDEV') });
   assert.throws(() => otherDisk.backlog.move('app', 'x', OTHER), /EXDEV/);
   assert.throws(() => otherDisk.archive.move('app', '2026-01-01-old', OTHER), /EXDEV/);
-  assert.equal(store.backlog.read('app', 'x')?.text, 'x\n');
-  assert.equal(store.archive.read('app', '2026-01-01-old')?.text, 'old\n');
+  assert.equal(store.backlog.read('app', 'x')?.text, storedText('x\n'));
+  assert.equal(store.archive.read('app', '2026-01-01-old')?.text, storedText('old\n'));
   assert.deepEqual(store.archive.evidenceFiles('app', '2026-01-01-old'), ['red.txt']);
   assert.equal(existsSync(store.backlog.repoLocation(OTHER)), false);
   assert.equal(existsSync(store.archive.repoLocation(OTHER)), false);
-  assert.deepEqual(readdirSync(store.archive.repoLocation('app')).sort(), ['2026-01-01-old', '2026-01-01-old.md']);
+  assert.deepEqual(readdirSync(store.archive.repoLocation('app')).sort(), ['2026-01-01-old', '2026-01-01-old.json']);
 });
 
 test('a conversion reports a ledger on another disk as one to move by hand, records no alias, and leaves something', (t) => {
@@ -915,8 +917,8 @@ test('ledger show finds a ledger left under an alias of the repo, by --repo with
   const { h, app, key, store } = appWorld(t);
   store.aliases.add('app', key);
   store.backlog.write('app', 'left', 'left under app\n');
-  assert.equal(ok(ledger(h, h, 'show', 'left', '--repo', key)), 'left under app\n');
-  assert.equal(ok(ledger(h, app, 'show', 'left')), 'left under app\n');
+  assert.equal(ok(ledger(h, h, 'show', 'left', '--repo', key)), storedText('left under app\n'));
+  assert.equal(ok(ledger(h, app, 'show', 'left')), storedText('left under app\n'));
 });
 
 test('ledger task new refuses a slug a backlog ledger has under an alias of the repo', (t) => {
@@ -1095,7 +1097,7 @@ test('ledger show --repo with an alias finds its repo, though two keys have that
   store.aliases.add('app', key);
   store.backlog.write(key, 'left', 'left under the key\n');
   store.backlog.write(path.join(h, 'elsewhere/app'), 'other', 'other\n');
-  assert.equal(ok(ledger(h, h, 'show', 'left', '--repo', 'app')), 'left under the key\n');
+  assert.equal(ok(ledger(h, h, 'show', 'left', '--repo', 'app')), storedText('left under the key\n'));
 });
 
 // --- 45. A storage switch dry run refuses what the run refuses ---
@@ -1184,7 +1186,7 @@ test('ledger show prefers a backlog ledger under an alias to an archive copy und
   store.aliases.add('app', key);
   store.backlog.write('app', 'x', 'in the backlog\n');
   store.archive.write(key, '2026-01-01-x', 'archived\n');
-  assert.equal(ok(ledger(h, app, 'show', 'x')), 'in the backlog\n');
+  assert.equal(ok(ledger(h, app, 'show', 'x')), storedText('in the backlog\n'));
 });
 
 test('ledger show picks the newest archive copy across the key and its aliases', (t) => {
@@ -1192,7 +1194,7 @@ test('ledger show picks the newest archive copy across the key and its aliases',
   store.aliases.add('app', key);
   store.archive.write(key, '2026-01-01-x', 'older\n');
   store.archive.write('app', '2026-02-01-x', 'newer\n');
-  assert.equal(ok(ledger(h, app, 'show', 'x')), 'newer\n');
+  assert.equal(ok(ledger(h, app, 'show', 'x')), storedText('newer\n'));
 });
 
 // --- 49. A storage switch checks the target's aliases even when it adds none ---

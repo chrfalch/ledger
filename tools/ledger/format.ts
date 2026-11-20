@@ -55,6 +55,18 @@ const PARKED = /^Parked:[ \t]*(\d{4}-\d{2}-\d{2})[ \t]*[—-][ \t]*(.*)$/;
 
 export const isPlaceholder = (text: string): boolean => /^<.*>$/.test(text);
 
+/** The text after `# Task ledger —` on a title line; undefined for any other line. */
+export const titleText = (line: string): string | undefined => TITLE.exec(line)?.[1].trim();
+
+/** `slug` or `slug @ /main`, as a `- parent:` bullet names a task. */
+export function parseRef(text: string): TaskRef | undefined {
+  const [, slug, main] = REF.exec(text) ?? [];
+  return slug === undefined ? undefined : { slug, ...(main === undefined ? {} : { main }) };
+}
+
+/** Whether `line` reads as the parked marker when it is the first text under ## Next step. */
+export const isParkedMarker = (line: string): boolean => PARKED.test(line.trim());
+
 /** A line as the parser reads it: without its \r and trailing whitespace. */
 export const plainLine = (line: string): string => line.replace(/\r$/, '').trimEnd();
 

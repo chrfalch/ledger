@@ -14,13 +14,14 @@ import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookContext
 import { ledgerBin, ledgerPaths, realPath } from './paths.js';
 import { repoKey, repoLabel } from './repo-key.js';
 import { migrateStorage } from './migrate.js';
+import { migrateRecords } from './migrate-records.js';
 import { migrateRepoIds } from './migrate-repo-ids.js';
 import { openStore } from './open-store.js';
 import { loadTasks } from './registry.js';
 import { retireTask, retireText } from './retire.js';
 import { readStorage, STORAGES, type Storage } from './settings.js';
 import { shownLedger } from './show.js';
-import { sqliteFile, sqliteStore } from './sqlite-store.js';
+import { sqliteFile } from './sqlite-store.js';
 import type { LedgerStore } from './store.js';
 import { initSync, syncInBackground, syncLedgers } from './sync.js';
 import {
@@ -387,14 +388,15 @@ export async function main(argv: string[]): Promise<number> {
   storeGroup
     .command('migrate')
     .description(
-      'Move the backlog ledgers, the archive with its evidence, and the registry from one storage to the storage --to names. It copies everything, reads every copy back, and then sets "storage" in ~/.claude/ledger-settings.json. Exits 1, with nothing changed, when the target already has a name to copy. A move into or out of git storage commits and pushes; a failed push is reported, and ledger store sync pushes later. With --repo-ids instead, it files the ledgers kept under the folder name of a repo under its address, once.',
+      'Move the backlog ledgers, the archive with its evidence, and the registry from one storage to the storage --to names. It copies everything, reads every copy back, and then sets "storage" in ~/.claude/ledger-settings.json. Exits 1, with nothing changed, when the target already has a name to copy. A move into or out of git storage commits and pushes; a failed push is reported, and ledger store sync pushes later. With --repo-ids instead, it files the ledgers kept under the folder name of a repo under its address, once. With --records instead, it rewrites each backlog and archive ledger still kept as Markdown as a task record, once; a line that fits no field of the record goes to its general notes.',
     )
     .addOption(new Option('--to <storage>', 'the storage to move the ledgers to').choices(STORAGES))
     .addOption(new Option('--from <storage>', 'the storage to move the ledgers from; by default the one "storage" names, and when that is --to, the other of file and sqlite').choices(STORAGES))
     .addOption(
       new Option('--repo-ids', "file each ledger kept under a repo's folder name under the repo's address, or its path without a remote, and keep the folder name as an alias").conflicts(['to', 'from']),
     )
-    .addOption(new Option('--remove-source', 'remove what was copied from the other storage, after the check').conflicts('repoIds'))
+    .addOption(new Option('--records', 'rewrite each backlog and archive ledger kept as Markdown as a task record').conflicts(['to', 'from', 'repoIds']))
+    .addOption(new Option('--remove-source', 'remove what was copied from the other storage, after the check').conflicts(['repoIds', 'records']))
     .option('--dry-run', 'print what would be copied, moved, switched and removed, and change nothing')
     .addHelpText(
       'after',
@@ -407,22 +409,44 @@ export async function main(argv: string[]): Promise<number> {
         '  ledger store migrate --to git                   copy into the clone ledger store sync init made, commit and push',
         '  ledger store migrate --from git --to file       copy from git storage back to files',
         '  ledger store migrate --repo-ids --dry-run       show which ledgers would move to their repo address',
+        '  ledger store migrate --records --dry-run        show which ledgers would become task records, and their lines left to notes',
       ].join('\n'),
     )
     .action(
-      ({ to, from, repoIds = false, removeSource = false, dryRun = false }: { to?: Storage; from?: Storage; repoIds?: boolean; removeSource?: boolean; dryRun?: boolean }) => {
-        if (repoIds) {
-          // A dry run on SQLite reads the database as it is: it makes none, and adds no table.
-          const sqliteDryRun = dryRun && readStorage(paths.home) === 'sqlite';
-          const dryStore = sqliteDryRun && exists(sqliteFile(paths.home)) ? sqliteStore(paths, { readOnly: true }) : undefined;
+      ({
+        to,
+        from,
+        repoIds = false,
+        records = false,
+        removeSource = false,
+        dryRun = false,
+      }: {
+        to?: Storage;
+        from?: Storage;
+        repoIds?: boolean;
+        records?: boolean;
+        removeSource?: boolean;
+        dryRun?: boolean;
+      }) => {
+        if (repoIds || records) {
+          // A dry run reads the store as it is: on SQLite it makes no database and adds no table; on git it repairs no hook
+          // and commits and pushes nothing.
+          const storage = readStorage(paths.home);
+          const dryStore = dryRun && (storage !== 'sqlite' || exists(sqliteFile(paths.home))) ? openStore(paths, storage, { readOnly: true }) : undefined;
+          const store = dryRun ? dryStore : context.store;
           try {
-            if (migrateRepoIds(sqliteDryRun ? dryStore : context.store, { dryRun }, print) > 0) exitCode = 1;
+            if ((records ? migrateRecords : migrateRepoIds)(store, { dryRun }, print) > 0) exitCode = 1;
           } finally {
             dryStore?.close?.();
           }
           return;
         }
-        migrateStorage(paths, to ?? fail('ledger store migrate needs --to <storage>, or --repo-ids to file the ledgers under repo addresses.'), { from, removeSource, dryRun }, print);
+        migrateStorage(
+          paths,
+          to ?? fail('ledger store migrate needs --to <storage>, --repo-ids to file the ledgers under repo addresses, or --records to make them task records.'),
+          { from, removeSource, dryRun },
+          print,
+        );
       },
     );
   const sync = storeGroup

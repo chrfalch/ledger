@@ -13,7 +13,7 @@ import type { LedgerStore } from '../tools/ledger/store.js';
 import { pauseForTest } from '../tools/ledger/wait.js';
 import { goTask, type Context } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
-import { asCli, commandEnv, home, LEDGER_BIN, ledger, ledgerText, noSqlite, ok, repoKeyOf, repository, storeFolder, type Ran } from './ledger-core-fixtures.js';
+import { asCli, commandEnv, home, LEDGER_BIN, ledger, ledgerText, noSqlite, ok, readLedgerFile, repoKeyOf, repository, storeFolder, type Ran } from './ledger-core-fixtures.js';
 
 type Storage = 'file' | 'sqlite';
 
@@ -226,7 +226,7 @@ const deadPid = (): number => spawnSync(process.execPath, ['-e', '']).pid;
 function lockedBacklogTask(t: TestContext, holder: { pid: number; since: string }) {
   const { h, app } = setup(t, 'file');
   ok(ledger(h, app, 'task', 'new', 'fix-login'));
-  const file = path.join(storeFolder(h, 'ledger-backlog', app), 'fix-login.md');
+  const file = path.join(storeFolder(h, 'ledger-backlog', app), 'fix-login.json');
   const lock = `${file}.lock`;
   writeFileSync(lock, JSON.stringify(holder));
   return { h, app, file, lock };
@@ -235,14 +235,14 @@ function lockedBacklogTask(t: TestContext, holder: { pid: number; since: string 
 test('file store: a lock left by a process that is gone is taken over, and the change is written', (t) => {
   const { h, app, file, lock } = lockedBacklogTask(t, { pid: deadPid(), since: new Date().toISOString() });
   ok(ledger(h, app, 'task', 'park', 'fix-login', '--reason', 'paused'));
-  assert.ok(parked(readFileSync(file, 'utf8')));
+  assert.ok(parked(readLedgerFile(file)));
   assert.equal(existsSync(lock), false);
 });
 
 test('file store: a lock older than its time limit is taken over, even when its process still runs', (t) => {
   const { h, app, file, lock } = lockedBacklogTask(t, { pid: process.pid, since: new Date(Date.now() - 60 * 60_000).toISOString() });
   ok(ledger(h, app, 'task', 'park', 'fix-login', '--reason', 'paused'));
-  assert.ok(parked(readFileSync(file, 'utf8')));
+  assert.ok(parked(readLedgerFile(file)));
   assert.equal(existsSync(lock), false);
 });
 

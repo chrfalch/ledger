@@ -5,10 +5,12 @@ import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { fail } from './failure.js';
 import { holdsAnything, treeEntries } from './files.js';
 import { shownSettingsFile } from './settings.js';
-import { byCodeUnit, checkedAliases, isAsChecked, NameTaken, needsAlias, noteCreated, type Archive, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
+import { parseRecord, readRecordJson, recordJson, recordToWrite, renderRecord, type TaskRecord } from './record.js';
+import { byCodeUnit, checkedAliases, isAsChecked, NameTaken, needsAlias, noteCreated, readable, refuseHiddenMarkdown, type Archive, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
 import { pauseForTest } from './wait.js';
 
-// The text of a ledger is UTF-8 in a BLOB: node:sqlite on Node 22 cuts a TEXT value short at a NUL byte.
+// The text of a ledger from before records is UTF-8 in a BLOB: node:sqlite on Node 22 cuts a TEXT value short at a NUL
+// byte. A record is TEXT, as JSON writes a NUL byte as \u0000.
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS ledgers (
     place TEXT NOT NULL CHECK (place IN ('backlog', 'archive')),
@@ -17,6 +19,17 @@ const SCHEMA = `
     text BLOB NOT NULL,
     created_ms REAL NOT NULL,
     modified_ms REAL NOT NULL,
+    PRIMARY KEY (place, repo, name)
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS records (
+    place TEXT NOT NULL CHECK (place IN ('backlog', 'archive')),
+    repo TEXT NOT NULL,
+    name TEXT NOT NULL,
+    record TEXT NOT NULL,
+    mtime REAL NOT NULL,
+    birthtime REAL NOT NULL,
+    parent TEXT GENERATED ALWAYS AS (json_extract(record, '$.parent.slug')) VIRTUAL,
+    state TEXT GENERATED ALWAYS AS (json_extract(record, '$.state')) VIRTUAL,
     PRIMARY KEY (place, repo, name)
   ) STRICT;
   CREATE TABLE IF NOT EXISTS evidence (
@@ -178,13 +191,28 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
     }
   }
 
+  // A record, else a row of ledgers from before records. A database opened read-only from before records has only ledgers.
+  const recordsTable = one(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'records'`) !== undefined;
+  const STORED = !recordsTable
+    ? '(SELECT place, repo, name, NULL AS record, text, created_ms, modified_ms FROM ledgers)'
+    : `(SELECT place, repo, name, record, NULL AS text, birthtime AS created_ms, mtime AS modified_ms FROM records
+        UNION ALL
+        SELECT place, repo, name, NULL, text, created_ms, modified_ms FROM ledgers l
+        WHERE NOT EXISTS (SELECT 1 FROM records r WHERE r.place = l.place AND r.repo = l.repo AND r.name = l.name))`;
+
+  // As the file store orders <name>.md, where fix-login.md comes before fix.md.
+  const byFileName = (a: { name: string }, b: { name: string }): number => byCodeUnit(`${a.name}.md`, `${b.name}.md`);
+
   function collection(place: Place): LedgerCollection {
     const location = (repo: string, name: string): string => `${file}:${place}/${repo}/${name}`;
-    type Row = { repo: string; name: string; text: Uint8Array; created_ms: number; modified_ms: number };
-    const stored = ({ repo, name, text, created_ms, modified_ms }: Row): StoredLedger => ({
+    type Row = { repo: string; name: string; record: string | null; text: Uint8Array | null; created_ms: number; modified_ms: number };
+    const markdownOf = (text: Uint8Array | null): string => Buffer.from(text ?? new Uint8Array()).toString('utf8');
+    /** The row of ledgers that `name` is still kept as, which no record hides. */
+    const markdownRow = (repo: string, name: string): Row | undefined => one<Row>(`SELECT * FROM ${STORED} WHERE place = ? AND repo = ? AND name = ? AND record IS NULL`, place, repo, name);
+    const stored = ({ repo, name, record, text, created_ms, modified_ms }: Row): StoredLedger => ({
       repo,
       name,
-      text: Buffer.from(text).toString('utf8'),
+      text: renderRecord(record === null ? parseRecord(markdownOf(text)) : readRecordJson(record, location(repo, name))),
       mtimeMs: modified_ms,
       birthtimeMs: created_ms,
       location: location(repo, name),
@@ -193,22 +221,43 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
       location,
       repoLocation: (repo) => (repo === undefined ? `${file}:${place}` : `${file}:${place}/${repo}`),
       repos: () =>
-        all<{ repo: string }>('SELECT DISTINCT repo FROM ledgers WHERE place = ?', place)
+        all<{ repo: string }>(`SELECT DISTINCT repo FROM ${STORED} WHERE place = ?`, place)
           .map(({ repo }) => repo)
           .sort(byCodeUnit),
-      // As the file store orders <name>.md, where fix-login.md comes before fix.md.
       list: (repo) =>
-        all<Row>('SELECT * FROM ledgers WHERE place = ? AND repo = ?', place, repo)
-          .sort((a, b) => byCodeUnit(`${a.name}.md`, `${b.name}.md`))
-          .map(stored),
+        all<Row>(`SELECT * FROM ${STORED} WHERE place = ? AND repo = ?`, place, repo)
+          .sort(byFileName)
+          .flatMap((row) => readable(() => stored(row)) ?? []),
       read: (repo, name) => {
-        const row = one<Row>('SELECT * FROM ledgers WHERE place = ? AND repo = ? AND name = ?', place, repo, name);
+        const row = one<Row>(`SELECT * FROM ${STORED} WHERE place = ? AND repo = ? AND name = ?`, place, repo, name);
         return row && stored(row);
       },
-      has: (repo, name) => one('SELECT 1 FROM ledgers WHERE place = ? AND repo = ? AND name = ?', place, repo, name) !== undefined,
+      has: (repo, name) => hasLedger(place, repo, name),
       setModified: (repo, name, mtimeMs) =>
         transaction(() => {
-          if (run('UPDATE ledgers SET modified_ms = ? WHERE place = ? AND repo = ? AND name = ?', mtimeMs, place, repo, name) === 0) fail(`${location(repo, name)} does not exist.`);
+          const changed =
+            run('UPDATE records SET mtime = ? WHERE place = ? AND repo = ? AND name = ?', mtimeMs, place, repo, name) ||
+            run('UPDATE ledgers SET modified_ms = ? WHERE place = ? AND repo = ? AND name = ?', mtimeMs, place, repo, name);
+          if (changed === 0) fail(`${location(repo, name)} does not exist.`);
+        }),
+      hiddenMarkdown: (repo) =>
+        (!recordsTable ? [] : all<{ name: string }>('SELECT l.name FROM ledgers l JOIN records r USING (place, repo, name) WHERE l.place = ? AND l.repo = ?', place, repo))
+          .sort(byFileName)
+          .map(({ name }) => name),
+      markdownNames: (repo) =>
+        all<{ name: string }>(`SELECT name FROM ${STORED} WHERE place = ? AND repo = ? AND record IS NULL`, place, repo)
+          .sort(byFileName)
+          .map(({ name }) => name),
+      markdownText: (repo, name) => {
+        const row = markdownRow(repo, name);
+        return row && markdownOf(row.text);
+      },
+      toRecord: (repo, name) =>
+        transaction(() => {
+          const row = markdownRow(repo, name);
+          if (row === undefined) return false;
+          putRecord(place, repo, name, recordToWrite(markdownOf(row.text), location(repo, name)), row.modified_ms);
+          return true;
         }),
     };
   }
@@ -234,7 +283,38 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
     }
   };
 
-  const hasLedger = (place: Place, repo: string, name: string): boolean => one('SELECT 1 FROM ledgers WHERE place = ? AND repo = ? AND name = ?', place, repo, name) !== undefined;
+  function hasLedger(place: Place, repo: string, name: string): boolean {
+    return one(`SELECT 1 FROM ${STORED} WHERE place = ? AND repo = ? AND name = ?`, place, repo, name) !== undefined;
+  }
+
+  const hasRecord = (place: Place, repo: string, name: string): boolean => one('SELECT 1 FROM records WHERE place = ? AND repo = ? AND name = ?', place, repo, name) !== undefined;
+  const hidesMarkdown = (place: Place, repo: string, name: string): boolean =>
+    one('SELECT 1 FROM ledgers l JOIN records r USING (place, repo, name) WHERE l.place = ? AND l.repo = ? AND l.name = ?', place, repo, name) !== undefined;
+
+  /**
+   * Keeps `record` as the record of `name`, in place of its record, or of its row of ledgers when that is what was read; a
+   * row of ledgers gives the record its created time. A row a record hides stays, for `ledger store migrate --records`
+   * to name. Call it in a transaction.
+   */
+  function putRecord(place: Place, repo: string, name: string, record: TaskRecord, modifiedMs = Date.now()): void {
+    const replacesRow = !hasRecord(place, repo, name);
+    const created = one<{ created_ms: number }>('SELECT created_ms FROM ledgers WHERE place = ? AND repo = ? AND name = ?', place, repo, name)?.created_ms ?? modifiedMs;
+    run(
+      `INSERT INTO records (place, repo, name, record, mtime, birthtime) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (place, repo, name) DO UPDATE SET record = excluded.record, mtime = excluded.mtime`,
+      place,
+      repo,
+      name,
+      recordJson(record),
+      modifiedMs,
+      created,
+    );
+    if (replacesRow) run('DELETE FROM ledgers WHERE place = ? AND repo = ? AND name = ?', place, repo, name);
+  }
+
+  /** Deletes what `read` reads of `name`: its record, else its row of ledgers; true when there was one. Call it in a transaction. */
+  const deleteLedger = (place: Place, repo: string, name: string): boolean =>
+    run('DELETE FROM records WHERE place = ? AND repo = ? AND name = ?', place, repo, name) > 0 || run('DELETE FROM ledgers WHERE place = ? AND repo = ? AND name = ?', place, repo, name) > 0;
   const hasEvidence = (place: Place, repo: string, name: string): boolean => place === 'archive' && one('SELECT 1 FROM evidence WHERE repo = ? AND name = ?', repo, name) !== undefined;
 
   /**
@@ -252,7 +332,7 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
       const planned = plannedMove(place, repo, name, to);
       if (planned !== 'evidence' && !hasLedger(place, repo, name)) fail(`${(place === 'backlog' ? backlog : archive).location(repo, name)} does not exist.`);
       if (planned === undefined) return false;
-      if (planned === 'ledger') run('UPDATE ledgers SET repo = ? WHERE place = ? AND repo = ? AND name = ?', to, place, repo, name);
+      if (planned === 'ledger') for (const table of ['records', 'ledgers']) run(`UPDATE ${table} SET repo = ? WHERE place = ? AND repo = ? AND name = ?`, to, place, repo, name);
       if (place === 'archive') run('UPDATE evidence SET repo = ? WHERE repo = ? AND name = ?', to, repo, name);
       return true;
     });
@@ -264,40 +344,34 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
       : all<{ old: string; repo: string }>('SELECT old, repo FROM aliases').map(({ old, repo }) => [old, repo]);
 
   const existing = (repo: string, slug: string): string => (backlog.read(repo, slug) ?? fail(`${backlog.location(repo, slug)} does not exist.`)).text;
+  const putBacklog = (repo: string, slug: string, text: string): void => putRecord('backlog', repo, slug, recordToWrite(text, backlog.location(repo, slug)));
   const readRegistry = (): string | undefined => one<{ text: string }>('SELECT text FROM registry WHERE id = 1')?.text;
   const writeRegistry = (text: string): void => void run('INSERT INTO registry VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET text = excluded.text', text);
 
   return {
     backlog: {
       ...backlog,
-      write: (repo, slug, text) => {
-        const now = Date.now();
-        transaction(() =>
-          run(
-            `INSERT INTO ledgers VALUES ('backlog', ?, ?, ?, ?, ?)
-             ON CONFLICT (place, repo, name) DO UPDATE SET text = excluded.text, modified_ms = excluded.modified_ms`,
-            repo,
-            slug,
-            Buffer.from(text),
-            now,
-            now,
-          ),
-        );
-      },
-      create: (repo, slug, text) => {
-        const now = Date.now();
-        return transaction(() => run(`INSERT INTO ledgers VALUES ('backlog', ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`, repo, slug, Buffer.from(text), now, now) === 1);
-      },
+      write: (repo, slug, text) => transaction(() => putBacklog(repo, slug, text)),
+      create: (repo, slug, text) =>
+        transaction(() => {
+          if (hasLedger('backlog', repo, slug)) return false;
+          putBacklog(repo, slug, text);
+          return true;
+        }),
       update: (repo, slug, change) =>
         transaction(() => {
           const current = existing(repo, slug);
           pauseForTest();
           const text = change(current);
-          if (text !== undefined) run(`UPDATE ledgers SET text = ?, modified_ms = ? WHERE place = 'backlog' AND repo = ? AND name = ?`, Buffer.from(text), Date.now(), repo, slug);
+          if (text !== undefined) putBacklog(repo, slug, text);
           return text !== undefined;
         }),
       remove: (repo, slug, expected) =>
-        transaction(() => existing(repo, slug) === expected && run(`DELETE FROM ledgers WHERE place = 'backlog' AND repo = ? AND name = ?`, repo, slug) === 1),
+        transaction(() => {
+          const current = existing(repo, slug);
+          if (hidesMarkdown('backlog', repo, slug)) refuseHiddenMarkdown(backlog.location(repo, slug));
+          return current === expected && deleteLedger('backlog', repo, slug);
+        }),
       move: (repo, slug, to) => move('backlog', repo, slug, to),
       canMove: (repo, slug, to) => plannedMove('backlog', repo, slug, to) !== undefined,
     },
@@ -305,10 +379,9 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
       ...archive,
       write: (repo, name, text, evidenceFrom) => {
         const evidence = evidenceFrom === undefined ? [] : evidenceIn(evidenceFrom);
-        const now = Date.now();
         transaction(() => {
           if (archive.has(repo, name)) throw new NameTaken(`${archive.location(repo, name)} already exists. An archive copy is never replaced.`);
-          run(`INSERT INTO ledgers VALUES ('archive', ?, ?, ?, ?, ?)`, repo, name, Buffer.from(text), now, now);
+          putRecord('archive', repo, name, recordToWrite(text, archive.location(repo, name)));
           for (const entry of evidence) run('INSERT INTO evidence VALUES (?, ?, ?, ?, ?)', repo, name, entry.path, entry.kind, entry.data);
         });
         noteCreated(archive.location(repo, name));
@@ -350,9 +423,10 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
       remove: (repo, name, expected) =>
         transaction(() => {
           if (!archive.has(repo, name)) fail(`${archive.location(repo, name)} does not exist.`);
+          if (hidesMarkdown('archive', repo, name)) refuseHiddenMarkdown(archive.location(repo, name));
           if (expected !== undefined && !isAsChecked({ read: archive.read, evidenceState }, repo, name, expected)) return false;
           run('DELETE FROM evidence WHERE repo = ? AND name = ?', repo, name);
-          run(`DELETE FROM ledgers WHERE place = 'archive' AND repo = ? AND name = ?`, repo, name);
+          deleteLedger('archive', repo, name);
           return true;
         }),
       move: (repo, name, to) => move('archive', repo, name, to),
@@ -360,7 +434,7 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
       orphanEvidence: () =>
         all<{ repo: string; name: string }>(
           `SELECT DISTINCT repo, name FROM evidence e
-           WHERE NOT EXISTS (SELECT 1 FROM ledgers l WHERE l.place = 'archive' AND l.repo = e.repo AND l.name = e.name)`,
+           WHERE NOT EXISTS (SELECT 1 FROM ${STORED} l WHERE l.place = 'archive' AND l.repo = e.repo AND l.name = e.name)`,
         ).sort((a, b) => byCodeUnit(a.repo, b.repo) || byCodeUnit(a.name, b.name)),
     },
     registry: {

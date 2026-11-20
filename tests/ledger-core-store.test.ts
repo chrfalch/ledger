@@ -1,15 +1,20 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs, { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { syncBuiltinESMExports } from 'node:module';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
+import { park } from '../tools/ledger/edit.js';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
+import { parseLedger } from '../tools/ledger/format.js';
 import { gitStore } from '../tools/ledger/git-store.js';
+import { withLock, withLockIfFree } from '../tools/ledger/lock.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { loadTasks } from '../tools/ledger/registry.js';
-import { loadSqlite, sqliteStore } from '../tools/ledger/sqlite-store.js';
+import { parseRecord, recordJson, renderRecord } from '../tools/ledger/record.js';
+import { loadSqlite, sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { createTask, goTask, parkTask, type Context } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
@@ -18,6 +23,25 @@ import { archivedTask, home, ledgerText, noSqlite, repoKeyOf, repository } from 
 const text = (slug: string): string => ledgerText({ slug, main: '/repos/app' });
 /** Every byte value once, so no text decoding can pass the bytes through unchanged. */
 const BYTES = Buffer.from(Array.from({ length: 256 }, (_, byte) => byte));
+const STRAY = readFileSync(path.join(REPO, 'tests/fixtures/ledgers/stray.md'), 'utf8');
+const rendered = (markdown: string): string => renderRecord(parseRecord(markdown));
+/** An empty ## Children, then a second one whose line names a task: the first is the section, so that line is a note. */
+const REPEATED_CHILDREN = '# Task ledger — repeated\n\n## Goal\nShip it.\n\n## Children\n\n## Children\n- deploy\n';
+/** A decision opens a code fence that the fence of ## Odd would close once ## Odd renders among the notes after it. */
+const UNSTABLE = ['# Task ledger — unstable', '', '## Odd', '```', 'fenced', '```', '', '## Decisions', '- a', '```', ''].join('\n');
+
+/** Puts a ledger as it was kept before task records: a <name>.md file, or a row of the SQLite table ledgers. */
+function plantMarkdown(h: string, store: LedgerStore, place: 'backlog' | 'archive', repo: string, name: string, markdown: string): void {
+  if (existsSync(sqliteFile(h))) {
+    const db = new (createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')).DatabaseSync(sqliteFile(h));
+    db.prepare('INSERT INTO ledgers VALUES (?, ?, ?, ?, ?, ?)').run(place, repo, name, Buffer.from(markdown), Date.now(), Date.now());
+    db.close();
+    return;
+  }
+  const folder = store[place].repoLocation(repo);
+  mkdirSync(folder, { recursive: true });
+  writeFileSync(path.join(folder, `${name}.md`), markdown);
+}
 
 /** The behaviour every store shares, whatever keeps the ledgers. `open` opens the store of a HOME; `skip` says why it cannot run here. */
 function storeContract(name: string, open: (home: string) => LedgerStore, skip: string | false = false): void {
@@ -79,14 +103,15 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.deepEqual(store.archive.evidenceFiles('app', '2026-11-01-fix-login'), ['Zebra.txt', 'apple.txt', 'é.txt', '😀.txt', '～.txt']);
   });
 
-  test(`${name}: ledger text with a NUL byte reads back exactly, in the backlog and the archive`, { skip }, (t) => {
+  test(`${name}: ledger text with a NUL byte reads back with the NUL bytes, in the backlog and the archive`, { skip }, (t) => {
     const store = makeStore(t);
     const withNul = 'before\0after\n\0';
     store.backlog.write('app', 'fix-login', withNul);
     store.archive.write('app', '2026-11-01-fix-login', withNul);
-    assert.equal(store.backlog.read('app', 'fix-login')?.text, withNul);
-    assert.equal(store.backlog.list('app')[0]?.text, withNul);
-    assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, withNul);
+    assert.match(rendered(withNul), /^before\0after\n\0\n/m);
+    assert.equal(store.backlog.read('app', 'fix-login')?.text, rendered(withNul));
+    assert.equal(store.backlog.list('app')[0]?.text, rendered(withNul));
+    assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, rendered(withNul));
   });
 
   test(`${name}: no evidence reads back as none, and readEvidence gives nothing for a path that is not an evidence file`, { skip }, (t) => {
@@ -154,7 +179,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     const store = open(h);
     store.archive.write('app', '2026-11-01-fix-login', 'first');
     assert.throws(() => store.archive.write('app', '2026-11-01-fix-login', 'second', evidenceFolder(h)), /already exists/);
-    assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, 'first');
+    assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, rendered('first'));
     assert.deepEqual(store.archive.evidenceFiles('app', '2026-11-01-fix-login'), []);
     assert.equal(store.archive.evidenceState('app', '2026-11-01-fix-login'), 'none');
   });
@@ -176,7 +201,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     const store = makeStore(t);
     store.backlog.write('app', 'fix-login', 'old');
     store.backlog.write('app', 'fix-login', 'new');
-    assert.equal(store.backlog.read('app', 'fix-login')?.text, 'new');
+    assert.equal(store.backlog.read('app', 'fix-login')?.text, rendered('new'));
     assert.equal(store.backlog.list('app').length, 1);
   });
 
@@ -234,7 +259,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     const store = makeStore(t);
     store.archive.write('app', '2026-11-01-fix-login', 'first');
     assert.throws(() => store.archive.write('app', '2026-11-01-fix-login', 'second'), /already exists/);
-    assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, 'first');
+    assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, rendered('first'));
   });
 
   test(`${name}: an unknown repo or name is empty, not an error`, { skip }, (t) => {
@@ -298,6 +323,247 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.equal(store.registry.read(), '[]\n');
     store.registry.write('[{"path":"x"}]\n');
     assert.equal(store.registry.read(), '[{"path":"x"}]\n');
+  });
+
+  test(`${name}: a ledger is kept as a task record, so read gives the record rendered, also for text out of the template layout`, { skip }, (t) => {
+    const store = makeStore(t);
+    store.backlog.write('app', 'stray', STRAY);
+    store.archive.write('app', '2026-11-01-stray', STRAY);
+    assert.equal(store.backlog.read('app', 'stray')?.text, rendered(STRAY));
+    assert.equal(store.archive.read('app', '2026-11-01-stray')?.text, rendered(STRAY));
+    assert.deepEqual(store.backlog.markdownNames?.('app'), []);
+    assert.deepEqual(store.archive.markdownNames?.('app'), []);
+  });
+
+  test(`${name}: a ledger kept as Markdown from before records reads as its record, rendered, and lists with the records`, { skip }, (t) => {
+    const h = home(t);
+    const store = open(h);
+    store.backlog.write('app', 'b-record', text('b-record'));
+    plantMarkdown(h, store, 'backlog', 'app', 'a-markdown', STRAY);
+    plantMarkdown(h, store, 'archive', 'app', '2026-11-01-old', STRAY);
+    assert.deepEqual(store.backlog.repos(), ['app']);
+    assert.deepEqual(store.archive.repos(), ['app']);
+    assert.deepEqual(
+      store.backlog.list('app').map(({ name, text }) => [name, text]),
+      [
+        ['a-markdown', rendered(STRAY)],
+        ['b-record', text('b-record')],
+      ],
+    );
+    assert.equal(store.backlog.read('app', 'a-markdown')?.text, rendered(STRAY));
+    assert.equal(store.archive.read('app', '2026-11-01-old')?.text, rendered(STRAY));
+    assert.ok(store.backlog.has('app', 'a-markdown'));
+    assert.ok(store.archive.nameTaken('app', '2026-11-01-old'));
+    assert.deepEqual(store.backlog.markdownNames?.('app'), ['a-markdown']);
+    assert.deepEqual(store.archive.markdownNames?.('app'), ['2026-11-01-old']);
+  });
+
+  test(`${name}: write and update replace a Markdown ledger with a record; create and an archive write refuse its name`, { skip }, (t) => {
+    const h = home(t);
+    const store = open(h);
+    plantMarkdown(h, store, 'backlog', 'app', 'written', STRAY);
+    plantMarkdown(h, store, 'backlog', 'app', 'updated', STRAY);
+    plantMarkdown(h, store, 'archive', 'app', '2026-11-01-old', STRAY);
+    assert.equal(store.backlog.create('app', 'written', text('written')), false);
+    assert.throws(() => store.archive.write('app', '2026-11-01-old', text('old')), /already exists/);
+    store.backlog.write('app', 'written', text('written'));
+    let given: string | undefined;
+    assert.ok(store.backlog.update('app', 'updated', (current) => ((given = current), text('updated'))));
+    assert.equal(given, rendered(STRAY));
+    assert.equal(store.backlog.read('app', 'written')?.text, text('written'));
+    assert.equal(store.backlog.read('app', 'updated')?.text, text('updated'));
+    assert.deepEqual(store.backlog.markdownNames?.('app'), []);
+    assert.deepEqual(
+      store.backlog.list('app').map(({ name }) => name),
+      ['updated', 'written'],
+    );
+  });
+
+  test(`${name}: remove of a Markdown ledger takes its rendered text as expected, and leaves nothing of it`, { skip }, (t) => {
+    const h = home(t);
+    const store = open(h);
+    plantMarkdown(h, store, 'backlog', 'app', 'gone', STRAY);
+    plantMarkdown(h, store, 'archive', 'app', '2026-11-01-gone', STRAY);
+    assert.equal(store.backlog.remove('app', 'gone', 'other text'), false);
+    assert.ok(store.backlog.remove('app', 'gone', rendered(STRAY)));
+    assert.ok(store.archive.remove('app', '2026-11-01-gone', { text: rendered(STRAY), evidence: path.join(h, 'no-evidence') }));
+    assert.equal(store.backlog.has('app', 'gone'), false);
+    assert.equal(store.archive.has('app', '2026-11-01-gone'), false);
+    assert.deepEqual(store.backlog.list('app'), []);
+    assert.deepEqual(store.archive.list('app'), []);
+  });
+
+  test(`${name}: toRecord rewrites a Markdown ledger as a record, its text and modified time as they were, and is false for a record`, { skip }, (t) => {
+    const h = home(t);
+    const store = open(h);
+    plantMarkdown(h, store, 'archive', 'app', '2026-11-01-old', STRAY);
+    store.archive.setModified?.('app', '2026-11-01-old', Date.parse('2026-11-01T12:00:00Z'));
+    const before = store.archive.read('app', '2026-11-01-old');
+    assert.equal(store.archive.toRecord?.('app', '2026-11-01-old'), true);
+    assert.equal(store.archive.toRecord?.('app', '2026-11-01-old'), false);
+    assert.deepEqual(store.archive.markdownNames?.('app'), []);
+    const after = store.archive.read('app', '2026-11-01-old');
+    assert.equal(after?.text, before?.text);
+    assert.equal(after?.mtimeMs, Date.parse('2026-11-01T12:00:00Z'));
+  });
+
+  test(`${name}: a record wins over a Markdown ledger of the same name`, { skip }, (t) => {
+    const h = home(t);
+    const store = open(h);
+    store.backlog.write('app', 'both', text('both'));
+    plantMarkdown(h, store, 'backlog', 'app', 'both', STRAY);
+    assert.equal(store.backlog.read('app', 'both')?.text, text('both'));
+    assert.deepEqual(
+      store.backlog.list('app').map(({ text: listed }) => listed),
+      [text('both')],
+    );
+    assert.deepEqual(store.backlog.markdownNames?.('app'), []);
+  });
+
+  test(`${name}: a write over a record that hides a Markdown ledger of the same name keeps the Markdown, and hiddenMarkdown names it`, { skip }, (t) => {
+    const h = home(t);
+    const store = open(h);
+    store.backlog.write('app', 'both', text('both'));
+    store.archive.write('app', '2026-11-01-both', text('both'));
+    plantMarkdown(h, store, 'backlog', 'app', 'both', STRAY);
+    plantMarkdown(h, store, 'archive', 'app', '2026-11-01-both', STRAY);
+    store.backlog.write('app', 'both', text('again'));
+    assert.ok(store.backlog.update('app', 'both', () => text('once-more')));
+    assert.deepEqual(store.backlog.hiddenMarkdown?.('app'), ['both']);
+    assert.deepEqual(store.archive.hiddenMarkdown?.('app'), ['2026-11-01-both']);
+    assert.equal(store.backlog.read('app', 'both')?.text, text('once-more'));
+  });
+
+  test(`${name}: remove refuses a task whose record hides Markdown, names the conflict and ledger store migrate --records, and changes nothing`, { skip }, (t) => {
+    const h = home(t);
+    const store = open(h);
+    const from = evidenceFolder(h);
+    store.backlog.write('app', 'both', text('both'));
+    store.archive.write('app', '2026-11-01-both', text('both'), from);
+    plantMarkdown(h, store, 'backlog', 'app', 'both', STRAY);
+    plantMarkdown(h, store, 'archive', 'app', '2026-11-01-both', STRAY);
+    const keptBothWays = (location: string) => (error: unknown) =>
+      error instanceof Failure && error.message.includes(location) && error.message.includes('Markdown from before records') && error.message.includes('ledger store migrate --records');
+
+    assert.throws(() => store.backlog.remove('app', 'both', text('both')), keptBothWays(store.backlog.location('app', 'both')));
+    for (const expected of [undefined, { text: text('both'), evidence: from }]) {
+      assert.throws(() => store.archive.remove('app', '2026-11-01-both', expected), keptBothWays(store.archive.location('app', '2026-11-01-both')));
+    }
+    assert.equal(store.backlog.read('app', 'both')?.text, text('both'));
+    assert.equal(store.archive.read('app', '2026-11-01-both')?.text, text('both'));
+    assert.equal(store.archive.evidenceState('app', '2026-11-01-both', from), 'same');
+    assert.deepEqual(store.backlog.hiddenMarkdown?.('app'), ['both']);
+    assert.deepEqual(store.archive.hiddenMarkdown?.('app'), ['2026-11-01-both']);
+  });
+
+  test(`${name}: a move takes the Markdown a record hides along, so neither repo shows it`, { skip }, (t) => {
+    const h = home(t);
+    const store = open(h);
+    store.backlog.write('app', 'both', text('both'));
+    store.archive.write('app', '2026-11-01-both', text('both'));
+    plantMarkdown(h, store, 'backlog', 'app', 'both', STRAY);
+    plantMarkdown(h, store, 'archive', 'app', '2026-11-01-both', STRAY);
+    assert.ok(store.backlog.move('app', 'both', 'lib'));
+    assert.ok(store.archive.move('app', '2026-11-01-both', 'lib'));
+    assert.deepEqual([store.backlog.list('app'), store.archive.list('app')], [[], []]);
+    assert.equal(store.backlog.read('lib', 'both')?.text, text('both'));
+    assert.equal(store.archive.read('lib', '2026-11-01-both')?.text, text('both'));
+    assert.deepEqual(store.backlog.hiddenMarkdown?.('lib'), ['both']);
+    assert.deepEqual(store.archive.hiddenMarkdown?.('lib'), ['2026-11-01-both']);
+  });
+
+  test(`${name}: a Markdown ledger moves to another repo and still reads there`, { skip }, (t) => {
+    const h = home(t);
+    const store = open(h);
+    plantMarkdown(h, store, 'backlog', 'app', 'moving', STRAY);
+    plantMarkdown(h, store, 'archive', 'app', '2026-11-01-moving', STRAY);
+    assert.ok(store.backlog.move('app', 'moving', 'lib'));
+    assert.ok(store.archive.move('app', '2026-11-01-moving', 'lib'));
+    assert.equal(store.backlog.read('lib', 'moving')?.text, rendered(STRAY));
+    assert.equal(store.archive.read('lib', '2026-11-01-moving')?.text, rendered(STRAY));
+    assert.equal(store.backlog.has('app', 'moving'), false);
+  });
+
+  test(`${name}: a ledger with a repeated section is the same record converted or written, its repeat a note, and it stays listed`, { skip }, (t) => {
+    const h = home(t);
+    const store = open(h);
+    plantMarkdown(h, store, 'backlog', 'app', 'converted', REPEATED_CHILDREN);
+    assert.equal(store.backlog.toRecord?.('app', 'converted'), true);
+    store.backlog.write('app', 'written', REPEATED_CHILDREN);
+    for (const slug of ['converted', 'written']) {
+      const stored = store.backlog.read('app', slug)?.text ?? '';
+      assert.equal(stored, rendered(REPEATED_CHILDREN), slug);
+      assert.deepEqual(parseLedger(stored).children, [], slug);
+    }
+    assert.deepEqual(
+      store.backlog.list('app').map(({ name }) => name),
+      ['converted', 'written'],
+    );
+    assert.deepEqual(store.backlog.markdownNames?.('app'), []);
+  });
+
+  test(`${name}: a write whose record would not read back the same fails, names the ledger, and changes nothing`, { skip }, (t) => {
+    const h = home(t);
+    const store = open(h);
+    store.backlog.write('app', 'kept', text('kept'));
+    plantMarkdown(h, store, 'backlog', 'app', 'legacy', UNSTABLE);
+    const before = store.backlog.list('app').map(({ name, text: stored }) => [name, stored]);
+    const refused = (where: string) => (error: unknown) => error instanceof Failure && error.message.includes(where) && /would not read back the same/.test(error.message);
+
+    assert.throws(() => store.backlog.write('app', 'kept', UNSTABLE), refused(store.backlog.location('app', 'kept')));
+    assert.throws(() => store.backlog.update('app', 'kept', () => UNSTABLE), refused(store.backlog.location('app', 'kept')));
+    assert.throws(() => store.backlog.toRecord?.('app', 'legacy'), refused(store.backlog.location('app', 'legacy')));
+    assert.throws(() => store.backlog.write('app', 'legacy', UNSTABLE), refused(store.backlog.location('app', 'legacy')));
+    assert.throws(() => store.backlog.create('app', 'new', UNSTABLE), refused(store.backlog.location('app', 'new')));
+    assert.throws(() => store.archive.write('app', '2026-11-01-new', UNSTABLE, evidenceFolder(h)), refused(store.archive.location('app', '2026-11-01-new')));
+
+    assert.deepEqual(
+      store.backlog.list('app').map(({ name, text: stored }) => [name, stored]),
+      before,
+    );
+    assert.deepEqual(store.backlog.markdownNames?.('app'), ['legacy']);
+    assert.equal(store.archive.nameTaken('app', '2026-11-01-new'), false);
+    assert.deepEqual(store.archive.orphanEvidence(), []);
+  });
+
+  test(`${name}: toRecord keeps the birth time of the Markdown it converts as the created time, also through a later write`, { skip }, async (t) => {
+    const h = home(t);
+    const store = open(h);
+    plantMarkdown(h, store, 'backlog', 'app', 'old', STRAY);
+    plantMarkdown(h, store, 'archive', 'app', '2026-11-01-old', STRAY);
+    const created = (place: 'backlog' | 'archive', name: string): string | undefined => {
+      const birth = store[place].read('app', name)?.birthtimeMs;
+      return birth === undefined ? undefined : new Date(birth).toISOString();
+    };
+    const born = [created('backlog', 'old'), created('archive', '2026-11-01-old')];
+    // A file made now has a later birth time, which only the record can correct.
+    await delay(20);
+
+    assert.ok(store.backlog.toRecord?.('app', 'old'));
+    assert.ok(store.archive.toRecord?.('app', '2026-11-01-old'));
+    assert.deepEqual([created('backlog', 'old'), created('archive', '2026-11-01-old')], born);
+    store.backlog.write('app', 'old', text('old'));
+    assert.ok(store.backlog.update('app', 'old', () => text('updated')));
+    assert.equal(created('backlog', 'old'), born[0]);
+    assert.equal(store.backlog.read('app', 'old')?.text, text('updated'));
+  });
+
+  test(`${name}: a write or an update over a Markdown ledger, such as a park, keeps the Markdown's birth time as the created time, as toRecord does`, { skip }, async (t) => {
+    const h = home(t);
+    const store = open(h);
+    for (const slug of ['written', 'parked']) plantMarkdown(h, store, 'backlog', 'app', slug, STRAY);
+    const created = (slug: string): string | undefined => {
+      const birth = store.backlog.read('app', slug)?.birthtimeMs;
+      return birth === undefined ? undefined : new Date(birth).toISOString();
+    };
+    const born = [created('written'), created('parked')];
+    // A file made now has a later birth time, which only the record can correct.
+    await delay(20);
+
+    store.backlog.write('app', 'written', text('written'));
+    assert.ok(store.backlog.update('app', 'parked', (current) => park(current, 'Parked: 2026-11-22 — on hold')));
+    assert.deepEqual([created('written'), created('parked')], born);
+    assert.deepEqual(store.backlog.markdownNames?.('app'), []);
   });
 }
 
@@ -476,7 +742,7 @@ test('file store: an archive remove that finds the copy changed as it deletes it
   writeFileSync(path.join(from, 'red.txt'), 'failing\n');
   store.archive.write('app', '2026-11-01-old', text('old'), from);
   const file = store.archive.location('app', '2026-11-01-old');
-  const edited = `${text('old')}Edited meanwhile.\n`;
+  const edited = recordJson(parseRecord(`${text('old')}Edited meanwhile.\n`));
   const didEdit = editBefore(t, 'renameSync', file, () => writeFileSync(file, edited));
 
   const removed = store.archive.remove('app', '2026-11-01-old', { text: text('old'), evidence: from });
@@ -486,10 +752,61 @@ test('file store: an archive remove that finds the copy changed as it deletes it
   assert.equal(readFileSync(file, 'utf8'), edited);
   assert.deepEqual(store.archive.evidenceFiles('app', '2026-11-01-old'), ['red.txt']);
   assert.deepEqual(
-    readdirSync(path.dirname(file)).filter((entry) => entry.startsWith('2026-11-01-old.md')),
-    ['2026-11-01-old.md'],
+    readdirSync(path.dirname(file)).filter((entry) => entry.startsWith('2026-11-01-old.json')),
+    ['2026-11-01-old.json'],
   );
 });
+
+for (const [name, open] of [['file store', (h: string) => fileStore(ledgerPaths(h))], ['git store', openGitStore]] as const) {
+  const replacements = [
+    ['toRecord of a backlog ledger', 'backlog', 'old', (store: LedgerStore) => store.backlog.toRecord?.('app', 'old')],
+    ['toRecord of an archive copy', 'archive', '2026-11-01-old', (store: LedgerStore) => store.archive.toRecord?.('app', '2026-11-01-old')],
+    ['a backlog write', 'backlog', 'old', (store: LedgerStore) => store.backlog.write('app', 'old', text('old'))],
+    ['a backlog update', 'backlog', 'old', (store: LedgerStore) => store.backlog.update('app', 'old', () => text('old'))],
+  ] as const;
+  for (const [what, place, ledger, replace] of replacements) {
+    test(`${name}: ${what} holds the lock of the Markdown it replaces, so an edit that a writer from before records makes meanwhile is kept`, (t) => {
+      const h = home(t);
+      const store = open(h);
+      plantMarkdown(h, store, place, 'app', ledger, STRAY);
+      const markdown = path.join(store[place].repoLocation('app'), `${ledger}.md`);
+      const edited = `${STRAY}A line written meanwhile.\n`;
+      // Such a writer locks <name>.md alone, and waits while another process holds that lock.
+      let waited = false;
+      editBefore(t, 'rmSync', markdown, () => {
+        if (withLockIfFree(markdown, () => writeFileSync(markdown, edited)) === 'busy') waited = true;
+      });
+
+      replace(store);
+      if (waited) withLock(markdown, () => writeFileSync(markdown, edited));
+
+      assert.equal(existsSync(markdown) ? readFileSync(markdown, 'utf8') : 'removed', edited, 'the edit made meanwhile is kept');
+      assert.deepEqual(store[place].hiddenMarkdown?.('app'), [ledger]);
+    });
+  }
+
+  test(`${name}: a record made in place of Markdown keeps the Markdown's mode, whatever the umask`, (t) => {
+    const umask = process.umask(0o022);
+    t.after(() => process.umask(umask));
+    const h = home(t);
+    const store = open(h);
+    const ledgers = [['backlog', 'converted'], ['archive', '2026-11-01-converted'], ['backlog', 'written']] as const;
+    for (const [place, ledger] of ledgers) {
+      plantMarkdown(h, store, place, 'app', ledger, STRAY);
+      chmodSync(store[place].location('app', ledger), 0o600);
+    }
+
+    assert.ok(store.backlog.toRecord?.('app', 'converted'));
+    assert.ok(store.archive.toRecord?.('app', '2026-11-01-converted'));
+    store.backlog.write('app', 'written', text('written'));
+
+    for (const [place, ledger] of ledgers) {
+      const record = store[place].location('app', ledger);
+      assert.ok(record.endsWith('.json'), record);
+      assert.equal(mode(record), 0o600, record);
+    }
+  });
+}
 
 test('sqlite store: copyEvidence refuses a path through a link it wrote under a name that differs only in case, on a volume that ignores case', { skip: noSqlite }, (t) => {
   const h = home(t);
@@ -567,19 +884,96 @@ test('sqlite store: everything is in <home>/.claude/ledgers.db, with no other fi
 const mode = (file: string): number => statSync(file).mode & 0o777;
 const leftovers = (folder: string): string[] => readdirSync(folder).filter((name) => name.includes('.tmp-'));
 
-test('file store: each ledger is the file the old layout names, and its location is that absolute path', (t) => {
+test('file store: each ledger is a <name>.json task record where the old layout had <name>.md, and its location is that absolute path', (t) => {
   const { h, store } = fileHome(t);
-  store.backlog.write('app', 'fix-login', 'backlog');
-  store.archive.write('app', '2026-11-01-fix-login', 'archive');
+  store.backlog.write('app', 'fix-login', text('fix-login'));
+  store.archive.write('app', '2026-11-01-fix-login', text('old'));
   store.registry.write('[]\n');
-  const backlog = path.join(h, '.claude/ledger-backlog/app/fix-login.md');
-  const archive = path.join(h, '.claude/ledger-archive/app/2026-11-01-fix-login.md');
-  assert.equal(readFileSync(backlog, 'utf8'), 'backlog');
-  assert.equal(readFileSync(archive, 'utf8'), 'archive');
+  const backlog = path.join(h, '.claude/ledger-backlog/app/fix-login.json');
+  const archive = path.join(h, '.claude/ledger-archive/app/2026-11-01-fix-login.json');
+  assert.deepEqual(JSON.parse(readFileSync(backlog, 'utf8')), parseRecord(text('fix-login')));
+  assert.deepEqual(JSON.parse(readFileSync(archive, 'utf8')), parseRecord(text('old')));
+  assert.equal(existsSync(path.join(h, '.claude/ledger-backlog/app/fix-login.md')), false);
   assert.equal(readFileSync(path.join(h, '.claude/ledgers.json'), 'utf8'), '[]\n');
   assert.equal(store.backlog.read('app', 'fix-login')?.location, backlog);
   assert.equal(store.backlog.location('app', 'fix-login'), backlog);
   assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.location, archive);
+});
+
+test('file store: a write replaces <name>.md with <name>.json, and the location names the file there is', (t) => {
+  const { h, store } = fileHome(t);
+  const folder = path.join(h, '.claude/ledger-backlog/app');
+  mkdirSync(folder, { recursive: true });
+  writeFileSync(path.join(folder, 'fix-login.md'), STRAY);
+  assert.equal(store.backlog.location('app', 'fix-login'), path.join(folder, 'fix-login.md'));
+  assert.equal(store.backlog.read('app', 'fix-login')?.location, path.join(folder, 'fix-login.md'));
+  store.backlog.write('app', 'fix-login', text('fix-login'));
+  assert.deepEqual(readdirSync(folder), ['fix-login.json']);
+  assert.equal(store.backlog.location('app', 'fix-login'), path.join(folder, 'fix-login.json'));
+  assert.equal(store.backlog.location('app', 'new-task'), path.join(folder, 'new-task.json'));
+});
+
+test('file store: a <name>.json that is no task record fails a read and names the file, and a list leaves it out', (t) => {
+  const { h, store } = fileHome(t);
+  const folder = path.join(h, '.claude/ledger-backlog/app');
+  mkdirSync(folder, { recursive: true });
+  writeFileSync(path.join(folder, 'broken.json'), '{"version": 1, "slug": 3}');
+  writeFileSync(path.join(folder, 'garbled.json'), '<<<<<<< HEAD');
+  assert.throws(() => store.backlog.read('app', 'broken'), (error: Error) => error.message.includes(path.join(folder, 'broken.json')) && /slug/.test(error.message));
+  assert.throws(() => store.backlog.read('app', 'garbled'), (error: Error) => error.message.includes(path.join(folder, 'garbled.json')));
+  store.backlog.write('app', 'fine', text('fine'));
+  assert.deepEqual(
+    store.backlog.list('app').map(({ name }) => name),
+    ['fine'],
+  );
+});
+
+/** Commits what is in the clone as a person would, so a ledger planted there is in HEAD before the store writes. */
+const commitByHand = (clone: string): void => {
+  for (const args of [['add', '-A', '-f', '.'], ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--quiet', '--no-verify', '-m', 'planted']]) {
+    assert.equal(spawnSync('git', args, { cwd: clone }).status, 0, args.join(' '));
+  }
+};
+
+test('git store: a write over a committed <name>.md commits <name>.json and the removal of the .md, and commit checks the record', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data');
+  const store = openGitStore(h);
+  plantMarkdown(h, store, 'backlog', 'app', 'fix-login', STRAY);
+  commitByHand(clone);
+  assert.deepEqual(spawnSync('git', ['ls-files'], { cwd: clone, encoding: 'utf8' }).stdout.split('\n').filter(Boolean), ['.ledger-data', 'backlog/app/fix-login.md']);
+  store.backlog.write('app', 'fix-login', text('fix-login'));
+  store.commit?.([{ place: 'backlog', repo: 'app', name: 'fix-login', text: text('fix-login') }]);
+  assert.deepEqual(spawnSync('git', ['ls-files'], { cwd: clone, encoding: 'utf8' }).stdout.split('\n').filter(Boolean), ['.ledger-data', 'backlog/app/fix-login.json']);
+  assert.equal(spawnSync('git', ['status', '--porcelain'], { cwd: clone, encoding: 'utf8' }).stdout, '');
+});
+
+test('sqlite store: a record is a row of the table records, whose parent and state columns come from the record; a write deletes the ledgers row', { skip: noSqlite }, (t) => {
+  const h = home(t);
+  const store = sqliteStore({ home: h });
+  t.after(() => store.close?.());
+  plantMarkdown(h, store, 'backlog', 'app', 'child', STRAY);
+  store.backlog.write('app', 'child', ledgerText({ slug: 'child', main: '/repos/app', parent: 'epic' }));
+  const db = new (createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')).DatabaseSync(sqliteFile(h), { readOnly: true });
+  t.after(() => db.close());
+  const rows = db.prepare('SELECT place, repo, name, record, parent, state FROM records').all();
+  assert.deepEqual(
+    rows.map(({ place, repo, name, parent, state }) => ({ place, repo, name, parent, state })),
+    [{ place: 'backlog', repo: 'app', name: 'child', parent: 'epic', state: null }],
+  );
+  assert.deepEqual(JSON.parse(String(rows[0].record)), parseRecord(ledgerText({ slug: 'child', main: '/repos/app', parent: 'epic' })));
+  assert.deepEqual(db.prepare('SELECT name FROM ledgers').all(), []);
+});
+
+test('git store: toRecord is committed like any other write', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data');
+  const store = openGitStore(h);
+  plantMarkdown(h, store, 'archive', 'app', '2026-11-01-old', STRAY);
+  commitByHand(clone);
+  assert.ok(store.archive.toRecord?.('app', '2026-11-01-old'));
+  store.commit?.();
+  assert.deepEqual(spawnSync('git', ['ls-files'], { cwd: clone, encoding: 'utf8' }).stdout.split('\n').filter(Boolean), ['.ledger-data', 'archive/app/2026-11-01-old.json']);
 });
 
 test('file store: a repo location is the repo folder, and without a repo the folder of all repos', (t) => {
@@ -661,19 +1055,26 @@ test('file store: a symbolic link named <name>.md is no ledger, even to a readab
 });
 
 // Root reads a mode-000 file all the same.
-test('file store: an unreadable <name>.md is no ledger: has, read and list all leave it out', { skip: process.getuid?.() === 0 }, (t) => {
-  const { h, store } = fileHome(t);
-  store.backlog.write('app', 'x', 'backlog');
-  store.archive.write('app', '2026-11-01-x', 'archive');
-  chmodSync(path.join(h, '.claude/ledger-backlog/app/x.md'), 0o000);
-  chmodSync(path.join(h, '.claude/ledger-archive/app/2026-11-01-x.md'), 0o000);
-  assert.equal(store.backlog.has('app', 'x'), false);
-  assert.equal(store.backlog.read('app', 'x'), undefined);
-  assert.deepEqual(store.backlog.list('app'), []);
-  assert.equal(store.archive.has('app', '2026-11-01-x'), false);
-  assert.equal(store.archive.read('app', '2026-11-01-x'), undefined);
-  assert.deepEqual(store.archive.list('app'), []);
-});
+for (const extension of ['json', 'md'] as const) {
+  test(`file store: an unreadable <name>.${extension} is no ledger: has, read and list all leave it out`, { skip: process.getuid?.() === 0 }, (t) => {
+    const { h, store } = fileHome(t);
+    if (extension === 'json') {
+      store.backlog.write('app', 'x', 'backlog');
+      store.archive.write('app', '2026-11-01-x', 'archive');
+    } else {
+      plantMarkdown(h, store, 'backlog', 'app', 'x', 'backlog');
+      plantMarkdown(h, store, 'archive', 'app', '2026-11-01-x', 'archive');
+    }
+    chmodSync(path.join(h, `.claude/ledger-backlog/app/x.${extension}`), 0o000);
+    chmodSync(path.join(h, `.claude/ledger-archive/app/2026-11-01-x.${extension}`), 0o000);
+    assert.equal(store.backlog.has('app', 'x'), false);
+    assert.equal(store.backlog.read('app', 'x'), undefined);
+    assert.deepEqual(store.backlog.list('app'), []);
+    assert.equal(store.archive.has('app', '2026-11-01-x'), false);
+    assert.equal(store.archive.read('app', '2026-11-01-x'), undefined);
+    assert.deepEqual(store.archive.list('app'), []);
+  });
+}
 
 test('file store: repos are sorted by their full name, so app comes before app-x', (t) => {
   const { h, store } = fileHome(t);
@@ -695,7 +1096,7 @@ test('file store: a symbolic link to a folder is a repo', (t) => {
 test('file store: an archive write refuses a dangling symbolic link at the copy, and leaves the link as it was', (t) => {
   const { h, store } = fileHome(t);
   const folder = path.join(h, '.claude/ledger-archive/app');
-  const copy = path.join(folder, '2026-11-01-fix-login.md');
+  const copy = path.join(folder, '2026-11-01-fix-login.json');
   mkdirSync(folder, { recursive: true });
   symlinkSync(path.join(h, 'missing.md'), copy);
   assert.throws(() => store.archive.write('app', '2026-11-01-fix-login', 'archive'), /already exists/);
@@ -708,7 +1109,7 @@ test('file store: an archive write refuses a dangling symbolic link at the copy,
 test('file store: an archive write does not follow a symbolic link at its temporary name, and writes no copy', (t) => {
   const { h, store } = fileHome(t);
   const folder = path.join(h, '.claude/ledger-archive/app');
-  const copy = path.join(folder, '2026-11-01-fix-login.md');
+  const copy = path.join(folder, '2026-11-01-fix-login.json');
   const victim = path.join(h, 'victim.txt');
   writeFileSync(victim, 'keep me');
   mkdirSync(folder, { recursive: true });
@@ -722,7 +1123,7 @@ test('file store: an archive write does not follow a symbolic link at its tempor
 test('file store: a backlog write does not follow a symbolic link at its temporary name, and keeps the ledger as it was', (t) => {
   const { h, store } = fileHome(t);
   store.backlog.write('app', 'fix-login', 'old');
-  const file = path.join(h, '.claude/ledger-backlog/app/fix-login.md');
+  const file = path.join(h, '.claude/ledger-backlog/app/fix-login.json');
   const temporary = `${file}.tmp-${process.pid}`;
   const victim = path.join(h, 'victim.txt');
   writeFileSync(victim, 'keep me');
@@ -730,7 +1131,7 @@ test('file store: a backlog write does not follow a symbolic link at its tempora
   assert.throws(() => store.backlog.write('app', 'fix-login', 'new'), (error: NodeJS.ErrnoException) => error.code === 'EEXIST');
   assert.equal(readFileSync(victim, 'utf8'), 'keep me');
   assert.ok(!lstatSync(file).isSymbolicLink());
-  assert.equal(readFileSync(file, 'utf8'), 'old');
+  assert.equal(readFileSync(file, 'utf8'), recordJson(parseRecord('old')));
   assert.ok(lstatSync(temporary).isSymbolicLink());
 });
 
@@ -750,7 +1151,7 @@ test('file store: an archive write refuses a dangling symbolic link at the evide
 test('file store: an archive write keeps the ledger copy when the evidence copy then fails', (t) => {
   const { h, store } = fileHome(t);
   assert.throws(() => store.archive.write('app', '2026-11-01-fix-login', 'archive', path.join(h, 'no-evidence')));
-  assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, 'archive');
+  assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, rendered('archive'));
 });
 
 test('file store: writes go through a temporary file that is gone afterwards, and keep the mode of the file they replace', (t) => {
@@ -758,12 +1159,15 @@ test('file store: writes go through a temporary file that is gone afterwards, an
   store.backlog.write('app', 'fix-login', 'one');
   store.registry.write('one');
   store.archive.write('app', '2026-11-01-fix-login', 'one');
-  const files = [path.join(h, '.claude/ledger-backlog/app/fix-login.md'), path.join(h, '.claude/ledgers.json')];
-  for (const file of files) chmodSync(file, 0o600);
+  const files = new Map([
+    [path.join(h, '.claude/ledger-backlog/app/fix-login.json'), recordJson(parseRecord('two'))],
+    [path.join(h, '.claude/ledgers.json'), 'two'],
+  ]);
+  for (const file of files.keys()) chmodSync(file, 0o600);
   store.backlog.write('app', 'fix-login', 'two');
   store.registry.write('two');
-  for (const file of files) {
-    assert.equal(readFileSync(file, 'utf8'), 'two');
+  for (const [file, written] of files) {
+    assert.equal(readFileSync(file, 'utf8'), written);
     assert.equal(mode(file), 0o600, file);
     assert.deepEqual(leftovers(path.dirname(file)), []);
   }
@@ -777,7 +1181,7 @@ test('file store: an archive write with evidence refuses a taken name before it 
   writeFileSync(path.join(evidence, 'red.txt'), 'failing');
   store.archive.write('app', '2026-11-01-fix-login', 'first');
   assert.throws(() => store.archive.write('app', '2026-11-01-fix-login', 'second', evidence), /already exists/);
-  assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, 'first');
+  assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, rendered('first'));
   assert.equal(existsSync(path.join(h, '.claude/ledger-archive/app/2026-11-01-fix-login')), false);
 });
 
@@ -807,7 +1211,7 @@ test('file store: an archive write with evidence copies the folder next to the c
   assert.equal(readFileSync(path.join(copy, 'logs/build.log'), 'utf8'), 'built');
   assert.equal(readFileSync(path.join(evidence, 'red.txt'), 'utf8'), 'failing');
   assert.equal(readFileSync(path.join(evidence, 'logs/build.log'), 'utf8'), 'built');
-  assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, 'archive');
+  assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, rendered('archive'));
 });
 
 test('file store: evidenceState compares the evidence archived with a copy to a folder: files by content, links by their text, and types', (t) => {
@@ -872,7 +1276,7 @@ test('file store: an archive write without evidence makes no evidence folder', (
   const { h, store } = fileHome(t);
   store.archive.write('app', '2026-11-01-fix-login', 'archive');
   assert.equal(existsSync(path.join(h, '.claude/ledger-archive/app/2026-11-01-fix-login')), false);
-  assert.deepEqual(readdirSync(path.join(h, '.claude/ledger-archive/app')), ['2026-11-01-fix-login.md']);
+  assert.deepEqual(readdirSync(path.join(h, '.claude/ledger-archive/app')), ['2026-11-01-fix-login.json']);
 });
 
 /** A store that passes every call on to `inner` and notes it as `<part>.<method> <repo> <name>`, without the text. */

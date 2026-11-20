@@ -5,7 +5,9 @@ import { isRepoKey } from './repo-key.js';
 
 /**
  * One ledger a store keeps. `location` names it for a person: messages and JSON print it as it is, but nothing outside
- * the store opens it, as a store need not keep its ledgers in files.
+ * the store opens it, as a store need not keep its ledgers in files. A store keeps each ledger as a task record:
+ * `text` is the record rendered to Markdown, and a write parses the Markdown it is given, so `text` is `storedText` of
+ * what was written.
  */
 export type StoredLedger = {
   repo: string;
@@ -15,6 +17,20 @@ export type StoredLedger = {
   birthtimeMs: number;
   location: string;
 };
+
+/**
+ * What `read` gives, or undefined for a task record that is no valid record, such as one a git conflict left: a list
+ * leaves it out, as it leaves out a file it cannot read, so one broken ledger does not stop every command. Reading it by
+ * name still fails and names it.
+ */
+export function readable(read: () => StoredLedger | undefined): StoredLedger | undefined {
+  try {
+    return read();
+  } catch (error) {
+    if (error instanceof Failure) return undefined;
+    throw error;
+  }
+}
 
 /** UTF-16 code-unit order, the order readdir gave the old scans; every store sorts evidence files by it. */
 export const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
@@ -34,6 +50,28 @@ export interface LedgerCollection {
   has(repo: string, name: string): boolean;
   /** Sets the `mtimeMs` that `read` gives the ledger, so a copy keeps the time of its original. */
   setModified?(repo: string, name: string, mtimeMs: number): void;
+  /** The names of `repo` still kept as Markdown from before task records, in the order of `list`. */
+  markdownNames?(repo: string): string[];
+  /** The Markdown the ledger `name` is still kept as, which `toRecord` converts; undefined when it is not kept as Markdown. */
+  markdownText?(repo: string, name: string): string | undefined;
+  /** Rewrites the Markdown ledger `name` as a task record, its text and times as they are; false when it is not kept as Markdown. */
+  toRecord?(repo: string, name: string): boolean;
+  /**
+   * The names of `repo` kept both as a record and as Markdown from before records, as when an older machine wrote one: the
+   * record is read, and the Markdown is hidden. No write removes such Markdown, and `remove` refuses such a name, as the
+   * Markdown would be read again without its record; a person merges the two.
+   */
+  hiddenMarkdown?(repo: string): string[];
+}
+
+/** What `remove` throws, removing nothing, while a ledger's record hides Markdown from before records. */
+export class HiddenMarkdown extends Failure {}
+
+/** Throws HiddenMarkdown for the ledger at `location`. */
+export function refuseHiddenMarkdown(location: string): never {
+  throw new HiddenMarkdown(
+    `${location} has both a task record and Markdown from before records, so it was left as it is: without the record, the Markdown would be read again. Merge the two by hand, then remove the Markdown; ledger store migrate --records names each task kept both ways.`,
+  );
 }
 
 /**
@@ -49,7 +87,10 @@ export interface Backlog extends LedgerCollection {
   create(repo: string, slug: string, text: string): boolean;
   /** Rewrites the ledger with `change`, which no other write can come between. True when it was written; throws when it does not exist. */
   update(repo: string, slug: string, change: Change<string>): boolean;
-  /** Deletes the ledger while its text is still `expected`. False, with nothing deleted, when another command changed it; throws when it does not exist. */
+  /**
+   * Deletes the ledger while its text is still `expected`. False, with nothing deleted, when another command changed it;
+   * throws when it does not exist, and while its record hides Markdown (`hiddenMarkdown`).
+   */
   remove(repo: string, slug: string, expected: string): boolean;
   /**
    * Moves the ledger to the repo `to`, text and times as they are, by a rename on one disk. False, with nothing moved, when
@@ -108,9 +149,10 @@ export interface Archive extends LedgerCollection {
    */
   copyEvidence(repo: string, name: string, to: string): void;
   /**
-   * Removes the evidence of the copy `name`, then the copy, and gives true; fails when there is no such copy. With
-   * `expected`, only while the copy still holds its text and its evidence matches the folder `expected.evidence`, which
-   * stands for none when it holds nothing; otherwise it removes nothing and gives false.
+   * Removes the evidence of the copy `name`, then the copy, and gives true; fails when there is no such copy, and while
+   * its record hides Markdown (`hiddenMarkdown`). With `expected`, only while the copy still holds its text and its
+   * evidence matches the folder `expected.evidence`, which stands for none when it holds nothing; otherwise it removes
+   * nothing and gives false.
    */
   remove(repo: string, name: string, expected?: CheckedCopy): boolean;
   /**

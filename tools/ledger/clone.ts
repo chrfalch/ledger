@@ -49,16 +49,18 @@ export const GITIGNORE = [
   '!/backlog/',
   '!/backlog/*/',
   '!/backlog/*/*.md',
+  '!/backlog/*/*.json',
   '!/archive/',
   '!/archive/*/',
   '!/archive/*/*.md',
+  '!/archive/*/*.json',
   '',
 ].join('\n');
 
 // A repo folder and a ledger name are never . or .., which would make a path that leaves its folder, and hold no / or \,
 // as in the file store, and no line break, which would split a name where git or the hook prints one per line. The
 // pre-push hook checks the same rule in bash.
-const ALLOWED = /^(\.ledger-data|\.gitignore|(backlog|archive)\/(?!\.\.?\/)[^/\\\n]+\/(?!\.\.?\.md$)[^/\\\n]+\.md)$/;
+const ALLOWED = /^(\.ledger-data|\.gitignore|(backlog|archive)\/(?!\.\.?\/)[^/\\\n]+\/(?!\.\.?\.(md|json)$)[^/\\\n]+\.(md|json))$/;
 
 /** Whether a path of the clone may be committed and pushed. It is checked on its own, as a nested .gitignore can un-ignore any file. */
 export const isAllowed = (file: string): boolean => ALLOWED.test(file);

@@ -483,7 +483,7 @@ function writable(t: TestContext) {
 }
 
 const withoutUsage = (help: string): string[] => help.split('\n').slice(1);
-const backlogLedger = (h: string, main: string, slug: string): string => path.join(storeFolder(h, 'ledger-backlog', main), `${slug}.md`);
+const backlogLedger = (h: string, main: string, slug: string): string => path.join(storeFolder(h, 'ledger-backlog', main), `${slug}.json`);
 const listedIn = (command: string): RegExp => new RegExp(`^\\s+${command}\\b`, 'm');
 
 test('ledger --help lists the groups, the short forms and deploy, and hides the commands only Claude Code runs', (t) => {
@@ -538,6 +538,21 @@ test('ledger task new, show, list, park, unpark, go, retire and archive take a t
 
   ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   assert.match(ok(ledger(h, app, 'task', 'archive')), /fix-login/);
+});
+
+test('ledger go and ledger task retire refuse a backlog task whose record hides Markdown: they say why, exit 1, and keep both', (t) => {
+  const { h, app } = writable(t);
+  ok(ledger(h, app, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.'));
+  const record = backlogLedger(h, app, 'fix-login');
+  const markdown = record.replace(/\.json$/, '.md');
+  writeFileSync(markdown, '# Task ledger — fix-login\n\n## Goal\nAn older copy.\n');
+  for (const args of [['go', 'fix-login'], ['task', 'retire', 'fix-login']]) {
+    const ran = ledger(h, app, ...args);
+    assert.equal(ran.status, 1, `${args.join(' ')}\n${ran.stdout}\n${ran.stderr}`);
+    assert.match(ran.stderr, new RegExp(`${record.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} has both a task record and Markdown from before records`));
+    assert.ok(existsSync(record) && existsSync(markdown), `${args.join(' ')} kept both`);
+  }
+  assert.equal(existsSync(path.join(app, '.claude/worktrees/fix-login')), false);
 });
 
 test('ledger tree show, add, start, next and remove read and change the children of a parent task', (t) => {
