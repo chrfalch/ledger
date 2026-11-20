@@ -49,6 +49,42 @@ export function messageLocations(log: string): string[] {
 
 export const WITHHELD = '<file name withheld>';
 
+const ESCAPED: Readonly<Record<string, string>> = { '"': '"', '\\': '\\', '/': '/', b: '\n', f: '\n', n: '\n', r: '\n', t: '\n' };
+
+/**
+ * A line of a task record's JSON with each escape undone, as the pre-push hook undoes it in awk: the escape of a printable
+ * ASCII character gives that character, and any other escape a line break. A secret pattern is printable ASCII, so to it
+ * such a character only ends a secret or comes before one, as a line break does.
+ */
+const recordText = (line: string): string =>
+  line.replace(/\\(?:u([0-9A-Fa-f]{4})|(.))/g, (escape, hex: string | undefined, char: string | undefined) => {
+    if (hex === undefined) return ESCAPED[char ?? ''] ?? escape;
+    const code = Number.parseInt(hex, 16);
+    return code >= 0x20 && code <= 0x7e ? String.fromCharCode(code) : '\n';
+  });
+
+/** What a scan reads of a line `file` adds: the line, and for a task record each line its JSON text holds, as a secret after an escaped line break starts a line there. */
+const scannedTexts = (file: string, line: string): string[] => (file.endsWith('.json') ? [line, ...recordText(line).split('\n')] : [line]);
+
+/** What a backslash escape stands for in a path git quotes, when it is not three octal digits. */
+const C_ESCAPES: Readonly<Record<string, string>> = { a: '\x07', b: '\b', t: '\t', n: '\n', v: '\v', f: '\f', r: '\r' };
+
+type AddedFile = { shown: string; path: string };
+
+/**
+ * The file a `+++ ` line of ADDED_LINES_LOG names: `shown` as git writes it there without the b/, and `path` as it is.
+ * Git ends the line with a tab when the path holds a space, and quotes a path that holds a control character, a double
+ * quote or a backslash, with C escapes. Undefined for /dev/null.
+ */
+function addedFile(header: string): AddedFile | undefined {
+  const label = header.slice('+++ '.length).replace(/\t$/, '');
+  if (label === '/dev/null') return undefined;
+  if (!label.startsWith('"')) return { shown: label.slice('b/'.length), path: label.slice('b/'.length) };
+  const quoted = label.slice('"b/'.length, -1);
+  const path = quoted.replace(/\\([0-7]{3}|.)/g, (_, escape: string) => (escape.length === 3 ? String.fromCharCode(Number.parseInt(escape, 8)) : (C_ESCAPES[escape] ?? escape)));
+  return { shown: `"${quoted}"`, path };
+}
+
 /**
  * Where the output of ADDED_LINES_LOG adds secret-like text, as `<file>:<line>`, and each path of `paths` that is
  * secret-like itself, as WITHHELD; a secret-like file name is never printed. Sorted, without repeats. The pre-push hook
@@ -56,7 +92,7 @@ export const WITHHELD = '<file name withheld>';
  */
 export function secretLocations(log: string, paths: string[]): string[] {
   const found = new Set<string>(paths.some(isSecretLike) ? [WITHHELD] : []);
-  let file: string | undefined;
+  let file: AddedFile | undefined;
   let line = 0;
   let inHunk = false;
   for (const text of log.split('\n')) {
@@ -66,7 +102,7 @@ export function secretLocations(log: string, paths: string[]): string[] {
       continue;
     }
     if (!inHunk && text.startsWith('+++ ')) {
-      file = text === '+++ /dev/null' ? undefined : text.slice('+++ b/'.length);
+      file = addedFile(text);
       continue;
     }
     const hunk = /^@@ -\S+ \+(\d+)/.exec(text);
@@ -76,7 +112,7 @@ export function secretLocations(log: string, paths: string[]): string[] {
       continue;
     }
     if (!inHunk || !text.startsWith('+')) continue;
-    if (file !== undefined && isSecretLike(text.slice(1))) found.add(`${isSecretLike(file) ? WITHHELD : file}:${line}`);
+    if (file !== undefined && scannedTexts(file.path, text.slice(1)).some(isSecretLike)) found.add(`${isSecretLike(file.path) ? WITHHELD : file.shown}:${line}`);
     line++;
   }
   return [...found].sort();
@@ -114,18 +150,61 @@ export function prePushHook(): string {
     '  [ "$status" -le 1 ]',
     '}',
     '',
-    '# file:line<TAB>text for each line the commits add.',
+    '# file:line<TAB>text for each line the commits add, and for a line of a task record also for each line its JSON text',
+    '# holds, as ledger store sync reads it: so a secret after an escaped line break starts a line there.',
     'added_lines() {',
     `  git ${added} "$@" | tr '\\000' ' ' | awk '`,
+    '    function hex(digits,    value, i) {',
+    '      value = 0',
+    '      for (i = 1; i <= 4; i++) value = value * 16 + index("0123456789abcdef", tolower(substr(digits, i, 1))) - 1',
+    '      return value',
+    '    }',
+    '    # The escape of a printable ASCII character gives that character, and any other escape a line break.',
+    '    function record_text(text,    out, at, c, code) {',
+    '      out = ""',
+    '      while ((at = index(text, "\\\\")) > 0) {',
+    '        out = out substr(text, 1, at - 1)',
+    '        c = substr(text, at + 1, 1)',
+    '        if (c == "u" && substr(text, at + 2, 4) ~ /^[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$/) {',
+    '          code = hex(substr(text, at + 2, 4))',
+    '          out = out (code >= 32 && code <= 126 ? sprintf("%c", code) : "\\n")',
+    '          text = substr(text, at + 6)',
+    '        } else {',
+    '          if (c == "\\"" || c == "\\\\" || c == "/") out = out c',
+    '          else if (c != "" && index("bfnrt", c) > 0) out = out "\\n"',
+    '          else out = out "\\\\" c',
+    '          text = substr(text, at + 2)',
+    '        }',
+    '      }',
+    '      return out text',
+    '    }',
     '    /^diff --git / { inhunk = 0; file = ""; next }',
-    '    !inhunk && /^\\+\\+\\+ / { file = ($0 == "+++ /dev/null") ? "" : substr($0, 7); next }',
+    '    # git ends a +++ line with a tab when its path holds a space, and quotes a path that holds a control character, a',
+    '    # double quote or a backslash, with C escapes. The file is shown without its b/, quoted as git quotes it.',
+    '    !inhunk && /^\\+\\+\\+ / {',
+    '      file = substr($0, 5)',
+    '      sub(/\\t$/, "", file)',
+    '      if (file == "/dev/null") file = ""',
+    '      else if (file ~ /^"/) file = "\\"" substr(file, 4)',
+    '      else file = substr(file, 3)',
+    '      next',
+    '    }',
     '    /^@@ / { split($3, start, ","); line = substr(start[1], 2) + 0; inhunk = 1; next }',
-    '    inhunk && /^\\+/ { if (file != "") print file ":" line "\\t" substr($0, 2); line++ }',
+    '    inhunk && /^\\+/ {',
+    '      if (file != "") {',
+    '        print file ":" line "\\t" substr($0, 2)',
+    '        if (file ~ /\\.json"?$/) {',
+    '          count = split(record_text(substr($0, 2)), parts, "\\n")',
+    '          for (i = 1; i <= count; i++) print file ":" line "\\t" parts[i]',
+    '        }',
+    '      }',
+    '      line++',
+    '    }',
     "  '",
     '}',
     '',
     '# The allowlist of ledger store sync: a repo folder and a ledger name are never . or .., and hold no / or \\ or line break.',
-    "ledger_path='^(backlog|archive)/([^/\\]+)/([^/\\]+)\\.md$'",
+    "ledger_path='^(backlog|archive)/([^/\\]+)/([^/\\]+)\\.(md|json)$'",
     'is_ledger() {',
     '  case $1 in .ledger-data | .gitignore) return 0 ;; *$\'\\n\'*) return 1 ;; esac',
     '  [[ $1 =~ $ledger_path ]] || return 1',

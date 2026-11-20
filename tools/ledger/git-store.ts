@@ -3,13 +3,16 @@ import { lstatSync } from 'node:fs';
 import path from 'node:path';
 import { checkCommitted, cloneEnv, cloneGit, clonePaths, commitChanges, recordProblem, repairHook, setUpClone, SyncProblem, withCloneLock } from './clone.js';
 import { fail } from './failure.js';
-import { fileStoreAt } from './file-store.js';
+import { fileStoreAt, keptCreated } from './file-store.js';
 import { ledgerBin, type LedgerPaths } from './paths.js';
-import type { LedgerStore, WrittenLedger } from './store.js';
+import { parseRecord, recordJson } from './record.js';
+import type { LedgerCollection, LedgerStore, WrittenLedger } from './store.js';
 
 export type GitStoreOptions = {
   /** Start `ledger store sync --quiet` after a command that wrote, so the push never makes the command wait. */
   backgroundSync: boolean;
+  /** For a dry run, which only reads: opening leaves the pre-push hook as it is, and closing commits and pushes nothing. */
+  readOnly?: boolean;
 };
 
 let backgroundSyncStarted: ((pid: number) => void) | undefined;
@@ -46,11 +49,16 @@ function hasUnpushed(clone: string): boolean {
  * pre-push hook that changed. `commit` commits what the store wrote; `close` does so too, once, and starts the push
  * while the clone has commits the remote lacks.
  */
-export function gitStore(paths: LedgerPaths, { backgroundSync }: GitStoreOptions = { backgroundSync: true }): LedgerStore {
+export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false }: GitStoreOptions = { backgroundSync: true }): LedgerStore {
   const clone = setUpClone(paths);
-  repairHook(clone);
+  if (!readOnly) repairHook(clone);
   const { evidence, registry, aliases } = clonePaths(paths);
   const files = fileStoreAt({ backlog: path.join(clone, 'backlog'), archive: path.join(clone, 'archive'), evidence, registry, aliases });
+  /** The clone paths of the record of a ledger and of the Markdown it replaces, both of which a write changes. */
+  const ledgerFiles = (collection: 'backlog' | 'archive', repo: string, name: string): string[] => {
+    const record = path.relative(clone, files[collection].location(repo, name)).replace(/\.(md|json)$/, '');
+    return [`${record}.json`, `${record}.md`];
+  };
   let wrote = false;
   let committed = false;
   /** The clone paths of the ledgers this store wrote since its last commit. */
@@ -78,7 +86,7 @@ export function gitStore(paths: LedgerPaths, { backgroundSync }: GitStoreOptions
         checkFolders(collection, touched);
         const note = (): void => {
           wrote = true;
-          for (const repo of touched) written.add(path.relative(clone, files[collection].location(repo, args[1])));
+          for (const repo of touched) for (const file of ledgerFiles(collection, repo, args[1])) written.add(file);
         };
         try {
           const result = write(...args);
@@ -91,9 +99,18 @@ export function gitStore(paths: LedgerPaths, { backgroundSync }: GitStoreOptions
         }
       });
   const fromAndTo = ([repo, , to]: [string, string, string]): string[] => [repo, to];
+  const toRecordOf =
+    (collection: LedgerCollection) =>
+    (repo: string, name: string): boolean =>
+      collection.toRecord?.(repo, name) ?? false;
+  /** The clone path of the record of a ledger written as `text`, and what the store keeps there, its created time too. */
+  const keptRecord = ({ place, repo, name, text }: WrittenLedger): [string, string] => {
+    const file = ledgerFiles(place, repo, name)[0];
+    return [file, recordJson(parseRecord(text), keptCreated(path.join(clone, file)))];
+  };
   const commit = (expected: WrittenLedger[] = []): void => {
     if (!wrote && expected.length === 0) return;
-    const texts = new Map(expected.map(({ place, repo, name, text }) => [path.relative(clone, files[place].location(repo, name)), text]));
+    const texts = new Map(expected.map(keptRecord));
     const made = withCloneLock(clone, () => {
       const made = commitChanges(clone);
       checkCommitted(clone, [...written], texts);
@@ -111,17 +128,20 @@ export function gitStore(paths: LedgerPaths, { backgroundSync }: GitStoreOptions
       update: locked('backlog', files.backlog.update, (updated) => updated),
       remove: locked('backlog', files.backlog.remove, (removed) => removed),
       move: locked('backlog', files.backlog.move, (moved) => moved, fromAndTo),
+      toRecord: locked('backlog', toRecordOf(files.backlog), (converted) => converted),
     },
     archive: {
       ...files.archive,
       write: locked('archive', files.archive.write),
       remove: locked('archive', files.archive.remove, (removed) => removed),
       move: locked('archive', files.archive.move, (moved) => moved, fromAndTo),
+      toRecord: locked('archive', toRecordOf(files.archive), (converted) => converted),
     },
     registry: files.registry,
     aliases: files.aliases,
     commit,
     close: () => {
+      if (readOnly) return;
       try {
         commit();
       } catch (error) {

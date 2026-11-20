@@ -12,6 +12,7 @@ import { fileStore } from '../tools/ledger/file-store.js';
 import { gitStore } from '../tools/ledger/git-store.js';
 import { withLock } from '../tools/ledger/lock.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
+import { parseRecord, readRecordJson, recordJson, renderRecord } from '../tools/ledger/record.js';
 import { sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { allowRemoteForTests, pullForSession } from '../tools/ledger/sync.js';
@@ -199,6 +200,9 @@ const remoteFiles = (bare: string): string[] => (remoteHead(bare) === '' ? [] : 
 
 const remoteText = (bare: string, file: string): string => git(path.dirname(bare), bare, 'show', `refs/heads/main:${file}`);
 
+/** A task record on the remote, rendered to Markdown as the store reads it. */
+const remoteLedger = (bare: string, file: string): string => renderRecord(readRecordJson(remoteText(bare, file), file));
+
 const useGitStorage = (m: Machine): void => writeFileSync(path.join(m.h, '.claude/ledger-settings.json'), JSON.stringify({ storage: 'git' }));
 
 /** `ledger store sync init` on a machine, then git storage. */
@@ -212,7 +216,7 @@ function today(): string {
   return [date.getFullYear(), date.getMonth() + 1, date.getDate()].map((part) => String(part).padStart(2, '0')).join('-');
 }
 
-const ALLOWED = /^(\.ledger-data|\.gitignore|(backlog|archive)\/[^/]+\/[^/]+\.md)$/;
+const ALLOWED = /^(\.ledger-data|\.gitignore|(backlog|archive)\/[^/]+\/[^/]+\.(md|json))$/;
 
 const hookContext = (m: Machine, cwd = m.h): string => {
   const ran = run(m, ['hook', 'session-start'], { cwd, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd }) });
@@ -487,7 +491,7 @@ test('task, park, parent add and retire under git storage each commit in the clo
   ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   assert.equal(commits(), start + 1);
   assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
-  assert.ok(!remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`), 'no push without a sync');
+  assert.ok(!remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`), 'no push without a sync');
 
   ledgerOk(a, 'task', 'park', 'fix-login', '--reason', 'waits for design');
   ledgerOk(a, 'task', 'new', 'epic', '--goal', 'All of it.');
@@ -501,11 +505,11 @@ test('task, park, parent add and retire under git storage each commit in the clo
 
   assert.equal(remoteHead(bare), git(a.h, a.clone, 'rev-parse', 'HEAD'));
   const files = remoteFiles(bare);
-  for (const file of [`backlog/${APP}/fix-login.md`, `backlog/${APP}/epic.md`, `archive/${APP}/${today()}-idea.md`]) assert.ok(files.includes(file), `${file} in ${files.join(', ')}`);
-  assert.ok(!files.includes(`backlog/${APP}/idea.md`));
-  assert.match(remoteText(bare, `backlog/${APP}/fix-login.md`), /Parked: .* — waits for design/);
-  assert.match(remoteText(bare, `backlog/${APP}/fix-login.md`), /- parent: epic/);
-  assert.match(remoteText(bare, `backlog/${APP}/epic.md`), /fix-login/);
+  for (const file of [`backlog/${APP}/fix-login.json`, `backlog/${APP}/epic.json`, `archive/${APP}/${today()}-idea.json`]) assert.ok(files.includes(file), `${file} in ${files.join(', ')}`);
+  assert.ok(!files.includes(`backlog/${APP}/idea.json`));
+  assert.match(remoteLedger(bare, `backlog/${APP}/fix-login.json`), /Parked: .* — waits for design/);
+  assert.match(remoteLedger(bare, `backlog/${APP}/fix-login.json`), /- parent: epic/);
+  assert.match(remoteLedger(bare, `backlog/${APP}/epic.json`), /fix-login/);
   assert.equal(existsSync(a.status), false);
 });
 
@@ -541,10 +545,10 @@ test('without the test switch a command returns first, prints only its own outpu
   assert.equal(ran.stderr, '');
   assert.equal(ran.stdout, quiet.stdout.replaceAll('quiet-twin', 'fix-login'));
   assert.ok(ms < 2500, `the command waited ${ms} ms for the push`);
-  assert.ok(!remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`), 'the push was not done yet when the command returned');
+  assert.ok(!remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`), 'the push was not done yet when the command returned');
   const head = git(a.h, a.clone, 'rev-parse', 'HEAD');
   await until(() => remoteHead(bare) === head && git(a.h, a.clone, 'rev-parse', 'refs/remotes/origin/main') === head && backgroundSyncDone(a), 'the background push');
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`));
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
 });
 
 // ------------------------------------------------------------------------------------------------------------ allowlist
@@ -560,8 +564,8 @@ test('only allowlisted paths reach the remote: no evidence, registry, lock or te
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
   ledgerOk(a, 'task', 'retire', 'old', '--force');
   ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  writeFileSync(path.join(a.clone, `backlog/${APP}/fix-login.md.lock`), '{}');
-  writeFileSync(path.join(a.clone, `backlog/${APP}/fix-login.md.tmp-123`), 'half');
+  writeFileSync(path.join(a.clone, `backlog/${APP}/fix-login.json.lock`), '{}');
+  writeFileSync(path.join(a.clone, `backlog/${APP}/fix-login.json.tmp-123`), 'half');
   writeFileSync(path.join(a.clone, 'notes.txt'), 'private\n');
 
   ledgerOk(a, 'store', 'sync');
@@ -571,7 +575,7 @@ test('only allowlisted paths reach the remote: no evidence, registry, lock or te
   assert.equal(existsSync(path.join(a.clone, `archive/${APP}`, name)), false, 'no evidence in the clone');
   assert.ok(existsSync(path.join(a.h, '.claude/ledgers-git.json')), 'the registry stays local');
   const files = remoteFiles(bare);
-  assert.ok(files.includes(`archive/${APP}/${name}.md`));
+  assert.ok(files.includes(`archive/${APP}/${name}.json`));
   for (const file of files) assert.match(file, ALLOWED);
 });
 
@@ -618,14 +622,14 @@ test('a token in a backlog ledger blocks the push: file:line is named, the token
   setUp(a);
   const before = remoteHead(bare);
   ledgerOk(a, 'task', 'new', 'leak', '--goal', `Use ${GITHUB_TOKEN} to log in.`);
-  const line = lineOf(readFileSync(path.join(a.clone, `backlog/${APP}/leak.md`), 'utf8'), GITHUB_TOKEN);
+  const line = lineOf(readFileSync(path.join(a.clone, `backlog/${APP}/leak.json`), 'utf8'), GITHUB_TOKEN);
 
   const output = failed(run(a, ['store', 'sync']));
 
-  assert.ok(output.includes(`backlog/${APP}/leak.md:${line}`), output);
+  assert.ok(output.includes(`backlog/${APP}/leak.json:${line}`), output);
   assert.ok(!output.includes(GITHUB_TOKEN), 'the token is printed');
   assert.equal(remoteHead(bare), before);
-  git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/leak.md`);
+  git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/leak.json`);
   const status = readFileSync(a.status, 'utf8');
   assert.equal(JSON.parse(status).problem, 'secret');
   assert.ok(!status.includes(GITHUB_TOKEN));
@@ -667,7 +671,7 @@ test('a token added in a merge resolution is caught by ledger store sync and by 
   ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   ledgerOk(a, 'store', 'sync');
   const before = remoteHead(bare);
-  const file = path.join(a.clone, `backlog/${APP}/fix-login.md`);
+  const file = path.join(a.clone, `backlog/${APP}/fix-login.json`);
   const original = readFileSync(file, 'utf8');
   git(a.h, a.clone, 'checkout', '--quiet', '-b', 'side');
   writeFileSync(file, original.replace('Users cannot log in.', 'Users cannot log in on the side.'));
@@ -679,7 +683,7 @@ test('a token added in a merge resolution is caught by ledger store sync and by 
   const resolved = original.replace('Users cannot log in.', `Users cannot log in; use ${GITHUB_TOKEN}.`);
   writeFileSync(file, resolved);
   git(a.h, a.clone, 'commit', '--quiet', '-am', 'merge side');
-  const hit = `backlog/${APP}/fix-login.md:${lineOf(resolved, GITHUB_TOKEN)}`;
+  const hit = `backlog/${APP}/fix-login.json:${lineOf(resolved, GITHUB_TOKEN)}`;
 
   const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
   assert.notEqual(pushed.status, 0);
@@ -687,6 +691,85 @@ test('a token added in a merge resolution is caught by ledger store sync and by 
   const synced = failed(run(a, ['store', 'sync']));
   assert.ok(synced.includes(hit), synced);
   assert.ok(!`${pushed.stderr}${synced}`.includes(GITHUB_TOKEN));
+  assert.equal(remoteHead(bare), before);
+});
+
+test('ledger store sync and the pre-push hook read a record as its text: a key after an escaped line break, tab or control character is found', (t) => {
+  const bare = remote(t);
+  const a = machine(t, bare);
+  setUp(a);
+  const before = remoteHead(bare);
+  const key = token(['s', 'k-'].join(''), 'aB3dE5gH7j', 48);
+  const markdown = [
+    '# Task ledger — leak',
+    '',
+    '## Goal',
+    'Log in with the key below.',
+    key,
+    '',
+    '## Decisions',
+    `- Keep the key\t${key} out of the code`,
+    '',
+    '## Report',
+    `A literal \\n${key} is no line break, so no key starts there.`,
+    '',
+    '## Next step',
+    `Ask.\v${key}`,
+    '',
+  ].join('\n');
+  const json = recordJson(parseRecord(markdown));
+  const file = `backlog/${APP}/leak.json`;
+  mkdirSync(path.join(a.clone, `backlog/${APP}`), { recursive: true });
+  writeFileSync(path.join(a.clone, file), json);
+  git(a.h, a.clone, 'add', '-A');
+  git(a.h, a.clone, 'commit', '--quiet', '--no-verify', '-m', 'leak');
+  const hits = ['"goal"', 'Keep the key', '"next"'].map((needle) => `${file}:${lineOf(json, needle)}`);
+  const miss = `${file}:${lineOf(json, 'A literal')}`;
+
+  const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
+  const synced = run(a, ['store', 'sync']);
+
+  for (const [who, ran] of [['git push', pushed], ['ledger store sync', synced]] as const) {
+    assert.notEqual(ran.status, 0, `${who} was not blocked`);
+    const output = `${ran.stdout}${ran.stderr}`;
+    const named = (where: string): boolean => output.split(/\s/).includes(where);
+    for (const hit of hits) assert.ok(named(hit), `${who} does not name ${hit}:\n${output}`);
+    assert.ok(!named(miss), `${who} names ${miss}:\n${output}`);
+    assert.ok(!output.includes(key.slice(3)), `${who} printed the key`);
+  }
+  assert.equal(remoteHead(bare), before);
+});
+
+test('ledger store sync and the pre-push hook read a record whose path holds a space or a double quote as a record, and name it as git shows it', (t) => {
+  const bare = remote(t);
+  const a = machine(t, bare);
+  setUp(a);
+  const before = remoteHead(bare);
+  const key = token(['s', 'k-'].join(''), 'aB3dE5gH7j', 48);
+  const json = recordJson(parseRecord(['# Task ledger — leak', '', '## Goal', 'Log in with the key below.', key, ''].join('\n')));
+  // git ends the +++ line of a path that holds a space with a tab, and quotes a path that holds a double quote.
+  const files = [
+    ['backlog/my app/leak.json', 'backlog/my app/leak.json'],
+    ['backlog/say"hi/leak.json', '"backlog/say\\"hi/leak.json"'],
+  ] as const;
+  for (const [file] of files) {
+    mkdirSync(path.join(a.clone, path.dirname(file)), { recursive: true });
+    writeFileSync(path.join(a.clone, file), json);
+  }
+  git(a.h, a.clone, 'add', '-A');
+  git(a.h, a.clone, 'commit', '--quiet', '--no-verify', '-m', 'leak');
+  const hits = files.map(([, shown]) => `${shown}:${lineOf(json, '"goal"')}`);
+
+  const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
+  const synced = run(a, ['store', 'sync']);
+
+  for (const [who, ran] of [['git push', pushed], ['ledger store sync', synced]] as const) {
+    assert.notEqual(ran.status, 0, `${who} was not blocked`);
+    const output = `${ran.stdout}${ran.stderr}`;
+    const lines = output.split('\n').map((line) => line.trim());
+    for (const hit of hits) assert.ok(lines.includes(hit), `${who} does not name ${hit}:\n${output}`);
+    assert.ok(!output.includes(key.slice(3)), `${who} printed the key`);
+  }
   assert.equal(remoteHead(bare), before);
 });
 
@@ -732,12 +815,12 @@ test('when two machines change the same ledger, the second sync exits 1, names t
 
   const output = failed(run(b, ['store', 'sync']));
 
-  assert.match(output, new RegExp(String.raw`backlog\/${APP_PATTERN}\/fix-login\.md`));
+  assert.match(output, new RegExp(String.raw`backlog\/${APP_PATTERN}\/fix-login\.json`));
   assert.equal(git(b.h, b.clone, 'rev-parse', 'HEAD'), local);
-  assert.match(readFileSync(path.join(b.clone, `backlog/${APP}/fix-login.md`), 'utf8'), /parked on B/);
+  assert.match(readFileSync(path.join(b.clone, `backlog/${APP}/fix-login.json`), 'utf8'), /parked on B/);
   assert.equal(git(b.h, b.clone, 'status', '--porcelain'), '');
   for (const folder of ['rebase-merge', 'rebase-apply']) assert.equal(existsSync(path.join(b.clone, '.git', folder)), false, `${folder} is left`);
-  assert.doesNotMatch(remoteText(bare, `backlog/${APP}/fix-login.md`), /parked on B/);
+  assert.doesNotMatch(remoteText(bare, `backlog/${APP}/fix-login.json`), /parked on B/);
   assert.equal(JSON.parse(readFileSync(b.status, 'utf8')).problem, 'conflict');
 
   const context = hookContext(b);
@@ -754,7 +837,7 @@ test('offline, commands still work locally, a quiet sync prints nothing and reco
   renameSync(bare, `${bare}.away`);
 
   ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/fix-login.md`);
+  git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/fix-login.json`);
 
   const quiet = run(a, ['store', 'sync', '--quiet']);
   assert.equal(quiet.stdout, '');
@@ -767,7 +850,7 @@ test('offline, commands still work locally, a quiet sync prints nothing and reco
   renameSync(`${bare}.away`, bare);
   ledgerOk(a, 'store', 'sync');
   assert.equal(existsSync(a.status), false);
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`));
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
   assert.doesNotMatch(hookContext(a), /ledger store sync/);
 });
 
@@ -790,25 +873,25 @@ test('migrate file → git → file moves the ledgers and evidence both ways; --
   const a = machine(t, bare);
   const name = withFileLedgers(a);
   ok(run(a, ['store', 'sync', 'init', URL]));
-  const backlog = readFileSync(path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.md`), 'utf8');
+  const backlog = readFileSync(path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.json`), 'utf8');
 
   ledgerOk(a, 'store', 'migrate', '--to', 'git', '--remove-source');
 
   assert.equal(JSON.parse(readFileSync(path.join(a.h, '.claude/ledger-settings.json'), 'utf8')).storage, 'git');
-  assert.equal(readFileSync(path.join(a.clone, `backlog/${APP}/fix-login.md`), 'utf8'), backlog);
+  assert.equal(readFileSync(path.join(a.clone, `backlog/${APP}/fix-login.json`), 'utf8'), backlog);
   assert.equal(readFileSync(path.join(a.h, `.claude/ledger-evidence/${APP}`, name, 'red.txt'), 'utf8'), 'failing\n');
   assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
-  assert.ok(remoteFiles(bare).includes(`archive/${APP}/${name}.md`), 'migrate pushed');
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`));
-  assert.equal(existsSync(path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.md`)), false);
+  assert.ok(remoteFiles(bare).includes(`archive/${APP}/${name}.json`), 'migrate pushed');
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
+  assert.equal(existsSync(path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.json`)), false);
   assert.equal(ledgerOk(a, 'show', name, '--evidence'), 'red.txt\n');
 
   ledgerOk(a, 'store', 'migrate', '--to', 'file');
 
   assert.equal(JSON.parse(readFileSync(path.join(a.h, '.claude/ledger-settings.json'), 'utf8')).storage, 'file');
-  assert.equal(readFileSync(path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.md`), 'utf8'), backlog);
+  assert.equal(readFileSync(path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.json`), 'utf8'), backlog);
   assert.equal(readFileSync(path.join(a.h, `.claude/ledger-archive/${APP}`, name, 'red.txt'), 'utf8'), 'failing\n');
-  assert.ok(existsSync(path.join(a.clone, `backlog/${APP}/fix-login.md`)), 'the git storage keeps its copy');
+  assert.ok(existsSync(path.join(a.clone, `backlog/${APP}/fix-login.json`)), 'the git storage keeps its copy');
 });
 
 test('migrate sqlite → git copies into the clone', { skip: noSqlite }, (t) => {
@@ -820,8 +903,8 @@ test('migrate sqlite → git copies into the clone', { skip: noSqlite }, (t) => 
 
   ledgerOk(a, 'store', 'migrate', '--to', 'git');
 
-  assert.match(readFileSync(path.join(a.clone, `backlog/${APP}/fix-login.md`), 'utf8'), /Users cannot log in\./);
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`));
+  assert.match(readFileSync(path.join(a.clone, `backlog/${APP}/fix-login.json`), 'utf8'), /Users cannot log in\./);
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
 });
 
 test('migrate --to git reports a failed push but still switches, as the copies are in the clone', (t) => {
@@ -835,7 +918,7 @@ test('migrate --to git reports a failed push but still switches, as the copies a
 
   assert.match(stdout, /ledger store sync/);
   assert.equal(JSON.parse(readFileSync(path.join(a.h, '.claude/ledger-settings.json'), 'utf8')).storage, 'git');
-  git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/fix-login.md`);
+  git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/fix-login.json`);
 });
 
 test('migrate refuses --from equal to --to, and --to git while the setting already is git without --from', (t) => {
@@ -845,6 +928,30 @@ test('migrate refuses --from equal to --to, and --to git while the setting alrea
   assert.match(failed(run(a, ['store', 'migrate', '--from', 'file', '--to', 'file'])), /--from/);
   assert.match(failed(run(a, ['store', 'migrate', '--to', 'git'])), /--from/);
   ledgerOk(a, 'store', 'migrate', '--from', 'file', '--to', 'git', '--dry-run');
+});
+
+test('migrate --records --dry-run in git storage changes nothing: the changed hook stays, nothing is committed, no push starts', (t) => {
+  const bare = remote(t);
+  const a = machine(t, bare);
+  setUp(a);
+  mkdirSync(path.join(a.clone, `backlog/${APP}`), { recursive: true });
+  writeFileSync(path.join(a.clone, `backlog/${APP}/legacy.md`), '# Task ledger — legacy\n\n## Goal\nFrom before records.\n');
+  git(a.h, a.clone, 'add', '-A');
+  git(a.h, a.clone, 'commit', '--quiet', '--no-verify', '-m', 'a ledger from before records, not pushed');
+  // Changed, so a store that opens to write would put the hook back.
+  appendFileSync(hookFile(a), '# changed by hand\n');
+  const hook = readFileSync(hookFile(a), 'utf8');
+  const head = git(a.h, a.clone, 'rev-parse', 'HEAD');
+  const pushed = remoteHead(bare);
+
+  const out = ok(run(a, ['store', 'migrate', '--records', '--dry-run'], { env: machineEnv(a) }));
+
+  assert.match(out, /^would convert backlog .+ legacy: /m);
+  assert.equal(readFileSync(hookFile(a), 'utf8'), hook);
+  assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), head);
+  assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
+  assert.equal(existsSync(backgroundPids(a.h)), false, 'the dry run started a push');
+  assert.equal(remoteHead(bare), pushed);
 });
 
 test('migrate --to git without a set-up clone says to run ledger store sync init and changes nothing', (t) => {
@@ -969,7 +1076,7 @@ test('ledger store sync pushes to the URL it checked: a pushurl on origin is not
 
   ledgerOk(a, 'store', 'sync');
 
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`));
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
   assert.equal(remoteHead(evil), '');
 });
 
@@ -1003,7 +1110,7 @@ test('ledger store sync asks gh whether the repository is still private each tim
   ledgerOk(a, 'task', 'new', 'second', '--goal', 'Second.');
   ok(run(a, ['store', 'sync', '--quiet']));
   assert.equal(calls(), atInit + 1, 'a background sync on the same day does not ask again');
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/second.md`));
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/second.json`));
 
   answerGh(a.h, { visibility: 'PUBLIC', isEmpty: false });
   ledgerOk(a, 'task', 'new', 'third', '--goal', 'Third.');
@@ -1040,7 +1147,7 @@ test('git storage refuses to write through a repo folder that is a symbolic link
 
   assert.equal(run(a, ['task', 'retire', 'idea']).status, 1);
   assert.deepEqual(readdirSync(outsideArchive), []);
-  assert.ok(existsSync(path.join(a.clone, `backlog/${APP}/idea.md`)));
+  assert.ok(existsSync(path.join(a.clone, `backlog/${APP}/idea.json`)));
 });
 
 test('a staged path whose name ends in a line break is checked as it is, and refused', (t) => {
@@ -1087,9 +1194,9 @@ test('ledger store sync and the pre-push hook scan from the remote branch, so a 
 
   const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
   assert.notEqual(pushed.status, 0, 'the pre-push hook let it through');
-  assert.match(pushed.stderr, new RegExp(String.raw`backlog\/${APP_PATTERN}\/leak\.md:\d+`));
+  assert.match(pushed.stderr, new RegExp(String.raw`backlog\/${APP_PATTERN}\/leak\.json:\d+`));
   git(a.h, a.clone, 'update-ref', 'refs/remotes/origin/side', 'HEAD');
-  assert.match(failed(run(a, ['store', 'sync'])), new RegExp(String.raw`backlog\/${APP_PATTERN}\/leak\.md:\d+`));
+  assert.match(failed(run(a, ['store', 'sync'])), new RegExp(String.raw`backlog\/${APP_PATTERN}\/leak\.json:\d+`));
   assert.equal(remoteHead(bare), before);
 });
 
@@ -1159,7 +1266,7 @@ test('a stash that left a conflict stops the commit of every command and of ledg
   const a = machine(t, bare);
   setUp(a);
   ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  const file = path.join(a.clone, `backlog/${APP}/fix-login.md`);
+  const file = path.join(a.clone, `backlog/${APP}/fix-login.json`);
   const original = readFileSync(file, 'utf8');
   writeFileSync(file, original.replace('Users cannot log in.', 'Stashed goal.'));
   git(a.h, a.clone, 'stash', '--quiet');
@@ -1176,7 +1283,7 @@ test('a stash that left a conflict stops the commit of every command and of ledg
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), head);
   assert.notEqual(git(a.h, a.clone, 'ls-files', '-u'), '', 'the conflict was marked as resolved');
   assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'conflict');
-  assert.match(failed(run(a, ['store', 'sync'])), new RegExp(String.raw`backlog\/${APP_PATTERN}\/fix-login\.md`));
+  assert.match(failed(run(a, ['store', 'sync'])), new RegExp(String.raw`backlog\/${APP_PATTERN}\/fix-login\.json`));
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), head);
 });
 
@@ -1198,7 +1305,7 @@ test('during a rebase a person has not finished, ledger store sync refuses, push
   assert.match(failed(run(b, ['store', 'sync'])), /rebase/);
 
   assert.ok(existsSync(path.join(b.clone, '.git/rebase-merge')), 'the rebase was aborted');
-  assert.doesNotMatch(remoteText(bare, `backlog/${APP}/fix-login.md`), /parked on B/);
+  assert.doesNotMatch(remoteText(bare, `backlog/${APP}/fix-login.json`), /parked on B/);
 });
 
 // --------------------------------------------------------------------------------------------------------------- locks
@@ -1214,7 +1321,7 @@ test('the clone lock of a process that still runs is kept, also after a minute',
 
   assert.equal(ran.status, 1, ran.stdout);
   assert.ok(ran.stderr.includes(lock), ran.stderr);
-  assert.equal(existsSync(path.join(a.clone, `backlog/${APP}/fix-login.md`)), false);
+  assert.equal(existsSync(path.join(a.clone, `backlog/${APP}/fix-login.json`)), false);
 });
 
 test('a background sync that gives up waiting for the clone lock prints nothing and records why', (t) => {
@@ -1248,7 +1355,7 @@ test('a background sync that starts while another runs exits at once, and the ru
   assert.ok(ms < 1500, `the second sync took ${ms} ms`);
   const done = await first;
   assert.equal(done.status, 0, done.stderr);
-  for (const file of [`backlog/${APP}/first.md`, `backlog/${APP}/second.md`]) assert.ok(remoteFiles(bare).includes(file), file);
+  for (const file of [`backlog/${APP}/first.json`, `backlog/${APP}/second.json`]) assert.ok(remoteFiles(bare).includes(file), file);
 });
 
 test('a sync that started earlier neither clears nor replaces the problem a later sync recorded', (t) => {
@@ -1314,7 +1421,7 @@ test('a ledger command that runs while a sync pushes is not held up, and the nex
   const synced = await syncing;
   assert.equal(synced.status, 0, synced.stderr);
   ledgerOk(a, 'store', 'sync');
-  for (const file of [`backlog/${APP}/first.md`, `backlog/${APP}/second.md`]) assert.ok(remoteFiles(bare).includes(file), file);
+  for (const file of [`backlog/${APP}/first.json`, `backlog/${APP}/second.json`]) assert.ok(remoteFiles(bare).includes(file), file);
   assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
 });
 
@@ -1339,7 +1446,7 @@ test('when the remote moves between the fetch and the push, ledger store sync pu
 
   assert.match(ledgerOk(a, 'store', 'sync'), /Pushed/);
 
-  for (const file of [`backlog/${APP}/other.md`, `backlog/${APP}/mine.md`]) assert.ok(remoteFiles(bare).includes(file), file);
+  for (const file of [`backlog/${APP}/other.md`, `backlog/${APP}/mine.json`]) assert.ok(remoteFiles(bare).includes(file), file);
   assert.equal(remoteHead(bare), git(a.h, a.clone, 'rev-parse', 'HEAD'));
 });
 
@@ -1370,9 +1477,9 @@ test('migrate --to git --remove-source stops before it removes or switches anyth
 
   assert.match(failed(run(a, ['store', 'migrate', '--to', 'git', '--remove-source'])), /notes\.txt/);
 
-  assert.ok(existsSync(path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.md`)), 'the source was removed');
+  assert.ok(existsSync(path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.json`)), 'the source was removed');
   assert.equal(existsSync(path.join(a.h, '.claude/ledger-settings.json')), false);
-  assert.equal(existsSync(path.join(a.clone, `backlog/${APP}/fix-login.md`)), false, 'the copy stays in the clone');
+  assert.equal(existsSync(path.join(a.clone, `backlog/${APP}/fix-login.json`)), false, 'the copy stays in the clone');
 });
 
 // -------------------------------------------------------------------------------------------------------- names as paths
@@ -1418,15 +1525,15 @@ test('a .gitignore from the remote that ignores ledgers keeps none out of the co
   const a = machine(t, bare);
   setUp(a);
   const other = plainClone(a);
-  appendFileSync(path.join(other, '.gitignore'), '/backlog/*/*.md\n');
+  appendFileSync(path.join(other, '.gitignore'), '/backlog/*/*.md\n/backlog/*/*.json\n');
   pushFrom(a, other, 'ignore the ledgers');
   ledgerOk(a, 'store', 'sync');
 
   ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
 
-  git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/fix-login.md`);
+  git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/fix-login.json`);
   ledgerOk(a, 'store', 'sync');
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`));
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
 });
 
 test('migrate --to git --remove-source commits every copy before it removes anything, also one an exclude file ignores', (t) => {
@@ -1435,7 +1542,7 @@ test('migrate --to git --remove-source commits every copy before it removes anyt
   ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   ok(run(a, ['store', 'sync', 'init', URL]));
   writeFileSync(path.join(a.clone, '.git/info/exclude'), 'backlog/\n');
-  const source = path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.md`);
+  const source = path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.json`);
   const commits = path.join(a.h, 'commits');
   // git runs post-commit also for a commit with --no-verify; it notes whether the source was still there.
   const hook = path.join(a.clone, '.git/hooks/post-commit');
@@ -1446,8 +1553,8 @@ test('migrate --to git --remove-source commits every copy before it removes anyt
 
   assert.equal(readFileSync(commits, 'utf8').split('\n')[0], 'source', 'the first commit came after the source was removed');
   assert.equal(existsSync(source), false);
-  git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/fix-login.md`);
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`));
+  git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/fix-login.json`);
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
 });
 
 // ------------------------------------------------------------------------------------------------------ incoming commits
@@ -1471,7 +1578,7 @@ test('ledger store sync pushes against the commit it fetched, even when the remo
 
   ledgerOk(b, 'store', 'sync');
 
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/mine.md`));
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/mine.json`));
   assert.equal(remoteHead(bare), git(b.h, b.clone, 'rev-parse', 'HEAD'));
 });
 
@@ -1551,7 +1658,7 @@ test('a manual git push in the clone runs the pre-push hook of ledger, also when
   const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
 
   assert.notEqual(pushed.status, 0, 'the push went through without the scan');
-  assert.match(pushed.stderr, new RegExp(String.raw`backlog\/${APP_PATTERN}\/leak\.md:\d+`));
+  assert.match(pushed.stderr, new RegExp(String.raw`backlog\/${APP_PATTERN}\/leak\.json:\d+`));
   assert.equal(remoteHead(bare), before);
   assertOwnHook(a);
 });
@@ -1793,7 +1900,7 @@ test('a background sync whose sync fails syncs once more for a command that left
   const done = await first;
 
   assert.equal(done.status, 0, done.stderr);
-  for (const file of [`backlog/${APP}/first.md`, `backlog/${APP}/second.md`]) assert.ok(remoteFiles(bare).includes(file), file);
+  for (const file of [`backlog/${APP}/first.json`, `backlog/${APP}/second.json`]) assert.ok(remoteFiles(bare).includes(file), file);
   assert.equal(existsSync(a.status), false);
 });
 
@@ -1828,13 +1935,13 @@ test('migrate --to git --remove-source keeps the source when git storage commits
   const a = machine(t, bare);
   ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   ok(run(a, ['store', 'sync', 'init', URL]));
-  const source = path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.md`);
+  const source = path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.json`);
   const text = readFileSync(source, 'utf8');
   // Stands in for another command that changes the copy once the check is done: the commit then holds its text, on disk too.
   const hook = path.join(a.clone, '.git/hooks/post-commit');
   writeFileSync(
     hook,
-    ['#!/bin/sh', '[ ! -f "$HOME/changed" ] || exit 0', 'touch "$HOME/changed"', `printf 'changed\\n' > backlog/${APP}/fix-login.md`, `git add backlog/${APP}/fix-login.md`, 'git commit --quiet --amend --no-edit --no-verify', ''].join('\n'),
+    ['#!/bin/sh', '[ ! -f "$HOME/changed" ] || exit 0', 'touch "$HOME/changed"', `printf 'changed\\n' > backlog/${APP}/fix-login.json`, `git add backlog/${APP}/fix-login.json`, 'git commit --quiet --amend --no-edit --no-verify', ''].join('\n'),
   );
   chmodSync(hook, 0o755);
 
@@ -1855,7 +1962,7 @@ for (const hide of ['a replace object', 'a graft'] as const) {
     ledgerOk(a, 'task', 'new', 'leak', '--goal', `Use ${GITHUB_TOKEN} to log in.`);
     const leak = git(a.h, a.clone, 'rev-parse', 'HEAD');
     // A later commit takes the token out again, so the last tree holds none; only the commit that added it does.
-    writeFileSync(path.join(a.clone, `backlog/${APP}/leak.md`), '# leak\n');
+    writeFileSync(path.join(a.clone, `backlog/${APP}/leak.json`), '# leak\n');
     git(a.h, a.clone, 'commit', '--quiet', '-am', 'clean');
     if (hide === 'a replace object') {
       git(a.h, a.clone, 'replace', leak, git(a.h, a.clone, 'commit-tree', 'HEAD^{tree}', '-p', before, '-m', 'clean'));
@@ -1868,7 +1975,7 @@ for (const hide of ['a replace object', 'a graft'] as const) {
 
     for (const [who, ran] of [['ledger store sync', synced], ['git push', pushed]] as const) {
       assert.notEqual(ran.status, 0, `${who} was not blocked`);
-      assert.match(`${ran.stdout}${ran.stderr}`, new RegExp(String.raw`backlog\/${APP_PATTERN}\/leak\.md:\d+`), who);
+      assert.match(`${ran.stdout}${ran.stderr}`, new RegExp(String.raw`backlog\/${APP_PATTERN}\/leak\.json:\d+`), who);
     }
     // ledger store sync's own scan, not the pre-push hook its push runs, must find it.
     assert.match(`${synced.stdout}${synced.stderr}`, /The commits not pushed yet add secret-like text/);
@@ -2049,9 +2156,9 @@ test('git in the clone ignores GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and GIT_CO
   ok(run(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.'], { env }));
   ok(run(a, ['store', 'sync'], { env }));
 
-  git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/fix-login.md`);
+  git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/fix-login.json`);
   assert.equal(git(a.h, a.app, 'rev-parse', 'HEAD'), appHead);
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`));
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
 });
 
 test('sync init asks gh for the visibility and whether the repository is empty, and refuses when gh and git disagree on empty', (t) => {
@@ -2072,13 +2179,13 @@ for (const flag of ['--assume-unchanged', '--skip-worktree']) {
     const a = machine(t, bare);
     setUp(a);
     ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-    git(a.h, a.clone, 'update-index', flag, `backlog/${APP}/fix-login.md`);
+    git(a.h, a.clone, 'update-index', flag, `backlog/${APP}/fix-login.json`);
 
     const ran = run(a, ['task', 'park', 'fix-login', '--reason', 'waits for design']);
 
     assert.match(ran.stderr, /not committed/);
     assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'git');
-    assert.doesNotMatch(git(a.h, a.clone, 'show', `HEAD:backlog/${APP}/fix-login.md`), /waits for design/);
+    assert.doesNotMatch(git(a.h, a.clone, 'show', `HEAD:backlog/${APP}/fix-login.json`), /waits for design/);
   });
 }
 
@@ -2090,7 +2197,7 @@ test('migrate git → sqlite --remove-source moves the ledgers, removes them fro
   ledgerOk(a, 'task', 'new', 'old', '--goal', 'Old work.');
   ledgerOk(a, 'task', 'retire', 'old');
   ledgerOk(a, 'store', 'sync');
-  const archived = `archive/${APP}/${today()}-old.md`;
+  const archived = `archive/${APP}/${today()}-old.json`;
   assert.ok(remoteFiles(bare).includes(archived));
 
   ledgerOk(a, 'store', 'migrate', '--to', 'sqlite', '--remove-source');
@@ -2101,7 +2208,7 @@ test('migrate git → sqlite --remove-source moves the ledgers, removes them fro
   assert.ok(store.archive.has(APP_KEY, `${today()}-old`));
   assert.deepEqual(JSON.parse(readFileSync(path.join(a.h, '.claude/ledger-settings.json'), 'utf8')), { storage: 'sqlite' });
   const files = remoteFiles(bare);
-  for (const file of [`backlog/${APP}/fix-login.md`, archived]) assert.ok(!files.includes(file), `${file} is still pushed`);
+  for (const file of [`backlog/${APP}/fix-login.json`, archived]) assert.ok(!files.includes(file), `${file} is still pushed`);
   assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
 });
 
@@ -2194,7 +2301,7 @@ test('a clone whose .git is a symbolic link is no git storage: a command exits 1
   symlinkSync(moved, path.join(a.clone, '.git'));
 
   assert.match(failed(run(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.'])), /\.git is not a folder/);
-  assert.equal(existsSync(path.join(a.clone, `backlog/${APP}/fix-login.md`)), false);
+  assert.equal(existsSync(path.join(a.clone, `backlog/${APP}/fix-login.json`)), false);
 });
 
 test('a clone whose git names another top folder is no git storage: a command exits 1 and says why', (t) => {
@@ -2206,7 +2313,7 @@ test('a clone whose git names another top folder is no git storage: a command ex
   git(a.h, a.clone, 'config', 'core.worktree', other);
 
   assert.match(failed(run(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.'])), /top folder/);
-  assert.equal(existsSync(path.join(a.clone, `backlog/${APP}/fix-login.md`)), false);
+  assert.equal(existsSync(path.join(a.clone, `backlog/${APP}/fix-login.json`)), false);
   assert.deepEqual(readdirSync(other), []);
 });
 
@@ -2378,11 +2485,11 @@ test('a command that commits nothing still starts the push while the clone has c
   const a = machine(t, bare);
   setUp(a);
   ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  assert.ok(!remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`));
+  assert.ok(!remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
 
   ok(run(a, ['list'], { env: machineEnv(a) }));
 
-  await until(() => remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`) && backgroundSyncDone(a), 'the background push', 10_000);
+  await until(() => remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`) && backgroundSyncDone(a), 'the background push', 10_000);
 });
 
 test('a command starts the push when git cannot count the commits the remote lacks', async (t) => {
@@ -2398,7 +2505,7 @@ test('a command starts the push when git cannot count the commits the remote lac
 
   ok(run(a, ['list'], { env: { ...machineEnv(a), PATH: `${stubs}${path.delimiter}${machineEnv(a).PATH ?? ''}` } }));
 
-  await until(() => remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`) && backgroundSyncDone(a), 'the background push', 10_000);
+  await until(() => remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`) && backgroundSyncDone(a), 'the background push', 10_000);
 });
 
 test('ledger store sync and sync init stop waiting for a gh that does not answer, exit 1 and say so, and push nothing', (t) => {
@@ -2514,11 +2621,11 @@ test('a command starts the push while origin lacks a commit on the branch the cl
   setUp(a);
   ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   git(a.h, a.clone, 'push', '--quiet', 'origin', 'HEAD:refs/heads/side');
-  assert.ok(!remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`));
+  assert.ok(!remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
 
   ok(run(a, ['list'], { env: machineEnv(a) }));
 
-  await until(() => remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`) && backgroundSyncDone(a), 'the background push', 10_000);
+  await until(() => remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`) && backgroundSyncDone(a), 'the background push', 10_000);
 });
 
 test('sync init stops before it writes the pre-push hook through a hooks folder that a git template made a symbolic link', (t) => {
@@ -2756,13 +2863,13 @@ test('after gh says the repository is not private, no sync trusts the earlier ch
   rmSync(configLock);
   answerGh(a.h, { visibility: 'PRIVATE', isEmpty: false });
   ok(run(a, ['store', 'sync', '--quiet']));
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`), 'a PRIVATE answer did not allow the push');
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`), 'a PRIVATE answer did not allow the push');
   assert.equal(existsSync(path.join(a.h, '.claude/ledger-data.not-private')), false);
 
   answerGh(a.h, 'fail');
   ledgerOk(a, 'task', 'new', 'second', '--goal', 'Second.');
   ok(run(a, ['store', 'sync', '--quiet']));
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/second.md`), 'after a PRIVATE answer, a background sync trusts it for a day again');
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/second.json`), 'after a PRIVATE answer, a background sync trusts it for a day again');
 });
 
 const ghCalls = (m: Machine): number => readFileSync(path.join(m.h, 'gh-calls'), 'utf8').trim().split('\n').length;
@@ -2851,7 +2958,7 @@ test('a background sync that still runs when its test ends, after the wait for i
     ok(run(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.'], { env: machineEnv(a) }));
     pids = readFileSync(backgroundPids(a.h), 'utf8').split('\n').filter(Boolean).map(Number);
 
-    await assert.rejects(until(() => remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`), 'the background push', 500), /did not happen/);
+    await assert.rejects(until(() => remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`), 'the background push', 500), /did not happen/);
   });
 
   assert.equal(pids.length, 1);
@@ -2881,8 +2988,8 @@ test('after the remote lost commits on purpose, the refusal says how to accept t
   git(a.h, a.clone, 'reset', '--quiet', '--hard', 'origin/main');
   assert.match(ledgerOk(a, 'store', 'sync'), /Nothing to push/);
   assert.equal(remoteHead(bare), older);
-  assert.deepEqual(remoteFiles(bare).filter((file) => file.startsWith('backlog/')), [`backlog/${APP}/first.md`]);
-  assert.equal(existsSync(path.join(a.clone, `backlog/${APP}/third.md`)), false, 'the reset keeps a change that was not pushed');
+  assert.deepEqual(remoteFiles(bare).filter((file) => file.startsWith('backlog/')), [`backlog/${APP}/first.json`]);
+  assert.equal(existsSync(path.join(a.clone, `backlog/${APP}/third.json`)), false, 'the reset keeps a change that was not pushed');
 });
 
 test('when git cannot check whether the remote lost commits, ledger store sync says so and does not report lost commits', (t) => {
@@ -2925,7 +3032,7 @@ test('a branch other than the one the clone pushes to, which the remote moved ba
 
   ledgerOk(a, 'store', 'sync');
 
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/third.md`));
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/third.json`));
   assert.equal(git(a.h, a.clone, 'rev-parse', 'refs/remotes/origin/main'), remoteHead(bare));
 });
 
@@ -2990,7 +3097,7 @@ test('git storage files a task under its repo key, URI-encoded as one folder, an
   ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   ledgerOk(a, 'store', 'sync');
 
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`), remoteFiles(bare).join('\n'));
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`), remoteFiles(bare).join('\n'));
 });
 
 test('git storage refuses to write through the folder of a repo key that is a symbolic link', (t) => {
@@ -3035,13 +3142,13 @@ test('ledger store migrate --repo-ids with git storage moves clone ledgers and t
   store.archive.write('app', '2026-01-01-old', ledgerText({ slug: 'old', main: a.app }), evidence);
   store.close?.();
   ledgerOk(a, 'store', 'sync');
-  assert.ok(remoteFiles(bare).includes('backlog/app/idea.md'));
+  assert.ok(remoteFiles(bare).includes('backlog/app/idea.json'));
 
   ledgerOk(a, 'store', 'migrate', '--repo-ids');
   ledgerOk(a, 'store', 'sync');
 
   const ledgers = remoteFiles(bare).filter((file) => /^(backlog|archive)\//.test(file));
-  assert.deepEqual(ledgers, [`archive/${APP}/2026-01-01-old.md`, `backlog/${APP}/idea.md`]);
+  assert.deepEqual(ledgers, [`archive/${APP}/2026-01-01-old.json`, `backlog/${APP}/idea.json`]);
   assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
   assert.equal(readFileSync(path.join(a.h, '.claude/ledger-evidence', APP, '2026-01-01-old/red.txt'), 'utf8'), 'failing\n');
   assert.equal(existsSync(path.join(a.h, '.claude/ledger-evidence/app')), false);
@@ -3063,6 +3170,6 @@ test('migrate file → git copies the repo aliases into git storage, and a git s
   ledgerOk(a, 'store', 'migrate', '--to', 'git');
 
   assert.deepEqual(JSON.parse(readFileSync(gitAliases(a), 'utf8')), { app: APP_KEY });
-  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.md`));
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
   assert.deepEqual(remoteFiles(bare).filter((file) => file.includes('alias')), []);
 });

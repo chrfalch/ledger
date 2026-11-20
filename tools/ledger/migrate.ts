@@ -9,7 +9,7 @@ import type { LedgerPaths } from './paths.js';
 import { parseRegistry, type RegistryEntry } from './registry.js';
 import { readStorage, shownSettingsFile, writeStorage, type Storage } from './settings.js';
 import { loadSqlite, sqliteFile, sqliteStore } from './sqlite-store.js';
-import { NameTaken, wasCreatedHere, type Change, type LedgerCollection, type LedgerStore, type StoredLedger, type WrittenLedger } from './store.js';
+import { HiddenMarkdown, NameTaken, wasCreatedHere, type Change, type LedgerCollection, type LedgerStore, type StoredLedger, type WrittenLedger } from './store.js';
 import { syncLedgers } from './sync.js';
 import { joined, plural } from './views.js';
 
@@ -295,14 +295,33 @@ function copy(source: LedgerStore, target: LedgerStore, { backlog, archive, alia
   });
 }
 
+type Removal = 'removed' | 'changed' | 'hidden';
+
+/** What `remove` did: 'changed' when it removed nothing as the ledger changed, 'hidden' when it refused one whose record hides Markdown. */
+function removal(remove: () => boolean): Removal {
+  try {
+    return remove() ? 'removed' : 'changed';
+  } catch (error) {
+    if (error instanceof HiddenMarkdown) return 'hidden';
+    throw error;
+  }
+}
+
+const KEPT_BECAUSE: Record<Exclude<Removal, 'removed'>, string> = { changed: 'it changed after the copy', hidden: 'its record hides Markdown from before records' };
+
 /**
  * Removes from `target` each ledger and alias in `written`, and puts back the registry it had while it is still what this
- * run wrote. A backlog ledger another command changed since the copy stays. Says what it did, as a sentence.
+ * run wrote. A backlog ledger another command changed since the copy stays, and so does a copy whose record hides
+ * Markdown. Says what it did, as a sentence.
  */
 function undo(target: LedgerStore, written: Written, registry: RegistryWrite, targetName: string): string {
   try {
-    const changed = written.backlog.filter(({ repo, name, text }) => target.backlog.has(repo, name) && !target.backlog.remove(repo, name, text));
-    for (const { repo, name } of written.archive) if (target.archive.has(repo, name)) target.archive.remove(repo, name);
+    const outcomes = [
+      ...written.backlog.filter(({ repo, name }) => target.backlog.has(repo, name)).map((ledger) => [`backlog ${shortName(ledger)}`, removal(() => target.backlog.remove(ledger.repo, ledger.name, ledger.text))] as const),
+      ...written.archive.filter(({ repo, name }) => target.archive.has(repo, name)).map((ledger) => [`archive ${shortName(ledger)}`, removal(() => target.archive.remove(ledger.repo, ledger.name))] as const),
+    ];
+    const kept = (outcome: Removal): string[] => outcomes.flatMap(([what, done]) => (done === outcome ? [what] : []));
+    const [changed, hidden] = [kept('changed'), kept('hidden')];
     for (const [old, key] of written.aliases) target.aliases.remove(old, key);
     const { before, after } = registry;
     if (after !== undefined) {
@@ -310,10 +329,11 @@ function undo(target: LedgerStore, written: Written, registry: RegistryWrite, ta
       if (before !== undefined) target.registry.update((current) => (current === after ? before : undefined));
       else if (target.registry.read() === after) target.registry.remove();
     }
-    if (changed.length > 0) {
-      const kept = joined(changed.map((ledger) => `backlog ${shortName(ledger)}`));
-      return `The copies it made in the ${targetName} were removed again, except ${kept}, which another command changed after the copy.`;
-    }
+    const except = [
+      ...(changed.length > 0 ? [`${joined(changed)}, which another command changed after the copy`] : []),
+      ...hidden.map((what) => `${what}, whose record hides Markdown from before records`),
+    ];
+    if (except.length > 0) return `The copies it made in the ${targetName} were removed again, except ${except.join(', and ')}.`;
     return `Every copy it made in the ${targetName} was removed again.`;
   } catch (error) {
     return `Removing the copies it made failed too, so some stay in the ${targetName}: ${messageOf(error)}.`;
@@ -364,8 +384,11 @@ function remove(
     if (!source.backlog.has(ledger.repo, ledger.name)) {
       line(`backlog ${shortName(ledger)} is already gone from the source`);
       kept.add(ledger.location);
-    } else if (!source.backlog.remove(ledger.repo, ledger.name, ledger.text)) {
-      line(`kept backlog ${shortName(ledger)} in the source: it changed after the copy`);
+      continue;
+    }
+    const done = removal(() => source.backlog.remove(ledger.repo, ledger.name, ledger.text));
+    if (done !== 'removed') {
+      line(`kept backlog ${shortName(ledger)} in the source: ${KEPT_BECAUSE[done]}`);
       kept.add(ledger.location);
     }
   }
@@ -374,9 +397,10 @@ function remove(
   archive.forEach((copy, index) => {
     if (!source.archive.nameTaken(copy.repo, copy.name)) return line(`archive ${shortName(copy)} is already gone from the source`);
     // Checked against what was copied, as another command may have changed the copy or its evidence since.
-    if (source.archive.remove(copy.repo, copy.name, { text: copy.text, evidence: evidenceFolder(evidenceRoot, index) })) archiveRemoved++;
+    const done = removal(() => source.archive.remove(copy.repo, copy.name, { text: copy.text, evidence: evidenceFolder(evidenceRoot, index) }));
+    if (done === 'removed') archiveRemoved++;
     else {
-      line(`kept archive ${shortName(copy)} in the source: it changed after the copy`);
+      line(`kept archive ${shortName(copy)} in the source: ${KEPT_BECAUSE[done]}`);
       kept.add(copy.location);
     }
   });

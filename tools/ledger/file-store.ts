@@ -1,10 +1,11 @@
 import { cpSync, lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, utimesSync } from 'node:fs';
 import path from 'node:path';
 import { fail } from './failure.js';
-import { createFile, folderEntries, holdsAnything, isEntryName, isFolder, isReadableFile, isTaken, moveAside, putBack, readText, readTimedText, sameTree, treeEntries, writeAtomic } from './files.js';
+import { createFile, folderEntries, holdsAnything, isEntryName, isFolder, isReadableFile, isTaken, moveAside, putBack, readText, readTimedText, sameTree, treeEntries, writeAtomic, type TimedText } from './files.js';
 import { withLock } from './lock.js';
 import type { LedgerPaths } from './paths.js';
-import { byCodeUnit, checkedAliases, isAsChecked, NameTaken, needsAlias, noteCreated, type Archive, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
+import { parseRecord, readStoredRecord, recordJson, recordToWrite, renderRecord, type StoredRecord } from './record.js';
+import { byCodeUnit, checkedAliases, isAsChecked, NameTaken, needsAlias, noteCreated, readable, refuseHiddenMarkdown, type Archive, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
 import { pauseForTest } from './wait.js';
 
 /**
@@ -65,39 +66,119 @@ function leaving(folder: string, moved: boolean): boolean {
   return moved;
 }
 
+const RECORD = '.json';
+const MARKDOWN = '.md';
+
+/** The name a ledger file `file` holds, when it is one: <name>.json for a task record, <name>.md from before records. */
+function ledgerName(file: string): string | undefined {
+  const extension = [RECORD, MARKDOWN].find((each) => file.endsWith(each));
+  const name = extension && file.slice(0, -extension.length);
+  return name && isEntryName(name) ? name : undefined;
+}
+
+const storedIn = (file: string, text: string): StoredRecord => (file.endsWith(RECORD) ? readStoredRecord(text, file) : { record: parseRecord(text) });
+
+/** The text a ledger file gives the store: a record rendered to Markdown, as every store reads it. */
+const renderedFile = (file: string, text: string): string => renderRecord(storedIn(file, text).record);
+
+/** The created time the record at `file` keeps, for a write over it to keep too; undefined when it keeps none or cannot be read. */
+export function keptCreated(file: string): string | undefined {
+  try {
+    return readStoredRecord(readText(file), file).created;
+  } catch {
+    // A record that cannot be read, such as one a git conflict left, is replaced all the same, as before.
+    return undefined;
+  }
+}
+
 /**
- * Ledgers as files <root>/<repo folder>/<name>.md. A ledger is a readable regular file, never a symbolic link; a repo is a
- * folder, through a symbolic link or not. A file such as `...md`, whose name would be `..`, is no ledger.
+ * The Markdown at `file`, with what a record made in its place keeps of it: its birth time as `created`, as macOS cannot
+ * set the birth time of the new file, and its mode, which the umask would set otherwise. Undefined when it is no
+ * readable file.
  */
-function collection(root: string): LedgerCollection {
+function markdownToReplace(file: string): (TimedText & { created: string; mode: number }) | undefined {
+  const found = readTimedText(file);
+  return found && { ...found, created: new Date(found.birthtimeMs).toISOString(), mode: lstatSync(file).mode };
+}
+
+/**
+ * Runs `work` holding the lock of a ledger's record, then that of its Markdown. A writer from before records locks the
+ * Markdown alone, so whatever converts or replaces the Markdown holds both, and never removes an edit it did not read.
+ */
+const withLedgerLocks = <T>({ record, markdown }: { record: string; markdown: string }, work: () => T): T => withLock(record, () => withLock(markdown, work));
+
+/**
+ * A collection of ledger files, and the two files a ledger may be: its record, and its Markdown from before records,
+ * which the record hides while both are there.
+ */
+type FileCollection = LedgerCollection & { files: (repo: string, name: string) => { record: string; markdown: string }; hidesMarkdown: (repo: string, name: string) => boolean };
+
+/**
+ * Ledgers as files <root>/<repo folder>/<name>.json, each a task record. A <name>.md from before records is read as well,
+ * while there is no <name>.json, and a write replaces it. A ledger is a readable regular file, never a symbolic link; a
+ * repo is a folder, through a symbolic link or not. A file such as `...md`, whose name would be `..`, is no ledger.
+ */
+function collection(root: string): FileCollection {
   const repoLocation = (repo?: string): string => (repo === undefined ? root : path.join(root, folderOf(repo)));
-  const location = (repo: string, name: string): string => path.join(repoLocation(repo), `${entryName(name)}.md`);
+  const files = (repo: string, name: string) => {
+    const base = path.join(repoLocation(repo), entryName(name));
+    return { record: `${base}${RECORD}`, markdown: `${base}${MARKDOWN}` };
+  };
+  /** The file there is: the record, else the Markdown, else where the record would be. */
+  const location = (repo: string, name: string): string => {
+    const { record, markdown } = files(repo, name);
+    return isTaken(record) || !isTaken(markdown) ? record : markdown;
+  };
   const read = (repo: string, name: string): StoredLedger | undefined => {
     const file = location(repo, name);
     const found = readTimedText(file);
-    return found && { repo, name, location: file, ...found };
+    if (found === undefined) return undefined;
+    const { record, created } = storedIn(file, found.text);
+    const birthtimeMs = created === undefined ? found.birthtimeMs : Date.parse(created);
+    return { repo, name, location: file, mtimeMs: found.mtimeMs, birthtimeMs, text: renderRecord(record) };
   };
+  const hidesMarkdown = (repo: string, name: string): boolean => {
+    const { record, markdown } = files(repo, name);
+    return isTaken(record) && isTaken(markdown);
+  };
+  // As before records, by <name>.md: fix-login comes before fix.
+  const names = (repo: string): string[] =>
+    [...new Set(folderEntries(repoLocation(repo)).flatMap(({ name }) => ledgerName(name) ?? []))].sort((a, b) => byCodeUnit(`${a}${MARKDOWN}`, `${b}${MARKDOWN}`));
   return {
     location,
     repoLocation,
+    files,
+    hidesMarkdown,
     repos: () =>
       folderEntries(root)
         .map(({ name }) => name)
         .filter((name) => isFolder(path.join(root, name)))
         .map(repoOf)
         .sort(byCodeUnit),
-    list: (repo) =>
-      folderEntries(repoLocation(repo))
-        .map(({ name }) => name)
-        .filter((name) => name.endsWith('.md') && isEntryName(name.slice(0, -'.md'.length)))
-        .sort(byCodeUnit)
-        .flatMap((name) => read(repo, name.slice(0, -'.md'.length)) ?? []),
+    list: (repo) => names(repo).flatMap((name) => readable(() => read(repo, name)) ?? []),
     read,
     has: (repo, name) => isReadableFile(location(repo, name)),
     setModified: (repo, name, mtimeMs) => {
-      const file = location(repo, name);
       const time = new Date(mtimeMs);
-      withLock(file, () => utimesSync(file, time, time));
+      withLock(files(repo, name).record, () => utimesSync(location(repo, name), time, time));
+    },
+    markdownNames: (repo) => names(repo).filter((name) => location(repo, name) === files(repo, name).markdown && isReadableFile(files(repo, name).markdown)),
+    hiddenMarkdown: (repo) => names(repo).filter((name) => hidesMarkdown(repo, name)),
+    markdownText: (repo, name) => {
+      const { record, markdown } = files(repo, name);
+      return isTaken(record) ? undefined : readTimedText(markdown)?.text;
+    },
+    toRecord: (repo, name) => {
+      const { record, markdown } = files(repo, name);
+      return withLedgerLocks({ record, markdown }, () => {
+        const found = isTaken(record) ? undefined : markdownToReplace(markdown);
+        if (found === undefined) return false;
+        if (!createFile(record, recordJson(recordToWrite(found.text, markdown), found.created), found.mode)) return false;
+        // In seconds, not a Date, which would cut the time to whole milliseconds.
+        utimesSync(record, found.mtimeMs / 1000, found.mtimeMs / 1000);
+        rmSync(markdown);
+        return true;
+      });
     },
   };
 }
@@ -196,12 +277,34 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync }: FileStore
       return 'differs';
     }
   };
-  /** Runs `work` on a backlog ledger and its text while holding its lock; throws when it does not exist. */
-  const withExisting = <T>(repo: string, slug: string, work: (file: string, text: string) => T): T => {
-    const file = backlog.location(repo, slug);
-    const missing = (): never => fail(`${file} does not exist.`);
+  /**
+   * Runs `work` on a backlog ledger and its text while holding the locks of its record and its Markdown, whichever of the
+   * two it is kept as; throws when it does not exist.
+   */
+  const withExisting = <T>(repo: string, slug: string, work: (text: string) => T): T => {
+    const missing = (): never => fail(`${backlog.location(repo, slug)} does not exist.`);
     if (!backlog.has(repo, slug)) missing();
-    return withLock(file, () => work(file, (backlog.read(repo, slug) ?? missing()).text));
+    return withLedgerLocks(backlog.files(repo, slug), () => work((backlog.read(repo, slug) ?? missing()).text));
+  };
+  /**
+   * Writes the record of `text` in place of the ledger's record, keeping its created time, or in place of its Markdown
+   * when that is what was read, keeping the Markdown's birth time and mode. Markdown a record hides stays, for
+   * `ledger store migrate --records` to name. Call it under withLedgerLocks.
+   */
+  const putRecord = (repo: string, slug: string, text: string): void => {
+    const { record, markdown } = backlog.files(repo, slug);
+    const replacesMarkdown = !isTaken(record);
+    const replaced = replacesMarkdown ? markdownToReplace(markdown) : undefined;
+    const created = replacesMarkdown ? replaced?.created : keptCreated(record);
+    writeAtomic(record, recordJson(recordToWrite(text, backlog.location(repo, slug)), created), replaced?.mode);
+    if (replacesMarkdown) rmSync(markdown, { force: true });
+  };
+  const anyFileAt = (collection: FileCollection, repo: string, name: string): boolean => Object.values(collection.files(repo, name)).some(isTaken);
+  /** Renames each file of the ledger `name` to `to`, the record and any Markdown it hides. */
+  const moveFiles = (collection: FileCollection, repo: string, name: string, to: string): void => {
+    const [from, target] = [collection.files(repo, name), collection.files(to, name)];
+    if (isTaken(from.record)) rename(from.record, target.record);
+    if (isTaken(from.markdown)) rename(from.markdown, target.markdown);
   };
   /** Fails when `root` is a symbolic link, as a new ledger made through it could land anywhere. */
   const checkRoot = (root: string): void => {
@@ -210,50 +313,47 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync }: FileStore
   return {
     backlog: {
       ...backlog,
-      write: (repo, slug, text) => {
-        const file = backlog.location(repo, slug);
-        withLock(file, () => writeAtomic(file, text));
-      },
+      write: (repo, slug, text) => withLedgerLocks(backlog.files(repo, slug), () => putRecord(repo, slug, text)),
       create: (repo, slug, text) => {
         checkRoot(roots.backlog);
-        return createFile(backlog.location(repo, slug), text);
+        const { record, markdown } = backlog.files(repo, slug);
+        return !isTaken(markdown) && createFile(record, recordJson(recordToWrite(text, record)));
       },
       update: (repo, slug, change) =>
-        withExisting(repo, slug, (file, current) => {
+        withExisting(repo, slug, (current) => {
           pauseForTest();
           const text = change(current);
-          if (text !== undefined) writeAtomic(file, text);
+          if (text !== undefined) putRecord(repo, slug, text);
           return text !== undefined;
         }),
       // Under the lock, so an update that read the ledger before cannot write it back after.
       remove: (repo, slug, expected) =>
-        withExisting(repo, slug, (file, current) => {
+        withExisting(repo, slug, (current) => {
+          if (backlog.hidesMarkdown(repo, slug)) refuseHiddenMarkdown(backlog.location(repo, slug));
           if (current !== expected) return false;
-          rmSync(file);
+          rmSync(backlog.location(repo, slug));
           return true;
         }),
       move: (repo, slug, to) =>
         leaving(
           backlog.repoLocation(repo),
-          withExisting(repo, slug, (file) => {
-            const target = backlog.location(to, slug);
-            return !isTaken(target) && into(backlog.repoLocation(to), () => (rename(file, target), true));
-          }),
+          withExisting(repo, slug, () => !anyFileAt(backlog, to, slug) && into(backlog.repoLocation(to), () => (moveFiles(backlog, repo, slug, to), true))),
         ),
-      canMove: (repo, slug, to) => backlog.has(repo, slug) && !isTaken(backlog.location(to, slug)),
+      canMove: (repo, slug, to) => backlog.has(repo, slug) && !anyFileAt(backlog, to, slug),
     },
     archive: {
       ...archive,
       write: (repo, name, text, evidenceFrom) => {
-        const file = archive.location(repo, name);
+        const { record: file, markdown } = archive.files(repo, name);
         const evidence = evidenceOf(repo, name);
         const refuse = (taken: string): never => {
           throw new NameTaken(`${taken} already exists. An archive copy is never replaced.`);
         };
         checkRoot(roots.archive);
         if (evidenceFrom !== undefined && isTaken(evidence)) refuse(evidence);
+        if (isTaken(markdown)) refuse(markdown);
         if (evidenceFrom !== undefined) evidenceToChange(repo, name);
-        if (!createFile(file, text)) refuse(file);
+        if (!createFile(file, recordJson(recordToWrite(text, file)))) refuse(file);
         noteCreated(file);
         if (evidenceFrom === undefined) return;
         // Verbatim, so a relative link keeps its text; one that stays inside the folder then points into the copy.
@@ -271,14 +371,22 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync }: FileStore
         if (lstatSync(folder, { throwIfNoEntry: false })?.isDirectory()) cpSync(folder, to, { recursive: true, verbatimSymlinks: true, errorOnExist: true, force: false });
       },
       remove: (repo, name, expected) => {
-        const file = archive.location(repo, name);
-        return withLock(file, () => {
+        return withLock(archive.files(repo, name).record, () => {
+          const file = archive.location(repo, name);
           const evidence = evidenceToChange(repo, name);
           if (!isTaken(file)) fail(`${file} does not exist.`);
+          if (archive.hidesMarkdown(repo, name)) refuseHiddenMarkdown(file);
           if (expected !== undefined && !isAsChecked({ read: archive.read, evidenceState }, repo, name, expected)) return false;
           // Checked again once moved aside: an edit made after the check above is put back, one made later is a new file.
           const aside = moveAside(file) ?? fail(`${file} does not exist.`);
-          if (expected !== undefined && readText(aside) !== expected.text) {
+          const unchanged = (): boolean => {
+            try {
+              return renderedFile(file, readText(aside)) === expected?.text;
+            } catch {
+              return false;
+            }
+          };
+          if (expected !== undefined && !unchanged()) {
             putBack(aside, file);
             return false;
           }
@@ -296,13 +404,13 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync }: FileStore
         const [file, evidence] = [archive.location(repo, name), evidenceOf(repo, name)];
         const missing = (): never => fail(`${file} does not exist.`);
         if (!isTaken(file) && !isTaken(evidence)) missing();
-        const moved = withLock(file, () => {
+        const moved = withLock(archive.files(repo, name).record, () => {
           const move = archiveMove(repo, name, to);
           if (move !== 'evidence' && !archive.has(repo, name)) missing();
           return (
             move !== undefined &&
             into(archive.repoLocation(to), () => {
-              if (move === 'copy') rename(file, archive.location(to, name));
+              if (move === 'copy') moveFiles(archive, repo, name, to);
               // The evidence root may be another folder than the archive's, as in git storage.
               return !isTaken(evidence) || into(evidenceRoot.repoLocation(to), () => (rename(evidence, evidenceOf(to, name)), true));
             })

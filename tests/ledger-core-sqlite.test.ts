@@ -5,6 +5,7 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
+import { storedText } from '../tools/ledger/record.js';
 import { sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { shellWord } from '../tools/ledger/write.js';
@@ -170,7 +171,7 @@ for (const storage of ['file', 'sqlite'] as const) {
   test(`${storage} store: ledger retire marks the child retired in a backlog parent and copies its report there`, { skip }, (t) => {
     const { app, ran, parent } = retiredChildOfBacklogParent(t, ['PR #12 merged.', 'The parent must know X.']);
     assert.equal(lineWith(parent, '- part @'), `- part @ ${app} (retired ${today()})`);
-    assert.match(parent, /## Child reports\n\n### part\nPR #12 merged\.\nThe parent must know X\.\n/);
+    assert.match(parent, /## Child reports\n### part\nPR #12 merged\.\nThe parent must know X\.\n/);
     assert.doesNotMatch(ran.stderr, /^warning: .*(epic|parent|## Children|report)/im);
   });
 
@@ -200,7 +201,7 @@ for (const storage of ['file', 'sqlite'] as const) {
     archive.write(keyOf(h, 'app'), '2026-11-01-old', 'newest copy\n');
     archive.write(keyOf(h, 'app'), '2026-12-01-older', 'another slug\n');
     archive.write(keyOf(h, 'lib'), '2026-12-01-old', 'another repo\n');
-    assert.equal(ok(ledger(h, app, 'show', 'old')), 'newest copy\n');
+    assert.equal(ok(ledger(h, app, 'show', 'old')), storedText('newest copy\n'));
   });
 
   test(`${storage} store: ledger show of a full archive name <date>-<slug>[-N] prints that copy, also where the slug alone would pick another`, { skip }, (t) => {
@@ -210,9 +211,9 @@ for (const storage of ['file', 'sqlite'] as const) {
     archive.write(keyOf(h, 'app'), '2026-11-01-old', 'november, first\n');
     archive.write(keyOf(h, 'app'), '2026-11-01-old-2', 'november, second\n');
     archive.write(keyOf(h, 'app'), '2026-12-01-old-2', 'the task old-2\n');
-    assert.equal(ok(ledger(h, app, 'show', '2026-10-01-old')), 'october\n');
-    assert.equal(ok(ledger(h, app, 'show', '2026-11-01-old-2')), 'november, second\n');
-    assert.equal(ok(ledger(h, app, 'show', '2026-11-01-old')), 'november, first\n');
+    assert.equal(ok(ledger(h, app, 'show', '2026-10-01-old')), storedText('october\n'));
+    assert.equal(ok(ledger(h, app, 'show', '2026-11-01-old-2')), storedText('november, second\n'));
+    assert.equal(ok(ledger(h, app, 'show', '2026-11-01-old')), storedText('november, first\n'));
     const { name } = JSON.parse(ok(ledger(h, app, 'show', '2026-11-01-old-2', '--json'))) as { name: string };
     assert.equal(name, '2026-11-01-old-2');
   });
@@ -234,9 +235,9 @@ for (const storage of ['file', 'sqlite'] as const) {
     archive.write(keyOf(h, 'app'), '2026-11-01-old-2', 'november, second\n');
     archive.write(keyOf(h, 'app'), '2026-11-01-old-10', 'november, tenth\n');
     archive.write(keyOf(h, 'app'), '2026-12-01-older', 'another slug\n');
-    assert.equal(ok(ledger(h, app, 'show', 'old')), 'november, tenth\n');
+    assert.equal(ok(ledger(h, app, 'show', 'old')), storedText('november, tenth\n'));
     archive.write(keyOf(h, 'app'), '2026-12-01-old', 'december, first\n');
-    assert.equal(ok(ledger(h, app, 'show', 'old')), 'december, first\n');
+    assert.equal(ok(ledger(h, app, 'show', 'old')), storedText('december, first\n'));
   });
 
   test(`${storage} store: ledger show --evidence of a slug only in the backlog exits 1 and says it has no archived copy`, { skip }, (t) => {
@@ -289,8 +290,8 @@ for (const storage of ['file', 'sqlite'] as const) {
   test(`${storage} store: ledger show --repo reads another repo folder, from any folder`, { skip }, (t) => {
     const { h, app, store } = setup(t, storage);
     store().archive.write(keyOf(h, 'lib'), '2026-11-01-lib-old', 'from lib\n');
-    assert.equal(ok(ledger(h, app, 'show', 'lib-old', '--repo', 'lib')), 'from lib\n');
-    assert.equal(ok(ledger(h, h, 'show', 'lib-old', '--repo', 'lib')), 'from lib\n');
+    assert.equal(ok(ledger(h, app, 'show', 'lib-old', '--repo', 'lib')), storedText('from lib\n'));
+    assert.equal(ok(ledger(h, h, 'show', 'lib-old', '--repo', 'lib')), storedText('from lib\n'));
   });
 
   test(`${storage} store: ledger show --evidence lists the archive copy's evidence files, one relative path per line`, { skip }, (t) => {
@@ -318,7 +319,7 @@ for (const storage of ['file', 'sqlite'] as const) {
     };
     const backlog = store().backlog;
     assert.deepEqual(shown('idea'), { repo: keyOf(h, 'app'), name: 'idea', location: backlog.location(keyOf(h, 'app'), 'idea'), text: backlog.read(keyOf(h, 'app'), 'idea')?.text });
-    assert.deepEqual(shown('old'), { repo: keyOf(h, 'app'), name: '2026-11-01-old', location: store().archive.location(keyOf(h, 'app'), '2026-11-01-old'), text: 'archived\n' });
+    assert.deepEqual(shown('old'), { repo: keyOf(h, 'app'), name: '2026-11-01-old', location: store().archive.location(keyOf(h, 'app'), '2026-11-01-old'), text: storedText('archived\n') });
   });
 
   test(`${storage} store: ledger show refuses a slug or --repo that is empty or holds .., / or \\, exits 1 and names the value`, { skip }, (t) => {
@@ -337,8 +338,8 @@ for (const storage of ['file', 'sqlite'] as const) {
     store().backlog.write(keyOf(h, 'app'), '2026-11-01-fix', 'the backlog task 2026-11-01-fix\n');
     store().archive.write(keyOf(h, 'app'), '2026-11-01-fix', 'archived fix\n');
     store().archive.write(keyOf(h, 'app'), '2026-11-01-fix-2', 'archived fix, second\n');
-    assert.equal(ok(ledger(h, app, 'show', '2026-11-01-fix')), 'archived fix\n');
-    assert.equal(ok(ledger(h, app, 'show', '2026-11-01-fix-2')), 'archived fix, second\n');
+    assert.equal(ok(ledger(h, app, 'show', '2026-11-01-fix')), storedText('archived fix\n'));
+    assert.equal(ok(ledger(h, app, 'show', '2026-11-01-fix-2')), storedText('archived fix, second\n'));
   });
 
   test(`${storage} store: ledger task --design-refs writes the numbers on the design refs line of the backlog ledger`, { skip }, (t) => {
@@ -393,7 +394,7 @@ for (const storage of ['file', 'sqlite'] as const) {
 test('with no ~/.claude/ledger-settings.json the ledgers stay in files, as before', (t) => {
   const { h, app } = setup(t, 'file');
   ok(ledger(h, app, 'task', 'new', 'fix-login'));
-  assert.ok(existsSync(path.join(storeFolder(h, 'ledger-backlog', app), 'fix-login.md')));
+  assert.ok(existsSync(path.join(storeFolder(h, 'ledger-backlog', app), 'fix-login.json')));
   assert.equal(existsSync(path.join(h, '.claude/ledgers.db')), false);
 });
 
@@ -405,7 +406,7 @@ for (const [what, settings] of [
     const { h, app } = setup(t, 'file');
     writeSettings(h, settings);
     ok(ledger(h, app, 'task', 'new', 'fix-login'));
-    assert.ok(existsSync(path.join(storeFolder(h, 'ledger-backlog', app), 'fix-login.md')));
+    assert.ok(existsSync(path.join(storeFolder(h, 'ledger-backlog', app), 'fix-login.json')));
     assert.equal(existsSync(path.join(h, '.claude/ledgers.db')), false);
   });
 }
