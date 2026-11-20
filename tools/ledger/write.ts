@@ -16,6 +16,7 @@ import {
   removeWorktree,
   shortCommit,
 } from './git.js';
+import { withLock } from './lock.js';
 import { samePath, taskWorktree, worktreeLedger, type LedgerPaths } from './paths.js';
 import { withHint } from './migrate-repo-ids.js';
 import { repoKey } from './repo-key.js';
@@ -38,9 +39,12 @@ export function readLedger({ store }: Context, task: Task): string {
 export function updateLedger({ store }: Context, task: Task, change: Change<string>): boolean {
   if (task.place === 'archive') throw new Error(`An archive copy is never changed: ${task.file}`);
   if (task.place === 'backlog') return store.backlog.update(task.repo, task.name, change);
-  const text = change(readText(task.file));
-  if (text !== undefined) writeAtomic(task.file, text);
-  return text !== undefined;
+  return withLock(task.file, () => {
+    const text = change(readText(task.file));
+    pauseForTest();
+    if (text !== undefined) writeAtomic(task.file, text);
+    return text !== undefined;
+  });
 }
 
 /** The local date, as the old scripts wrote it. */
@@ -359,7 +363,7 @@ export function goText(context: Context, { ledger, worktree, branch, base, chain
   ].join('\n');
 }
 
-function liveTask(context: Context, name: string): Linked & { tasks: Task[] } {
+export function liveTask(context: Context, name: string): Linked & { tasks: Task[] } {
   const ref = taskRef(context.cwd, name);
   const tasks = loadTasks(context, [ref.main]);
   return { task: theTask(tasks, ref, { live: true }), ref, tasks };

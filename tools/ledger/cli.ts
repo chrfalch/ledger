@@ -16,6 +16,32 @@ import { repoKey, repoLabel } from './repo-key.js';
 import { migrateStorage } from './migrate.js';
 import { migrateRecords } from './migrate-records.js';
 import { migrateRepoIds } from './migrate-repo-ids.js';
+import {
+  addConstraint,
+  addConstraintText,
+  addDecision,
+  addDecisionText,
+  addNote,
+  addNoteText,
+  addQuestion,
+  addQuestionText,
+  addStep,
+  addStepText,
+  approvePlan,
+  approvePlanText,
+  checkTask,
+  positive,
+  reportStep,
+  reportStepText,
+  reportToParent,
+  reportToParentText,
+  resolveQuestion,
+  resolveQuestionText,
+  setNext,
+  setNextText,
+  TAGS,
+  type Tag,
+} from './notes.js';
 import { openStore } from './open-store.js';
 import { loadTasks } from './registry.js';
 import { retireTask, retireText } from './retire.js';
@@ -328,6 +354,92 @@ export async function main(argv: string[]): Promise<number> {
       const here = own && tasks.length === 1 ? tasks[0].slug : undefined;
       print(JSON.stringify(gateQuestion(name, slug ?? here), null, 2));
     });
+
+  const notesGroup = program
+    .command('notes')
+    .description("Write a task's ledger one item at a time. Each command checks the item and the whole ledger, and writes nothing when either is wrong; after a write, it warns of what ledger notes check finds.")
+    .addHelpText(
+      'after',
+      [
+        '',
+        'Examples:',
+        '  ledger notes plan add "write the tests" --owner opus-implementer',
+        '  ledger notes decide "Keep files" --because "they are simple" --tag observed',
+        '  ledger notes question "Which port?" --blocks 2',
+        '  ledger notes report --step 2 --file .claude/evidence/red.txt',
+        '  ledger notes next "Review step 2 with reviewer" --task fix-login',
+      ].join('\n'),
+    );
+  /** A notes command with the options every one takes. */
+  const notesCommand = (parent: Command, name: string, description: string): Command =>
+    parent
+      .command(name)
+      .description(description)
+      .option('--task <slug>', 'the task in this repo, or <slug>@<path> for the repo at <path>; by default the task of the worktree you are in')
+      .option('--json', JSON_HELP);
+  const tagOption = (what: string): Option => new Option('--tag <tag>', `how the ${what} is known`).choices(TAGS);
+  /** Prints a write: its warnings, on stderr or in the JSON, then the result. */
+  const written = <T extends { warnings: string[] }>(result: T, view: (result: T) => string): void => {
+    warn(result.warnings);
+    show(result, view);
+  };
+  type TaskOption = { task?: string };
+
+  const planGroup = notesGroup.command('plan').description('Add a step to the plan, or approve the plan.');
+  notesCommand(planGroup, 'add', 'Add a step to the end of the plan, numbered after the highest step, with status todo.')
+    .argument('<step>', 'what the step does')
+    .requiredOption('--owner <agent>', 'the agent that does the step')
+    .option('--note <text>', 'one line for the note column')
+    .action((step: string, { owner, note, task }: TaskOption & { owner: string; note?: string }) => written(addStep(context, task, step, owner, note), addStepText));
+  notesCommand(planGroup, 'approve', 'Mark the plan approved today, in place of any earlier date.').action(({ task }: TaskOption) => written(approvePlan(context, task), approvePlanText));
+  notesCommand(notesGroup, 'decide', 'Add a decision, dated today, with its reason and how it is known.')
+    .argument('<text>', 'the decision')
+    .requiredOption('--because <reason>', 'why it was decided')
+    .addOption(tagOption('decision').makeOptionMandatory())
+    .action((text: string, { because, tag, task }: TaskOption & { because: string; tag: Tag }) => written(addDecision(context, task, text, because, tag), addDecisionText));
+  notesCommand(notesGroup, 'constraint', 'Add a constraint that was found, with where it was found.')
+    .argument('<text>', 'the constraint')
+    .requiredOption('--source <where>', 'the file, report or person it comes from')
+    .addOption(tagOption('constraint'))
+    .action((text: string, { source, tag, task }: TaskOption & { source: string; tag?: Tag }) => written(addConstraint(context, task, text, source, tag), addConstraintText));
+  notesCommand(notesGroup, 'question', 'Add an open question and print its number, or with --resolve mark one resolved. A question is numbered by its place in the list.')
+    .argument('[text]', 'the question')
+    .option('--blocks <n>', 'the plan step that waits for the answer')
+    .option('--resolve <id>', 'the number of the question to mark resolved')
+    .action((text: string | undefined, { blocks, resolve, task }: TaskOption & { blocks?: string; resolve?: string }) => {
+      if (resolve === undefined) return written(addQuestion(context, task, text ?? '', blocks === undefined ? undefined : positive(blocks, '--blocks')), addQuestionText);
+      if (text !== undefined || blocks !== undefined) fail('--resolve takes no question text and no --blocks.');
+      written(resolveQuestion(context, task, positive(resolve, '--resolve')), resolveQuestionText);
+    });
+  notesCommand(notesGroup, 'report', "Record the report of a plan step as the path of its file, in place of an earlier one; or set the task's report to its parent.")
+    .option('--step <n>', 'the plan step the report is for; needs --file')
+    .option('--file <path>', 'the report file; the ledger keeps its path, relative to the worktree when inside it')
+    .option('--parent <text>', 'the report to the parent task, which replaces the whole ## Report')
+    .action(({ step, file, parent, task }: TaskOption & { step?: string; file?: string; parent?: string }) => {
+      if (parent !== undefined) {
+        if (step !== undefined || file !== undefined) fail('--parent takes no --step and no --file.');
+        return written(reportToParent(context, task, parent), reportToParentText);
+      }
+      if (step === undefined || file === undefined) fail('ledger notes report needs --step <n> with --file <path>, or --parent <text>.');
+      written(reportStep(context, task, positive(step, '--step'), file), reportStepText);
+    });
+  notesCommand(notesGroup, 'note', 'Add a general note.')
+    .argument('<text>', 'the note')
+    .action((text: string, { task }: TaskOption) => written(addNote(context, task, text), addNoteText));
+  notesCommand(notesGroup, 'next', 'Set the next step, in place of the one there.')
+    .argument('<text>', 'exactly one action, with the agent and effort to use')
+    .action((text: string, { task }: TaskOption) => written(setNext(context, task, text), setNextText));
+  notesCommand(
+    notesGroup,
+    'check',
+    'Check the ledger and change nothing: the record reads back the same from its Markdown, the goal is not empty, and each open question and step report names a step of the plan. Prints ok, or each problem on a line and exits 1.',
+  ).action(({ task }: TaskOption) => {
+    const checked = checkTask(context, task);
+    const { problems } = checked;
+    if (problems.length > 0) exitCode = 1;
+    if (json) printJson(checked, problems.length > 0 ? problems.join('\n') : undefined);
+    else print(problems.length > 0 ? problems.join('\n') : 'ok');
+  });
 
   const parentSlug = 'the parent task in this repo, or <slug>@<path> for the repo at <path>';
   const childSlug = 'the child task, as <slug> or <slug>@<path>';

@@ -59,6 +59,8 @@ it. The commands are:
 - `retire`: archives the ledger (see [Retire and archive](#retire-and-archive)).
 - `task gate`: prints the question for a gate, such as plan approval, as JSON
   the question widget takes. `tools/ledger/gates.ts` defines each gate.
+- `notes`: writes one item of a task's ledger (see
+  [The notes commands](#the-notes-commands)).
 - `store migrate`: moves the ledgers between file, SQLite and git storage.
 - `store sync`: pushes and pulls the ledgers of git storage.
 - `worktrees`: shows the linked worktrees and prunes their build folders.
@@ -67,6 +69,44 @@ it. The commands are:
 - `deploy`: runs `bin/deploy`.
 
 Most commands take `--json`. The plugin reads that output.
+
+### The notes commands
+
+`tools/ledger/notes.ts` implements `ledger notes`. Each write command adds or
+changes one item of the task record (D29 in LLP 0001):
+
+| Command | Changes |
+|---|---|
+| `plan add "<step>" --owner <agent> [--note <text>]` | adds a `todo` step, numbered after the highest |
+| `plan approve` | sets the plan's approval date to today |
+| `decide "<text>" --because <reason> --tag <tag>` | adds a decision dated today |
+| `constraint "<text>" --source <where> [--tag <tag>]` | adds a constraint |
+| `question "<text>" [--blocks <n>]`, `question --resolve <id>` | adds an open question, or marks one resolved |
+| `report --step <n> --file <path>`, `report --parent "<text>"` | sets the report of a step, or `## Report` |
+| `note "<text>"` | adds a line to the general notes |
+| `next "<text>"` | sets the next step |
+
+A tag is `observed`, `confirmed` or `inferred`. A step report keeps only the
+path of its file: relative to the worktree when the file is inside it, else
+absolute.
+
+Each command acts on the task `--task` names, or else on the task of the
+worktree the command runs in. An archived task is refused. A write reads the
+ledger where it lives today: the backlog ledger through
+`store.backlog.update`, or the worktree's `.claude/ledger.md` under
+`withLock`. It parses the ledger with `parseRecord`, changes the record, checks
+it with `validateRecord` and writes `renderRecord` of it. When the new item or
+the record is wrong, the command exits 1 and writes nothing.
+
+`ledger notes check` reads the ledger and changes nothing. It reports a
+record that does not read back the same from its Markdown, an empty goal, an
+open question that blocks a step not in the plan, and a step report for a step
+not in the plan. Every write runs the same rules on the record it wrote and
+prints what they find as warnings, with exit 0.
+
+A question's id is its place in the list, from 1, and is not stored. A
+question that is removed or moved by hand changes the ids of the questions
+after it, so `--resolve` with an id read earlier can mark the wrong question.
 
 ### The store
 
