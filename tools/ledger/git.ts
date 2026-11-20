@@ -78,6 +78,18 @@ export const commitOf = (folder: string, ref: string): string | undefined => lin
 
 export const shortCommit = (folder: string, commit: string): string | undefined => line(folder, 'rev-parse', '--short', commit);
 
+/** The fetch address of each remote by name; undefined when git cannot list them. */
+export function remoteUrls(folder: string): Map<string, string> | undefined {
+  const listed = git(folder, 'remote', '-v');
+  if (listed === undefined) return undefined;
+  const fetched = listed.split('\n').flatMap((entry) => {
+    // A partial clone's line ends with its filter, as in "(fetch) [blob:none]".
+    const [, name, url] = /^(\S+)\t(.*) \(fetch\)(?: \[[^\]]*\])?$/.exec(entry) ?? [];
+    return name === undefined ? [] : [[name, url] as const];
+  });
+  return new Map(fetched);
+}
+
 /** The remote default branch, such as origin/main. */
 export const originHead = (main: string): string | undefined => line(main, 'symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD');
 

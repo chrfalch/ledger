@@ -1,4 +1,5 @@
-const READABLE_SLUG = /^[A-Za-z0-9._-]+$/;
+// Not starting with a dot, so a slug never names ., .. or a hidden folder when it becomes a worktree folder.
+const READABLE_SLUG = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
 const NEW_SLUG = /^[a-z0-9][a-z0-9-]*$/;
 
 /** A slug an existing ledger may carry. */

@@ -70,15 +70,18 @@ function familyLedger(slug: string, location: string[], rest = '## Next step\nA 
   return [`# Task ledger — ${slug}`, '', '## Goal', 'A goal.', '', '## Location', ...location, '', rest].join('\n');
 }
 
-function backlogLedger(h: string, folder: string, slug: string, owner: string, location: string[] = []): string {
-  const ledger = path.join(h, '.claude/ledger-backlog', folder, `${slug}.md`);
+/** The store folder of the repo at <h>/<name>, which has no remote, so its key is that path. */
+const repoFolder = (h: string, name: string): string => encodeURIComponent(path.join(h, name));
+
+function backlogLedger(h: string, name: string, slug: string, owner: string, location: string[] = []): string {
+  const ledger = path.join(h, '.claude/ledger-backlog', repoFolder(h, name), `${slug}.md`);
   mkdirSync(path.dirname(ledger), { recursive: true });
   writeFileSync(ledger, familyLedger(slug, [`- main: ${owner}`, '- worktree: <path>', ...location]));
   return ledger;
 }
 
-function archiveCopy(h: string, folder: string, name: string, text: string): string {
-  const copy = path.join(h, '.claude/ledger-archive', folder, `${name}.md`);
+function archiveCopy(h: string, repo: string, name: string, text: string): string {
+  const copy = path.join(h, '.claude/ledger-archive', repoFolder(h, repo), `${name}.md`);
   mkdirSync(path.dirname(copy), { recursive: true });
   writeFileSync(copy, text);
   return copy;
@@ -426,7 +429,7 @@ test('session-start names a backlog child as backlog, but not one of another rep
   const epic = worktree(h, main, path.join(h, 'epic'));
   const ledger = ledgerIn(epic, familyLedger('epic', [], '## Children\n- idea\n- foreign\n\n## Next step\nA step.\n'));
   backlogLedger(h, 'main', 'idea', main, ['- parent: epic']);
-  backlogLedger(h, 'main', 'foreign', path.join(h, 'elsewhere/main'), ['- parent: epic']);
+  backlogLedger(h, 'elsewhere/main', 'foreign', path.join(h, 'elsewhere/main'), ['- parent: epic']);
 
   assert.equal(sessionStart(h, epic).additionalContext, relationText(ledger, 'Child task: idea (backlog).', 'Child task: foreign (missing).'));
 });
@@ -450,10 +453,10 @@ test('session-start prints nothing when there is no ledger', (t) => {
 test('session-start leaves out backlog tasks, both their ledger files and their registry entries', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const backlog = path.join(h, '.claude/ledger-backlog/main/idea.md');
+  const backlog = path.join(h, '.claude/ledger-backlog', repoFolder(h, 'main'), 'idea.md');
   mkdirSync(path.dirname(backlog), { recursive: true });
   writeFileSync(backlog, `# Task ledger — idea\n\n## Goal\nA backlog goal.\n\n## Location\n- main: ${main}\n`);
-  const entry = { repo: 'main', slug: 'idea', path: backlog, branch: '', status: 'backlog', main, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' };
+  const entry = { repo: main, slug: 'idea', path: backlog, branch: '', status: 'backlog', main, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' };
   writeFileSync(path.join(h, '.claude/ledgers.json'), JSON.stringify([entry]));
 
   assert.equal(hook(h, 'session-start', { cwd: main }), '');
@@ -922,7 +925,7 @@ function removal(t: TestContext) {
   return { h, main, task };
 }
 
-const removalReason = (...folders: string[]): string =>
+const removalReason = (main: string, ...folders: string[]): string =>
   [
     `This would remove a worktree whose task ledger is not archived:${folders.map((folder) => ` ${folder}`).join('')}`,
     '',
@@ -930,13 +933,13 @@ const removalReason = (...folders: string[]): string =>
     'Retire it instead, which archives the ledger and then removes the worktree:',
     `  ${BIN} task retire <slug>`,
     '',
-    'Archived ledgers live in ~/.claude/ledger-archive/<repo>/.',
+    `Archived ledgers of ${path.basename(main)} live in ~/.claude/ledger-archive/${encodeURIComponent(main)}/.`,
   ].join('\n');
 
 test('removing a worktree whose ledger is not archived is denied, naming ledger retire', (t) => {
   const { h, main, task } = removal(t);
 
-  assert.equal(assertDenied(gate(main, 'Bash', { command: 'git worktree remove .claude/worktrees/task' }, h)), removalReason(task));
+  assert.equal(assertDenied(gate(main, 'Bash', { command: 'git worktree remove .claude/worktrees/task' }, h)), removalReason(main, task));
 });
 
 test('each way of naming the worktree in a removal is denied', (t) => {
@@ -949,7 +952,7 @@ test('each way of naming the worktree in a removal is denied', (t) => {
     `rm -rf ~/${path.relative(h, task)}`,
     'cd /tmp && rm -rf .claude/worktrees/task',
   ];
-  for (const command of commands) assert.equal(assertDenied(gate(main, 'Bash', { command }, h)), removalReason(task), command);
+  for (const command of commands) assert.equal(assertDenied(gate(main, 'Bash', { command }, h)), removalReason(main, task), command);
 });
 
 test('removing a worktree whose ledger is archived is allowed', (t) => {
@@ -964,7 +967,7 @@ test('an archive copy of another worktree whose path starts with the same text d
   const { h, main, task } = removal(t);
   archiveCopy(h, 'main', '2026-11-01-task-old', ledgerText({ slug: 'task-old', main, worktree: `${task}-old` }));
 
-  assert.equal(assertDenied(gate(main, 'Bash', { command: `rm -rf ${task}` }, h)), removalReason(task));
+  assert.equal(assertDenied(gate(main, 'Bash', { command: `rm -rf ${task}` }, h)), removalReason(main, task));
 });
 
 test('a removal by the retire commands is allowed', (t) => {
@@ -977,14 +980,14 @@ test('a removal by the retire commands is allowed', (t) => {
 test('a removal that names the deleted cc-worktree-retire script is denied', (t) => {
   const { h, main, task } = removal(t);
 
-  assert.equal(assertDenied(gate(main, 'Bash', { command: `bin/cc-worktree-retire ${task}; rm -rf ${task}` }, h)), removalReason(task));
+  assert.equal(assertDenied(gate(main, 'Bash', { command: `bin/cc-worktree-retire ${task}; rm -rf ${task}` }, h)), removalReason(main, task));
 });
 
 test('a removal that names the worktree by a glob is denied, as bash expands the glob', (t) => {
   const { h, main, task } = removal(t);
 
   for (const glob of ['.claude/worktrees/*', '.claude/worktrees/ta?k', '.claude/worktrees/[st]ask', '.claude/worktrees/[!x]ask', '.claude/*/task', `${main}/.claude/worktrees/*`, '.claude/worktrees/*/']) {
-    assert.equal(assertDenied(gate(main, 'Bash', { command: `rm -rf ${glob}` }, h)), removalReason(task), glob);
+    assert.equal(assertDenied(gate(main, 'Bash', { command: `rm -rf ${glob}` }, h)), removalReason(main, task), glob);
   }
 });
 
@@ -992,7 +995,7 @@ test('a glob with a POSIX class, equivalence class or collating symbol in a brac
   const { h, main, task } = removal(t);
 
   for (const glob of ['[[:alnum:]]ask', '[[:alpha:]]ask', 't[[:lower:]]sk', '[![:digit:]]ask', '[=t=]ask', '[.t.]ask', '[[:alpha:]]*']) {
-    assert.equal(assertDenied(gate(main, 'Bash', { command: `rm -rf .claude/worktrees/${glob}` }, h)), removalReason(task), glob);
+    assert.equal(assertDenied(gate(main, 'Bash', { command: `rm -rf .claude/worktrees/${glob}` }, h)), removalReason(main, task), glob);
   }
 });
 
@@ -1024,7 +1027,7 @@ test('a check that throws does not disable the other: a failed archive read stil
 test('a glob with a reversed range matches nothing, and the rest of the command is still checked', (t) => {
   const { h, main, task } = removal(t);
 
-  assert.equal(assertDenied(gate(main, 'Bash', { command: `rm -rf .claude/worktrees/[z-a]ask ${task}` }, h)), removalReason(task));
+  assert.equal(assertDenied(gate(main, 'Bash', { command: `rm -rf .claude/worktrees/[z-a]ask ${task}` }, h)), removalReason(main, task));
 });
 
 test('a glob that matches nothing, or only folders without a ledger, is allowed', (t) => {
@@ -1194,7 +1197,7 @@ test('a path the gates cannot check counts as no ledger, and the rest of the com
   const tooLong = 'a'.repeat(300);
 
   for (const word of [tooLong, '/broken\u0000folder']) {
-    assert.equal(assertDenied(gate(main, 'Bash', { command: `rm -rf ${task} && echo ${word}` }, h)), removalReason(task));
+    assert.equal(assertDenied(gate(main, 'Bash', { command: `rm -rf ${task} && echo ${word}` }, h)), removalReason(main, task));
   }
   assert.equal(
     assertDenied(gate(main, 'Bash', { command: `echo x > ${tooLong}/.claude/ledger.md; echo y > .claude/ledger.md` }, h)),
@@ -1209,7 +1212,7 @@ test('a folder the gate may not read counts as no ledger, and the rest of the co
   mkdirSync(path.join(locked, 'inside'), { recursive: true });
   chmodSync(locked, 0o000);
   try {
-    assert.equal(assertDenied(gate(main, 'Bash', { command: `rm -rf locked/inside ${task}` }, h)), removalReason(task));
+    assert.equal(assertDenied(gate(main, 'Bash', { command: `rm -rf locked/inside ${task}` }, h)), removalReason(main, task));
   } finally {
     chmodSync(locked, 0o755);
   }

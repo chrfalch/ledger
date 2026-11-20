@@ -5,7 +5,7 @@ import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { fail } from './failure.js';
 import { holdsAnything, treeEntries } from './files.js';
 import { shownSettingsFile } from './settings.js';
-import { byCodeUnit, isAsChecked, NameTaken, noteCreated, type Archive, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
+import { byCodeUnit, checkedAliases, isAsChecked, NameTaken, needsAlias, noteCreated, type Archive, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
 import { pauseForTest } from './wait.js';
 
 // The text of a ledger is UTF-8 in a BLOB: node:sqlite on Node 22 cuts a TEXT value short at a NUL byte.
@@ -30,6 +30,10 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS registry (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     text TEXT NOT NULL
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS aliases (
+    old TEXT PRIMARY KEY,
+    repo TEXT NOT NULL
   ) STRICT;
 `;
 
@@ -79,17 +83,18 @@ export function loadSqlite(): typeof import('node:sqlite') | undefined {
   }
 }
 
-function openDatabase(file: string, home: string): DatabaseSync {
+/** With `readOnly`, the database must be there, and its schema stays as it is, so a dry run changes nothing. */
+function openDatabase(file: string, home: string, readOnly: boolean): DatabaseSync {
   const sqlite =
     loadSqlite() ??
     fail(
       `SQLite storage needs Node 22.13 or later, and 23.4 or later on Node 23. This is Node ${process.versions.node}. Run a newer Node, or set "storage" to "file" in ${shownSettingsFile(home)}.`,
     );
-  mkdirSync(path.dirname(file), { recursive: true });
-  const db = new sqlite.DatabaseSync(file);
+  if (!readOnly) mkdirSync(path.dirname(file), { recursive: true });
+  const db = new sqlite.DatabaseSync(file, { readOnly });
   // Hooks and commands of several sessions may write at once; each waits for the others' short transactions.
   db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-  db.exec(SCHEMA);
+  if (!readOnly) db.exec(SCHEMA);
   return db;
 }
 
@@ -137,9 +142,9 @@ function realFolderIn(root: string, relative: string, outside: () => never): str
  * their evidence, and the registry. A location is the database file and a place in it, such as
  * ~/.claude/ledgers.db:archive/app/2026-11-01-fix-login, and names no file of its own.
  */
-export function sqliteStore({ home }: { home: string }): LedgerStore {
+export function sqliteStore({ home }: { home: string }, { readOnly = false } = {}): LedgerStore {
   const file = sqliteFile(home);
-  const db = openDatabase(file, home);
+  const db = openDatabase(file, home, readOnly);
   const all = <T>(sql: string, ...params: SQLInputValue[]): T[] => db.prepare(sql).all(...params) as T[];
   const one = <T>(sql: string, ...params: SQLInputValue[]): T | undefined => db.prepare(sql).get(...params) as T | undefined;
   const run = (sql: string, ...params: SQLInputValue[]): number => Number(db.prepare(sql).run(...params).changes);
@@ -229,6 +234,35 @@ export function sqliteStore({ home }: { home: string }): LedgerStore {
     }
   };
 
+  const hasLedger = (place: Place, repo: string, name: string): boolean => one('SELECT 1 FROM ledgers WHERE place = ? AND repo = ? AND name = ?', place, repo, name) !== undefined;
+  const hasEvidence = (place: Place, repo: string, name: string): boolean => place === 'archive' && one('SELECT 1 FROM evidence WHERE repo = ? AND name = ?', repo, name) !== undefined;
+
+  /**
+   * What a move of `name` of `place` to `to` would move, by the rules of the file store: the ledger with any evidence, or
+   * only the evidence of an archive copy `to` has already; nothing when `to` has anything else of that name.
+   */
+  const plannedMove = (place: Place, repo: string, name: string, to: string): 'ledger' | 'evidence' | undefined => {
+    if (hasEvidence(place, to, name)) return undefined;
+    if (!hasLedger(place, to, name)) return hasLedger(place, repo, name) ? 'ledger' : undefined;
+    return !hasLedger(place, repo, name) && hasEvidence(place, repo, name) ? 'evidence' : undefined;
+  };
+
+  const move = (place: Place, repo: string, name: string, to: string): boolean =>
+    transaction(() => {
+      const planned = plannedMove(place, repo, name, to);
+      if (planned !== 'evidence' && !hasLedger(place, repo, name)) fail(`${(place === 'backlog' ? backlog : archive).location(repo, name)} does not exist.`);
+      if (planned === undefined) return false;
+      if (planned === 'ledger') run('UPDATE ledgers SET repo = ? WHERE place = ? AND repo = ? AND name = ?', to, place, repo, name);
+      if (place === 'archive') run('UPDATE evidence SET repo = ? WHERE repo = ? AND name = ?', to, repo, name);
+      return true;
+    });
+
+  // A database opened read-only from before the table has none.
+  const storedAliases = (): [string, string][] =>
+    one(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'aliases'`) === undefined
+      ? []
+      : all<{ old: string; repo: string }>('SELECT old, repo FROM aliases').map(({ old, repo }) => [old, repo]);
+
   const existing = (repo: string, slug: string): string => (backlog.read(repo, slug) ?? fail(`${backlog.location(repo, slug)} does not exist.`)).text;
   const readRegistry = (): string | undefined => one<{ text: string }>('SELECT text FROM registry WHERE id = 1')?.text;
   const writeRegistry = (text: string): void => void run('INSERT INTO registry VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET text = excluded.text', text);
@@ -264,6 +298,8 @@ export function sqliteStore({ home }: { home: string }): LedgerStore {
         }),
       remove: (repo, slug, expected) =>
         transaction(() => existing(repo, slug) === expected && run(`DELETE FROM ledgers WHERE place = 'backlog' AND repo = ? AND name = ?`, repo, slug) === 1),
+      move: (repo, slug, to) => move('backlog', repo, slug, to),
+      canMove: (repo, slug, to) => plannedMove('backlog', repo, slug, to) !== undefined,
     },
     archive: {
       ...archive,
@@ -319,6 +355,13 @@ export function sqliteStore({ home }: { home: string }): LedgerStore {
           run(`DELETE FROM ledgers WHERE place = 'archive' AND repo = ? AND name = ?`, repo, name);
           return true;
         }),
+      move: (repo, name, to) => move('archive', repo, name, to),
+      canMove: (repo, name, to) => plannedMove('archive', repo, name, to) !== undefined,
+      orphanEvidence: () =>
+        all<{ repo: string; name: string }>(
+          `SELECT DISTINCT repo, name FROM evidence e
+           WHERE NOT EXISTS (SELECT 1 FROM ledgers l WHERE l.place = 'archive' AND l.repo = e.repo AND l.name = e.name)`,
+        ).sort((a, b) => byCodeUnit(a.repo, b.repo) || byCodeUnit(a.name, b.name)),
     },
     registry: {
       read: readRegistry,
@@ -329,6 +372,15 @@ export function sqliteStore({ home }: { home: string }): LedgerStore {
           if (text !== undefined) writeRegistry(text);
         }),
       remove: () => transaction(() => void run('DELETE FROM registry')),
+    },
+    aliases: {
+      read: () => checkedAliases(storedAliases()).aliases,
+      problem: () => checkedAliases(storedAliases()).problem,
+      add: (old, repo) =>
+        transaction(() => {
+          if (needsAlias(storedAliases(), old, repo, file)) run('INSERT INTO aliases VALUES (?, ?)', old, repo);
+        }),
+      remove: (old, repo) => transaction(() => void run('DELETE FROM aliases WHERE old = ? AND repo = ?', old, repo)),
     },
     close: () => db.close(),
   };

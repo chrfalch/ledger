@@ -132,6 +132,16 @@ function withSuffix(text: string, child: Child, suffix: string): string {
   return lines.join('\n');
 }
 
+/** The child's line as `- <slug> @ <main>`, its suffix as it was. */
+export function withChildMain(text: string, child: Child, main: string): string {
+  const ledger = parseLedger(text);
+  const line = ledger.lines[child.line];
+  const [, indent] = /^(\s*)/.exec(plain(line)) ?? ['', ''];
+  const lines = [...ledger.lines];
+  lines[child.line] = replaced(line, `${indent}- ${child.slug} @ ${main}${child.suffix ? ` ${child.suffix}` : ''}`);
+  return lines.join('\n');
+}
+
 const markedBefore = (mark: string, child: Child): string => `(${mark})${child.suffix ? ` ${child.suffix}` : ''}`;
 
 /** `- <slug> (started <date>)`; a hand-written suffix stays after the mark, as it was. */

@@ -31,11 +31,23 @@ bin/deploy
 
 A clone made before the project was called ledger can still be in a folder
 named `agent-config`. Deploy works from any folder name. To rename the folder,
-run `bin/deploy` again from the new path. Then move
-`~/.claude/ledger-backlog/<old name>/` and `~/.claude/ledger-archive/<old name>/`
-to the new folder name, because ledgers are filed under the folder name of the
-checkout. With SQLite storage, the ledgers stay filed under the old name in the
-database.
+run `bin/deploy` again from the new path. Ledgers are filed under the address of
+the repo's remote, such as `github.com/chrfalch/ledger`, so they stay with the
+repo. A repo with no `origin` and not exactly one other remote files them under
+the path of its main checkout instead, and a new path starts a new set.
+
+Ledgers written before this were filed under the folder name of the checkout.
+`ledger store migrate --repo-ids --dry-run` lists how it would move them to the
+repo's address, and `ledger store migrate --repo-ids` moves them, once. Run it
+before you rename or move the folder. It finds the repo of each ledger through
+the checkout's folder, so it leaves the ledgers of a checkout that has moved
+where they are. Run it while no other ledger command runs, in this or any other session.
+
+The command only renames files on the same disk. It leaves a ledger where it is
+when it cannot tell the repo for sure, when the address already has a ledger of
+that name, or when the address's folder is on another disk. It lists each one
+and exits 1. Move those by hand, then run the command again to check that
+nothing is left.
 
 Run the dry run first. It tells you which files would be linked, which policy
 keys would change, and whether any file of your own would be replaced.

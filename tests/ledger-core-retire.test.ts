@@ -4,7 +4,7 @@ import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, read
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { REPO, snapshot } from './helpers.js';
-import { archivedTask, asCli, backlogTask, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, ok, repository, spawn, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { archivedTask, asCli, backlogTask, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, ok, repository, spawn, storeFolder, worktreeTask, type Ran } from './ledger-core-fixtures.js';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
@@ -21,7 +21,7 @@ function setup(t: TestContext) {
 
 const read = (file: string): string => readFileSync(file, 'utf8');
 const worktreeOf = (main: string, slug: string): string => path.join(main, '.claude/worktrees', slug);
-const archiveFolder = (h: string, main: string): string => path.join(h, '.claude/ledger-archive', path.basename(main));
+const archiveFolder = (h: string, main: string): string => storeFolder(h, 'ledger-archive', main);
 const archiveList = (h: string, main: string): string[] => (existsSync(archiveFolder(h, main)) ? readdirSync(archiveFolder(h, main)).sort() : []);
 const buildRoot = (main: string): string => path.join(realpathSync(main), '.claude/worktrees/.build');
 type RegistryEntry = { slug: string; status: string; archivePath?: string };

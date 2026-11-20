@@ -3,8 +3,9 @@ import { fail } from './failure.js';
 import { folderEntries, readTimedText, type TimedText } from './files.js';
 import { isReadableSlug, parseLedger, type Child, type ChildMark, type Ledger, type TaskRef } from './format.js';
 import { mainCheckout, worktrees } from './git.js';
-import { mainOfTaskWorktree, parseArchiveName, repoName, samePath, worktreeLedger } from './paths.js';
-import type { LedgerStore } from './store.js';
+import { mainOfTaskWorktree, parseArchiveName, samePath, worktreeLedger } from './paths.js';
+import { repoKey } from './repo-key.js';
+import { keyAndAliases, type LedgerStore } from './store.js';
 
 export type Place = 'worktree' | 'backlog' | 'archive';
 export type TaskStatus = 'active' | 'parked' | 'backlog' | 'retired';
@@ -12,7 +13,10 @@ export type TaskStatus = 'active' | 'parked' | 'backlog' | 'retired';
 /** One task ledger. `main` is unknown for a backlog or archive ledger that does not name it. */
 export type Task = {
   slug: string;
+  /** The key the ledger is filed under. */
   repo: string;
+  /** The key `repo` is an alias of, for a ledger still filed under an old key. */
+  currentRepo?: string;
   main?: string;
   /** A worktree's .claude/ledger.md, or the store's location of a backlog ledger or archive copy. */
   file: string;
@@ -35,9 +39,18 @@ export type ChildView = { slug: string; main: string; status: ChildStatus; next:
 const SKIPPED = new Set(['node_modules', '.git', 'Pods', 'DerivedData', 'build', 'dist']);
 const SCAN_DEPTH = 7;
 
-type Found = { file: string; name: string; place: Place; repo: string; fallbackSlug: string; mainOf: (ledger: Ledger) => string | undefined; branch?: string };
+type Found = {
+  file: string;
+  name: string;
+  place: Place;
+  repo: string;
+  currentRepo?: string;
+  fallbackSlug: string;
+  mainOf: (ledger: Ledger) => string | undefined;
+  branch?: string;
+};
 
-function toTask({ file, name, place, repo, fallbackSlug, mainOf, branch }: Found, { text, mtimeMs, birthtimeMs }: TimedText): Task {
+function toTask({ file, name, place, repo, currentRepo, fallbackSlug, mainOf, branch }: Found, { text, mtimeMs, birthtimeMs }: TimedText): Task {
   const ledger = parseLedger(text);
   const status: TaskStatus = place === 'archive' ? 'retired' : place === 'backlog' ? 'backlog' : ledger.parked ? 'parked' : 'active';
   const main = mainOf(ledger);
@@ -46,6 +59,7 @@ function toTask({ file, name, place, repo, fallbackSlug, mainOf, branch }: Found
   return {
     slug: ledger.slug ?? fallbackSlug,
     repo,
+    ...(currentRepo === undefined ? {} : { currentRepo }),
     ...(main === undefined ? {} : { main }),
     file,
     name,
@@ -67,36 +81,38 @@ function worktreeTask(found: Omit<Found, 'file'>, folder: string): Task | undefi
 }
 
 export function backlogTasks(store: LedgerStore): Task[] {
+  const aliases = store.aliases.read();
   return store.backlog
     .repos()
     .flatMap((repo) => store.backlog.list(repo))
     .map((entry) =>
-      toTask({ file: entry.location, name: entry.name, place: 'backlog', repo: entry.repo, fallbackSlug: entry.name, mainOf: ({ location }) => location.main }, entry),
+      toTask({ file: entry.location, name: entry.name, place: 'backlog', repo: entry.repo, currentRepo: aliases.get(entry.repo), fallbackSlug: entry.name, mainOf: ({ location }) => location.main }, entry),
     );
 }
 
-/** Archived ledgers, of one repo folder or of all. The slug is the title's; old copies were named after the branch. */
+/** Archived ledgers, of one repo, those under its aliases included, or of all. The slug is the title's; old copies were named after the branch. */
 export function archivedTasks(store: LedgerStore, repo?: string): Task[] {
+  const aliases = store.aliases.read();
   const mainOf = ({ location: { main, worktree } }: Ledger): string | undefined => main ?? (worktree === undefined ? undefined : mainOfTaskWorktree(worktree));
-  return (repo === undefined ? store.archive.repos() : [repo])
+  return (repo === undefined ? store.archive.repos() : keyAndAliases(aliases, repo))
     .flatMap((name) => store.archive.list(name))
     .map((entry) => {
       const fallbackSlug = parseArchiveName(entry.name)?.slug ?? entry.name;
-      return toTask({ file: entry.location, name: entry.name, place: 'archive', repo: entry.repo, fallbackSlug, mainOf }, entry);
+      return toTask({ file: entry.location, name: entry.name, place: 'archive', repo: entry.repo, currentRepo: aliases.get(entry.repo), fallbackSlug, mainOf }, entry);
     });
 }
 
 export function worktreeTasks(main: string): Task[] {
   return worktrees(main).flatMap(({ path: folder, branch }) => {
     const name = path.basename(folder);
-    return worktreeTask({ name, place: 'worktree', repo: repoName(main), fallbackSlug: name, mainOf: () => main, branch }, folder) ?? [];
+    return worktreeTask({ name, place: 'worktree', repo: repoKey(main), fallbackSlug: name, mainOf: () => main, branch }, folder) ?? [];
   });
 }
 
-/** The ledger of a folder that is in no git repository; the folder names its repo, as the old registry did. */
+/** The ledger of a folder that is in no git repository; the folder's path is its repo key, as for a repo without remote. */
 export function folderTask(folder: string): Task | undefined {
   const name = path.basename(folder);
-  return worktreeTask({ name, place: 'worktree', repo: name, fallbackSlug: name, mainOf: () => undefined }, folder);
+  return worktreeTask({ name, place: 'worktree', repo: path.resolve(folder), fallbackSlug: name, mainOf: () => undefined }, folder);
 }
 
 /** The folders that hold a `.claude/ledger.md`, git repository or not, found by walking `roots` the way the old registry scan did. */
@@ -137,8 +153,13 @@ export function findTasks(store: LedgerStore, mains: string[]): Task[] {
   return [...live, ...backlog, ...archivedTasks(store)];
 }
 
-/** Archive copies name no main when their worktree was not under .claude/worktrees; then the repo folder name decides. */
-export const inRepo = (task: Task, main: string): boolean => (task.main === undefined ? task.repo === repoName(main) : samePath(task.main, main));
+/**
+ * Whether `task` is a task of the repo at `main`. A worktree's ledger is one of the checkout that holds the worktree only.
+ * A backlog ledger or archive copy is one of each clone of its repo, by its key with an alias resolved, never by the main
+ * it names: that path may be a clone of another origin now.
+ */
+export const inRepo = (task: Task, main: string): boolean =>
+  task.place === 'worktree' ? task.main !== undefined && samePath(task.main, main) : (task.currentRepo ?? task.repo) === repoKey(main);
 
 const PRECEDENCE: Place[] = ['worktree', 'backlog', 'archive'];
 
@@ -167,7 +188,7 @@ export function locateChild(tasks: Task[], child: Required<TaskRef>, parent: Req
 export const wasChildOf = (tasks: Task[], child: Required<TaskRef>, parent: Required<TaskRef>): boolean =>
   tasks.some((task) => task.place === 'archive' && task.slug === child.slug && inRepo(task, child.main) && namesParent(task, parent));
 
-export const notASlug = (slug: string): string => `"${slug}" is not a slug. A slug has only letters, digits, dots, underscores and hyphens.`;
+export const notASlug = (slug: string): string => `"${slug}" is not a slug. A slug has only letters, digits, dots, underscores and hyphens. It does not start with a dot.`;
 
 /** `<slug>`, a task in the repo that holds `cwd`, or `<slug>@<path>`, a task in the repo that holds `<path>`. */
 export function taskRef(cwd: string, name: string): Required<TaskRef> {
@@ -190,7 +211,12 @@ export function theTask(tasks: Task[], ref: Required<TaskRef>, { live = false } 
   return found[0];
 }
 
-export const sameTask = (a: Required<TaskRef>, b: Required<TaskRef>): boolean => a.slug === b.slug && samePath(a.main, b.main);
+/**
+ * Whether `a` and `b` name one task, a task of `place`. Two clones of a repo share its backlog and archive, so a slug
+ * named from each is one such task; a worktree task is only that of the clone that holds it.
+ */
+export const sameTask = (a: Required<TaskRef>, b: Required<TaskRef>, place: Place): boolean =>
+  a.slug === b.slug && (samePath(a.main, b.main) || (place !== 'worktree' && repoKey(a.main) === repoKey(b.main)));
 
 /** The live ledgers of `ref` (worktree or backlog), else its newest archive copy. */
 export function findNamed(tasks: Task[], { slug, main }: Required<TaskRef>): Task[] {

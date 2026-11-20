@@ -11,7 +11,7 @@ import { ledgerPaths, type LedgerPaths } from '../tools/ledger/paths.js';
 import { sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { Archive, Backlog, LedgerCollection, LedgerStore, Registry } from '../tools/ledger/store.js';
 import { REPO } from './helpers.js';
-import { cannotHideSqlite, home, LEDGER_BIN, ledger, ledgerIn, noSqlite, ok, repository, withoutSqlite, type Ran } from './ledger-core-fixtures.js';
+import { cannotHideSqlite, home, LEDGER_BIN, ledger, ledgerIn, noSqlite, ok, repoKeyOf, repository, withoutSqlite, type Ran } from './ledger-core-fixtures.js';
 
 type Storage = 'file' | 'sqlite';
 
@@ -39,6 +39,9 @@ function withStore<T>(h: string, storage: Storage, use: (store: LedgerStore) => 
     store.close?.();
   }
 }
+
+/** The store key of the repo ~/repos/<name>. */
+const keyOf = (h: string, name: string): string => repoKeyOf(path.join(h, 'repos', name));
 
 /** Everything a store holds, with evidence bytes as base64 so deepEqual compares them. */
 function contents(store: LedgerStore) {
@@ -127,7 +130,7 @@ for (const from of ['file', 'sqlite'] as const) {
       target.archive[0].evidence.map(([file]) => file),
       ['logs/trace.bin', 'red.txt'],
     );
-    assert.deepEqual(withStore(h, to, (store) => store.archive.readEvidence('app', archived, 'logs/trace.bin')), BYTES);
+    assert.deepEqual(withStore(h, to, (store) => store.archive.readEvidence(keyOf(h, 'app'), archived, 'logs/trace.bin')), BYTES);
     assert.match(stdout, /2 backlog ledgers/);
     assert.match(stdout, /1 archive copy/);
     assert.match(stdout, /2 evidence files/);
@@ -144,9 +147,9 @@ for (const from of ['file', 'sqlite'] as const) {
     ok(ledger(h, app, 'store', 'migrate', '--to', to));
     const reference = path.join(h, 'reference');
     writeEvidence(reference);
-    assert.equal(withStore(h, to, (store) => store.archive.evidenceState('app', archived, reference)), 'same');
+    assert.equal(withStore(h, to, (store) => store.archive.evidenceState(keyOf(h, 'app'), archived, reference)), 'same');
     if (to === 'file') {
-      const link = path.join(h, '.claude/ledger-archive/app', archived, 'latest');
+      const link = path.join(h, '.claude/ledger-archive', encodeURIComponent(keyOf(h, 'app')), archived, 'latest');
       assert.ok(lstatSync(link).isSymbolicLink());
       assert.equal(readlinkSync(link), 'red.txt');
     }
@@ -157,7 +160,7 @@ for (const from of ['file', 'sqlite'] as const) {
     ok(ledger(h, app, 'store', 'migrate', '--to', to));
     const [copied, locations] = withStore(h, to, (store) => [
       entries(store.registry.read()),
-      { 'fix-login': store.backlog.location('app', 'fix-login'), idea: store.backlog.location('lib', 'idea'), old: store.archive.location('app', archived) },
+      { 'fix-login': store.backlog.location(keyOf(h, 'app'), 'fix-login'), idea: store.backlog.location(keyOf(h, 'lib'), 'idea'), old: store.archive.location(keyOf(h, 'app'), archived) },
     ] as const);
     const bySlug = (list: Entry[]) => Object.fromEntries(list.map((entry) => [entry.slug, entry]));
     const [was, now] = [bySlug(entries(source.registry)), bySlug(copied)];
@@ -179,7 +182,7 @@ for (const from of ['file', 'sqlite'] as const) {
     const stdout = ok(ledger(h, app, 'store', 'migrate', '--to', to, '--remove-source'));
     assert.deepEqual(withStore(h, from, contents), { backlog: [], archive: [], registry: undefined });
     assert.deepEqual(
-      withStore(h, from, (store) => [store.archive.nameTaken('app', archived), store.archive.evidenceFiles('app', archived)]),
+      withStore(h, from, (store) => [store.archive.nameTaken(keyOf(h, 'app'), archived), store.archive.evidenceFiles(keyOf(h, 'app'), archived)]),
       [false, []],
       'an evidence folder is left without its copy',
     );
@@ -194,8 +197,8 @@ for (const from of ['file', 'sqlite'] as const) {
     const { h, app, source, archived } = populated(t, from);
     const fixLogin = source.backlog.find(({ name }) => name === 'fix-login')?.text ?? assert.fail('no fix-login');
     withStore(h, to, (store) => {
-      store.backlog.write('app', 'fix-login', fixLogin);
-      store.archive.write('app', archived, 'another copy\n');
+      store.backlog.write(keyOf(h, 'app'), 'fix-login', fixLogin);
+      store.archive.write(keyOf(h, 'app'), archived, 'another copy\n');
     });
     const target = withStore(h, to, contents);
     const settings = readFileSync(settingsFile(h), 'utf8');
@@ -356,7 +359,7 @@ for (const from of ['file', 'sqlite'] as const) {
     } finally {
       target?.close?.();
     }
-    assert.equal(withStore(h, to, (store) => store.archive.read('app', archived)?.text), theirs);
+    assert.equal(withStore(h, to, (store) => store.archive.read(keyOf(h, 'app'), archived)?.text), theirs);
   });
 
   test(`migrate ${from} → ${to} keeps an archive copy another command wrote with the same text when its own write then fails before it writes`, { skip }, (t) => {
@@ -366,9 +369,9 @@ for (const from of ['file', 'sqlite'] as const) {
       disk();
     };
     assert.match(failure(() => migrateWith(h, to, { archive: { write } })), /disk full/);
-    const text = withStore(h, from, (store) => store.archive.read('app', archived)?.text);
+    const text = withStore(h, from, (store) => store.archive.read(keyOf(h, 'app'), archived)?.text);
     assert.ok(text !== undefined);
-    assert.equal(withStore(h, to, (store) => store.archive.read('app', archived)?.text), text);
+    assert.equal(withStore(h, to, (store) => store.archive.read(keyOf(h, 'app'), archived)?.text), text);
   });
 
   test(`migrate ${from} → ${to} with no registry in the target removes the registry it wrote when the check fails`, { skip }, (t) => {
@@ -417,9 +420,9 @@ for (const from of ['file', 'sqlite'] as const) {
       },
       { removeSource: true },
     );
-    assert.ok(lines.some((line) => line.includes('kept backlog app/fix-login')), lines.join('\n'));
+    assert.ok(lines.some((line) => line.includes(`kept backlog ${keyOf(h, 'app')}/fix-login`)), lines.join('\n'));
     const left = withStore(h, from, contents);
-    assert.deepEqual(left.backlog, [{ repo: 'app', name: 'fix-login', text: changedText }]);
+    assert.deepEqual(left.backlog, [{ repo: keyOf(h, 'app'), name: 'fix-login', text: changedText }]);
     assert.deepEqual(left.archive, []);
     assert.deepEqual(entries(left.registry).map(({ slug }) => slug), ['fix-login']);
     assert.deepEqual(withStore(h, to, contents).backlog, source.backlog);
@@ -434,16 +437,16 @@ for (const from of ['file', 'sqlite'] as const) {
     const settings = readFileSync(settingsFile(h), 'utf8');
     // The check for taken archive names runs after the one for backlog names, so this write comes between that check and the copy.
     const takeName = () => {
-      if (!raced) withStore(h, to, (store) => store.backlog.write('app', 'fix-login', theirs));
+      if (!raced) withStore(h, to, (store) => store.backlog.write(keyOf(h, 'app'), 'fix-login', theirs));
       raced = true;
       return false;
     };
     const message = failure(() => migrateWith(h, to, { archive: { nameTaken: takeName } }));
     assert.match(message, /ledger store migrate stopped/);
-    assert.match(message, /backlog app\/fix-login/);
+    assert.ok(message.includes(`backlog ${keyOf(h, 'app')}/fix-login`), message);
     assert.equal(readFileSync(settingsFile(h), 'utf8'), settings);
     assert.deepEqual(withStore(h, from, contents), source);
-    assert.deepEqual(withStore(h, to, contents), { backlog: [{ repo: 'app', name: 'fix-login', text: theirs }], archive: [], registry: undefined });
+    assert.deepEqual(withStore(h, to, contents), { backlog: [{ repo: keyOf(h, 'app'), name: 'fix-login', text: theirs }], archive: [], registry: undefined });
   });
 
   test(`migrate ${from} → ${to} keeps a registry entry another command adds to the target while it copies`, { skip }, (t) => {
@@ -472,16 +475,16 @@ for (const from of ['file', 'sqlite'] as const) {
       migrateWith(h, to, {
         archive: {
           write: () => {
-            withStore(h, to, (store) => store.backlog.write('app', 'fix-login', changedText));
+            withStore(h, to, (store) => store.backlog.write(keyOf(h, 'app'), 'fix-login', changedText));
             disk();
           },
         },
       }),
     );
-    assert.match(message, /backlog app\/fix-login/);
+    assert.ok(message.includes(`backlog ${keyOf(h, 'app')}/fix-login`), message);
     assert.doesNotMatch(message, /Every copy it made in the .* was removed again\./);
     assert.deepEqual(withStore(h, from, contents), source);
-    assert.deepEqual(withStore(h, to, contents), { backlog: [{ repo: 'app', name: 'fix-login', text: changedText }], archive: [], registry: undefined });
+    assert.deepEqual(withStore(h, to, contents), { backlog: [{ repo: keyOf(h, 'app'), name: 'fix-login', text: changedText }], archive: [], registry: undefined });
   });
 }
 
@@ -563,7 +566,7 @@ test('migrate --remove-source withholds a secret-like ledger name in each line i
   // Built at run time, so no secret-like text sits in this file for a scanner to find.
   const changedName = `${['s', 'k-'].join('')}${'a1b2c3d4'.repeat(5)}`;
   const goneName = `${['s', 'k-'].join('')}${'e5f6g7h8'.repeat(5)}`;
-  for (const name of [changedName, goneName]) writeFileSync(path.join(h, '.claude/ledger-backlog/app', `${name}.md`), '# a secret-like name\n');
+  for (const name of [changedName, goneName]) writeFileSync(path.join(h, '.claude/ledger-backlog', encodeURIComponent(keyOf(h, 'app')), `${name}.md`), '# a secret-like name\n');
   const lines = migrateWith(
     h,
     'sqlite',
@@ -606,10 +609,10 @@ for (const what of ['text', 'evidence'] as const) {
     migrateStorage(ledgerPaths(h), 'sqlite', { removeSource: true, dryRun: false }, (line) => lines.push(line), open);
 
     assert.ok(
-      lines.some((line) => line.includes(`kept archive app/${archived}`)),
+      lines.some((line) => line.includes(`kept archive ${keyOf(h, 'app')}/${archived}`)),
       lines.join('\n'),
     );
-    const kept = withStore(h, 'file', (store) => ({ has: store.archive.has('app', archived), evidence: store.archive.evidenceFiles('app', archived) }));
+    const kept = withStore(h, 'file', (store) => ({ has: store.archive.has(keyOf(h, 'app'), archived), evidence: store.archive.evidenceFiles(keyOf(h, 'app'), archived) }));
     assert.ok(kept.has, 'the changed copy was removed');
     assert.ok(kept.evidence.includes('red.txt'), 'the evidence of the changed copy was removed');
   });

@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { addChild, addDecision, addLocationBullet, fillLedger, markStarted, park, removeChildren, removeLine, unpark, withDesignRefsBullet } from './edit.js';
+import { addChild, addDecision, addLocationBullet, fillLedger, markStarted, park, removeChildren, removeLine, unpark, withChildMain, withDesignRefsBullet } from './edit.js';
 import { fail } from './failure.js';
 import { exists, isFolder, readText, writeAtomic } from './files.js';
 import { isNewSlug, isReadableSlug, parseLedger, type Child, type ChildMark, type Location, type TaskRef } from './format.js';
@@ -16,11 +16,13 @@ import {
   removeWorktree,
   shortCommit,
 } from './git.js';
-import { repoName, samePath, taskWorktree, worktreeLedger, type LedgerPaths } from './paths.js';
+import { samePath, taskWorktree, worktreeLedger, type LedgerPaths } from './paths.js';
+import { withHint } from './migrate-repo-ids.js';
+import { repoKey } from './repo-key.js';
 import { loadTasks } from './registry.js';
-import type { Change, LedgerStore } from './store.js';
+import { keyAndAliases, type Change, type LedgerStore } from './store.js';
 import { pauseForTest } from './wait.js';
-import { childrenOf, findNamed, inRepo, locateChild, namedChildren, notASlug, sameTask, taskRef, theTask, wasChildOf, type ChildStatus, type Task } from './tasks.js';
+import { childrenOf, findNamed, inRepo, locateChild, namedChildren, notASlug, sameTask, taskRef, theTask, wasChildOf, type ChildStatus, type Place, type Task } from './tasks.js';
 
 type Ref = Required<TaskRef>;
 export type Context = { paths: LedgerPaths; cwd: string; store: LedgerStore };
@@ -170,10 +172,11 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
 
   const main = repoOf(cwd, repo === undefined ? cwd : path.resolve(cwd, repo));
   const template = readTemplate(paths, refs);
-  const repoFolder = repoName(main);
-  const backlog = store.backlog.location(repoFolder, slug);
-  const taken = (): never => fail(`A backlog task ${slug} already exists: ${paths.tilde(backlog)}`);
-  if (store.backlog.has(repoFolder, slug)) taken();
+  const key = repoKey(main);
+  const backlog = store.backlog.location(key, slug);
+  const taken = (location = backlog): never => fail(`A backlog task ${slug} already exists: ${paths.tilde(location)}`);
+  const filedUnder = keyAndAliases(store.aliases.read(), key).find((repo) => store.backlog.has(repo, slug));
+  if (filedUnder !== undefined) taken(store.backlog.location(filedUnder, slug));
   const current = currentLedger(cwd);
   let created: CreatedTask;
   if (stack) {
@@ -184,7 +187,7 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
   } else {
     checkTarget(main, slug, slug);
     pauseForTest();
-    if (!store.backlog.create(repoFolder, slug, fillLedger(template, { slug, goal, main, designRefs: designRefs(main, refs) }))) taken();
+    if (!store.backlog.create(key, slug, fillLedger(template, { slug, goal, main, designRefs: designRefs(main, refs) }))) taken();
     created = { slug, main, status: 'backlog', ledger: backlog };
   }
   const cwdMain = mainCheckout(cwd);
@@ -215,14 +218,17 @@ function hereTask(context: Context, given: string | undefined, goal: string | un
   return { slug, main, status: 'active', ...started };
 }
 
-/** Exit codes: 2 no backlog task, 3 a task of another repo, 4 a ledger that names no repo. */
-function promote(context: Context, slug: string, main: string): Started {
+/**
+ * Starts the backlog task `slug` of the repo at `main`, filed under `repo`: the repo's key, or an old key that is an alias
+ * of it. Exit codes: 2 no backlog task, 3 a task of another repo, 4 a ledger that names no repo.
+ */
+function promote(context: Context, slug: string, main: string, repo: string): Started {
   const { store } = context;
-  const backlog = store.backlog.read(repoName(main), slug) ?? fail(`No backlog task ${slug} for the repo at ${main}.`, 2);
+  const backlog = store.backlog.read(repo, slug) ?? fail(withHint(store, `No backlog task ${slug} for the repo at ${main}.`), 2);
   const { text } = backlog;
   const { location } = parseLedger(text);
-  const owner = location.main ?? fail(`The backlog ledger ${backlog.location} has no "- main:" line, so its repo is unknown.`, 4);
-  if (!samePath(owner, main)) fail(`The backlog task ${slug} belongs to the repo at ${owner}. Run: ledger go ${slug} --repo ${shellWord(owner)}`, 3);
+  // Filed under this repo's key, so it is a task of this repo, also when its main line names another clone of it.
+  location.main ?? fail(`The backlog ledger ${backlog.location} has no "- main:" line, so its repo is unknown.`, 4);
   const base = location.base?.ref ?? originHead(main) ?? currentBranch(main) ?? fail(`${main} has no origin/HEAD and a detached HEAD, so there is no branch to start from.`);
   const started = startWorktree(
     main,
@@ -266,18 +272,21 @@ export type GoResult = {
  * Why no live ledger of this repo has the slug of `ref`, with the exit codes of promote: 3 for a task of another repo,
  * 1 for a retired task or a worktree folder in the way, else 2, as /ledger:go makes a new task only on 2.
  */
-function refuseMissing(tasks: Task[], { slug, main }: Ref): never {
-  const elsewhere = tasks.find((task) => task.slug === slug && task.place !== 'archive' && !inRepo(task, main));
+function refuseMissing(store: LedgerStore, tasks: Task[], { slug, main }: Ref): never {
+  // A ledger that names this checkout but is filed under another key, an old folder name or the origin this path had, is
+  // no task of another checkout: --repo would lead back here.
+  const namesThis = (task: Task): boolean => task.main !== undefined && samePath(task.main, main);
+  const elsewhere = tasks.find((task) => task.slug === slug && task.place !== 'archive' && !inRepo(task, main) && !namesThis(task));
   if (elsewhere !== undefined) {
     const owner = elsewhere.main ?? `named ${elsewhere.repo}`;
     const start = elsewhere.main === undefined ? '' : ` Run: ledger go ${slug} --repo ${shellWord(elsewhere.main)}`;
-    fail(`No task ${slug} in the repo at ${main}: it is a task of the repo at ${owner}.${start}`, 3);
+    fail(withHint(store, `No task ${slug} in the repo at ${main}: it is a task of the repo at ${owner}.${start}`), 3);
   }
   const archived = findNamed(tasks, { slug, main }).find(({ place }) => place === 'archive');
   if (archived !== undefined) fail(`${slug} is retired: only its archive copy is left, ${archived.file}.`);
   const folder = taskWorktree(main, slug);
   if (exists(folder)) fail(`The folder ${folder} exists, but no task ledger in it has the slug ${slug}.`);
-  return fail(`No backlog task ${slug} for the repo at ${main}.`, 2);
+  return fail(withHint(store, `No backlog task ${slug} for the repo at ${main}.`), 2);
 }
 
 /** The live ledger of `ref`: one in a worktree beats one in the backlog. */
@@ -304,11 +313,12 @@ export function goTask(context: Context, slug: string, repo: string | undefined)
     if (chain.length === 0 && task.place === 'backlog') fail(`No child task of ${slug} is left in the backlog, so there is nothing to start. ledger tree show ${slug} shows its children.`);
   }
   const target = chain.at(-1) ?? named;
-  const found = (chain.length === 0 ? task : liveLedger(tasks, target)) ?? refuseMissing(tasks, target);
+  if (!isReadableSlug(target.slug)) fail(notASlug(target.slug));
+  const found = (chain.length === 0 ? task : liveLedger(tasks, target)) ?? refuseMissing(context.store, tasks, target);
   const place =
     found.place === 'worktree'
       ? { ledger: found.file, worktree: path.dirname(path.dirname(found.file)), ...(found.branch === undefined ? {} : { branch: found.branch }), promoted: false }
-      : { ...promote(context, target.slug, target.main), promoted: true };
+      : { ...promote(context, target.slug, target.main, found.repo), promoted: true };
 
   const text = readText(place.ledger);
   const { parked, location } = parseLedger(text);
@@ -318,6 +328,7 @@ export function goTask(context: Context, slug: string, repo: string | undefined)
   const parent = location.parent && { slug: location.parent.slug, main: location.parent.main ?? target.main };
   if (parent !== undefined) {
     try {
+      if (place.promoted) nameChildClone(context, parent, target);
       const change = changeParent(context, `${parent.slug}@${parent.main}`, 'start', `${target.slug}@${target.main}`);
       if (change.action === 'start' && change.marked) marked = { parent, ledger: change.ledger };
     } catch (error) {
@@ -435,13 +446,46 @@ export function changeParent(context: Context, parentName: string, action: Paren
 type Linked = { task: Task; ref: Ref };
 type ParentLine = NonNullable<Location['parent']>;
 
-/** The lines under the parent's ## Children that name `child`: in the parent as it was read, or else in `text`. */
-const linesOf = ({ task, ref }: Linked, child: Ref, text?: string): Child[] =>
-  (text === undefined ? task.ledger : parseLedger(text)).children.filter((line) => sameTask({ slug: line.slug, main: line.main ?? ref.main }, child));
+/** The lines under the parent's ## Children that name `child`, a task of `place`: in the parent as it was read, or else in `text`. */
+const linesOf = ({ task, ref }: Linked, child: Ref, place: Place, text?: string): Child[] =>
+  (text === undefined ? task.ledger : parseLedger(text)).children.filter((line) => sameTask({ slug: line.slug, main: line.main ?? ref.main }, child, place));
+
+/**
+ * Every clone of a repo shares a backlog parent, and a worktree child is in one of them only, so the child's line in
+ * such a parent names that clone's main checkout.
+ */
+const namesClone = (parent: Task, place: Place): boolean => parent.place === 'backlog' && place === 'worktree';
+
+/**
+ * After `go` put the backlog child `child` in a worktree, its line in a backlog parent names the clone it is in. A line
+ * that names a clone with a worktree task of that slug is that task's, so it stays. A line that names a folder that is
+ * no main checkout any more names a clone that is gone, of a repo no one can tell, so it is taken for this child's.
+ */
+function nameChildClone(context: Context, parentRef: Ref, child: Ref): void {
+  if (/\s/.test(child.main)) return;
+  const tasks = loadTasks(context, [parentRef.main]);
+  const parent = liveLedger(tasks, parentRef);
+  if (parent === undefined || !namesClone(parent, 'worktree')) return;
+  const hasWorktreeTask = (main: string): boolean => tasks.some((task) => task.place === 'worktree' && task.slug === child.slug && task.main !== undefined && samePath(task.main, main));
+  const isGone = (main: string): boolean => {
+    const checkout = mainCheckout(main);
+    return checkout === undefined || !samePath(checkout, main);
+  };
+  const namesChild = ({ slug, main }: Child): boolean =>
+    main === undefined ? sameTask({ slug, main: parentRef.main }, child, 'backlog') : slug === child.slug && (isGone(main) || (sameTask({ slug, main }, child, 'backlog') && !hasWorktreeTask(main)));
+  updateLedger(context, parent, (text) => {
+    const line = parseLedger(text).children.find(namesChild);
+    return line && withChildMain(text, line, child.main);
+  });
+}
+
+/** The ## Children line of `child`, a task of `place`. */
+const childLine = (parent: Linked, child: Ref, place: Place): string =>
+  namesClone(parent.task, place) ? `- ${child.slug} @ ${child.main}` : `- ${linkFrom(parent.ref.main, child)}`;
 
 /** Whether the `- parent:` line of a child in `childMain` names `parent`. */
-const namesParent = (bullet: ParentLine | undefined, childMain: string, parent: Ref): bullet is ParentLine =>
-  bullet !== undefined && sameTask({ slug: bullet.slug, main: bullet.main ?? childMain }, parent);
+const namesParent = (bullet: ParentLine | undefined, childMain: string, parent: Linked): bullet is ParentLine =>
+  bullet !== undefined && sameTask({ slug: bullet.slug, main: bullet.main ?? childMain }, parent.ref, parent.task.place);
 
 /** The parent a ledger's Location names, in the task's own repo unless the line names another. */
 function parentOf(task: Task, main: string): Ref | undefined {
@@ -455,9 +499,9 @@ function ancestors(tasks: Task[], { task, ref }: Linked): Ref[] {
   let next = parentOf(task, ref.main);
   while (next !== undefined) {
     const ancestor = next;
-    if (seen.some((known) => sameTask(known, ancestor))) break;
-    seen.push(ancestor);
     const found = findNamed(tasks, ancestor).find(({ place }) => place !== 'archive');
+    if (seen.some((known) => sameTask(known, ancestor, found?.place ?? 'backlog'))) break;
+    seen.push(ancestor);
     next = found && parentOf(found, ancestor.main);
   }
   return seen;
@@ -465,39 +509,42 @@ function ancestors(tasks: Task[], { task, ref }: Linked): Ref[] {
 
 function addChildTask(context: Context, tasks: Task[], parent: Linked, childRef: Ref): ParentChange {
   const name = nameFrom(context.cwd);
-  if (sameTask(parent.ref, childRef)) fail(`${name(childRef)} cannot be its own parent.`);
+  if (sameTask(parent.ref, childRef, parent.task.place)) fail(`${name(childRef)} cannot be its own parent.`);
   const child = theTask(tasks, childRef, { live: true });
   if (wasChildOf(tasks, childRef, parent.ref)) fail(`${name(childRef)} is a retired child of ${name(parent.ref)}. Give the new task another slug.`);
   const current = parentOf(child, childRef.main);
-  if (current !== undefined && !sameTask(current, parent.ref)) {
+  if (current !== undefined && !sameTask(current, parent.ref, parent.task.place)) {
     fail(`${name(childRef)} already has the parent ${name(current)}. First run: ledger tree remove ${name(current)} ${name(childRef)}`);
   }
-  if (ancestors(tasks, parent).some((ancestor) => sameTask(ancestor, childRef))) {
+  if (ancestors(tasks, parent).some((ancestor) => sameTask(ancestor, childRef, child.place))) {
     fail(`${name(childRef)} is already a parent of ${name(parent.ref)}, or of one of its parents. Making it a child of ${name(parent.ref)} would make a cycle.`);
   }
   const spaced = samePath(parent.ref.main, childRef.main) ? undefined : [parent.ref.main, childRef.main].find((main) => /\s/.test(main));
   if (spaced !== undefined) fail(`The repo at ${spaced} has whitespace in its path, so none of its tasks can be linked to a task in another repo.`);
+  if (namesClone(parent.task, child.place) && /\s/.test(childRef.main)) {
+    fail(`The repo at ${childRef.main} has whitespace in its path, so none of its worktree tasks can be a child of a backlog task.`);
+  }
 
   // The child's line first: once it is written, running the same add again finishes the parent.
   if (current === undefined) {
     updateLedger(context, child, (text) => addLocationBullet(text, `- parent: ${linkFrom(childRef.main, parent.ref)}`) ?? fail(`${child.file} has no ## Location section.`));
   }
-  updateLedger(context, parent.task, (text) => (linesOf(parent, childRef, text).length > 0 ? undefined : addChild(text, `- ${linkFrom(parent.ref.main, childRef)}`)));
+  updateLedger(context, parent.task, (text) => (linesOf(parent, childRef, child.place, text).length > 0 ? undefined : addChild(text, childLine(parent, childRef, child.place))));
   return { action: 'add', parent: parent.ref, child: childRef };
 }
 
 function removeChildTask(context: Context, tasks: Task[], parent: Linked, childRef: Ref): ParentChange {
   const name = nameFrom(context.cwd);
   const child = theTask(tasks, childRef, { live: true });
-  if (!namesParent(child.ledger.location.parent, childRef.main, parent.ref)) fail(`${name(childRef)} is not a child of ${name(parent.ref)}.`);
+  if (!namesParent(child.ledger.location.parent, childRef.main, parent)) fail(`${name(childRef)} is not a child of ${name(parent.ref)}.`);
   // The parent first: until the child's line is gone, running the same remove again still finds the pair.
   updateLedger(context, parent.task, (text) => {
-    const listed = linesOf(parent, childRef, text);
+    const listed = linesOf(parent, childRef, child.place, text);
     return listed.length === 0 ? undefined : removeChildren(text, listed.map(({ line }) => line));
   });
   updateLedger(context, child, (text) => {
     const bullet = parseLedger(text).location.parent;
-    return namesParent(bullet, childRef.main, parent.ref) ? removeLine(text, bullet.line) : undefined;
+    return namesParent(bullet, childRef.main, parent) ? removeLine(text, bullet.line) : undefined;
   });
   return { action: 'remove', parent: parent.ref, child: childRef };
 }
@@ -506,15 +553,17 @@ function removeChildTask(context: Context, tasks: Task[], parent: Linked, childR
 function startChildTask(context: Context, tasks: Task[], parent: Linked, childRef: Ref): ParentChange {
   const name = nameFrom(context.cwd);
   const notListed = (): never => fail(`${name(childRef)} is not listed under ## Children of ${name(parent.ref)}. Add it with: ledger tree add ${name(parent.ref)} ${name(childRef)}`);
-  const [line] = linesOf(parent, childRef);
+  const child = locateChild(tasks, childRef, parent.ref);
+  const place = child?.place ?? 'backlog';
+  const [line] = linesOf(parent, childRef, place);
   if (line === undefined) notListed();
   if (!namedChildren(parent.task, tasks).includes(line)) fail(`${name(childRef)} names no task: its line under ## Children of ${name(parent.ref)} is a note, not a child.`);
   const started = { action: 'start', parent: parent.ref, child: childRef, ledger: parent.task.file } as const;
   if (line.mark !== undefined) return { ...started, marked: false, reason: 'already-marked', mark: line.mark.kind };
-  if (locateChild(tasks, childRef, parent.ref)?.status === 'retired') return { ...started, marked: false, reason: 'retired' };
+  if (child?.status === 'retired') return { ...started, marked: false, reason: 'retired' };
   let mark: ChildMark['kind'] | undefined;
   updateLedger(context, parent.task, (text) => {
-    const [now] = linesOf(parent, childRef, text);
+    const [now] = linesOf(parent, childRef, place, text);
     if (now === undefined) return notListed();
     mark = now.mark?.kind;
     return mark === undefined ? markStarted(text, now, today()) : undefined;
@@ -529,9 +578,8 @@ function startChildTask(context: Context, tasks: Task[], parent: Linked, childRe
 function firstToStart(tasks: Task[], parent: Linked, chain: Ref[] = [parent.ref]): Ref[] | undefined {
   for (const line of namedChildren(parent.task, tasks)) {
     const child = { slug: line.slug, main: line.main ?? parent.ref.main };
-    if (chain.some((ref) => sameTask(ref, child))) continue;
     const found = locateChild(tasks, child, parent.ref);
-    if (found?.place !== 'backlog') continue;
+    if (found?.place !== 'backlog' || chain.some((ref) => sameTask(ref, child, found.place))) continue;
     const picked = namedChildren(found, tasks).length === 0 ? [...chain, child] : firstToStart(tasks, { task: found, ref: child }, [...chain, child]);
     if (picked) return picked;
   }

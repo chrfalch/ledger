@@ -40,7 +40,7 @@ during a sync. Repo is ~/repos/acme/mobile.
 This is a new task, so the orchestrator invokes
 `/ledger:task` before it plans anything. The command writes a ledger from
 `~/.claude/ledger.template.md`, with the goal filled in. The ledger goes to the
-backlog, `~/.claude/ledger-backlog/mobile/offline-queue-loss.md`. There is no
+backlog, `~/.claude/ledger-backlog/github.com%2Facme%2Fmobile/offline-queue-loss.md`. There is no
 branch or worktree yet.
 
 No task is open, so the session has nothing to clear. The command starts the
@@ -297,8 +297,8 @@ merged PR. A branch with commits after its PR merged stays.
 **You:** `/ledger:retire image-clear-disk-cache`
 
 ```
-archived ~/.claude/ledger-archive/expo/2026-10-26-image-clear-disk-cache.md
-archived evidence ~/.claude/ledger-archive/expo/2026-10-26-image-clear-disk-cache/
+archived ~/.claude/ledger-archive/github.com%2Fexpo%2Fexpo/2026-10-26-image-clear-disk-cache.md
+archived evidence ~/.claude/ledger-archive/github.com%2Fexpo%2Fexpo/2026-10-26-image-clear-disk-cache/
 removed  ~/repos/expo/expo/.claude/worktrees/image-clear-disk-cache
 deleted  branch image-clear-disk-cache
 ```
@@ -311,9 +311,9 @@ task whose work all shipped in its child tasks. It has no worktree and no
 branch, so `/ledger:retire <name>` archives its ledger, then deletes the
 backlog file. A backlog task of another repo is not found.
 
-`ledger show <name>` prints a task's ledger from the terminal: its backlog
-ledger, else its newest archive copy. `ledger show <name> --evidence` lists
-the evidence files of that copy, and `--evidence <file>` prints one.
+`ledger show <name>` prints a task's ledger from the terminal: its worktree
+ledger in this clone, else its backlog ledger, else its newest archive copy. `ledger show <name> --evidence` lists
+the evidence files of the newest archive copy, and `--evidence <file>` prints one.
 
 The paths in this guide are for file storage, the default. With
 `{"storage": "sqlite"}` in `~/.claude/ledger-settings.json`, the backlog, the
@@ -421,9 +421,13 @@ the commits, and pushes.
 
 | Pushed | Stays on this machine |
 |---|---|
-| Backlog ledgers, `backlog/<repo>/<slug>.md` | The active `.claude/ledger.md` in each worktree |
-| Archive copies, `archive/<repo>/<name>.md` | Evidence, in `~/.claude/ledger-evidence/<repo>/<name>/` |
-| `.ledger-data`, `.gitignore` | The task list `~/.claude/ledgers-git.json`, the pre-push hook, lock files and temporary files |
+| Backlog ledgers, `backlog/<repo key>/<slug>.md` | The active `.claude/ledger.md` in each worktree |
+| Archive copies, `archive/<repo key>/<name>.md` | Evidence, in `~/.claude/ledger-evidence/<repo key>/<name>/` |
+| `.ledger-data`, `.gitignore` | The task list `~/.claude/ledgers-git.json`, the repo aliases `~/.claude/ledger-aliases-git.json`, the pre-push hook, lock files and temporary files |
+
+`<repo key>` is the repo's address, URI-encoded as one folder, such as
+`github.com%2Fchrfalch%2Fledger`, so your clones of one repo on every machine
+share it.
 
 Safety:
 
@@ -611,7 +615,7 @@ The other commands show the relation too:
 | Where | A parent task | A child task |
 |---|---|---|
 | `/ledger` | Nothing about its child tasks. It shows only the ledgers of this session | `- **Parent:** <parent>` under its goal, step and next step |
-| `/ledger:all` | Its child tasks follow it as `↳ <child>`, one indent deeper for each level. Active child tasks come first | Its parent task in the `parent` column. A parent in another repo shows that repo's folder name, as `<parent> (<folder>)` |
+| `/ledger:all` | Its child tasks follow it as `↳ <child>`, one indent deeper for each level. Active child tasks come first | Its parent task in the `parent` column. A parent in another repo shows that repo's short name, as `<parent> (<owner>/<repo>)` |
 | `/ledger:go <name>` | Starts its first child task not yet started, and names it. With none left, a line that lists its child tasks with their status | A line that names its parent task; marks the child task started |
 | `/ledger:worktrees`, ledger column | `parent of <n>`, where n counts the child tasks not retired | `child of <parent>` |
 | Session start | `Child task: <child> (<status>).` or `Child task: <child> (retired YYYY-MM-DD).`, one line per child task | `Parent task: <parent> (<status>).` |

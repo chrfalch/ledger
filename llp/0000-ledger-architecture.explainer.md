@@ -71,12 +71,19 @@ Most commands take `--json`. The plugin reads that output.
 ### The store
 
 `tools/ledger/store.ts` defines the store as interfaces. A `LedgerStore` has
-three parts:
+four parts:
 
 - `backlog`: ledgers of tasks not started yet, named by slug.
 - `archive`: copies of retired ledgers, named `<YYYY-MM-DD>-<slug>`, with the
   files of their evidence.
 - `registry`: the text of the task list.
+- `aliases`: old repo keys, each with the key that replaced it.
+
+Each ledger is filed under its repo's key. `repoKey` in
+`tools/ledger/repo-key.ts` gives it: the address of the remote `origin`, else
+of the only remote, such as `github.com/chrfalch/ledger`; else the absolute path
+of the main checkout. `repoLabel` gives the short form people see, such as
+`chrfalch/ledger`.
 
 A worktree's `.claude/ledger.md` is not in the store. Hooks read it from disk.
 
@@ -91,7 +98,8 @@ Three stores implement the interfaces:
   It is the file store with other folders. After a command writes, it commits
   once and starts `ledger store sync --quiet` in the background, so a command
   never waits for the network. Only the ledgers, a `.ledger-data` marker and a
-  `.gitignore` are committed. Evidence and the registry stay on this machine.
+  `.gitignore` are committed. Evidence, the registry and the repo aliases stay
+  on this machine.
 
 `readStorage` in `tools/ledger/settings.ts` picks the store. It reads
 `"storage"` from `~/.claude/ledger-settings.json`. With no file and no key, the
@@ -109,6 +117,15 @@ to another, between any two of the three. It reads every copy back before it
 switches the setting. When a copy fails, it removes the copies it made, and
 nothing changes. A move into git storage commits, then pushes; a failed push is
 reported, and the setting still switches.
+
+`migrateRepoIds` in `tools/ledger/migrate-repo-ids.ts` runs once for stores
+that filed ledgers under the main checkout's folder name. It moves each such
+ledger to its repo key with a plain rename on the same disk, and records the
+folder name as an alias only for tasks it moved. A ledger whose main checkout it
+cannot find, that lies on another disk, or whose target name is taken stays
+where it is, and a person moves it by hand. In git storage the moves are
+committed and pushed like any other write; each machine records its aliases
+itself.
 
 ### The registry
 
@@ -188,8 +205,10 @@ the first, above the ledgers.
 - A task's worktree is `<main>/.claude/worktrees/<folder>`.
 - Its ledger is `<worktree>/.claude/ledger.md`.
 - Its evidence is `<worktree>/.claude/evidence/`.
-- Backlog and archive folders are named after the main checkout's folder. Two
-  repos with the same folder name share them.
+- The file store, and the git store in its clone, name each repo folder by its
+  repo key, URI-encoded, such as `github.com%2Fchrfalch%2Fledger`. A folder from
+  before the repo key, named after the main checkout's folder, keeps that name
+  until the conversion moves its ledgers.
 
 `mainOfTaskWorktree` finds the main checkout from a worktree path.
 
@@ -235,10 +254,11 @@ Close last.
 
 | Data | File store | SQLite store | Git store |
 |---|---|---|---|
-| Backlog ledger | `~/.claude/ledger-backlog/<repo>/<slug>.md` | `~/.claude/ledgers.db` | `~/.claude/ledger-data/backlog/<repo>/<slug>.md`, committed |
-| Archive copy | `~/.claude/ledger-archive/<repo>/<YYYY-MM-DD>-<slug>.md` | `~/.claude/ledgers.db` | `~/.claude/ledger-data/archive/<repo>/<YYYY-MM-DD>-<slug>.md`, committed |
-| Archive evidence | `~/.claude/ledger-archive/<repo>/<YYYY-MM-DD>-<slug>/` | `~/.claude/ledgers.db`, as bytes | `~/.claude/ledger-evidence/<repo>/<YYYY-MM-DD>-<slug>/`, never committed |
+| Backlog ledger | `~/.claude/ledger-backlog/<repo key>/<slug>.md` | `~/.claude/ledgers.db` | `~/.claude/ledger-data/backlog/<repo key>/<slug>.md`, committed |
+| Archive copy | `~/.claude/ledger-archive/<repo key>/<YYYY-MM-DD>-<slug>.md` | `~/.claude/ledgers.db` | `~/.claude/ledger-data/archive/<repo key>/<YYYY-MM-DD>-<slug>.md`, committed |
+| Archive evidence | `~/.claude/ledger-archive/<repo key>/<YYYY-MM-DD>-<slug>/` | `~/.claude/ledgers.db`, as bytes | `~/.claude/ledger-evidence/<repo key>/<YYYY-MM-DD>-<slug>/`, never committed |
 | Registry | `~/.claude/ledgers.json` | `~/.claude/ledgers.db` | `~/.claude/ledgers-git.json`, never committed |
+| Repo aliases | `~/.claude/ledger-aliases.json` | `~/.claude/ledgers.db` | `~/.claude/ledger-aliases-git.json`, never committed |
 | Active ledger | `<worktree>/.claude/ledger.md` | the same file | the same file |
 | Store setting | `~/.claude/ledger-settings.json` | the same file | the same file |
 

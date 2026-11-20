@@ -45,7 +45,7 @@ const ASSERTS_ABSENCE: Record<string, readonly string[]> = {
   ],
   'tests/ledger-core-hooks.test.ts': [
     "test('a removal that names the deleted cc-worktree-retire script is denied', (t) => {",
-    'assert.equal(assertDenied(gate(main, \'Bash\', { command: `bin/cc-worktree-retire ${task}; rm -rf ${task}` }, h)), removalReason(task));',
+    'assert.equal(assertDenied(gate(main, \'Bash\', { command: `bin/cc-worktree-retire ${task}; rm -rf ${task}` }, h)), removalReason(main, task));',
   ],
 };
 

@@ -1,6 +1,6 @@
 import stringWidth from 'string-width';
 import { plainLine } from './format.js';
-import { repoName } from './paths.js';
+import { repoKey, repoLabel } from './repo-key.js';
 import { inRepo, type ChildView, type Task } from './tasks.js';
 
 const TEXT_WIDTH = 80;
@@ -28,16 +28,19 @@ export const heading = (...parts: string[]): string => parts.join(' · ');
 
 export const plural = (count: number, one: string, many = `${one}s`): string => `${count} ${count === 1 ? one : many}`;
 
+/** `a`, `a and b`, `a, b and c`. */
+export const joined = (parts: string[]): string => (parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`);
+
 const localDate = (ms: number): string => {
   const date = new Date(ms);
   return [date.getFullYear(), date.getMonth() + 1, date.getDate()].map((part) => String(part).padStart(2, '0')).join('-');
 };
 
-/** A parent in another repo is named with that repo's folder. */
+/** A parent in another repo is named with that repo's label. */
 function parentCell(task: Task): string {
   const parent = task.ledger.location.parent;
   if (parent === undefined) return '';
-  return parent.main === undefined ? parent.slug : `${parent.slug} (${repoName(parent.main)})`;
+  return parent.main === undefined ? parent.slug : `${parent.slug} (${repoLabel(repoKey(parent.main))})`;
 }
 
 /** The listed task that `task` names as its parent: a live one before an archive copy. */
@@ -76,7 +79,7 @@ export function listView(tasks: Task[]): string {
   if (tasks.length === 0) return 'No live tasks. Retired tasks are listed by: ledger task archive';
   const count = (status: string): number => tasks.filter((task) => task.status === status).length;
   const counts = [`${count('active')} active`, `${count('parked')} parked`, `${count('backlog')} backlog`];
-  const rows = familyOrder(tasks).map(({ task, depth }) => [task.repo, nestedName(task.slug, depth), task.status, parentCell(task), localDate(task.mtimeMs), truncate(task.ledger.next)]);
+  const rows = familyOrder(tasks).map(({ task, depth }) => [repoLabel(task.repo), nestedName(task.slug, depth), task.status, parentCell(task), localDate(task.mtimeMs), truncate(task.ledger.next)]);
   return [heading('Task ledgers', `${plural(tasks.length, 'task')}: ${counts.join(', ')}`), '', ...table(['repo', 'task', 'status', 'parent', 'updated', 'next'], rows)].join('\n');
 }
 
@@ -94,13 +97,13 @@ export function archiveView(rows: ArchiveRow[], repo: string | undefined, term: 
   const header = ['date', ...(repo === undefined ? ['repo'] : []), 'task', 'branch', 'goal', ...(term ? ['match'] : [])];
   const cells = rows.map(({ task, match }) => [
     task.archived ?? '',
-    ...(repo === undefined ? [task.repo] : []),
+    ...(repo === undefined ? [repoLabel(task.repo)] : []),
     task.slug,
     writtenBranch(task),
     truncate(task.ledger.goal),
     ...(term ? [truncate(match ?? '')] : []),
   ]);
-  return [heading('Archived ledgers', repo ?? 'every repo', count), '', ...table(header, cells)].join('\n');
+  return [heading('Archived ledgers', repo === undefined ? 'every repo' : repoLabel(repo), count), '', ...table(header, cells)].join('\n');
 }
 
 /** A child in another repo is named `<slug>@<main>`, the form `ledger tree` takes. */

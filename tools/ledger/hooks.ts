@@ -6,7 +6,9 @@ import { logHookFailure, markHookFailuresReported, unreportedHookFailures } from
 import { findSection, serializeLedger, type Child, type Ledger, type TaskRef } from './format.js';
 import { checkoutRoot, gitTimedOut, inMainCheckout, limitGitCalls, mainCheckout } from './git.js';
 import { limitLockWaits } from './lock.js';
-import { repoName, samePath, worktreeLedger } from './paths.js';
+import { conversionHint } from './migrate-repo-ids.js';
+import { samePath, worktreeLedger } from './paths.js';
+import { repoKey, repoLabel } from './repo-key.js';
 import { loadTasks } from './registry.js';
 import { pullForSession, syncNotice } from './sync.js';
 import { archivedTasks, findNamed, findTasks, folderTask, locateChild, namedChildren, worktreeTasks, type Task } from './tasks.js';
@@ -172,19 +174,21 @@ function tasksOnDisk(context: HookContext, mains: string[]): Task[] {
  * With git storage it pulls first, and a sync problem adds one line before the ledgers. The pull, and every git call and
  * lock wait after it, opening and closing the store too, end by `deadline`.
  */
-function sessionLedgerContext(input: HookInput, context: HookContext, deadline: number): { text?: string; title?: string } {
+function sessionLedgerContext(input: HookInput, context: HookContext, deadline: number): { hint?: string; text?: string; title?: string } {
   limitLockWaits(deadline);
   limitCloneGitCalls(deadline);
   // Opened first, as git in the session folder may use up the time that is left after the pull.
   void context.store;
   pullForSession(context.paths, deadline - AFTER_PULL_MS);
   limitGitCalls(GIT_TIMEOUT_MS, deadline);
+  // After the pull, which may bring ledgers under folder names, and before the ledgers, whose registry rebuild re-keys the entries the hint counts.
+  const hint = conversionHint(context.store);
   const notice = syncNotice(context.paths);
   const found = sessionLedgers(folderOf(input, context));
-  if (found.tasks.length === 0) return { text: notice };
+  if (found.tasks.length === 0) return { hint, text: notice };
   const mains = found.tasks.flatMap(({ main, ledger: { location, children } }) => [main, location.parent?.main, ...children.map((child) => child.main)].filter((known) => known !== undefined));
   const ledgers = sessionStartText(found, tasksOnDisk(context, mains));
-  return { text: notice === undefined ? ledgers : `${notice}\n${ledgers}`, title: sessionTitle(found) };
+  return { hint, text: notice === undefined ? ledgers : `${notice}\n${ledgers}`, title: sessionTitle(found) };
 }
 
 /**
@@ -194,7 +198,7 @@ function sessionLedgerContext(input: HookInput, context: HookContext, deadline: 
  */
 export function sessionStart(input: HookInput, context: HookContext, deadline = Date.now() + GIT_TIMEOUT_MS): SessionStartOutput | undefined {
   const failures = unreportedHookFailures(context.paths);
-  let ledgers: { text?: string; title?: string };
+  let ledgers: { hint?: string; text?: string; title?: string };
   try {
     ledgers = sessionLedgerContext(input, context, deadline);
   } catch (error) {
@@ -202,7 +206,7 @@ export function sessionStart(input: HookInput, context: HookContext, deadline = 
     logHookFailure(context.paths.home, 'ledger hook session-start', error instanceof Error ? error.message : String(error));
     ledgers = {};
   }
-  const additionalContext = [failures?.text, ledgers.text].filter((part) => part !== undefined).join('\n\n');
+  const additionalContext = [failures?.text, ledgers.hint, ledgers.text].filter((part) => part !== undefined).join('\n\n');
   if (additionalContext === '') return undefined;
   if (failures !== undefined) markHookFailuresReported(context.paths.home, failures);
   return {
@@ -236,7 +240,7 @@ export function promptSubmit(input: HookInput, context: HookContext): PromptSubm
   const title = input.sessionTitle;
   if (!active.includes(target) || title === target) return undefined;
   // A title that names no task came from /rename; the operator keeps it.
-  if (title !== '' && !active.includes(title) && !archivedTasks(context.store, repoName(main)).some(({ slug }) => slug === title)) return undefined;
+  if (title !== '' && !active.includes(title) && !archivedTasks(context.store, repoKey(main)).some(({ slug }) => slug === title)) return undefined;
   return { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', sessionTitle: target } };
 }
 
@@ -354,6 +358,13 @@ function expandGlob(word: string, cwd: string): string[] {
 const RETIRE_COMMANDS = ['ledger task retire'];
 const REMOVALS = ['worktree remove', 'rm -rf', 'rm -fr'];
 
+function archiveHint(cwd: string, { paths, store }: HookContext): string {
+  const main = mainCheckout(cwd);
+  if (main === undefined) return `Archived ledgers live in ${paths.tilde(store.archive.repoLocation())}/.`;
+  const key = repoKey(main);
+  return `Archived ledgers of ${repoLabel(key)} live in ${paths.tilde(store.archive.repoLocation(key))}/.`;
+}
+
 /** Denies a Bash removal of a folder whose ledger no archive copy names as its worktree. */
 function worktreeRemovalReason(input: HookInput, context: HookContext): string | undefined {
   if (input.toolName !== 'Bash') return undefined;
@@ -377,7 +388,7 @@ function worktreeRemovalReason(input: HookInput, context: HookContext): string |
     'Retire it instead, which archives the ledger and then removes the worktree:',
     `  ${context.ledgerBin} task retire <slug>`,
     '',
-    `Archived ledgers live in ${context.paths.tilde(context.store.archive.repoLocation('<repo>'))}/.`,
+    archiveHint(cwd, context),
   ].join('\n');
 }
 

@@ -8,7 +8,7 @@ import { withLock, type LockOptions } from './lock.js';
 import type { LedgerPaths } from './paths.js';
 import { isSecretLike, prePushHook, RAW_CHANGES_LOG, WITHHELD } from './secret-scan.js';
 
-/** The clone of git storage and what stays next to it on this machine: evidence, the sync status and the registry are never pushed. */
+/** The clone of git storage and what stays next to it on this machine: evidence, the sync status, the registry and the repo aliases are never pushed. */
 export function clonePaths({ home }: LedgerPaths) {
   const claude = path.join(home, '.claude');
   return {
@@ -24,6 +24,8 @@ export function clonePaths({ home }: LedgerPaths) {
     order: path.join(claude, 'ledger-data.sync-order.json'),
     // Not the ledgers.json of file storage: a migrate between the two would merge one registry into itself, and remove from it.
     registry: path.join(claude, 'ledgers-git.json'),
+    // Not the ledger-aliases.json of file storage, for the same reason: a migrate that stops removes the aliases it added.
+    aliases: path.join(claude, 'ledger-aliases-git.json'),
     /** The lock target of `ledger store sync init`, so only one runs at a time. */
     init: path.join(claude, 'ledger-data.init'),
     /** The lock target of `ledger store sync --quiet`, so only one runs at a time. */

@@ -120,12 +120,27 @@ a new folder or mark it lost. Only this command searches the disk, in folders
 the operator names.
 
 **Decision D10 (2026-11-19):** the store identifies a repo by its remote
-address, such as `github.com/chrfalch/ledger`, not by its folder name. A repo
-with no remote falls back to the absolute path of its main checkout. Two
-checkouts of one repo share one task tree; each task records its own worktree
-path (D9). A renamed remote is kept as an alias, and `ledger store repair` updates
-it. A one-time conversion moves existing tasks from folder names to repo
-addresses; `ledger store migrate` does this step.
+address, such as `github.com/chrfalch/ledger`, not by its folder name. The
+address is that of `origin`, else of the only remote. Normalize it: drop the
+scheme, the user, a `.git` suffix and a trailing slash, and lowercase the whole
+address, host and path, because GitHub paths and the default APFS volume ignore
+case. It keeps a port that is
+not the scheme's default, such as `host:2222/team/app`, so two servers on one
+host stay apart. A repo with no such remote, or one whose address names no
+host or repo path or has a port that is no number, falls back to the absolute
+path of its main checkout. Two checkouts of one repo
+share its backlog and archive. A task in a worktree belongs to the checkout that
+holds the worktree; each task records its own worktree path (D9). People see a
+short label: the address without its host, such as `chrfalch/ledger`, or the
+last folder of a path. The store keeps an alias map from old keys to current
+ones. `ledger store migrate --repo-ids` converts existing tasks once: it moves
+each task filed under a folder name to its repo address, only by a rename on the
+same disk, and records the folder name as an alias once a task moved there. It
+moves nothing it is not sure of. A task whose main checkout is gone or not
+known for sure, a task whose name the address already has, and a task on
+another disk stay where they are. The command lists each such conflict and
+exits 1, and a person fixes it by hand. Detecting a renamed remote and keeping its old address as an
+alias lands with `ledger store repair` (D9).
 
 **Decision D1 (2026-11-19):** the store is a technical setting, outside this
 spec. The tool supports Markdown files and SQLite, and GitHub support is in
@@ -490,7 +505,9 @@ Decided 2026-11-19:
 - **D9** No folder scan: the store records each task's repo and worktree
   path; `ledger store repair` handles moved or missing folders (section 4).
 - **D10** Repos are identified by remote address, with the main checkout's
-  path as fallback; existing tasks are converted once (section 4).
+  path as fallback; `ledger store migrate --repo-ids` converts existing tasks
+  once and keeps each folder name in an alias map; renamed remotes come with
+  `ledger store repair` (section 4).
 - **D11** (revised) Hooks still let actions through when they fail; a hook
   failure log reports them at session start (section 10).
 - **D12** LLP 0000 stays current: a PR that changes how the system works

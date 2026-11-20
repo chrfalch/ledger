@@ -8,21 +8,23 @@ import { openStore } from './open-store.js';
 import type { LedgerPaths } from './paths.js';
 import { parseRegistry, type RegistryEntry } from './registry.js';
 import { readStorage, shownSettingsFile, writeStorage, type Storage } from './settings.js';
-import { loadSqlite, sqliteFile } from './sqlite-store.js';
+import { loadSqlite, sqliteFile, sqliteStore } from './sqlite-store.js';
 import { NameTaken, wasCreatedHere, type Change, type LedgerCollection, type LedgerStore, type StoredLedger, type WrittenLedger } from './store.js';
 import { syncLedgers } from './sync.js';
-import { plural } from './views.js';
+import { joined, plural } from './views.js';
 
 /** `from` is the storage to copy from; by default the one the setting names. */
 export type MigrateOptions = { removeSource: boolean; dryRun: boolean; from?: Storage };
 
-// A method's parameters are bivariant, so a test may pass an opener for only the storages it migrates between.
-type OpenStore = { open(paths: LedgerPaths, storage: Storage): LedgerStore }['open'];
+// A method's parameters are bivariant, so a test may pass an opener for only the storages it migrates between. With
+// `readOnly`, a database stays as it is, its schema too.
+type OpenStore = { open(paths: LedgerPaths, storage: Storage, readOnly?: boolean): LedgerStore }['open'];
 
 const STORAGE_NAME: Record<Storage, string> = { file: 'file storage', sqlite: 'SQLite storage', git: 'git storage' };
 
 // Migrate pushes once, in the foreground, after the stores are closed, so it can say whether the push got through.
-const openForMigrate: OpenStore = (paths, storage) => openStore(paths, storage, { backgroundSync: false });
+const openForMigrate: OpenStore = (paths, storage, readOnly = false) =>
+  storage === 'sqlite' ? sqliteStore(paths, { readOnly }) : openStore(paths, storage, { backgroundSync: false });
 
 /**
  * The storage the setting names. When that is `to`, as after a hand-edited setting, file and SQLite storage each
@@ -35,8 +37,8 @@ function defaultSource(setting: Storage, to: Storage): Storage {
 }
 
 /** The store, or undefined for a database that is not there yet, so reading it does not make one. */
-const openIfThere = (paths: LedgerPaths, storage: Storage, open: OpenStore): LedgerStore | undefined =>
-  storage === 'sqlite' && !exists(sqliteFile(paths.home)) ? undefined : open(paths, storage);
+const openIfThere = (paths: LedgerPaths, storage: Storage, open: OpenStore, readOnly: boolean): LedgerStore | undefined =>
+  storage === 'sqlite' && !exists(sqliteFile(paths.home)) ? undefined : open(paths, storage, readOnly);
 
 const everyLedger = (collection: LedgerCollection | undefined): StoredLedger[] => collection?.repos().flatMap((repo) => collection.list(repo)) ?? [];
 
@@ -60,8 +62,6 @@ const updatedOf = ({ updated }: RegistryEntry): string => (typeof updated === 's
 
 const newestFirst = (a: RegistryEntry, b: RegistryEntry): number => updatedOf(b).localeCompare(updatedOf(a));
 
-const joined = (parts: string[]): string => (parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`);
-
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /**
@@ -84,8 +84,8 @@ export function migrateStorage(paths: LedgerPaths, to: Storage, options: Migrate
   const keep = (store: LedgerStore | undefined): LedgerStore | undefined => (store && opened.push(store), store);
   const evidenceRoot = mkdtempSync(path.join(tmpdir(), 'ledger-migrate-'));
   try {
-    const source = keep(openIfThere(paths, from, open));
-    const target = keep(options.dryRun ? openIfThere(paths, to, open) : open(paths, to));
+    const source = keep(openIfThere(paths, from, open, options.dryRun));
+    const target = keep(options.dryRun ? openIfThere(paths, to, open, true) : open(paths, to));
     migrate({ ...options, paths, from, to, setting, source, target, evidenceRoot, line });
   } finally {
     for (const store of opened) store.close?.();
@@ -121,6 +121,8 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
   const backlog = everyLedger(source?.backlog);
   const archive = everyLedger(source?.archive);
   const evidenceCount = archive.reduce((count, { repo, name }) => count + (source?.archive.evidenceFiles(repo, name).length ?? 0), 0);
+  const unread = source?.aliases.problem();
+  if (unread !== undefined) fail(`ledger store migrate stopped, and nothing changed: not every alias of the ${STORAGE_NAME[from]} can be read. ${unread}`);
 
   if (target !== undefined) {
     const conflict = (place: string, collection: LedgerCollection) => (ledger: StoredLedger) =>
@@ -133,6 +135,14 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
       const summary = `ledger store migrate stopped, and nothing changed: the ${STORAGE_NAME[to]} already has ${plural(conflicts.length, 'name')} to copy. A ledger with identical text counts too.`;
       fail([summary, ...conflicts].join('\n'));
     }
+    const kept = target.aliases.read();
+    const otherKeys = [...(source?.aliases.read() ?? [])].flatMap(([old, key]) => {
+      const theirs = kept.get(old);
+      return theirs === undefined || theirs === key ? [] : [`${old} is an alias of ${theirs}, not of ${key}`];
+    });
+    if (otherKeys.length > 0) fail(`ledger store migrate stopped, and nothing changed: in the ${STORAGE_NAME[to]}, ${joined(otherKeys)}. An alias is never changed.`);
+    const refused = target.aliases.problem();
+    if (refused !== undefined) fail(`ledger store migrate stopped, and nothing changed: the ${STORAGE_NAME[to]} takes no alias. ${refused} Fix or remove that alias first.`);
   }
 
   const moved = new Map(
@@ -167,7 +177,9 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
   if (writing) {
     const stopped = (reason: string, undone: string): string =>
       `ledger store migrate stopped: ${reason} ${undone} The setting stays "${setting}", and nothing was removed from the ${STORAGE_NAME[from]}.`;
-    copyChecked(source, target, { backlog, archive, evidenceRoot, entries: sourceEntries, mergeRegistry, targetName: STORAGE_NAME[to] }, stopped);
+    const kept = target.aliases.read();
+    const aliases = [...source.aliases.read()].filter(([old]) => !kept.has(old));
+    copyChecked(source, target, { backlog, archive, aliases, evidenceRoot, entries: sourceEntries, mergeRegistry, targetName: STORAGE_NAME[to] }, stopped);
   }
   line(`${act('copied', 'copy')} ${plural(backlog.length, 'backlog ledger')}`);
   line(`${act('copied', 'copy')} ${plural(archive.length, 'archive copy', 'archive copies')} with ${plural(evidenceCount, 'evidence file')}`);
@@ -206,7 +218,10 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
 
 type Copied = { backlog: StoredLedger[]; archive: StoredLedger[] };
 
-type Planned = Copied & { evidenceRoot: string };
+/** What a copy wrote to the target, so a copy that stops can take it back: aliases, by old key and key, too. */
+type Written = Copied & { aliases: [string, string][] };
+
+type Planned = Written & { evidenceRoot: string };
 
 const evidenceFolder = (evidenceRoot: string, index: number): string => path.join(evidenceRoot, String(index));
 
@@ -215,8 +230,8 @@ type RegistryWrite = { before?: string; after?: string };
 
 /**
  * Copies `planned` and merges its registry entries into `target` with `mergeRegistry`, reads it all back, and commits
- * it where the target commits. When any of that throws or reads back different, it removes each ledger it wrote, puts
- * back the registry the target had, and fails.
+ * it where the target commits. When any of that throws or reads back different, it removes each ledger and alias it
+ * wrote, puts back the registry the target had, and fails.
  */
 function copyChecked(
   source: LedgerStore,
@@ -224,7 +239,7 @@ function copyChecked(
   planned: Planned & { entries: RegistryEntry[]; mergeRegistry: Change<string | undefined>; targetName: string },
   stopped: (reason: string, undone: string) => string,
 ): void {
-  const written: Copied = { backlog: [], archive: [] };
+  const written: Written = { backlog: [], archive: [], aliases: [] };
   const registry: RegistryWrite = {};
   let differs: string[];
   try {
@@ -252,7 +267,12 @@ function copyChecked(
  * A ledger is noted in `written` once its write succeeded, so a name another command took since the check is never
  * removed. An archive write that fails is noted only when this process made the copy, as it may have written half.
  */
-function copy(source: LedgerStore, target: LedgerStore, { backlog, archive, evidenceRoot }: Planned, written: Copied): void {
+function copy(source: LedgerStore, target: LedgerStore, { backlog, archive, aliases, evidenceRoot }: Planned, written: Written): void {
+  // Before the ledgers, so a copy is never in the target without the alias that finds it under an old key.
+  for (const [old, key] of aliases) {
+    target.aliases.add(old, key);
+    written.aliases.push([old, key]);
+  }
   for (const ledger of backlog) {
     const { repo, name, text, mtimeMs } = ledger;
     if (!target.backlog.create(repo, name, text)) fail(`another command wrote backlog ${shortName(ledger)} after the check for names already taken`);
@@ -276,13 +296,14 @@ function copy(source: LedgerStore, target: LedgerStore, { backlog, archive, evid
 }
 
 /**
- * Removes from `target` each ledger in `written`, and puts back the registry it had while it is still what this run
- * wrote. A backlog ledger another command changed since the copy stays. Says what it did, as a sentence.
+ * Removes from `target` each ledger and alias in `written`, and puts back the registry it had while it is still what this
+ * run wrote. A backlog ledger another command changed since the copy stays. Says what it did, as a sentence.
  */
-function undo(target: LedgerStore, written: Copied, registry: RegistryWrite, targetName: string): string {
+function undo(target: LedgerStore, written: Written, registry: RegistryWrite, targetName: string): string {
   try {
     const changed = written.backlog.filter(({ repo, name, text }) => target.backlog.has(repo, name) && !target.backlog.remove(repo, name, text));
     for (const { repo, name } of written.archive) if (target.archive.has(repo, name)) target.archive.remove(repo, name);
+    for (const [old, key] of written.aliases) target.aliases.remove(old, key);
     const { before, after } = registry;
     if (after !== undefined) {
       // Update cannot remove, so a registry the target did not have is removed after a separate read.
@@ -334,7 +355,7 @@ type Removed = { backlog: number; archive: number; registry: number | undefined 
  */
 function remove(
   source: LedgerStore,
-  { backlog, archive, evidenceRoot, entries }: Planned & { entries: RegistryEntry[] | undefined },
+  { backlog, archive, evidenceRoot, entries }: Copied & { evidenceRoot: string; entries: RegistryEntry[] | undefined },
   line: (text: string) => void,
 ): Removed {
   const kept = new Set<string>();

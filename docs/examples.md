@@ -73,7 +73,7 @@ five. Can you look at that?
 **Agent:** That is a separate task. It runs `/ledger:task`, which prints:
 
 ```
-ledger:  ~/.claude/ledger-backlog/expo/router-modal-e2e-flake.md
+ledger:  ~/.claude/ledger-backlog/github.com%2Fexpo%2Fexpo/router-modal-e2e-flake.md
 status:  backlog
 start:   /ledger:go router-modal-e2e-flake
 ```
