@@ -28,11 +28,19 @@ is unverified.
 Ask every question that has fixed answers with the question widget (the
 AskUserQuestion tool), not as text. This includes yes/no questions, such as
 whether to commit and open a PR.
+- At a gate that `ledger task gate` knows (`plan` and `pr` today), show the
+  question it prints as JSON. Do not write its options yourself. Write any
+  other gate yourself, with at most three actions, plus Close.
 - A request for approval of one proposed action ("Shall I commit, push and
   open the PR?", "Proceed?") is a yes/no question. It has fixed answers, so it
-  goes in the widget. Give it two options: the action, labelled with what it
-  does, and "Not yet", which stops and waits.
-- When your report ends with such a question, end the turn with the widget
+  goes in the widget. Give it three options: the action, labelled with what it
+  does; "Not yet", which stops and waits; and Close, which saves where the task
+  stands and stops.
+- In a multi-select widget, Close ticked with other options runs those
+  options, then stops. Close ticked alone runs nothing and stops.
+- During an operator walkthrough of a document, ask in plain text, one point
+  at a time. The widget returns at the next gate.
+- When your report ends with a question that has fixed answers, end the turn with the widget
   call. Do not write the question as text first.
 - Make each possible answer one option, two to four per question. The widget
   adds its own free-text answer, so do not add an "Other" option.
@@ -62,7 +70,8 @@ Rules:
   reach every reader. The word is the outcome, never "red" or "green".
 - In a comparison table, give each row one mark.
 - A question with fixed answers goes in the question widget (see Asking the
-  operator), and so does a yes/no question. Start any other question you ask
+  operator), and so does a yes/no question, except during a walkthrough of a
+  document. Start any other question you ask
   the user with ❓. Such a question has an open answer, such as a name or a
   value:
   `❓ What should the new command be called?`. Use ❓ only for a question the

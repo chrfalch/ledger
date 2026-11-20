@@ -81,5 +81,6 @@ parent task.
    script printed for `--stack`. Read `.claude/ledger.md` in
    the new worktree: the SessionStart hook does not put it in context in this
    case. Then continue with the operator's request in this session, through
-   the normal pipeline: get the plan approved, then write the approved plan
-   into the ledger.
+   the normal pipeline. When the task changes more than one file or involves
+   a design choice, get the plan approved with the widget question that
+   `ledger task gate plan` prints. Then write the plan into the ledger.

@@ -13,10 +13,12 @@ architecture are yours to resolve, never to delegate.
   model. The Astra and Fable lanes are for a shape of work, not escalation targets.
 
 ### Plan gate
-Written plan before any non-trivial delegation; approval before multi-file or
-architectural work. State assumptions. **Ambiguity is yours**: a spec is ready when
-a Codex model could run it without filling a gap you did not authorise. Ambiguity
-about *intent* → ask; about technique → resolve at raised effort.
+Written plan before any non-trivial delegation. Get the plan approved only for a
+task that touches more than one file or includes a design choice. Other tasks go
+from the plan straight to red tests. Ask with `ledger task gate plan`. State
+assumptions. **Ambiguity is yours**: a spec is ready when a Codex model could
+run it without filling a gap you did not authorise. Ambiguity about *intent* →
+ask; about technique → resolve at raised effort.
 
 **Split work gets a parent task first.** This is a hard rule. When the
 approved plan has two or more parts that ship separately, make the parent task
@@ -107,19 +109,20 @@ The **task ledger** records the task. See `ledger --help`.
   backlog task has no worktree: run `/ledger:go <slug>` yourself. If the task
   has a parent or children, show its tree with `/ledger:parent <parent>`. Do not re-read
   files or rerun tests to re-establish state. When every plan step is done,
-  ask with the question widget whether to commit or open a PR.
+  ask with `ledger task gate pr`.
 - **End of task.** When the work is merged, or the operator says the task is
   finished, ask one `multiSelect` widget question. Its options are: retire
   this task; one option per other finished task; start the next task with
-  `/ledger:go <slug>`. With a parent, the next task is `/ledger:go <parent>`.
+  `/ledger:go <slug>`. Add Close (see Asking the operator). With a parent, the
+  next task is `/ledger:go <parent>`.
   With no child task left, offer to retire the parent task. A ticked option is
-  the operator's approval to run it. Run in order:
+  the operator's approval to run it.
   1. Run `/ledger:retire <slug> --dry-run` for each; clear the problems it
      names. Ask before you discard any change. Do not retire a branch with no merged PR; say what
      is missing.
   2. `ExitWorktree` with `keep`, if a retire removes this session's worktree.
   3. Retire each ticked task, this task first.
-  4. Start the next task.
+  4. Start the next task, if ticked.
 - With `llp/` in the repo, durable design decisions go in an LLP document in
   the same PR. Never commit a ledger.
 
