@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
 import { planProgress } from './format.js';
+import { GATE_NAMES, gateQuestion } from './gates.js';
 import { mainCheckout } from './git.js';
 import { logHookFailure, oneLine } from './hook-failures.js';
 import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookContext, type HookEvent } from './hooks.js';
@@ -312,6 +313,16 @@ export async function main(argv: string[]): Promise<number> {
       const found = archive(context, term ?? '', all);
       if (json) printJson(archiveFields(found));
       else console.log(archiveView(found.rows, found.repo, found.term, `${paths.tilde(found.folder)}/`));
+    });
+  taskGroup
+    .command('gate')
+    .description('Print the question to ask the operator at a gate, as one AskUserQuestion question in JSON: the recommended action first, Close last.')
+    .argument('<name>', `the gate: ${GATE_NAMES.join(', ')}`)
+    .argument('[slug]', 'the task the question names; by default the task of the worktree you are in')
+    .action((name: string, slug: string | undefined) => {
+      const { tasks, own } = sessionLedgers(cwd);
+      const here = own && tasks.length === 1 ? tasks[0].slug : undefined;
+      print(JSON.stringify(gateQuestion(name, slug ?? here), null, 2));
     });
 
   const parentSlug = 'the parent task in this repo, or <slug>@<path> for the repo at <path>';

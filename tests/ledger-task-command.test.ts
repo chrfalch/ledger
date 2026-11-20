@@ -20,7 +20,7 @@ test('/ledger:task continues in this session when there is no current ledger', (
 test('/ledger:task without a current ledger reads the new ledger and follows the plan gate', () => {
   const step8 = read('mods/ledger/commands/task.md').match(/ 8\. If there is no current ledger.*/)?.[0] ?? '';
   assert.match(step8, /EnterWorktree.*Read `\.claude\/ledger\.md` in the new worktree/);
-  assert.match(step8, /get the plan approved, then write the approved plan into the ledger/);
+  assert.match(step8, /When the task changes more than one file or involves a design choice, get the plan approved with the widget question that `ledger task gate plan` prints\. Then write the plan into the ledger\./);
 });
 
 test('/ledger:task without a current ledger starts the backlog task with ledger go, then enters the worktree it printed', () => {
@@ -167,14 +167,52 @@ test('the parent task rule states both directions', () => {
   assert.match(planGate(), /two or more parts that ship separately/);
 });
 
+test('the Plan gate asks for approval only for a task with more than one file or a design choice', () => {
+  const gate = planGate();
+  assert.match(gate, /Get the plan approved only for a task that touches more than one file or includes a design choice\./);
+  assert.match(gate, /Other tasks go from the plan straight to red tests\./);
+  assert.match(gate, /Ask with `ledger task gate plan`\./);
+  assert.doesNotMatch(gate, /approval before multi-file or architectural work/);
+});
+
 test('a finished task ends with one multi-select question for retire and the next task', () => {
-  assert.match(checkpointBullet('**Resume.**'), /When every plan step is done, ask with the question widget whether to commit or open a PR\./);
+  assert.match(checkpointBullet('**Resume.**'), /When every plan step is done, ask with `ledger task gate pr`\./);
   const bullet = checkpointBullet('**End of task.**');
   assert.match(bullet, /When the work is merged, or the operator says the task is finished, ask one `multiSelect` widget question\./);
   assert.match(bullet, /Its options are: retire this task; one option per other finished task; start the next task with `\/ledger:go <slug>`\./);
+  // The multi-select Close rule itself lives in rule 20: rule 10's ledger sections are held to 550 words.
+  assert.match(bullet, /Add Close \(see Asking the operator\)\./);
   assert.match(bullet, /With a parent, the next task is `\/ledger:go <parent>`\./);
   assert.match(bullet, /With no child task left, offer to retire the parent task\./);
   assert.match(bullet, /A ticked option is the operator's approval to run it\./);
+});
+
+const askingTheOperator = () => read('rules/20-writing.md').match(/### Asking the operator.*?## /)?.[0] ?? '';
+
+test('the writing rule takes the widget of each gate ledger task gate knows from it', () => {
+  const section = askingTheOperator();
+  assert.match(section, /At a gate that `ledger task gate` knows \(`plan` and `pr` today\), show the question it prints as JSON\. Do not write its options yourself\./);
+  assert.match(section, /Write any other gate yourself, with at most three actions, plus Close\./);
+});
+
+test('the writing rule gives an approval question the action, "Not yet" and Close', () => {
+  const section = askingTheOperator();
+  assert.match(section, /Give it three options: the action, labelled with what it does; "Not yet", which stops and waits; and Close, which saves where the task stands and stops\./);
+  assert.doesNotMatch(section, /Give it two options/);
+});
+
+test('the writing rule states the multi-select Close rule', () => {
+  assert.match(askingTheOperator(), /In a multi-select widget, Close ticked with other options runs those options, then stops\. Close ticked alone runs nothing and stops\./);
+});
+
+test('the writing rule asks in plain text during a walkthrough of a document', () => {
+  assert.match(askingTheOperator(), /During an operator walkthrough of a document, ask in plain text, one point at a time\. The widget returns at the next gate\./);
+});
+
+test('the writing rule starts an open-answer question with ❓ and keeps the walkthrough exception', () => {
+  const marks = read('rules/20-writing.md').match(/## Result status marks.*?## /)?.[0] ?? '';
+  assert.match(marks, /Start any other question you ask the user with ❓\. Such a question has an open answer, such as a name or a value/);
+  assert.match(marks, /except during a walkthrough/);
 });
 
 test('the end-of-task retires leave the worktree only when needed and never retire an unmerged branch', () => {
@@ -185,7 +223,7 @@ test('the end-of-task retires leave the worktree only when needed and never reti
 
 test('ticked options run in a fixed order: dry runs, leave the worktree, retires, then /ledger:go', () => {
   const bullet = checkpointBullet('**End of task.**');
-  const order = ['1. Run `/ledger:retire <slug> --dry-run`', '`ExitWorktree` with `keep`', '3. Retire each ticked task, this task first.', '4. Start the next task.'].map(step => bullet.indexOf(step));
+  const order = ['1. Run `/ledger:retire <slug> --dry-run`', '`ExitWorktree` with `keep`', '3. Retire each ticked task, this task first.', '4. Start the next task, if ticked.'].map(step => bullet.indexOf(step));
   assert.ok(order.every(at => at >= 0), `missing step: ${JSON.stringify(order)}`);
   assert.deepEqual([...order].sort((a, b) => a - b), order);
 });

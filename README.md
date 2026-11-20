@@ -93,7 +93,7 @@ groups: `task` for tasks, `tree` for parent and child tasks, `store` for where
 the ledgers are kept, and `worktrees` for linked worktrees. `ledger go`,
 `ledger list` and `ledger show` are short for `ledger task go`,
 `ledger task list` and `ledger task show`. `task list`, `task archive`,
-`task show`, `tree show` and `worktrees` only read. `task new`, `task go`,
+`task show`, `task gate`, `tree show` and `worktrees` only read. `task new`, `task go`,
 `task park`, `task unpark`, `task retire` and the other `tree` commands change
 ledgers; each edit changes only the lines it names.
 
@@ -103,6 +103,7 @@ ledgers; each edit changes only the lines it names.
 | `ledger task archive [term] [--all]` | Lists this repo's archived ledgers, newest first. A term keeps only the ledgers that contain it, in any case. `--all` lists the archive of every repo. |
 | `ledger task show <slug> [--repo <name>] [--json]` | Prints the task's backlog ledger in this repo, else its newest archive copy, `<date>-<slug>`. A full archive name, such as `2026-11-01-fix-login-2`, prints that one copy. `--repo <name>` reads another repo's ledgers; outside a repo it is required. |
 | `ledger task show <slug> --evidence [<file>]` | Lists the evidence files of the task's newest archive copy, one path per line. With a file, it prints that file's bytes. |
+| `ledger task gate <plan\|pr> [<slug>]` | Prints the question the agent asks you at a gate, as JSON the question widget takes. `plan` asks to approve a plan, `pr` asks to open the pull request. The recommended action comes first and Close last. Without a slug, the question names the task of the worktree you are in; outside one, it says "this task". It exits 1 for a gate name it does not know. |
 | `ledger tree show <slug> [--json]` | Shows a parent task and the status of each child task. Use `<slug>@<path>` for a parent in the repo at `<path>`. |
 | `ledger tree add <slug> <child>` | Makes `<child>` a child task of `<slug>`. It writes `- parent:` in the child's ledger and a line under `## Children` in the parent's. A child in another repo is `<child>@<path>`. It refuses a task as its own parent, a child that has another parent, a cycle, and a retired child. |
 | `ledger tree remove <slug> <child>` | Removes the link again. A `## Children` section with no child left is removed too. |

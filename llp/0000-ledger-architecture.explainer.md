@@ -57,6 +57,8 @@ it. The commands are:
   that is still in the backlog.
 - `park`, `unpark`: add or remove the parked mark under `## Next step`.
 - `retire`: archives the ledger (see [Retire and archive](#retire-and-archive)).
+- `task gate`: prints the question for a gate, such as plan approval, as JSON
+  the question widget takes. `tools/ledger/gates.ts` defines each gate.
 - `store migrate`: moves the ledgers between file, SQLite and git storage.
 - `store sync`: pushes and pulls the ledgers of git storage.
 - `worktrees`: shows the linked worktrees and prunes their build folders.
@@ -221,6 +223,13 @@ writes the result instead of links.
 ledger, when to update it, the clear point and the end of a task. The rules
 name the `ledger` command and the `/ledger:` commands. The code does not read
 the rules. The agent follows them.
+
+At a gate, the agent asks the operator with the question widget. For the gates
+that `ledger task gate <name>` knows, `plan` and `pr` today, the question comes
+from that command, not from the rule text. The agent writes any other gate
+itself, by the same rules: one to three actions, the recommended one first, and
+Close last.
+`rules/20-writing.md` says how to ask everything else.
 
 ## Data and storage
 
