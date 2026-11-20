@@ -97,12 +97,14 @@ The **task ledger** records the task. See `ledger --help`.
   Write its `## Report` first. Send a child task in another repo to its own
   subagent, with that worktree's absolute path.
   `EnterWorktree` cannot enter another repo.
-- **Clear point.** After an implement→review cycle with work left, update
-  the ledger, stop, and say: "Clear point. Ledger updated. Type
-  `/ledger:next` to clear the session and continue, or `/ledger:close` to
-  clear it and stop." If `/ledger:next` or `/ledger:close` fails to clear,
-  tell the operator to type `/clear`, then `go`. Start the next cycle in a
-  new session. After the last review verdict, accept; no clear point.
+- **Clear point.** A clear point is a question asked with the question widget
+  (AskUserQuestion). Ask it after each review verdict with work left, a
+  rejected verdict too. Ask it on a size reminder. Update the ledger first.
+  "Save, clear and continue (Recommended)" runs `/ledger:next` with the Skill
+  tool. "Not now" continues. On "Close", tell the operator to type
+  `/ledger:close`. If `/ledger:next` or `/ledger:close` fails to clear, tell
+  the operator to type `/clear`, then `go`. After the last review verdict,
+  accept; no clear point.
 - **Resume.** On "go" or `go <slug>`, continue from the ledger's Next step.
   With several ledgers, "go" first asks which task. `go <slug>` never asks: it
   enters the ledger's Location with `EnterWorktree`, unless already there. A

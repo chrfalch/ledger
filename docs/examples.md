@@ -34,8 +34,8 @@ iOS has the same problem. Do you approve?
 **Agent:** (writes the plan into the ledger, writes the test and sees it fail,
 makes the fix, gets it reviewed, updates the ledger)
 
-**Agent:** Clear point. Ledger updated. Type `/ledger:next` to clear the
-session and continue, or `/ledger:close` to clear it and stop.
+**Agent:** (asks) Ledger updated. Save, clear the session and continue from
+step 3?
 
 At this point the ledger holds:
 
@@ -54,14 +54,14 @@ At this point the ledger holds:
 Step 3: researcher, medium effort. Does SDWebImage clear the disk cache on iOS?
 ```
 
-**You:** `/ledger:next`
+**You:** (pick) Save, clear and continue (Recommended)
 
-The session clears. A hook reads the ledger into the fresh session, and
-`go image-clear-disk-cache` is sent for you.
+The agent runs `/ledger:next`. The session clears. A hook reads the ledger
+into the fresh session, and `go image-clear-disk-cache` is sent for you.
 
 **Agent:** Continuing `image-clear-disk-cache` from step 3: check iOS.
 
-You typed three things: the task, `yes`, and `/ledger:next`.
+You did three things: typed the task, typed `yes`, and picked "Save, clear and continue".
 
 ## Put a second task in the backlog, start it later
 

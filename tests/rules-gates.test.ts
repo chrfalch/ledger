@@ -102,18 +102,46 @@ function flatRule10(): string {
   return ruleSource('10-operating-model.md').replace(/\s+/g, ' ');
 }
 
-const CLEAR_POINT = 'Clear point. Ledger updated. Type `/ledger:next` to clear the session and continue, or `/ledger:close` to clear it and stop.';
+const OLD_CLEAR_POINT = 'Clear point. Ledger updated.';
 
-test('the ledger sections of rule 10 state policy in 300 to 550 words and point to ledger --help', () => {
+test('the ledger sections of rule 10 state policy in 300 to 575 words and point to ledger --help', () => {
   const text = ruleSource('10-operating-model.md');
   const sections = ['### Checkpoint gate', '### Archiving a ledger', '## Compact Instructions'].map((heading) => section(text, heading)).join('\n');
   const words = sections.split(/\s+/).filter(Boolean).length;
-  assert.ok(words >= 300 && words <= 550, `the three sections hold ${words} words`);
+  assert.ok(words >= 300 && words <= 575, `the three sections hold ${words} words`);
   assert.match(sections, /`ledger --help`/);
 });
 
-test('rule 10 keeps the exact clear-point sentence', () => {
-  assert.ok(flatRule10().includes(CLEAR_POINT));
+test('rule 10 asks the clear point with the question widget, not as a typed sentence', () => {
+  const rule = flatRule10();
+  assert.match(rule, /clear point is a question asked with the question widget \(AskUserQuestion\)/i);
+  assert.ok(!rule.includes(OLD_CLEAR_POINT));
+});
+
+test('rule 10 offers the clear point after each review verdict with work left, rejected ones included', () => {
+  const rule = flatRule10();
+  assert.match(rule, /after each review verdict with work left/i);
+  assert.match(rule, /rejected verdict/i);
+});
+
+test('rule 10 offers the clear point when a size reminder arrives', () => {
+  assert.match(flatRule10(), /size reminder/i);
+});
+
+test('rule 10 names the three clear-point options in order', () => {
+  const rule = flatRule10();
+  const labels = ['"Save, clear and continue (Recommended)"', '"Not now"', '"Close"'];
+  const positions = labels.map((label) => rule.indexOf(label));
+  assert.ok(positions.every((position) => position >= 0), `missing a label: ${positions}`);
+  assert.deepEqual([...positions].sort((a, b) => a - b), positions);
+});
+
+test('rule 10 has the agent run /ledger:next on "Save, clear and continue"', () => {
+  assert.match(flatRule10(), /"Save, clear and continue \(Recommended\)"[^.]*runs `\/ledger:next` with the Skill tool/);
+});
+
+test('rule 10 has the operator type /ledger:close on "Close"', () => {
+  assert.match(flatRule10(), /"Close"[^.]*tell the operator to type `\/ledger:close`/);
 });
 
 /** The sentences of the three ledger sections of rule 10, without headings and list markers. */
@@ -136,6 +164,13 @@ test('each sentence of the ledger sections of rule 10 is under 20 words', () => 
 
 test('rule 10 accepts and finishes after the last review verdict, with no clear point', () => {
   assert.match(flatRule10(), /After the last review verdict, accept; no clear point\./);
+});
+
+test('/ledger:update ends a cycle with work left on the clear-point widget question', () => {
+  const update = readFileSync(path.join(REPO, 'mods/ledger/commands/update.md'), 'utf8').replace(/\s+/g, ' ');
+  assert.ok(!update.includes(OLD_CLEAR_POINT));
+  assert.match(update, /AskUserQuestion/);
+  assert.match(update, /"Save, clear and continue \(Recommended\)"/);
 });
 
 test('rule 10 tells the operator how to clear when /ledger:next cannot', () => {

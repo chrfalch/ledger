@@ -162,9 +162,21 @@ the plugin clears the session. After `/ledger:next`, the new session continues
 from the ledger's next step with no typing. After `/ledger:go`, it continues in
 the other task. After `/ledger:close`, nothing starts.
 
-Only the operator may type `/ledger:next`, `/ledger:close` and `/ledger:park`
-(`TYPED_ONLY` in `register.ts`). The plugin refuses them when the agent starts
-them through the `Skill` tool. The agent may start `/ledger:go`; Claude Code
+Only the operator may type `/ledger:close` and `/ledger:park` (`TYPED_ONLY` in
+`register.ts`). The plugin refuses them when the agent starts them through the
+`Skill` tool. The agent may start `/ledger:next` once, right after the operator
+picks "Save, clear and continue" (`CLEAR_POINT_OPTION` in `ledger.ts`) in the
+clear-point question. Otherwise the plugin refuses it too.
+
+The agent asks the clear-point question after each review verdict with work
+left. It also asks when the session context passes the plugin setting
+`clearPointTokens`, by default 150,000 tokens; 0 turns it off. At the end of
+such a turn, `markClearPoint` in `register.ts` notes the size, unless the
+task is finished. The next prompt that is not a slash command then carries
+`clearPointReminder` from `ledger.ts`. The reminder comes again
+only after the context grows by another `clearPointTokens`.
+
+The agent may start `/ledger:go`; Claude Code
 then asks the operator for permission. A subagent may not start `/ledger:go`,
 because its turn end does not clear the session.
 

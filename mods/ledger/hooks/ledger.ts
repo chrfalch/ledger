@@ -59,6 +59,8 @@ export const PARENT_USAGE = 'Usage: /ledger:parent <slug> [add|remove <child>]. 
 
 export const GO_FROM_SUBAGENT = `Only the main session can switch tasks with /ledger:go. ${UNCHANGED}`
 
+export const NEXT_FROM_SUBAGENT = `Only the main session can clear and continue with /ledger:next. ${UNCHANGED}`
+
 export function slugExpectedMessage(args: string): string {
   const slug = /^task: (.*)/.exec(args)?.[1] ?? '<slug>'
   return `/ledger:go takes a task slug, such as ${slug}, not the task: and ledger: lines it writes itself. ${UNCHANGED}`
@@ -85,15 +87,25 @@ export function goCommand(target: string): string[] {
   return at === -1 ? ['go', target] : ['go', target.slice(0, at), '--repo', target.slice(at + 1)]
 }
 
+const continues = (task: string) => `ends with /ledger:next, which clears the session and continues ${task}`
+
 const armedTurn = {
   go: (slug: string) => `switches to task ${slug}`,
-  next: (slug: string) => `ends with /ledger:next, which clears the session and continues task ${slug}`,
+  next: (slug: string) => continues(`task ${slug}`),
   close: () => 'ends with /ledger:close, which clears the session',
   park: (slug: string) => `parks task ${slug} and clears the session`,
 }
 
-export const oneSwitchPerTurnMessage = (armed: { mode: keyof typeof armedTurn; slug: string }, target: string): string =>
-  `This turn already ${armedTurn[armed.mode](armed.slug)}, so /ledger:go ${target} was not started and nothing was written. A turn switches tasks only once: run /ledger:go ${target} after the session clears.`
+/** A switch this turn armed, or one still starting: a /ledger:next that has not yet read which task it continues. */
+export type Switch = { mode: keyof typeof armedTurn; slug: string } | { mode: 'next' }
+
+const notStarted = (armed: Switch, command: string): string =>
+  `This turn already ${'slug' in armed ? armedTurn[armed.mode](armed.slug) : continues('this task')}, so ${command} was not started and nothing was written. A turn switches tasks only once`
+
+export const oneSwitchPerTurnMessage = (armed: Switch, target: string): string =>
+  `${notStarted(armed, `/ledger:go ${target}`)}: run /ledger:go ${target} after the session clears.`
+
+export const nextAfterSwitchMessage = (armed: Switch): string => `${notStarted(armed, '/ledger:next')}.`
 
 /** What `ledger go` did, as go.md reads it. `parent` and `children` name tasks as the operator types them. */
 export type GoFields = {
@@ -175,8 +187,16 @@ export const nextChildHint = (parent: string, child: string | undefined): string
     ? `Parent ${parent} has no child task left to start.`
     : `Parent ${parent} has a child task that has not started: ${child}. Start it with \`/ledger:go ${parent}\`.`
 
+/** The clear-point option in a question box; a pick of it lets the model start /ledger:next once. */
+export const CLEAR_POINT_OPTION = 'Save, clear and continue'
+
+export const clearPointReminder = (tokens: number): string =>
+  `The context has passed ${tokens.toLocaleString('en-US')} tokens. End this turn with the clear-point question, asked with AskUserQuestion. Its options: "${CLEAR_POINT_OPTION} (Recommended)", "Not now" and "Close".`
+
 export function typedOnlyMessage(command: string, args: string): string {
   const typed = [`/${command}`, args.trim().replace(/\s+/g, ' ')].filter(part => part !== '').join(' ')
+  if (command === 'ledger:next')
+    return `/ledger:next runs only when the operator types it, or right after the operator picks "${CLEAR_POINT_OPTION}" in the clear-point question box. Ask the clear-point question, or ask the operator to type \`${typed}\`.`
   return `/${command} runs only when the operator types it. Ask the operator to type \`${typed}\`.`
 }
 
