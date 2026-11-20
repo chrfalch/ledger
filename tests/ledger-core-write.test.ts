@@ -3,7 +3,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, w
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { REPO } from './helpers.js';
-import { archivedTask, backlogTask, git, home, ledger, LEDGER_BIN, ledgerText, ok, repository, spawn, worktreeTask } from './ledger-core-fixtures.js';
+import { archivedTask, backlogTask, git, home, ledger, LEDGER_BIN, ledgerText, ok, repository, spawn, storeFolder, worktreeTask } from './ledger-core-fixtures.js';
 
 const TEMPLATE = readFileSync(path.join(REPO, 'ledger.template.md'), 'utf8');
 
@@ -16,7 +16,7 @@ function setup(t: TestContext) {
 }
 
 const read = (file: string): string => readFileSync(file, 'utf8');
-const backlogFile = (h: string, main: string, slug: string): string => path.join(h, '.claude/ledger-backlog', path.basename(main), `${slug}.md`);
+const backlogFile = (h: string, main: string, slug: string): string => path.join(storeFolder(h, 'ledger-backlog', main), `${slug}.md`);
 const worktreeOf = (main: string, slug: string): string => path.join(main, '.claude/worktrees', slug);
 const ledgerOf = (worktree: string): string => path.join(worktree, '.claude/ledger.md');
 const short = (h: string, cwd: string, ref: string): string => git(h, cwd, 'rev-parse', '--short', ref);
@@ -282,6 +282,7 @@ test('ledger go refuses a missing backlog task (2), one of a same-named repo (3)
   ok(ledger(h, twin, 'task', 'new', 'twin-task'));
   failed(ledger(h, app, 'go', 'twin-task'), new RegExp(twin), 3);
   const file = backlogFile(h, app, 'no-main');
+  mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, ledgerText({ slug: 'no-main' }));
   failed(ledger(h, app, 'go', 'no-main'), /main/, 4);
   assert.equal(existsSync(worktreeOf(app, 'no-main')), false);

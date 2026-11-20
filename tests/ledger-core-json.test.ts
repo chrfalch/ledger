@@ -3,7 +3,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSy
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { REPO } from './helpers.js';
-import { archivedTask, backlogTask, git, home, ledger, ledgerText, repository, worktreeTask, type Fields, type Ran } from './ledger-core-fixtures.js';
+import { archivedTask, backlogTask, git, home, ledger, ledgerText, lineWith, repoKeyOf, repository, storeFolder, worktreeTask, type Fields, type Ran } from './ledger-core-fixtures.js';
 
 /** A HOME with the template and ~/repos/app, whose build/ and .claude/ folders git ignores. */
 function setup(t: TestContext) {
@@ -88,7 +88,7 @@ test('list --json gives the tasks with plan progress and parked state; --archive
   const old = all.find(({ slug }) => slug === 'old');
   assert.equal(old?.status, 'retired');
   assert.equal(old?.archived, '2026-10-01');
-  assert.equal(old?.path, path.join(h, '.claude/ledger-archive/app/2026-10-01-old.md'));
+  assert.equal(old?.path, path.join(storeFolder(h, 'ledger-archive', app), '2026-10-01-old.md'));
 });
 
 test('archive --json lists the archived ledgers with date, branch, goal and the matching line; outside a repo it fails', (t) => {
@@ -97,11 +97,12 @@ test('archive --json lists the archived ledgers with date, branch, goal and the 
   archivedTask(h, app, '2026-10-05', { slug: 'old-b' });
 
   const all = done(json(h, app, 'task', 'archive'));
-  assert.equal(all.repo, 'app');
-  assert.equal(all.folder, path.join(h, '.claude/ledger-archive/app'));
+  const [repo, folder] = [repoKeyOf(app), storeFolder(h, 'ledger-archive', app)];
+  assert.equal(all.repo, repo);
+  assert.equal(all.folder, folder);
   assert.deepEqual(all.ledgers, [
-    { date: '2026-10-05', repo: 'app', slug: 'old-b', path: path.join(h, '.claude/ledger-archive/app/2026-10-05-old-b.md'), branch: 'me/old-b', goal: 'Goal of old-b.' },
-    { date: '2026-10-01', repo: 'app', slug: 'old-a', path: path.join(h, '.claude/ledger-archive/app/2026-10-01-old-a.md'), branch: 'me/old-a', goal: 'Goal of old-a.' },
+    { date: '2026-10-05', repo, slug: 'old-b', path: path.join(folder, '2026-10-05-old-b.md'), branch: 'me/old-b', goal: 'Goal of old-b.' },
+    { date: '2026-10-01', repo, slug: 'old-a', path: path.join(folder, '2026-10-01-old-a.md'), branch: 'me/old-a', goal: 'Goal of old-a.' },
   ]);
   const matched = done(json(h, app, 'task', 'archive', 'pr #27'));
   assert.equal(matched.term, 'pr #27');
@@ -136,7 +137,7 @@ test('parent --json shows the parent; add, remove, start and next each report wh
   assert.equal(again.marked, false);
   assert.equal(again.reason, 'already-marked');
 
-  rmSync(path.join(h, '.claude/ledger-backlog/app/first.md'));
+  rmSync(path.join(storeFolder(h, 'ledger-backlog', app), 'first.md'));
   assert.deepEqual(done(json(h, app, 'tree', 'next', 'epic')).chain, []);
   refused(json(h, app, 'tree', 'add', 'epic'), /missing required argument 'child'/);
   refused(json(h, app, 'tree', 'show', 'ghost'), /ghost/);
@@ -170,9 +171,9 @@ test('go --json of a parent starts its first backlog child, marks it started and
   assert.deepEqual(started.chain, [{ slug: 'epic', main: app }, { slug: 'part-a', main: app }]);
   assert.equal(started.worktree, worktreeOf(app, 'part-a'));
   assert.deepEqual(started.unparked, { date: '2026-11-10', reason: 'not yet' });
-  const epicBacklog = path.join(h, '.claude/ledger-backlog/app/epic.md');
+  const epicBacklog = path.join(storeFolder(h, 'ledger-backlog', app), 'epic.md');
   assert.deepEqual(started.marked, { parent: { slug: 'epic', main: app }, ledger: epicBacklog });
-  assert.match(read(epicBacklog), new RegExp(`^- part-a \\(started ${today()}\\)$`, 'm'));
+  assert.equal(lineWith(read(epicBacklog), '- part-a @'), `- part-a @ ${app} (started ${today()})`);
   assert.doesNotMatch(read(ledgerOf(worktreeOf(app, 'part-a'))), /^Parked:/m);
 });
 
@@ -261,7 +262,7 @@ test('task --json reports a backlog task and its start command, a stacked task w
     slug: 'fix-login',
     main: app,
     status: 'backlog',
-    ledger: path.join(h, '.claude/ledger-backlog/app/fix-login.md'),
+    ledger: path.join(storeFolder(h, 'ledger-backlog', app), 'fix-login.md'),
     start: '/ledger:go fix-login',
   });
 
@@ -316,7 +317,7 @@ test('retire --dry-run --json gives the plan and its blockers; retire --json lis
   assert.equal(existsSync(worktree), true);
 
   const retired = done(json(h, app, 'task', 'retire', 'idea'));
-  const archive = path.join(h, `.claude/ledger-archive/app/${today()}-idea.md`);
+  const archive = path.join(storeFolder(h, 'ledger-archive', app), `${today()}-idea.md`);
   assert.equal(retired.dryRun, false);
   assert.equal(retired.archive, archive);
   assert.deepEqual(retired.parent, { slug: 'epic', main: app });

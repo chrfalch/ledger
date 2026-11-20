@@ -18,9 +18,6 @@ export function ledgerPaths(home: string) {
 
 export type LedgerPaths = ReturnType<typeof ledgerPaths>;
 
-/** Backlog and archive folders are named after the main checkout's folder, so same-named repos share them. */
-export const repoName = (main: string): string => path.basename(main);
-
 export const worktreeLedger = (worktree: string): string => path.join(worktree, '.claude', 'ledger.md');
 
 export const taskWorktree = (main: string, folder: string): string => path.join(main, '.claude', 'worktrees', folder);

@@ -103,6 +103,9 @@ export const exists = (file: string): boolean => existsSync(file);
 /** Whether any entry is at `file`, a dangling symbolic link included. */
 export const isTaken = (file: string): boolean => lstatSync(file, { throwIfNoEntry: false }) !== undefined;
 
+/** A name that stays one entry of the folder it is joined to: not empty, not . or .., and with no / or \. */
+export const isEntryName = (name: string): boolean => name !== '' && name !== '.' && name !== '..' && !/[/\\]/.test(name);
+
 /** Anything at `folder` but an empty folder or nothing; a symbolic link is not followed. Throws when the folder cannot be read, which is not empty. */
 export const holdsAnything = (folder: string): boolean =>
   isTaken(folder) && !(lstatSync(folder).isDirectory() && readdirSync(folder).length === 0);

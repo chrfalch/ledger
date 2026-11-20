@@ -21,6 +21,7 @@ import {
 } from './git.js';
 import { ledgerBin, samePath, worktreeLedger } from './paths.js';
 import { loadTasks } from './registry.js';
+import { repoKey } from './repo-key.js';
 import type { EvidenceState } from './store.js';
 import { findNamed, findTasks, inRepo, locateChild, namedChildren, sameTask, type Task } from './tasks.js';
 import { plural } from './views.js';
@@ -60,6 +61,8 @@ export type RetireFacts = {
   text: string;
   worktree?: WorktreeFacts;
   tasks: Task[];
+  /** The repo key the copy is archived under: the repo's key now, also for a backlog ledger still filed under an alias. */
+  archiveRepo: string;
   /** Whether a copy or an evidence folder already uses the archive name. */
   archiveNameTaken: (name: string) => boolean;
   /** An archive copy with the ledger's text, and how its evidence compares with the worktree's. */
@@ -146,13 +149,13 @@ function parentActions({ task, ref, tasks }: RetireFacts, warnings: string[]): {
   const [parent] = live;
   const childName = linkFrom(parentRef.main, ref);
   const actions: RetireAction[] = [];
-  const line = parent.ledger.children.find((child) => sameTask(lineRef(child, parentRef.main), ref));
+  const line = parent.ledger.children.find((child) => sameTask(lineRef(child, parentRef.main), ref, task.place));
   if (line === undefined) warnings.push(`${childName} is not listed under ## Children of ${parentRef.slug} in ${parent.file}, so no line is marked retired.`);
   else if (line.mark?.kind !== 'retired') actions.push({ kind: 'mark-parent', parent, parentRef, child: ref, childName });
   const { report } = task.ledger;
   if (report.length === 0) warnings.push(`${task.file} has no report under ## Report, so none is copied to ${shown}.`);
   else actions.push({ kind: 'copy-report', parent, parentRef, heading: samePath(parentRef.main, ref.main) ? ref.slug : `${ref.slug}@${ref.main}`, report, childName });
-  const siblingsActive = namedChildren(parent, tasks).some((child) => !sameTask(lineRef(child, parentRef.main), ref) && childStatus(tasks, child, parentRef) !== 'retired');
+  const siblingsActive = namedChildren(parent, tasks).some((child) => !sameTask(lineRef(child, parentRef.main), ref, task.place) && childStatus(tasks, child, parentRef) !== 'retired');
   if (line !== undefined && !siblingsActive) {
     const text = samePath(parentRef.main, ref.main)
       ? `Parent ${parentRef.slug} has no active children left. Retire it with /ledger:retire ${parentRef.slug}.`
@@ -184,7 +187,7 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
   const archived = facts.alreadyArchived;
   if (archived !== undefined) {
     // A rerun after a failed worktree removal lands here. It goes on only when no evidence would be lost.
-    actions.push({ kind: 'already-archived', repo: task.repo, name: archived.name, location: archived.location });
+    actions.push({ kind: 'already-archived', repo: facts.archiveRepo, name: archived.name, location: archived.location });
     if (archived.evidence === 'differs') {
       const evidence = worktree === undefined ? 'the backlog task, which has none' : `${path.join(worktree.folder, '.claude', 'evidence')}/`;
       blockers.push({ kind: 'evidence', name: archived.name, copy: archived.location, evidenceLocation: facts.archiveEvidenceLocation(archived.name), evidence });
@@ -193,7 +196,7 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
     const name = archiveName(facts);
     actions.push({
       kind: 'archive',
-      repo: task.repo,
+      repo: facts.archiveRepo,
       name,
       location: facts.archiveLocation(name),
       evidenceLocation: facts.archiveEvidenceLocation(name),
@@ -383,17 +386,19 @@ export function readRetire(context: Context, slug: string | undefined): RetireFa
     };
   }
   const text = readLedger(context, task);
-  const identical = store.archive.list(task.repo).find((copy) => copy.text === text);
+  const archiveRepo = repoKey(main);
+  const identical = store.archive.list(archiveRepo).find((copy) => copy.text === text);
   return {
     task,
     ref: { slug: task.slug, main },
     text,
     ...(worktree === undefined ? {} : { worktree }),
     tasks,
-    archiveNameTaken: (name) => store.archive.nameTaken(task.repo, name),
-    ...(identical === undefined ? {} : { alreadyArchived: { name: identical.name, location: identical.location, evidence: store.archive.evidenceState(task.repo, identical.name, evidence) } }),
-    archiveLocation: (name) => store.archive.location(task.repo, name),
-    archiveEvidenceLocation: (name) => store.archive.evidenceLocation(task.repo, name),
+    archiveRepo,
+    archiveNameTaken: (name) => store.archive.nameTaken(archiveRepo, name),
+    ...(identical === undefined ? {} : { alreadyArchived: { name: identical.name, location: identical.location, evidence: store.archive.evidenceState(archiveRepo, identical.name, evidence) } }),
+    archiveLocation: (name) => store.archive.location(archiveRepo, name),
+    archiveEvidenceLocation: (name) => store.archive.evidenceLocation(archiveRepo, name),
     today: today(),
     warnings,
   };
@@ -620,7 +625,7 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
       case 'mark-parent':
         try {
           const marked = updateLedger(context, action.parent, (text) => {
-            const line = parseLedger(text).children.find((child) => sameTask(lineRef(child, action.parentRef.main), action.child));
+            const line = parseLedger(text).children.find((child) => sameTask(lineRef(child, action.parentRef.main), action.child, plan.task.place));
             return line === undefined || line.mark?.kind === 'retired' ? undefined : markRetired(text, line, today());
           });
           if (marked) out.line(`retired ${action.childName} in ${action.parent.file}`);

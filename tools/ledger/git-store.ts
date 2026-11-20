@@ -39,49 +39,58 @@ function hasUnpushed(clone: string): boolean {
   return !counted.ok || Number(counted.stdout.trim()) > 0;
 }
 
-/** Fails when the collection folder or the repo folder in it is a symbolic link: a write through it could land anywhere. */
-function checkFolders(clone: string, collection: 'backlog' | 'archive', repo: string): void {
-  for (const folder of [path.join(clone, collection), path.join(clone, collection, repo)]) {
-    if (lstatSync(folder, { throwIfNoEntry: false })?.isSymbolicLink()) fail(`${folder} is a symbolic link, so git storage writes nothing through it. Replace it with a folder.`);
-  }
-}
-
 /**
- * The ledger store as files in the clone ~/.claude/ledger-data, with the evidence in ~/.claude/ledger-evidence and the
- * registry in ~/.claude/ledgers-git.json, neither of which is pushed. Each write holds the clone lock, so a sync never
- * rebases a file a command is changing. Opening it puts back a pre-push hook that changed. `commit` commits what the
- * store wrote; `close` does so too, once, and starts the push while the clone has commits the remote lacks.
+ * The ledger store as files in the clone ~/.claude/ledger-data, with the evidence in ~/.claude/ledger-evidence, the
+ * registry in ~/.claude/ledgers-git.json and the repo aliases in ~/.claude/ledger-aliases-git.json, none of which is
+ * pushed. Each write holds the clone lock, so a sync never rebases a file a command is changing. Opening it puts back a
+ * pre-push hook that changed. `commit` commits what the store wrote; `close` does so too, once, and starts the push
+ * while the clone has commits the remote lacks.
  */
 export function gitStore(paths: LedgerPaths, { backgroundSync }: GitStoreOptions = { backgroundSync: true }): LedgerStore {
   const clone = setUpClone(paths);
   repairHook(clone);
-  const { evidence, registry } = clonePaths(paths);
-  const files = fileStoreAt({ backlog: path.join(clone, 'backlog'), archive: path.join(clone, 'archive'), evidence, registry });
+  const { evidence, registry, aliases } = clonePaths(paths);
+  const files = fileStoreAt({ backlog: path.join(clone, 'backlog'), archive: path.join(clone, 'archive'), evidence, registry, aliases });
   let wrote = false;
   let committed = false;
   /** The clone paths of the ledgers this store wrote since its last commit. */
   const written = new Set<string>();
-  /** `write` of `collection` under the clone lock; a result that `changed` says left the clone as it was needs no commit. */
+  /** Fails when the collection folder or a repo folder in it is a symbolic link: a write through it could land anywhere. */
+  const checkFolders = (collection: 'backlog' | 'archive', repos: string[]): void => {
+    for (const folder of [path.join(clone, collection), ...repos.map((repo) => files[collection].repoLocation(repo))]) {
+      if (lstatSync(folder, { throwIfNoEntry: false })?.isSymbolicLink()) fail(`${folder} is a symbolic link, so git storage writes nothing through it. Replace it with a folder.`);
+    }
+  };
+  /**
+   * `write` of `collection` under the clone lock; a result that `changed` says left the clone as it was needs no commit.
+   * It writes the ledger its first two arguments name in each repo `repos` gives, which a move gives two of.
+   */
   const locked =
-    <A extends [string, string, ...unknown[]], R>(collection: 'backlog' | 'archive', write: (...args: A) => R, changed: (result: R) => boolean = () => true) =>
+    <A extends [string, string, ...unknown[]], R>(
+      collection: 'backlog' | 'archive',
+      write: (...args: A) => R,
+      changed: (result: R) => boolean = () => true,
+      repos: (args: A) => string[] = ([repo]) => [repo],
+    ) =>
     (...args: A): R =>
       withCloneLock(clone, () => {
-        checkFolders(clone, collection, args[0]);
-        const file = path.relative(clone, files[collection].location(args[0], args[1]));
+        const touched = repos(args);
+        checkFolders(collection, touched);
+        const note = (): void => {
+          wrote = true;
+          for (const repo of touched) written.add(path.relative(clone, files[collection].location(repo, args[1])));
+        };
         try {
           const result = write(...args);
-          if (changed(result)) {
-            wrote = true;
-            written.add(file);
-          }
+          if (changed(result)) note();
           return result;
         } catch (error) {
           // A write that failed halfway may have changed a file all the same.
-          wrote = true;
-          written.add(file);
+          note();
           throw error;
         }
       });
+  const fromAndTo = ([repo, , to]: [string, string, string]): string[] => [repo, to];
   const commit = (expected: WrittenLedger[] = []): void => {
     if (!wrote && expected.length === 0) return;
     const texts = new Map(expected.map(({ place, repo, name, text }) => [path.relative(clone, files[place].location(repo, name)), text]));
@@ -101,9 +110,16 @@ export function gitStore(paths: LedgerPaths, { backgroundSync }: GitStoreOptions
       create: locked('backlog', files.backlog.create, (created) => created),
       update: locked('backlog', files.backlog.update, (updated) => updated),
       remove: locked('backlog', files.backlog.remove, (removed) => removed),
+      move: locked('backlog', files.backlog.move, (moved) => moved, fromAndTo),
     },
-    archive: { ...files.archive, write: locked('archive', files.archive.write), remove: locked('archive', files.archive.remove, (removed) => removed) },
+    archive: {
+      ...files.archive,
+      write: locked('archive', files.archive.write),
+      remove: locked('archive', files.archive.remove, (removed) => removed),
+      move: locked('archive', files.archive.move, (moved) => moved, fromAndTo),
+    },
     registry: files.registry,
+    aliases: files.aliases,
     commit,
     close: () => {
       try {

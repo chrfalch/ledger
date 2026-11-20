@@ -1,6 +1,7 @@
 // @ref LLP 0000#the-store — what each store keeps, and how the storage setting picks one.
-import { Failure } from './failure.js';
+import { fail, Failure } from './failure.js';
 import { holdsAnything } from './files.js';
+import { isRepoKey } from './repo-key.js';
 
 /**
  * One ledger a store keeps. `location` names it for a person: messages and JSON print it as it is, but nothing outside
@@ -18,15 +19,15 @@ export type StoredLedger = {
 /** UTF-16 code-unit order, the order readdir gave the old scans; every store sorts evidence files by it. */
 export const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
-/** Ledgers kept per repo folder, which is named after the main checkout's folder. */
+/** Ledgers kept per repo, by its key: the repo's remote address, or the path of its main checkout (LLP 0001 D10). */
 export interface LedgerCollection {
   /** Where the ledger `name` of `repo` is or would be, as `StoredLedger.location` gives it; for display only. */
   location(repo: string, name: string): string;
   /** Where the ledgers of `repo` are, or without a repo, where the ledgers of every repo are; for display only. */
   repoLocation(repo?: string): string;
-  /** The repo folders, by name. */
+  /** The keys of the repos that have ledgers. */
   repos(): string[];
-  /** The ledgers of one repo folder, in the order of their file names; none for an unknown repo. */
+  /** The ledgers of one repo, in the order of their file names; none for an unknown repo. */
   list(repo: string): StoredLedger[];
   read(repo: string, name: string): StoredLedger | undefined;
   /** The same as `read(repo, name) !== undefined`, without reading the text. */
@@ -50,6 +51,14 @@ export interface Backlog extends LedgerCollection {
   update(repo: string, slug: string, change: Change<string>): boolean;
   /** Deletes the ledger while its text is still `expected`. False, with nothing deleted, when another command changed it; throws when it does not exist. */
   remove(repo: string, slug: string, expected: string): boolean;
+  /**
+   * Moves the ledger to the repo `to`, text and times as they are, by a rename on one disk. False, with nothing moved, when
+   * anything has `slug` in `to` already, also a name that differs only in case on a disk that ignores case. Throws when
+   * the ledger does not exist, and when the rename fails, such as with EXDEV to another disk; then nothing moved.
+   */
+  move(repo: string, slug: string, to: string): boolean;
+  /** Whether `move` would move the ledger now, by the checks it makes, without moving anything. */
+  canMove(repo: string, slug: string, to: string): boolean;
 }
 
 export type EvidenceState = 'none' | 'same' | 'differs';
@@ -104,6 +113,16 @@ export interface Archive extends LedgerCollection {
    * stands for none when it holds nothing; otherwise it removes nothing and gives false.
    */
   remove(repo: string, name: string, expected?: CheckedCopy): boolean;
+  /**
+   * Moves the copy and then its evidence to the repo `to`, as they are, as `Backlog.move` moves a ledger. False, with
+   * nothing moved, when anything has `name` in `to`, except one case: `to` has the copy, the source has only its evidence,
+   * and `to` has none. A move that stopped between the two left that, so then only the evidence moves.
+   */
+  move(repo: string, name: string, to: string): boolean;
+  /** Whether `move` would move the copy now, by the checks it makes, without moving anything. */
+  canMove(repo: string, name: string, to: string): boolean;
+  /** Evidence kept under a name that has no archive copy, in any repo, such as what a move or a hand left behind. */
+  orphanEvidence(): { repo: string; name: string }[];
 }
 
 /** An archive copy as it was checked: its text, and a folder that holds its evidence as it was then. */
@@ -126,11 +145,62 @@ export interface Registry {
 /** A ledger with the text a caller wrote to it. */
 export type WrittenLedger = { place: 'backlog' | 'archive'; repo: string; name: string; text: string };
 
+/** Old repo keys, such as the folder names keys were before D10, each with the key that replaced it. Unlike the registry, no rebuild can recreate it. */
+export interface Aliases {
+  /** Only the aliases whose old key is a repo key and whose target is an address or a path, so a target is never joined into a path that climbs out. */
+  read(): ReadonlyMap<string, string>;
+  /** A sentence for the operator about aliases `read` ignores, or a map that cannot be read; undefined when there is none. */
+  problem(): string | undefined;
+  /**
+   * Makes `old` an alias of `key`. Throws, and leaves the map as it is, when `old` is an alias of another key already, and
+   * for a map that cannot be read or that holds an alias `read` ignores.
+   */
+  add(old: string, key: string): void;
+  /** Removes `old` while it is an alias of `key`, so a storage switch that stops can take back what it added. */
+  remove(old: string, key: string): void;
+}
+
+/** `key` and the old keys that are aliases of it: every key a backlog or archive ledger of the repo `key` can be filed under. */
+export const keyAndAliases = (aliases: ReadonlyMap<string, string>, key: string): string[] => [
+  key,
+  ...[...aliases].flatMap(([old, target]) => (target === key ? [old] : [])),
+];
+
+/** What an alias can point to: a repo key with a slash, as every D10 key has. A folder name is only ever an old key. */
+const isAliasTarget = (key: unknown): key is string => typeof key === 'string' && isRepoKey(key) && key.includes('/');
+
+/** The aliases among `entries` that `Aliases.read` gives, and the `Aliases.problem` sentence for the others. */
+export function checkedAliases(entries: Iterable<readonly [string, unknown]>): { aliases: Map<string, string>; problem?: string } {
+  const aliases = new Map<string, string>();
+  const ignored: string[] = [];
+  for (const [old, key] of entries) {
+    if (isAliasTarget(key) && isRepoKey(old)) aliases.set(old, key);
+    else ignored.push(`Ignored the repo alias ${old} → ${JSON.stringify(key)}, as that is no repo key.`);
+  }
+  return ignored.length === 0 ? { aliases } : { aliases, problem: ignored.join(' ') };
+}
+
+/**
+ * Whether the alias map `entries`, kept in `where`, needs `old` → `key` added: false when it has it. Throws, so nothing is
+ * written, as `Aliases.add` does.
+ */
+export function needsAlias(entries: Iterable<readonly [string, unknown]>, old: string, key: string, where: string): boolean {
+  if (!isAliasTarget(key) || !isRepoKey(old)) {
+    fail(`${old} cannot be an alias of "${key}": both must be repo keys, not empty, with no \\ and no . or .. between slashes, and "${key}" must be an address or a path, so it holds a slash.`);
+  }
+  const { aliases, problem } = checkedAliases(entries);
+  if (problem !== undefined) fail(`${problem} So ${old} was not made an alias of ${key}. Fix or remove that alias in ${where}.`);
+  const current = aliases.get(old);
+  if (current !== undefined && current !== key) fail(`${old} is an alias of ${current} already, so it was not made an alias of ${key}.`);
+  return current === undefined;
+}
+
 /** Where backlog ledgers, archive copies and the registry are kept. A worktree's .claude/ledger.md is not in it. */
 export interface LedgerStore {
   backlog: Backlog;
   archive: Archive;
   registry: Registry;
+  aliases: Aliases;
   /**
    * Records what the store wrote where it must be recorded, as git storage commits it; throws when it cannot, and when
    * it recorded a ledger of `expected` with any other text.

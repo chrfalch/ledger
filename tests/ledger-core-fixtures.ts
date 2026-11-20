@@ -172,8 +172,24 @@ export function worktreeTask(h: string, main: string, fields: Omit<Fields, 'work
   return file;
 }
 
+/**
+ * The store key of the repo at `main`: the address of its origin, which every fixture repo has as a local bare repo,
+ * so that path without .git; the main path for a repo without origin or a folder that is gone.
+ */
+export function repoKeyOf(main: string): string {
+  const origin = spawnSync('git', ['-C', main, 'remote', 'get-url', 'origin'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const url = origin.status === 0 ? origin.stdout.trim() : undefined;
+  if (url === undefined) return main;
+  assert.ok(path.isAbsolute(url), `the fixture knows only local origins, not ${url}`);
+  return url.replace(/\.git$/, '');
+}
+
+/** The file store's folder of the repo at `main` in `place`. */
+export const storeFolder = (h: string, place: 'ledger-backlog' | 'ledger-archive', main: string): string =>
+  path.join(h, '.claude', place, encodeURIComponent(repoKeyOf(main)));
+
 export function backlogTask(h: string, main: string, fields: Omit<Fields, 'main'>): string {
-  const file = path.join(h, '.claude/ledger-backlog', path.basename(main), `${fields.slug}.md`);
+  const file = path.join(storeFolder(h, 'ledger-backlog', main), `${fields.slug}.md`);
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, ledgerText({ ...fields, main, branch: fields.branch ?? fields.slug }));
   return file;
@@ -181,7 +197,7 @@ export function backlogTask(h: string, main: string, fields: Omit<Fields, 'main'
 
 /** An archive copy named <date>-<name>.md; `name` defaults to the slug. Its worktree is gone. */
 export function archivedTask(h: string, main: string, date: string, fields: Fields, name = fields.slug): string {
-  const file = path.join(h, '.claude/ledger-archive', path.basename(main), `${date}-${name}.md`);
+  const file = path.join(storeFolder(h, 'ledger-archive', main), `${date}-${name}.md`);
   mkdirSync(path.dirname(file), { recursive: true });
   const worktree = path.join(main, '.claude/worktrees', name);
   writeFileSync(file, ledgerText({ worktree, branch: `me/${name}`, base: 'origin/main @ 1234567', ...fields }));

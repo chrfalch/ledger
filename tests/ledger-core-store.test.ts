@@ -13,7 +13,7 @@ import { loadSqlite, sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { createTask, goTask, parkTask, type Context } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
-import { archivedTask, home, ledgerText, noSqlite, repository } from './ledger-core-fixtures.js';
+import { archivedTask, home, ledgerText, noSqlite, repoKeyOf, repository } from './ledger-core-fixtures.js';
 
 const text = (slug: string): string => ledgerText({ slug, main: '/repos/app' });
 /** Every byte value once, so no text decoding can pass the bytes through unchanged. */
@@ -611,7 +611,7 @@ test('file store: a repo or name that is empty, . or .., or holds a path separat
     store.archive.list('app').map(({ name }) => name),
     ['2026-11-01-fix-login'],
   );
-  for (const [repo, name] of [['app', '..'], ['app', '.'], ['app', ''], ['app', 'a/b'], ['app', 'a\\b'], ['..', 'x'], ['.', 'x'], ['a/b', 'x']]) {
+  for (const [repo, name] of [['app', '..'], ['app', '.'], ['app', ''], ['app', 'a/b'], ['app', 'a\\b'], ['..', 'x'], ['.', 'x'], ['a\\b', 'x']]) {
     assert.throws(() => store.archive.remove(repo, name), Failure, `archive remove ${repo} ${name}`);
     assert.throws(() => store.archive.evidenceLocation(repo, name), Failure, `evidence location ${repo} ${name}`);
     assert.throws(() => store.backlog.write(repo, name, 'text'), Failure, `backlog write ${repo} ${name}`);
@@ -891,6 +891,8 @@ function recording(inner: LedgerStore): { store: LedgerStore; calls: string[] } 
       create: (repo, name, body) => (note('backlog.create', repo, name), inner.backlog.create(repo, name, body)),
       update: (repo, name, change) => (note('backlog.update', repo, name), inner.backlog.update(repo, name, change)),
       remove: (repo, name, expected) => (note('backlog.remove', repo, name), inner.backlog.remove(repo, name, expected)),
+      move: (repo, name, to) => (note('backlog.move', repo, name, to), inner.backlog.move(repo, name, to)),
+      canMove: (repo, name, to) => (note('backlog.canMove', repo, name, to), inner.backlog.canMove(repo, name, to)),
     },
     archive: {
       location: (repo, name) => inner.archive.location(repo, name),
@@ -907,12 +909,21 @@ function recording(inner: LedgerStore): { store: LedgerStore; calls: string[] } 
       readEvidence: (repo, name, file) => (note('archive.readEvidence', repo, name, file), inner.archive.readEvidence(repo, name, file)),
       copyEvidence: (repo, name, to) => (note('archive.copyEvidence', repo, name), inner.archive.copyEvidence(repo, name, to)),
       remove: (repo, name) => (note('archive.remove', repo, name), inner.archive.remove(repo, name)),
+      move: (repo, name, to) => (note('archive.move', repo, name, to), inner.archive.move(repo, name, to)),
+      canMove: (repo, name, to) => (note('archive.canMove', repo, name, to), inner.archive.canMove(repo, name, to)),
+      orphanEvidence: () => (note('archive.orphanEvidence'), inner.archive.orphanEvidence()),
     },
     registry: {
       read: () => (note('registry.read'), inner.registry.read()),
       write: (body) => (note('registry.write'), inner.registry.write(body)),
       update: (change) => (note('registry.update'), inner.registry.update(change)),
       remove: () => (note('registry.remove'), inner.registry.remove()),
+    },
+    aliases: {
+      read: () => (note('aliases.read'), inner.aliases.read()),
+      problem: () => (note('aliases.problem'), inner.aliases.problem()),
+      add: (old, key) => (note('aliases.add', old, key), inner.aliases.add(old, key)),
+      remove: (old, key) => (note('aliases.remove', old, key), inner.aliases.remove(old, key)),
     },
   };
   return { store, calls };
@@ -930,26 +941,27 @@ test('the core reads and writes backlog ledgers and the registry through the sto
   const paths = ledgerPaths(h);
   const { store, calls } = recording(fileStore(paths));
   const context: Context = { paths, cwd: app, store };
+  const key = repoKeyOf(app);
 
   createTask(context, 'fix-login', { goal: 'Users cannot log in.' });
-  includesAll(calls, ['backlog.has app fix-login', 'backlog.create app fix-login', 'registry.update']);
-  assert.match(store.backlog.read('app', 'fix-login')?.text ?? '', /Users cannot log in\./);
+  includesAll(calls, [`backlog.has ${key} fix-login`, `backlog.create ${key} fix-login`, 'registry.update']);
+  assert.match(store.backlog.read(key, 'fix-login')?.text ?? '', /Users cannot log in\./);
 
   calls.length = 0;
   parkTask(context, 'fix-login', 'waits for the API');
-  includesAll(calls, ['registry.read', 'backlog.list app', 'backlog.update app fix-login']);
-  assert.match(store.backlog.read('app', 'fix-login')?.text ?? '', /Parked: .* — waits for the API/);
+  includesAll(calls, ['registry.read', `backlog.list ${key}`, `backlog.update ${key} fix-login`]);
+  assert.match(store.backlog.read(key, 'fix-login')?.text ?? '', /Parked: .* — waits for the API/);
 
   createTask(context, 'add-cache', { goal: 'Pages load slowly.' });
   calls.length = 0;
   goTask(context, 'add-cache', undefined);
-  includesAll(calls, ['backlog.read app add-cache', 'backlog.remove app add-cache']);
-  assert.equal(store.backlog.has('app', 'add-cache'), false);
+  includesAll(calls, [`backlog.read ${key} add-cache`, `backlog.remove ${key} add-cache`]);
+  assert.equal(store.backlog.has(key, 'add-cache'), false);
   assert.ok(existsSync(path.join(app, '.claude/worktrees/add-cache/.claude/ledger.md')));
 
   calls.length = 0;
   const tasks = loadTasks(context, [app]);
-  includesAll(calls, ['registry.read', 'backlog.repos', 'backlog.list app', 'archive.repos', 'archive.list app']);
+  includesAll(calls, ['registry.read', 'backlog.repos', `backlog.list ${key}`, 'archive.repos', `archive.list ${key}`]);
   assert.deepEqual(
     tasks.map(({ slug, place }) => `${slug} ${place}`),
     ['add-cache worktree', 'fix-login backlog', 'old-task archive'],

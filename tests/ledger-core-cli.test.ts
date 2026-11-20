@@ -11,7 +11,9 @@ import {
   lineWith,
   noSqlite,
   ok,
+  repoKeyOf,
   repository,
+  storeFolder,
   touch,
   worktreeTask,
 } from './ledger-core-fixtures.js';
@@ -124,7 +126,7 @@ test('ledger list --json gives one object per live task, newest first', (t) => {
   assert.deepEqual(bySlug.get('live-child')?.parent, { slug: 'epic', main: app });
   assert.deepEqual(bySlug.get('lib-part')?.parent, { slug: 'epic', main: app });
   assert.equal(bySlug.get('lib-part')?.main, lib);
-  assert.equal(bySlug.get('lib-part')?.repo, 'lib');
+  assert.equal(bySlug.get('lib-part')?.repo, repoKeyOf(lib));
   assert.equal(bySlug.get('idea')?.main, app);
   assert.equal(bySlug.get('parked-child')?.next, 'Then implement.');
   assert.equal(bySlug.get('epic')?.goal, 'Rewrite the ledger core.');
@@ -168,7 +170,7 @@ test('without ~/.claude/ledgers.json, list finds the repos under ~/repos from an
   assert.equal(entries.find(({ slug }) => slug === 'idea')?.status, 'backlog');
   const oldD = entries.find(({ slug }) => slug === 'old-d');
   assert.equal(oldD?.status, 'archived');
-  assert.equal(oldD?.archivePath, path.join(h, '.claude/ledger-archive/app/2026-10-21-feature-old-d.md'));
+  assert.equal(oldD?.archivePath, path.join(storeFolder(h, 'ledger-archive', app), '2026-10-21-feature-old-d.md'));
   const libPart = entries.find(({ slug }) => slug === 'lib-part');
   assert.equal(libPart?.parentMain, app);
   const updated = entries.map((entry) => entry.updated);
@@ -232,16 +234,17 @@ test('a ledger in a folder that is not a git repository stays in the list, once 
   const stored: RegistryEntry = { repo: 'disk-watcher', slug: 'disk-growth-scan', path: file, branch: '', status: 'active', created, updated: created };
   writeFileSync(registryFile(h), `${JSON.stringify([stored], null, 2)}\n`);
   const listed = listJson(h, app).find(({ slug }) => slug === 'disk-growth-scan');
-  assert.deepEqual(listed && [listed.repo, listed.status, listed.path], ['disk-watcher', 'active', file]);
+  assert.deepEqual(listed && [listed.repo, listed.status, listed.path], [folder, 'active', file]);
   assert.match(lineWith(ok(ledger(h, app, 'list')), 'disk-growth-scan'), /^disk-watcher\s+disk-growth-scan\s+active\b/);
   assert.equal(readRegistry(h).filter(({ path: entry }) => entry === file).length, 1);
 });
 
 test('without a registry, the scan finds a ledger in a folder under ~/repos that is not a git repository', (t) => {
   const { h } = world(t);
-  const file = plainFolderTask(path.join(h, 'repos/disk-watcher'), 'disk-growth-scan', 'Parked: 2026-11-10 — waiting\nScan again.');
+  const folder = path.join(h, 'repos/disk-watcher');
+  const file = plainFolderTask(folder, 'disk-growth-scan', 'Parked: 2026-11-10 — waiting\nScan again.');
   const listed = listJson(h, h).find(({ slug }) => slug === 'disk-growth-scan');
-  assert.deepEqual(listed && [listed.repo, listed.status, listed.path, listed.next], ['disk-watcher', 'parked', file, 'Scan again.']);
+  assert.deepEqual(listed && [listed.repo, listed.status, listed.path, listed.next], [folder, 'parked', file, 'Scan again.']);
 });
 
 test('an unreadable registry is rebuilt from disk', (t) => {
@@ -292,9 +295,10 @@ test('ledger archive --all lists every repo and names the repo of each ledger', 
 
 test('ledger archive says so when nothing is archived or nothing matches', (t) => {
   const { h, app } = world(t);
-  assert.equal(ok(ledger(h, app, 'task', 'archive', 'zzz')).trim(), 'No archived ledger in ~/.claude/ledger-archive/app/ contains "zzz".');
+  const shown = (main: string): string => `~/${path.relative(h, storeFolder(h, 'ledger-archive', main))}/`;
+  assert.equal(ok(ledger(h, app, 'task', 'archive', 'zzz')).trim(), `No archived ledger in ${shown(app)} contains "zzz".`);
   const empty = repository(h, path.join(h, 'repos/empty'));
-  assert.equal(ok(ledger(h, empty, 'task', 'archive')).trim(), 'No archived ledgers in ~/.claude/ledger-archive/empty/.');
+  assert.equal(ok(ledger(h, empty, 'task', 'archive')).trim(), `No archived ledgers in ${shown(empty)}.`);
 });
 
 test('ledger archive --all says so when nothing is archived in any repo', (t) => {
@@ -479,7 +483,7 @@ function writable(t: TestContext) {
 }
 
 const withoutUsage = (help: string): string[] => help.split('\n').slice(1);
-const backlogLedger = (h: string, main: string, slug: string): string => path.join(h, '.claude/ledger-backlog', path.basename(main), `${slug}.md`);
+const backlogLedger = (h: string, main: string, slug: string): string => path.join(storeFolder(h, 'ledger-backlog', main), `${slug}.md`);
 const listedIn = (command: string): RegExp => new RegExp(`^\\s+${command}\\b`, 'm');
 
 test('ledger --help lists the groups, the short forms and deploy, and hides the commands only Claude Code runs', (t) => {
