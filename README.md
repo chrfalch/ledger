@@ -15,16 +15,20 @@ implementation, and return short reports.
 ## How you use it
 
 Most of the time you do four things. You start the task, approve the plan with
-`yes`, type `/ledger:next` at each clear point, and tick "retire" after the PR
-merges. The full loop:
+`yes`, pick "Save, clear and continue" at each clear point, and tick "retire"
+after the PR merges. The full loop:
 
 1. Start a task in one sentence: `Start a new task: …`. If another task is
    open, the reply ends with a `start:` line, `/ledger:go <name>`. Type it.
 2. Approve the plan. Answer `yes`, or ask to change a step.
 3. The agent works. It writes failing tests first, makes the fix, and gets it
    reviewed.
-4. At "Clear point", type `/ledger:next`. A fresh session continues from the
-   ledger. Steps 3 and 4 repeat until the plan is done.
+4. At a clear point, the agent asks one question. Pick "Save, clear and
+   continue". The agent saves the ledger and clears the session. A fresh
+   session continues from the ledger. Steps 3 and 4 repeat until the plan is
+   done. The agent also asks at a clear point when the session grows past
+   150,000 tokens. The plugin setting `clearPointTokens` changes that size;
+   0 turns it off.
 5. When the last review passes, the agent asks to commit and open a PR.
    Answer `yes`.
 6. After the PR merges, the agent asks one question with check boxes: retire
@@ -50,9 +54,10 @@ item only after the server confirms it. Do you approve?
 
 **Agent:** (writes failing tests, makes the fix, gets it reviewed)
 
-**Agent:** Clear point. Ledger updated. Type `/ledger:next` to clear the session and continue, or `/ledger:close` to clear it and stop.
+**Agent:** (asks) Ledger updated. Save, clear the session and continue from
+the next step?
 
-**You:** `/ledger:next`
+**You:** (pick) Save, clear and continue (Recommended)
 
 **Agent:** (fresh session, reads the ledger, continues with step 3 in the plan)
 
@@ -213,7 +218,7 @@ without a prompt box, such as SDK hosts, still show them.
 | `/ledger:help` | Prints one line for each `/ledger` command. |
 | `/ledger:task <description>` | Starts a separate task. The agent picks a short name, writes the goal, and runs `ledger task new`. The command writes a ledger with the goal filled in to the backlog, `~/.claude/ledger-backlog/<repo>/<name>.md`, with no branch or worktree yet. When no task is open, the session moves into the new worktree and continues there. The agent makes that branch and worktree at once, the same way `/ledger:go` does. When another task is open, the ledger stays in the backlog, and the reply ends with a `start:` line, `/ledger:go <name>`. Type it to clear the session and continue in the new task. Either way, you do not open a new terminal. `--stack` makes the branch and worktree at once, on top of the current branch. |
 | `/ledger:task --here [<slug>]` | Gives the linked worktree this session is in a ledger, instead of a new worktree. Without a slug, the task takes the branch name without its owner prefix. It refuses the main checkout and a worktree that already has a ledger. The reply is the path of the new ledger. |
-| `/ledger:update` | Writes the step status, the subagent reports, the decisions and the next step to the task's ledger. After an implement-and-review cycle with work left, the reply is the clear point line. Otherwise it says only that the ledger is updated. With no ledger in the working directory, the agent creates nothing and tells you to use `/ledger:task`. |
+| `/ledger:update` | Writes the step status, the subagent reports, the decisions and the next step to the task's ledger. After a review with work left, the reply is the clear-point question: save, clear and continue, not now, or close. Otherwise it says only that the ledger is updated. With no ledger in the working directory, the agent creates nothing and tells you to use `/ledger:task`. |
 | `/ledger:close` | Writes the ledger the same way, then clears the session. Type `go` later to continue. It never starts a task: with no ledger in the worktree, it prints why and does nothing. |
 | `/ledger:next` | Writes the ledger the same way, clears the session, then sends `go <name>`, so the fresh session continues from the next step. When every step is done, it first says how to retire the task, and deletes its build folders as every finished turn does. Like `/ledger:close`, it never starts a task. |
 

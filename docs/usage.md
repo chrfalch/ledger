@@ -24,7 +24,7 @@ investigate -> resolve ambiguity -> plan -> ledger -> red tests -> implement
             -> verify -> review -> clear point (if more remains) -> you accept
 ```
 
-Four things need you: starting the task (and typing the `start:` line that a new task prints when another task is open), plan approval, typing `/ledger:next` at a clear point, and typing `/ledger:retire` after the merge.
+Four things need you: starting the task (and typing the `start:` line that a new task prints when another task is open), plan approval, picking "Save, clear and continue" at a clear point, and typing `/ledger:retire` after the merge.
 
 ## A worked example
 
@@ -144,20 +144,25 @@ Step 3: delegate to sol-implementer, de-duplicate on id in flushQueue().
 
 ### 7. Clear point
 
-Steps 1 and 2 are done and step 3 remains, so the orchestrator stops:
+Steps 1 and 2 are done and step 3 remains. The orchestrator updates the
+ledger and asks one question. The question says that the ledger is updated, and
+it has three answers:
 
-> Clear point. Ledger updated. Type `/ledger:next` to clear the session and continue, or `/ledger:close` to clear it and stop.
+- **Save, clear and continue (Recommended).** The orchestrator runs
+  `/ledger:next` itself. It clears the session and sends `go <name>`, so the
+  fresh session continues from the ledger.
+- **Not now.** The orchestrator goes on in this session.
+- **Close.** The orchestrator asks you to type `/ledger:close`. It clears
+  without continuing. Type `go` later to continue. Only you can run
+  `/ledger:close`.
 
-You type:
+The orchestrator asks after each review with work left, also after a review
+that rejects the work. It also asks when the session grows past a set size, by
+default 150,000 tokens. It asks again after each further 150,000 tokens. The
+plugin setting `clearPointTokens` sets this size; 0 turns it off.
 
-```
-/ledger:next
-```
-
-It clears the session and sends `go <name>`, so the fresh session continues
-from the ledger. `/ledger:close` clears without continuing. Type `go` later to
-continue. If either command cannot clear the session, it says so; then type
-`/clear`, then `go`.
+If the session cannot be cleared, the orchestrator says so; then type `/clear`,
+then `go`.
 
 When every plan step of the task is done, `/ledger:next` first shows one line
 in the fresh session on how to retire the task:
@@ -768,10 +773,10 @@ library is one child task.
 ## The clear loop, in short
 
 ```
-implement -> review -> ledger updated -> "Clear point" -> /ledger:next -> next step
+implement -> review -> ledger updated -> clear-point question -> "Save, clear and continue" -> next step
 ```
 
-Why it is worth the keystrokes: a cold start from the ledger costs a few
+Why it is worth the pick: a cold start from the ledger costs a few
 thousand tokens, once. Keeping a finished cycle in context costs those tokens on
 every remaining turn of the task.
 

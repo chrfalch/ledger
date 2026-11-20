@@ -16,7 +16,17 @@ export type LedgerArmed =
 
 declare module 'claude-code' {
   interface PluginState {
-    /** `titled`: the slug the mod last named the session after with /rename. A StateRead gives undefined when the value was never written. */
-    ledger: { armed: LedgerArmed | null; titled: string | null }
+    /**
+     * `titled`: the slug the mod last named the session after with /rename. `clearApproved`: the operator's last answer in a
+     * question box picked "Save, clear and continue", so the model may start /ledger:next once. `clearPoint`: for session
+     * `sessionId`, the context size in tokens that marks the next clear-point offer, and `pending`, the size at a marked
+     * offer no prompt has carried yet. A StateRead gives undefined when the value was never written.
+     */
+    ledger: {
+      armed: LedgerArmed | null
+      titled: string | null
+      clearApproved: boolean
+      clearPoint: { sessionId: string; threshold: number; pending: number | null }
+    }
   }
 }

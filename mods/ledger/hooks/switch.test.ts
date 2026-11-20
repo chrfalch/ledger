@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { done, ledgerOf, MAIN, refused, removedSession, session, task, turnEnd, world, worktreeOf } from './fake-ledger.test-helper'
-import { GO_FROM_SUBAGENT, noLedgerMessage, oneSwitchPerTurnMessage, removedFolderMessage } from './ledger'
+import { GO_FROM_SUBAGENT, NEXT_FROM_SUBAGENT, nextAfterSwitchMessage, noLedgerMessage, oneSwitchPerTurnMessage, removedFolderMessage, typedOnlyMessage } from './ledger'
 
 const CWD = worktreeOf('epic')
 const SESSION = `session ${CWD} --json`
@@ -329,6 +329,306 @@ test('a No at the permission prompt disarms /ledger:go and says what was already
   await $.turn.complete(turnEnd)
 
   expect(answer.text).toContain(`Promoted backlog task kid: its branch, worktree and ledger are at ${worktreeOf('kid')}.`)
+  expect(w.events).not.toContain('clear')
+})
+
+// next through the Skill tool, after the operator's pick in the clear-point question box
+
+const CLEAR_POINT = 'Clear point. Ledger updated. Clear the session and continue?'
+const clearPointQuestions = [
+  {
+    question: CLEAR_POINT,
+    header: 'Clear point',
+    options: [
+      { label: 'Save, clear and continue (Recommended)', description: 'Writes the ledger, clears the session and continues the task.' },
+      { label: 'Not yet', description: 'Stops here and waits.' },
+    ],
+    multiSelect: false,
+  },
+]
+const askClearPoint = { tool: 'AskUserQuestion', questions: clearPointQuestions } as const
+const NEXT_ARM = { mode: 'next', slug: 'epic', previous: { slug: 'epic', ledger: EPIC, main: MAIN } }
+
+for (const pick of ['Save, clear and continue (Recommended)', 'Save, clear and continue', 'Retire this task, Save, clear and continue']) {
+  test(`/ledger:next through the Skill tool runs after the operator picks "${pick}", and the turn end clears and sends go <slug>`, async ($, on) => {
+    const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+    w.answerQuestion({ answers: { [CLEAR_POINT]: pick } })
+
+    await $.tool.call(askClearPoint)
+    const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+    await $.turn.complete(turnEnd)
+
+    expect(answer.deny).toBeUndefined()
+    expect(w.skills.map(({ skill }) => skill)).toEqual(['ledger:next'])
+    expect(w.armed).toEqual([NEXT_ARM])
+    expect(w.events).toEqual(['clear', 'submit: go epic'])
+  })
+}
+
+test('the pick approves one /ledger:next: a second Skill call is refused', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+
+  await $.tool.call(askClearPoint)
+  await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+  const second = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+
+  expect(second.deny).toBe(typedOnlyMessage('ledger:next', ''))
+  expect(w.skills.length).toBe(1)
+})
+
+test('"Not yet" approves no /ledger:next, and takes back an earlier pick', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
+
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Not yet' } })
+  await $.tool.call(askClearPoint)
+  const unpicked = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+  await $.tool.call(askClearPoint)
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Not yet' } })
+  await $.tool.call(askClearPoint)
+  const takenBack = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+
+  expect(unpicked.deny).toBe(typedOnlyMessage('ledger:next', ''))
+  expect(takenBack.deny).toBe(typedOnlyMessage('ledger:next', ''))
+  expect(w.calls).toEqual([])
+  expect(w.armed).toEqual([])
+})
+
+test('a question box that answered itself while the operator was away approves no /ledger:next', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' }, afkTimeoutMs: 60_000 })
+
+  await $.tool.call(askClearPoint)
+  const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+
+  expect(answer.deny).toBe(typedOnlyMessage('ledger:next', ''))
+  expect(w.armed).toEqual([])
+})
+
+test('a pick in a subagent question box approves no /ledger:next of the main session', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+
+  await $.tool.call({ ...askClearPoint, agentId: 'a1' })
+  const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+
+  expect(answer.deny).toBe(typedOnlyMessage('ledger:next', ''))
+  expect(w.armed).toEqual([])
+})
+
+test('answers the model wrote into the question box call approve no /ledger:next', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue' } })
+
+  await $.tool.call({ ...askClearPoint, answers: { [CLEAR_POINT]: 'Save, clear and continue' } })
+  const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+
+  expect(answer.deny).toBe(typedOnlyMessage('ledger:next', ''))
+  expect(w.armed).toEqual([])
+})
+
+test('answers the model wrote into the question box call take back an earlier pick', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+
+  await $.tool.call(askClearPoint)
+  await $.tool.call({ ...askClearPoint, answers: { [CLEAR_POINT]: 'Save, clear and continue' } })
+  const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+
+  expect(answer.deny).toBe(typedOnlyMessage('ledger:next', ''))
+  expect(w.armed).toEqual([])
+})
+
+for (const [failure, times] of [
+  ['once', 1],
+  ['every time', Number.POSITIVE_INFINITY],
+] as const) {
+  test(`a write of the pick that fails ${failure} still hands back the answer, asks once, and leaves no earlier pick`, async ($, on) => {
+    const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
+    w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+    await $.tool.call(askClearPoint)
+
+    w.answerQuestion({ answers: { [CLEAR_POINT]: 'Not yet' } })
+    w.breakCall('approval', times)
+    const notYet = await $.tool.call(askClearPoint)
+    const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+
+    expect(notYet).toMatchObject({ result: { answers: { [CLEAR_POINT]: 'Not yet' } } })
+    expect(w.asked.length).toBe(2)
+    expect(answer.deny).toBeDefined()
+    expect(w.skills).toEqual([])
+    expect(w.armed).toEqual([])
+  })
+}
+
+test('/ledger:next through the Skill tool from a subagent is refused even after the pick', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+
+  await $.tool.call(askClearPoint)
+  const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:next', agentId: 'a1' })
+
+  expect(answer.deny).toBe(NEXT_FROM_SUBAGENT)
+  expect(w.calls).toEqual([])
+  expect(w.armed).toEqual([])
+})
+
+test('a subagent ledger:next leaves the pick to the main session, whose ledger:next then runs', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+
+  await $.tool.call(askClearPoint)
+  const fromSubagent = await $.tool.call({ tool: 'Skill', skill: 'ledger:next', agentId: 'a1' })
+  const fromMain = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+
+  expect(fromSubagent.deny).toBe(NEXT_FROM_SUBAGENT)
+  expect(fromMain.deny).toBeUndefined()
+  expect(w.armed).toEqual([NEXT_ARM])
+})
+
+test('the pick ends with the main turn: /ledger:next in the next turn is refused', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+
+  await $.tool.call(askClearPoint)
+  await $.turn.complete(turnEnd)
+  const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+
+  expect(answer.deny).toBe(typedOnlyMessage('ledger:next', ''))
+  expect(w.armed).toEqual([])
+})
+
+test('a subagent turn end keeps the pick: /ledger:next of the main session still runs', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+
+  await $.tool.call(askClearPoint)
+  await $.turn.complete({ ...turnEnd, agentId: 'a1' })
+  const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+
+  expect(answer.deny).toBeUndefined()
+  expect(w.armed).toEqual([NEXT_ARM])
+})
+
+test('a /ledger:go that overlaps a /ledger:next still checking the pick is refused before ledger go runs', async ($, on) => {
+  let reached!: () => void
+  let release!: () => void
+  const held = new Promise<void>(resolve => (reached = resolve))
+  const gate = new Promise<void>(resolve => (release = resolve))
+  on('state.get', async (_, e, next) => {
+    if (e.key === 'clearApproved') {
+      reached()
+      await gate
+    }
+    return next(e)
+  })
+  const w = world(on, { [SESSION]: ownEpic(), 'go kid --json': started('kid') }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+
+  await $.tool.call(askClearPoint)
+  const nextCall = $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+  await held
+  const goAnswer = await $.tool.call({ tool: 'Skill', skill: 'ledger:go', args: 'kid' })
+  release()
+  const nextAnswer = await nextCall
+
+  expect(goAnswer.deny).toBe(oneSwitchPerTurnMessage({ mode: 'next' }, 'kid'))
+  expect(nextAnswer.deny).toBeUndefined()
+  expect(w.argvs().filter(([command]) => command === 'go')).toEqual([])
+  expect(w.armed).toEqual([NEXT_ARM])
+})
+
+test('two /ledger:next calls through the Skill tool that overlap start only the first', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+
+  await $.tool.call(askClearPoint)
+  const [first, second] = await Promise.all([$.tool.call({ tool: 'Skill', skill: 'ledger:next' }), $.tool.call({ tool: 'Skill', skill: 'ledger:next' })])
+
+  expect(first.deny).toBeUndefined()
+  expect(second.deny).toBe(nextAfterSwitchMessage({ mode: 'next' }))
+  expect(w.skills.length).toBe(1)
+  expect(w.armed).toEqual([NEXT_ARM])
+})
+
+for (const [command, args] of [
+  ['ledger:close', ''],
+  ['ledger:park', 'waits for review'],
+] as const) {
+  test(`/${command} through the Skill tool stays refused after the pick`, async ($, on) => {
+    const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
+    w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+
+    await $.tool.call(askClearPoint)
+    const answer = await $.tool.call({ tool: 'Skill', skill: command, args })
+
+    expect(answer.deny).toBe(typedOnlyMessage(command, args))
+    expect(w.armed).toEqual([])
+  })
+}
+
+test('/ledger:next through the Skill tool after /ledger:go in the same turn is refused, and the go stays armed', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), 'go kid --json': started('kid'), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+
+  await $.command.run({ command: 'ledger:go', args: 'kid' })
+  await $.tool.call(askClearPoint)
+  const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+  await $.turn.complete(turnEnd)
+
+  expect(answer.deny).toBe(nextAfterSwitchMessage({ mode: 'go', slug: 'kid' }))
+  expect(w.skills).toEqual([])
+  expect(w.events).toEqual(['clear', 'submit: go kid'])
+})
+
+test('/ledger:next through the Skill tool in a folder with no ledger of its own says so and arms nothing', async ($, on) => {
+  const w = world(on, { [`session ${MAIN} --json`]: session(MAIN, undefined, [task('epic')]) }, { cwd: MAIN })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+
+  await $.tool.call(askClearPoint)
+  const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+
+  expect(answer.deny).toBe(noLedgerMessage(MAIN))
+  expect(w.armed).toEqual([])
+  expect(w.skills).toEqual([])
+})
+
+test('/ledger:next through the Skill tool in a removed session folder says so and arms nothing', async ($, on) => {
+  const gone = worktreeOf('gone')
+  const w = world(on, { [`session ${gone} --json`]: removedSession(gone) }, { cwd: gone, missing: [gone] })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+
+  await $.tool.call(askClearPoint)
+  const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+
+  expect(answer.deny).toBe(removedFolderMessage(gone))
+  expect(w.armed).toEqual([])
+})
+
+test('a No at the permission prompt disarms /ledger:next: the turn end does not clear', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+  w.answerSkill({ isError: true, text: 'The user said no.' })
+
+  await $.tool.call(askClearPoint)
+  const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+  await $.turn.complete(turnEnd)
+
+  expect(answer.text).toBe('The user said no.')
+  expect(w.events).not.toContain('clear')
+})
+
+test('a deny of the /ledger:next Skill call disarms it: the turn end does not clear', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+  w.answerSkill({ deny: 'Blocked.' })
+
+  await $.tool.call(askClearPoint)
+  const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+  await $.turn.complete(turnEnd)
+
+  expect(answer.deny).toBe('Blocked.')
   expect(w.events).not.toContain('clear')
 })
 

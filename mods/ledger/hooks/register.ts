@@ -1,7 +1,9 @@
-import type { EngineInterface, PluginState, Register } from 'claude-code'
+import type { EngineInterface, PluginState, Register, ToolCallResult } from 'claude-code'
 
 import { ledgerJson, ledgerText, LONG_TIMEOUT_MS, message, ownTask, readSession, type AutoPruned, type NextChild, type Parked, type RetirePlan, type Started } from './cli'
 import {
+  CLEAR_POINT_OPTION,
+  clearPointReminder,
   descriptionMessage,
   formatLedgers,
   GO_FROM_SUBAGENT,
@@ -14,6 +16,8 @@ import {
   isGoArgs,
   isNewSlug,
   lookupFailedMessage,
+  NEXT_FROM_SUBAGENT,
+  nextAfterSwitchMessage,
   nextChildHint,
   noLedgerMessage,
   notCheckedMessage,
@@ -33,26 +37,30 @@ import {
   taskName,
   typedOnlyMessage,
   type BranchFacts,
+  type Switch,
   type GoFields,
   type ListedTask,
 } from './ledger'
 
 type Armed = NonNullable<PluginState['ledger']['armed']>
 type GoArm = Extract<Armed, { mode: 'go' }>
+type NextArm = Extract<Armed, { mode: 'next' }>
 type PreviousTask = NonNullable<GoArm['previous']>
 
 const armed = { plugin: 'ledger', key: 'armed' } as const
 const titled = { plugin: 'ledger', key: 'titled' } as const
+const clearApproved = { plugin: 'ledger', key: 'clearApproved' } as const
+const clearPoint = { plugin: 'ledger', key: 'clearPoint' } as const
 
 /** `ledger go` exits 2 when no task has the slug. */
 const NO_SUCH_TASK = 2
 
 /**
- * The task a /ledger:go call is starting, from its armed check until it armed the switch or gave up. It is set before the
- * first await, so a second call that overlaps the first cannot also pass the check.
+ * The switch a /ledger:go or model-started /ledger:next call is starting, from its armed check until it armed the switch or
+ * gave up. It is set before the first await, so a second call that overlaps the first cannot also pass the check.
  * It assumes the hooks module is loaded once per session; a second instance would hold its own reservation.
  */
-let goStarting: string | undefined
+let switchStarting: Switch | undefined
 
 const words = (args: string | undefined): string[] => (args ?? '').split(/\s+/).filter(word => word !== '')
 
@@ -87,8 +95,8 @@ async function startGo($: EngineInterface, input: string): Promise<{ target: str
   const target = input.trim()
   if (target === '') return { text: GO_USAGE }
   if (isDescription(target)) return { text: descriptionMessage(target) }
-  if (goStarting !== undefined) return { text: oneSwitchPerTurnMessage({ mode: 'go', slug: goStarting }, target) }
-  goStarting = target
+  if (switchStarting !== undefined) return { text: oneSwitchPerTurnMessage(switchStarting, target) }
+  switchStarting = { mode: 'go', slug: target }
   try {
     const { value: alreadyArmed } = await $.state.get(armed)
     if (alreadyArmed) return { text: oneSwitchPerTurnMessage(alreadyArmed, target) }
@@ -112,22 +120,56 @@ async function startGo($: EngineInterface, input: string): Promise<{ target: str
     await $.state.set(armed, arm)
     return { target: arm.slug, fields, args: goArgs(arm.slug, own?.path, fields), arm }
   } finally {
-    goStarting = undefined
+    switchStarting = undefined
   }
 }
 
 /**
- * Clears the switch a /ledger:go call armed, unless something armed another since. State hands back copies, not `arm`.
- * Known limit: in the test harness $.state.get returns this hook's own last write, so an arm made meanwhile may be
- * cleared too. The cost is one missed clear.
+ * Everything /ledger:next does before next.md runs: read this session's ledger and arm the clear. A text says why it
+ * cannot; then nothing is armed.
  */
-async function disarm($: EngineInterface, arm: GoArm): Promise<void> {
-  const { value } = await $.state.get(armed)
-  if (value?.mode === 'go' && value.slug === arm.slug) await $.state.set(armed, null)
+async function armNext($: EngineInterface): Promise<{ arm: NextArm } | { text: string }> {
+  const session = await readSession($)
+  if (!session.ok) return { text: lookupFailedMessage(session.error) }
+  if (session.removed) return { text: removedFolderMessage(session.folder) }
+  const own = ownTask(session)
+  if (own === undefined) return { text: noLedgerMessage(session.folder) }
+  const arm: NextArm = { mode: 'next', slug: own.slug, previous: previousOf(own) }
+  await $.state.set(armed, arm)
+  return { arm }
 }
 
-/** The answer of the hooks after /ledger:go; when they fail, the switch it armed is undone first. */
-async function disarmedOnFailure<T>($: EngineInterface, arm: GoArm, answer: Promise<T>): Promise<T> {
+/**
+ * Everything a model-started /ledger:next does before next.md runs: use up the operator's pick, then arm the clear as the
+ * typed command does. A text says why it did not; then nothing is armed.
+ */
+async function startNext($: EngineInterface, args: string): Promise<{ arm: NextArm } | { text: string }> {
+  if (switchStarting !== undefined) return { text: nextAfterSwitchMessage(switchStarting) }
+  switchStarting = { mode: 'next' }
+  try {
+    const { value: approved } = await $.state.get(clearApproved)
+    if (approved !== true) return { text: typedOnlyMessage('ledger:next', args) }
+    await $.state.set(clearApproved, false)
+    const { value: alreadyArmed } = await $.state.get(armed)
+    if (alreadyArmed) return { text: nextAfterSwitchMessage(alreadyArmed) }
+    return await armNext($)
+  } finally {
+    switchStarting = undefined
+  }
+}
+
+/**
+ * Clears the switch a /ledger:go or /ledger:next call armed, unless something armed another since. State hands back
+ * copies, not `arm`. Known limit: in the test harness $.state.get returns this hook's own last write, so an arm made
+ * meanwhile may be cleared too. The cost is one missed clear.
+ */
+async function disarm($: EngineInterface, arm: GoArm | NextArm): Promise<void> {
+  const { value } = await $.state.get(armed)
+  if (value?.mode === arm.mode && value.slug === arm.slug) await $.state.set(armed, null)
+}
+
+/** The answer of the hooks after /ledger:go or /ledger:next; when they fail, the switch it armed is undone first. */
+async function disarmedOnFailure<T>($: EngineInterface, arm: GoArm | NextArm, answer: Promise<T>): Promise<T> {
   try {
     return await answer
   } catch (error) {
@@ -190,8 +232,33 @@ async function titleSession($: EngineInterface, slug: string): Promise<void> {
   } catch {}
 }
 
+/**
+ * Marks a clear-point offer once the context reaches this session's threshold, unless an agent runs: a clear would cut it
+ * off. The offer is only advice, so a failure skips it, as a failed rename does.
+ */
+async function markClearPoint($: EngineInterface, every: number): Promise<void> {
+  if (every <= 0) return
+  try {
+    const { tokens } = (await $.session.usage()).context
+    if (tokens === undefined) return
+    const sessionId = await $.session.id()
+    const { value } = await $.state.get(clearPoint)
+    if (tokens < (value?.sessionId === sessionId ? value.threshold : every)) return
+    if ((await $.agent.list()).some(({ status }) => status === 'running')) return
+    await $.state.set(clearPoint, { sessionId, threshold: tokens + every, pending: tokens })
+  } catch {}
+}
+
+/** The context size of this session's marked offer, which the prompt now carries; `undefined` when there is none. */
+async function takeClearPoint($: EngineInterface): Promise<number | undefined> {
+  const { value } = await $.state.get(clearPoint)
+  if (value === undefined || value.pending === null || value.sessionId !== (await $.session.id())) return undefined
+  await $.state.set(clearPoint, { ...value, pending: null })
+  return value.pending
+}
+
 /** At a turn end that does not clear: the model may have just finished or reopened the task, which auto-prune acts on once. */
-async function finishTurn($: EngineInterface): Promise<void> {
+async function finishTurn($: EngineInterface, clearPointTokens: number): Promise<void> {
   const session = await readSession($)
   if (!session.ok) return
   if (session.title !== undefined) await titleSession($, session.title)
@@ -199,6 +266,7 @@ async function finishTurn($: EngineInterface): Promise<void> {
   if (own === undefined) return
   const pruned = await ledgerJson<AutoPruned>($, ['worktrees', 'auto-prune', own.path])
   if (pruned.ok && pruned.message) await $.ui.log(pruned.message)
+  if (!(pruned.ok && pruned.finished)) await markClearPoint($, clearPointTokens)
 }
 
 function archiveArgs(given: string[]): string[] {
@@ -242,7 +310,22 @@ function answerOf($: EngineInterface, command: string, args: string | undefined)
   return undefined
 }
 
-const TYPED_ONLY = new Set(['ledger:close', 'ledger:next', 'ledger:park'])
+// /ledger:next is typed-only too, unless the operator just picked the clear-point option: its own Skill hook decides.
+const TYPED_ONLY = new Set(['ledger:close', 'ledger:park'])
+
+const CLEAR_POINT_PICKS = [CLEAR_POINT_OPTION, `${CLEAR_POINT_OPTION} (Recommended)`]
+
+/**
+ * Whether the operator picked the clear-point option in a question box. An answer the box gave itself after the operator
+ * was away is not the operator's. A multi-select answer joins its labels with ", ", which the option's label holds too,
+ * so a pick is matched as a whole label between separators rather than by splitting.
+ */
+function picksClearPoint(asked: ToolCallResult<'AskUserQuestion'>): boolean {
+  if (asked.deny !== undefined || asked.isError === true || asked.result.afkTimeoutMs !== undefined) return false
+  return Object.values<unknown>(asked.result.answers).some(
+    answer => typeof answer === 'string' && CLEAR_POINT_PICKS.some(label => `, ${answer}, `.includes(`, ${label}, `)),
+  )
+}
 
 /** Whether only the operator may run `command` with `args`: it deletes, writes or clears the session. */
 function isTypedOnly(command: string, args: string | undefined): boolean {
@@ -259,7 +342,9 @@ function isTypedOnly(command: string, args: string | undefined): boolean {
   return TYPED_ONLY.has(command)
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const clearPointTokens = typeof options.clearPointTokens === 'number' ? options.clearPointTokens : 0
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'ledger',
@@ -280,19 +365,18 @@ export const register: Register = on => {
   // The markdown command writes to the ledger, so it runs only for the session's own ledger. The exception is
   // /ledger:close after the session folder was removed: told there is no ledger, it writes nothing, and its turn's end clears.
   on('command.run', { command: ['ledger:close', 'ledger:next'] }, async ($, e, next) => {
+    if (e.command === 'ledger:next') {
+      const nextArmed = await armNext($)
+      return 'text' in nextArmed ? nextArmed : next(e)
+    }
     const session = await readSession($)
     if (!session.ok) return { text: lookupFailedMessage(session.error) }
     if (session.removed) {
-      if (e.command === 'ledger:next') return { text: removedFolderMessage(session.folder) }
       await $.state.set(armed, { mode: 'close', slug: basename(session.folder) })
       return next({ ...e, args: 'ledger: none' })
     }
     const own = ownTask(session)
     if (own === undefined) return { text: noLedgerMessage(session.folder) }
-    if (e.command === 'ledger:next') {
-      await $.state.set(armed, { mode: 'next', slug: own.slug, previous: previousOf(own) })
-      return next(e)
-    }
     await $.state.set(armed, { mode: 'close', slug: own.slug })
     // Set here, so only this hook can tell close.md that there is no ledger.
     return next({ ...e, args: `ledger: ${own.path}` })
@@ -345,6 +429,32 @@ export const register: Register = on => {
     return { ...ran, deny: goDeniedMessage(started.target, started.fields, ran.deny) }
   }).catch(async ($, e, next) => (next.called ? next(e) : { deny: lookupFailedMessage(next.error.message ?? next.error.kind) }))
 
+  // The model may start /ledger:next only right after the operator picked the clear-point option, and once per pick.
+  on('tool.call', { tool: 'Skill' }, async ($, e, next) => {
+    if (skillName(e.skill) !== 'ledger:next') return next(e)
+    // Before the pick is checked, so that a subagent cannot use up the main session's pick.
+    if (e.agentId !== undefined) return { deny: NEXT_FROM_SUBAGENT }
+    const started = await startNext($, e.args ?? '')
+    if ('text' in started) return { deny: started.text }
+    const ran = await disarmedOnFailure($, started.arm, next(e))
+    // A person's No at the permission prompt comes back as an error result, not as a deny.
+    if (ran.isError === true || ran.deny !== undefined) await disarm($, started.arm)
+    return ran
+  }).catch(async ($, e, next) => (next.called ? next(e) : { deny: lookupFailedMessage(next.error.message ?? next.error.kind) }))
+
+  // Every answer replaces the last approval, so a later "Not yet" takes back an earlier pick. A subagent's question box
+  // approves nothing: the clear-point question is the main session's. Nor do answers the model wrote into the call itself.
+  on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
+    const asked = await next(e)
+    await $.state.set(clearApproved, e.agentId === undefined && e.answers === undefined && picksClearPoint(asked))
+    return asked
+  }).catch(async ($, e, next) => {
+    // The operator's answer is handed back, never asked again; a pick that was not written approves nothing.
+    const asked = await next(e)
+    await $.state.set(clearApproved, false).catch(() => undefined)
+    return asked
+  })
+
   // The first word names another task only when a live task of this repo has that slug; otherwise it is part of the reason. A slug of
   // another task with no reason is a mistake, not this task's reason.
   on('command.run', { command: 'ledger:park' }, async ($, e, next) => {
@@ -375,14 +485,24 @@ export const register: Register = on => {
     on('command.run', { command }, async ($, e) => ({ text: (await answerOf($, command, e.args)) ?? '' }))
   }
 
+  // The offer reaches the model as context beside the next prompt, which the operator does not see. A slash command's turn
+  // has its own instructions, so the offer waits for the next plain prompt.
+  on('prompt.submit', async ($, e, next) => {
+    if (e.command !== undefined) return next(e)
+    const tokens = await takeClearPoint($)
+    return next(tokens === undefined ? e : { ...e, context: [...(e.context ?? []), clearPointReminder(tokens)] })
+  }).catch(async ($, e, next) => next(e))
+
   // $.command.run and $.prompt.submit must not be awaited inside a command.run hook, so the clear waits for the turn's end.
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
+    // The pick answers the question of this turn only.
+    await $.state.set(clearApproved, false)
     const { value } = await $.state.get(armed)
     // A turn that clears does not rename: the session is still in the old task, and the turn of `go <slug>` renames.
     // It prunes through showRetireHint instead, so each turn prunes at most once.
     if (!value) {
-      if (e.reason === 'answer') await finishTurn($)
+      if (e.reason === 'answer') await finishTurn($, clearPointTokens)
       return next(e)
     }
     await $.state.set(armed, null)

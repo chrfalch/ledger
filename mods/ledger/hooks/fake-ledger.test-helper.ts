@@ -1,4 +1,4 @@
-import type { On } from 'claude-code'
+import type { AgentInfo, AgentStatus, On } from 'claude-code'
 
 /** Test kit: a fake `bin/ledger` and the engine calls the mod makes around it. */
 
@@ -48,8 +48,8 @@ export const removedSession = (folder: string): Reply => done({ folder, removed:
 
 export type Call = { args: string[]; cwd?: string; timeoutMs?: number }
 
-/** An engine call `world` can make throw: a command's markdown, the Skill tool, /clear, /rename or a prompt submit. */
-export type Breakable = 'markdown' | 'skill' | 'clear' | 'rename' | 'submit'
+/** An engine call `world` can make throw: a command's markdown, the Skill tool, /clear, /rename, a prompt submit, a write of the clear-point pick or a usage read. */
+export type Breakable = 'markdown' | 'skill' | 'clear' | 'rename' | 'submit' | 'approval' | 'usage' | 'offer'
 
 /**
  * `replies` are keyed by the arguments after bin/ledger, joined by spaces. Any other program, and any arguments with no
@@ -62,18 +62,33 @@ export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [
   const events: string[] = []
   const armed: unknown[] = []
   const skills: { skill: string; args?: string }[] = []
+  const asked: string[] = []
   const broken = new Map<Breakable, number>()
   let markdown: { command: string; args?: string } | undefined
   let skillAnswer: { deny?: string; isError?: true; text?: string } = {}
+  let questionAnswer: { answers: Record<string, string>; afkTimeoutMs?: number } = { answers: {} }
+  const reminders: string[] = []
+  let contextTokens: number | undefined = 0
+  let sessionId = 'session-1'
+  let agentStatuses: AgentStatus[] = []
 
-  const breakIfBroken = (call: Breakable): void => {
+  const takeBreak = (call: Breakable): boolean => {
     const left = broken.get(call) ?? 0
-    if (left === 0) return
+    if (left === 0) return false
     broken.set(call, left - 1)
-    throw new Error(`${call} broke`)
+    return true
+  }
+  const breakIfBroken = (call: Breakable): void => {
+    if (takeBreak(call)) throw new Error(`${call} broke`)
   }
 
   on('session.cwd', async () => ({ value: cwd }))
+  on('session.id', async () => ({ value: sessionId }))
+  on('session.usage', async () => {
+    breakIfBroken('usage')
+    return { value: { startedAt: 0, context: { tokens: contextTokens, window: 1_000_000 }, rateLimits: [] } }
+  })
+  on('agent.list', async () => ({ value: agentStatuses.map(agentWith) }))
   on('fs.stat', async (_, e) => (missing.includes(e.path) ? { deny: `ENOENT: no such file or directory, stat '${e.path}'` } : { value: { kind: 'directory', size: 0, mtimeMs: 0, isLink: false } }))
   on('process.run', async (_, e: { argv: string[]; init?: { cwd?: string; timeoutMs?: number } }) => {
     const [program = '', ...args] = e.argv
@@ -85,6 +100,9 @@ export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [
     return replies[args.join(' ')] ?? { deny: `no reply for: ledger ${args.join(' ')}` }
   })
   on('state.set', async (_, e, next) => {
+    // A state.set hook that throws is skipped and the write still lands; a deny is what fails it.
+    if (e.plugin === 'ledger' && e.key === 'clearApproved' && takeBreak('approval')) return { deny: 'approval broke' }
+    if (e.plugin === 'ledger' && e.key === 'clearPoint' && takeBreak('offer')) return { deny: 'offer broke' }
     if (e.plugin === 'ledger' && e.key === 'armed' && e.value !== null) armed.push(e.value)
     return next(e)
   })
@@ -102,6 +120,10 @@ export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [
     if (skillAnswer.isError) return { isError: true, result: {}, text: skillAnswer.text }
     return skillAnswer.deny === undefined ? { result: {} } : { deny: skillAnswer.deny }
   })
+  on('tool.call', { tool: 'AskUserQuestion' }, async function operatorAnswers(_, e) {
+    asked.push(e.questions.map(({ question }) => question).join(' | '))
+    return { result: { questions: e.questions, ...questionAnswer } }
+  })
   on('command.run', { command: 'clear' }, async () => {
     breakIfBroken('clear')
     events.push('clear')
@@ -115,6 +137,7 @@ export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [
   on('prompt.submit', async (_, e) => {
     breakIfBroken('submit')
     events.push(`submit: ${e.text}`)
+    reminders.push(...(e.context ?? []))
     return { text: '' }
   })
   on('ui.log', async (_, e) => {
@@ -131,9 +154,28 @@ export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [
     events,
     armed,
     skills,
+    /** Each question box the operator saw, as its questions joined by " | ". */
+    asked,
     markdown: () => markdown,
     answerSkill: (answer: typeof skillAnswer) => {
       skillAnswer = answer
+    },
+    answerQuestion: (answer: typeof questionAnswer) => {
+      questionAnswer = answer
+    },
+    /** Each context block a prompt submit carried for the model. */
+    reminders,
+    /** Sets the context size `$.session.usage()` reports; undefined before the first response. */
+    useContext: (tokens: number | undefined) => {
+      contextTokens = tokens
+    },
+    /** Makes `$.session.id()` answer `id`, as a /clear does. */
+    newSession: (id: string) => {
+      sessionId = id
+    },
+    /** Makes `$.agent.list()` list one agent of each status. */
+    listAgents: (...statuses: AgentStatus[]) => {
+      agentStatuses = statuses
     },
     /** Makes the next `times` calls of `call` throw. */
     breakCall: (call: Breakable, times = Number.POSITIVE_INFINITY) => {
@@ -144,5 +186,20 @@ export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [
     },
   }
 }
+
+const agentWith = (status: AgentStatus, index: number): AgentInfo => ({
+  id: `agent-${index}`,
+  description: 'work',
+  type: 'general-purpose',
+  status,
+  kind: 'local_agent',
+  taskStatus: status === 'running' ? 'running' : 'completed',
+  label: 'work',
+  startTime: 0,
+  cwd: MAIN,
+  tokenCount: 0,
+  tokenSamples: [],
+  hasRow: true,
+})
 
 export const turnEnd = { answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' } as const
