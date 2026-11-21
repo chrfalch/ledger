@@ -886,3 +886,27 @@ test('after "host" changes, notes, park, go and retire of a task this machine st
   ledgerOk(a, 'task', 'retire', SLUG, '--force');
   assert.equal(inHead(a, recordOf()), false);
 });
+
+test('a plain ledger task retire finishes a retire whose worktree removal deleted the folder and then failed', (t) => {
+  const a = machine(t, remote(t));
+  setUpAs(a, 'host-a');
+  startTask(a);
+  const worktree = worktreeOf(a);
+  stubGit(a, '*"worktree remove"*', `rm -rf ${JSON.stringify(worktree)}; echo "fatal: refused by the test" >&2; exit 128`);
+  let first: ReturnType<typeof run>;
+  try {
+    first = run(a, ['task', 'retire', SLUG, '--force']);
+  } finally {
+    unstubGit(a);
+  }
+  assert.notEqual(first.status, 0, first.stdout);
+  assert.equal(existsSync(worktree), false, 'the stub left the worktree folder');
+
+  const second = run(a, ['task', 'retire', SLUG]);
+
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(existsSync(path.join(a.clone, recordOf())), false, 'the record is left');
+  assert.equal(inHead(a, recordOf()), false);
+  const copies = git(a.h, a.clone, 'ls-files', '--', `archive/${APP}/*.json`).split('\n').filter(Boolean);
+  assert.deepEqual(copies, [`archive/${APP}/${today()}-${SLUG}.json`]);
+});

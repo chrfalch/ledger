@@ -2,7 +2,7 @@ import { accessSync, constants, lstatSync, readdirSync, readFileSync, readlinkSy
 import path from 'node:path';
 import { markRetired, putChildReport, withoutClaim } from './edit.js';
 import { fail } from './failure.js';
-import { folderEntries, holdsAnything, treeEntries } from './files.js';
+import { folderEntries, holdsAnything, isTaken, treeEntries } from './files.js';
 import { isReadableSlug, parseLedger, type Child } from './format.js';
 import {
   branchPrs,
@@ -66,6 +66,11 @@ export type RetireFacts = {
   archiveRepo: string;
   /** Whether a copy or an evidence folder already uses the archive name. */
   archiveNameTaken: (name: string) => boolean;
+  /**
+   * A retire that stopped after it removed the worktree: the record names a host of this machine, its worktree folder is
+   * gone, and the archive holds the ledger. A rerun then finishes without --force; any other missing worktree needs it.
+   */
+  worktreeRemoved?: true;
   /** An archive copy with the ledger's text, and whether removing the worktree would lose evidence it does not hold. */
   alreadyArchived?: { name: string; location: string; losesEvidence: boolean };
   archiveLocation: (name: string) => string;
@@ -184,7 +189,7 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
   const active = named('live');
   if (active.length > 0) blockers.push({ kind: 'children', names: active });
   for (const name of named('missing')) blockers.push({ kind: 'missing-child', name });
-  if (task.elsewhere) blockers.push({ kind: 'elsewhere', ...(task.worktree === undefined ? {} : { worktree: task.worktree }) });
+  if (task.elsewhere && !facts.worktreeRemoved) blockers.push({ kind: 'elsewhere', ...(task.worktree === undefined ? {} : { worktree: task.worktree }) });
   if (worktree !== undefined) {
     if (worktree.state.dirty > 0) blockers.push({ kind: 'dirty', count: worktree.state.dirty });
     if (!isMerged(worktree.state)) blockers.push({ kind: 'unmerged' });
@@ -405,6 +410,8 @@ export function readRetire(context: Context, slug: string | undefined): RetireFa
   const text = withoutClaim(readLedger(context, task));
   const archiveRepo = repoKey(main);
   const identical = store.archive.list(archiveRepo).find((copy) => copy.text === storedText(text));
+  const { host, worktree: named } = task.ledger.location;
+  const worktreeRemoved = identical !== undefined && task.elsewhere === true && host !== undefined && (store.ownHosts?.has(host) ?? false) && named !== undefined && !isTaken(named);
   return {
     task,
     ref: { slug: task.slug, main },
@@ -413,6 +420,7 @@ export function readRetire(context: Context, slug: string | undefined): RetireFa
     tasks,
     archiveRepo,
     archiveNameTaken: (name) => store.archive.nameTaken(archiveRepo, name),
+    ...(worktreeRemoved ? { worktreeRemoved } : {}),
     ...(identical === undefined ? {} : { alreadyArchived: { name: identical.name, location: identical.location, losesEvidence: losesEvidence(store.archive, archiveRepo, identical.name, evidence) } }),
     archiveLocation: (name) => store.archive.location(archiveRepo, name),
     archiveEvidenceLocation: (name) => store.archive.evidenceLocation(archiveRepo, name),
