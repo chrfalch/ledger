@@ -462,8 +462,9 @@ can read it:
   `ledger store mirror` does it by hand. A copy is removed only when git
   confirms that its worktree is gone, or when the same worktree's ledger was
   just copied under another repo key or slug, as for a copy under a repo
-  folder name from before repo keys, or after the ledger's title changed. `ledger task retire` removes the copy
-  in the same commit that adds the archive copy.
+  folder name from before repo keys, or after the ledger's title changed.
+  `ledger task retire` removes the copy in the same commit that adds the
+  archive copy.
 - A machine never commits the copies of another machine. A sync puts an
   edited or added file in another machine's folder back as git storage holds
   it, and prints one warning for each file.

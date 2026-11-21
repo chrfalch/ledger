@@ -2501,6 +2501,22 @@ test('ledger store mirror removes the copy of a task whose worktree ledger now h
   assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
 });
 
+test('ledger store mirror keeps the copy of a worktree task whose Location names the worktree of another task', (t) => {
+  const a = machine(t, remote(t));
+  setUpAs(a, 'host-a');
+  const login = startTask(a);
+  const signup = startTask(a, 'fix-signup');
+  const text = readFileSync(signup, 'utf8');
+  const moved = text.replace(`- worktree: ${worktreeOf(signup)}`, `- worktree: ${worktreeOf(login)}`);
+  assert.notEqual(moved, text, 'the ledger names no worktree in its Location');
+  writeFileSync(signup, moved);
+
+  ledgerOk(a, 'store', 'mirror');
+
+  assert.deepEqual(git(a.h, a.clone, 'ls-tree', '-r', '--name-only', 'HEAD', '--', 'active/').split('\n').sort(), [copyOf('host-a'), copyOf('host-a', 'fix-signup')].sort());
+  assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
+});
+
 /** Where a machine kept its copies before repo keys: in the folder of the repo's folder name, which is an alias now. */
 const oldCopyOf = (host: string): string => `active/${host}/app/${SLUG}.md`;
 

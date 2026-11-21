@@ -156,8 +156,8 @@ copied its worktree's ledger under another key or slug, as for a copy under a
 folder name from before repo keys or after a title change; the registry may
 still list the old slug. A copy that matches no worktree task, and no task the
 registry lists active, by repo key and slug is removed when git confirms its
-worktree is gone. A repo git cannot read keeps its copies. The host folder is `"host"` in
-`~/.claude/ledger-settings.json`, else the host name (`readHost` in
+worktree is gone. A repo git cannot read keeps its copies. The host folder is
+`"host"` in `~/.claude/ledger-settings.json`, else the host name (`readHost` in
 `tools/ledger/settings.ts`). `findTasks` reads the copies of the other hosts as
 tasks of place `remote`: a remote task hides a backlog ledger of the same task
 (`sameTask`), and `ledger go`, park, retire and `ledger notes` refuse it. A machine skips its own

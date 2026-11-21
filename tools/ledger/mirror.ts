@@ -90,6 +90,8 @@ export function mirrorLedgers(context: Context): Mirrored | undefined {
       [...found, ...ledgers, ...registered].some((task) => task.repo === repo && task.slug === slug);
     // Such as a copy written under the folder name of its repo, from before repo keys, or under a slug its ledger has no longer.
     const copiedUnderAnotherName = (copy: StoredLedger): boolean => {
+      // A worktree task keeps its copy even when its Location names the worktree of another task.
+      if (ledgers.some(({ repo, slug }) => repo === copy.repo && slug === copy.name)) return false;
       const { worktree } = parseLedger(copy.text).location;
       return worktree !== undefined && ledgers.some((ledger) => (ledger.repo !== copy.repo || ledger.slug !== copy.name) && samePath(ledger.worktree, worktree));
     };
