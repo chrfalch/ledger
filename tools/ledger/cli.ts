@@ -14,6 +14,7 @@ import { limitGitCalls, mainCheckout } from './git.js';
 import { gitStore } from './git-store.js';
 import { logHookFailure, oneLine } from './hook-failures.js';
 import { answerHook, GIT_TIMEOUT_MS, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookContext, type HookEvent } from './hooks.js';
+import { KINDS, STAGES } from './kinds.js';
 import { limitLockWaits } from './lock.js';
 import { ledgerBin, ledgerPaths, realPath } from './paths.js';
 import { repoKey, repoLabel } from './repo-key.js';
@@ -47,7 +48,6 @@ import {
   resolveQuestionText,
   setNext,
   setNextText,
-  STAGES,
   TAGS,
   type Tag,
 } from './notes.js';
@@ -341,6 +341,7 @@ export async function main(argv: string[]): Promise<number> {
     .argument('[slug]', 'the new task: lowercase letters, digits and hyphens; with --here, the branch name by default')
     .option('--goal <text>', 'one paragraph: the problem, then what done looks like')
     .option('--design-refs <n,n>', 'the LLP numbers for the "- design refs:" line, comma-separated')
+    .option('--kind <kind>', `the kind of task for the "- kind:" line, which sets its stages: ${KINDS}; code by default`)
     .option('--stack', 'make the worktree and branch at once, on top of the current branch')
     .option('--here', 'add a ledger to this linked worktree instead; prints no start line')
     .option('--repo <path>', 'write the task for the repo that holds <path>')

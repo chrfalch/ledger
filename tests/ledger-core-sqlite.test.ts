@@ -359,7 +359,7 @@ for (const storage of ['file', 'sqlite'] as const) {
     writeFileSync(template, readFileSync(template, 'utf8').replace(/^- design refs:.*\n/m, ''));
     ok(ledger(h, app, 'task', 'new', 'fix-login', '--design-refs', '3,12'));
     const [, location] = /^## Location\n((?:- .*\n)+)/m.exec(store().backlog.read(keyOf(h, 'app'), 'fix-login')?.text ?? '') ?? [];
-    assert.equal(location?.trimEnd().split('\n').at(-1), '- design refs: 3,12');
+    assert.deepEqual(location?.trimEnd().split('\n').slice(-2), ['- design refs: 3,12', '- kind: code']);
   });
 
   test(`${storage} store: ledger task --design-refs with a template that has no ## Location exits 1, names the template file, and writes no ledger`, { skip }, (t) => {

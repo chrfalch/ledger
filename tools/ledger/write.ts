@@ -36,6 +36,7 @@ import {
 import { withLock } from './lock.js';
 import { samePath, taskWorktree, worktreeLedger, type LedgerPaths } from './paths.js';
 import { withHint } from './migrate-repo-ids.js';
+import { isKind, KINDS, type Kind } from './kinds.js';
 import { remoteKey, repoKey } from './repo-key.js';
 import { loadTasks } from './registry.js';
 import { keyAndAliases, type Change, type LedgerStore } from './store.js';
@@ -201,17 +202,18 @@ function startWorktree(main: string, slug: string, branch: string, base: string,
   return started;
 }
 
-export type TaskOptions = { goal?: string; designRefs?: string; stack?: boolean; here?: boolean; repo?: string };
+export type TaskOptions = { goal?: string; designRefs?: string; kind?: string; stack?: boolean; here?: boolean; repo?: string };
 
-export function createTask(context: Context, slug: string | undefined, { goal: rawGoal, designRefs: refs, stack = false, here = false, repo }: TaskOptions): CreatedTask {
+export function createTask(context: Context, slug: string | undefined, { goal: rawGoal, designRefs: refs, kind = 'code', stack = false, here = false, repo }: TaskOptions): CreatedTask {
   const { paths, cwd, store } = context;
   if (here && stack) fail('--here adds a ledger to this worktree, so it takes no --stack.');
   if (here && repo !== undefined) fail('--here adds a ledger to this worktree, so it takes no --repo.');
   if (stack && repo !== undefined) fail('--stack builds on the current branch, so it takes no --repo.');
   if (slug !== undefined && !isNewSlug(slug)) fail(slugRule(slug));
   if (refs !== undefined && !/^\d+(?:,\d+)*$/.test(refs)) fail(`--design-refs takes LLP numbers, comma-separated, such as 3,12. "${refs}" is not.`);
+  if (!isKind(kind)) fail(`--kind takes one of ${KINDS}. "${kind}" is not.`);
   const goal = rawGoal === undefined || oneLine(rawGoal) === '' ? undefined : oneLine(rawGoal);
-  if (here) return hereTask(context, slug, goal, refs);
+  if (here) return hereTask(context, slug, goal, refs, kind);
   if (slug === undefined) return fail('ledger task new needs a slug, or --here for this worktree.');
 
   const main = repoOf(cwd, repo === undefined ? cwd : path.resolve(cwd, repo));
@@ -226,12 +228,12 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
   if (stack) {
     const base = currentBranch(cwd) ?? fail(`--stack needs a branch, but HEAD is detached in ${cwd}.`);
     const root = checkoutRoot(cwd) ?? cwd;
-    const started = startWorktree(main, slug, slug, base, (filled) => fillLedger(template, { slug, goal, ...filled, designRefs: designRefs(root, refs) }));
+    const started = startWorktree(main, slug, slug, base, (filled) => fillLedger(template, { slug, goal, ...filled, designRefs: designRefs(root, refs), kind }));
     created = { slug, main, status: 'active', ...started };
   } else {
     checkTarget(main, slug, slug);
     pauseForTest();
-    if (!store.backlog.create(key, slug, fillLedger(template, { slug, goal, main, designRefs: designRefs(main, refs) }))) taken();
+    if (!store.backlog.create(key, slug, fillLedger(template, { slug, goal, main, designRefs: designRefs(main, refs), kind }))) taken();
     created = { slug, main, status: 'backlog', ledger: backlog };
   }
   const cwdMain = mainCheckout(cwd);
@@ -244,7 +246,7 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
   return { ...created, start };
 }
 
-function hereTask(context: Context, given: string | undefined, goal: string | undefined, refs: string | undefined): CreatedTask {
+function hereTask(context: Context, given: string | undefined, goal: string | undefined, refs: string | undefined, kind: Kind): CreatedTask {
   const { paths, cwd } = context;
   const main = repoOf(cwd);
   const worktree = checkoutRoot(cwd) ?? fail(`${cwd} is not inside a git repository.`);
@@ -256,7 +258,7 @@ function hereTask(context: Context, given: string | undefined, goal: string | un
   if (!isNewSlug(slug)) fail(`${slugRule(slug)} Name it: ledger task new --here <slug>`);
   const commit = commitOf(cwd, 'HEAD') ?? fail(`This worktree has no commit yet: ${worktree}`);
   const started: Started = { worktree, branch: branch ?? 'detached HEAD', base: `HEAD @ ${short(cwd, commit)}`, ledger };
-  writeAtomic(ledger, fillLedger(readTemplate(paths, refs), { slug, goal, ...started, designRefs: designRefs(worktree, refs) }));
+  writeAtomic(ledger, fillLedger(readTemplate(paths, refs), { slug, goal, ...started, designRefs: designRefs(worktree, refs), kind }));
   excludeEvidence(main);
   refreshRegistry(context, [main]);
   return { slug, main, status: 'active', ...started };

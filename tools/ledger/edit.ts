@@ -41,6 +41,8 @@ export type Filled = {
   base?: string;
   /** null drops the bullet, for a repo with no llp/ folder. */
   designRefs?: string | null;
+  /** Replaces the value of the `- kind:` bullet, or is added at the end of ## Location. */
+  kind?: string;
 };
 
 const PLACEHOLDER_TITLE = /^# Task ledger[ \t]*[—-][ \t]*<.*>$/;
@@ -56,7 +58,7 @@ export function fillLedger(text: string, fields: Filled): string {
   const titleLine = ledger.lines.findIndex((line) => PLACEHOLDER_TITLE.test(plain(line)));
   const values: Record<string, string | null | undefined> = { main: null, worktree: fields.worktree, branch: fields.branch, base: fields.base, 'design refs': fields.designRefs };
   const cr = ending(ledger.lines);
-  return ledger.lines
+  const filled = ledger.lines
     .flatMap((line, index) => {
       if (index === titleLine) return [replaced(line, `# Task ledger — ${fields.slug}`)];
       if (index === goalLine && fields.goal) return [replaced(line, fields.goal)];
@@ -66,6 +68,7 @@ export function fillLedger(text: string, fields: Filled): string {
       return index === location?.start && fields.main !== undefined ? [...kept, `- main: ${fields.main}${cr}`] : kept;
     })
     .join('\n');
+  return fields.kind === undefined ? filled : (setLocationBullet(filled, 'kind', fields.kind) ?? filled);
 }
 
 /** `text` with a `- design refs:` bullet at the end of ## Location when that section has none; undefined without the section. */

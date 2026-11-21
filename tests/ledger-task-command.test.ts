@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 
 import { HELP } from '../mods/ledger/hooks/ledger.js';
 import { REPO } from './helpers.js';
+import { git, hasLedgerFile, home, ledger, ok, readLedgerFile, repository, storeFolder, worktreeTask, type Ran } from './ledger-core-fixtures.js';
 
 const read = (file: string) => readFileSync(path.join(REPO, file), 'utf8').replace(/\s+/g, ' ');
 
@@ -299,7 +300,7 @@ test('/ledger:task passes picked LLPs to bin/ledger task with --design-refs, and
 
 test('/ledger:go makes a new task with bin/ledger task, then starts it with bin/ledger go', () => {
   const go = read('mods/ledger/commands/go.md');
-  assert.match(go, /\/bin\/ledger" task new <slug> --goal '<goal>'/);
+  assert.match(go, /\/bin\/ledger" task new <slug> --kind <kind> --goal '<goal>'/);
   assert.match(go, /`bin\/ledger go <slug>`/);
   assert.doesNotMatch(go, /--promote|--refs/);
   assert.match(go, /`- design refs:` line/);
@@ -312,8 +313,106 @@ test('/ledger:go passes picked LLPs to bin/ledger task with --design-refs, and i
   assert.doesNotMatch(newTaskSteps, /Use Edit/);
 });
 
+test('/ledger:task and /ledger:go always pass --kind to ledger task new', () => {
+  const go = read('mods/ledger/commands/go.md');
+  const newTaskSteps = go.slice(go.indexOf('If there is a `new:` line'), go.indexOf('If `ledger:` is `none`'));
+  for (const text of [read('mods/ledger/commands/task.md'), newTaskSteps]) {
+    assert.match(text, /`--kind[ `]/);
+    for (const kind of ['docs', 'investigation', 'code']) assert.match(text, new RegExp(`\`${kind}\``));
+  }
+});
+
 test('no ledger mod command names a removed script', () => {
   for (const file of ['go.md', 'task.md', 'update.md', 'close.md', 'next.md', 'park.md']) {
     assert.doesNotMatch(read(`mods/ledger/commands/${file}`), /cc-task-new|cc-ledger-parent|cc-ledgers|cc-worktree-retire|cc-ledger-dashboard/, file);
   }
+});
+
+function kindSetup(t: TestContext) {
+  const h = home(t);
+  copyFileSync(path.join(REPO, 'ledger.template.md'), path.join(h, '.claude/ledger.template.md'));
+  const app = repository(h, path.join(h, 'repos/app'));
+  writeFileSync(path.join(app, '.git/info/exclude'), '.claude/\n');
+  const backlogFile = (slug: string): string => path.join(storeFolder(h, 'ledger-backlog', app), `${slug}.json`);
+  const worktreeOf = (slug: string): string => path.join(app, '.claude/worktrees', slug);
+  const ledgerOf = (worktree: string): string => path.join(worktree, '.claude/ledger.md');
+  return { h, app, backlogFile, worktreeOf, ledgerOf };
+}
+
+const locationOf = (text: string): string[] => (/^## Location\n((?:- .*\n)*)/m.exec(text)?.[1] ?? '').split('\n').filter((line) => line !== '');
+const kindsIn = (text: string): string[] => locationOf(text).filter((line) => line.startsWith('- kind:'));
+
+test('ledger task new --kind docs writes - kind: docs as the last ## Location bullet of a backlog task', (t) => {
+  const { h, app, backlogFile } = kindSetup(t);
+  ok(ledger(h, app, 'task', 'new', 'docs-task', '--kind', 'docs'));
+  const location = locationOf(readLedgerFile(backlogFile('docs-task')));
+  assert.deepEqual(location.filter((line) => line.startsWith('- kind:')), ['- kind: docs']);
+  assert.equal(location.at(-1), '- kind: docs');
+});
+
+test('ledger task new adds the kind as the last ## Location bullet when the template has no - kind: line', (t) => {
+  const { h, app, backlogFile } = kindSetup(t);
+  ok(ledger(h, app, 'task', 'new', 'docs-task', '--kind', 'docs'));
+  assert.equal(locationOf(readLedgerFile(backlogFile('docs-task'))).at(-1), '- kind: docs');
+});
+
+test('ledger task new replaces the kind of a template that has a - kind: line', (t) => {
+  const { h, app, backlogFile } = kindSetup(t);
+  const template = path.join(h, '.claude/ledger.template.md');
+  writeFileSync(template, readFileSync(template, 'utf8').replace(/^(- design refs:.*\n)/m, '$1- kind: investigation\n'));
+  ok(ledger(h, app, 'task', 'new', 'docs-task', '--kind', 'docs'));
+  ok(ledger(h, app, 'task', 'new', 'plain'));
+  assert.deepEqual(kindsIn(readLedgerFile(backlogFile('docs-task'))), ['- kind: docs']);
+  assert.deepEqual(kindsIn(readLedgerFile(backlogFile('plain'))), ['- kind: code']);
+});
+
+test('ledger task new without --kind writes - kind: code', (t) => {
+  const { h, app, backlogFile } = kindSetup(t);
+  ok(ledger(h, app, 'task', 'new', 'plain'));
+  assert.deepEqual(kindsIn(readLedgerFile(backlogFile('plain'))), ['- kind: code']);
+});
+
+test('ledger task new --stack and --here write the kind given', (t) => {
+  const { h, app, worktreeOf, ledgerOf } = kindSetup(t);
+  worktreeTask(h, app, { slug: 'epic' });
+  ok(ledger(h, worktreeOf('epic'), 'task', 'new', 'sub', '--stack', '--kind', 'investigation'));
+  assert.deepEqual(kindsIn(readFileSync(ledgerOf(worktreeOf('sub')), 'utf8')), ['- kind: investigation']);
+  const side = worktreeOf('side');
+  git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/side', side, 'main');
+  ok(ledger(h, side, 'task', 'new', '--here', '--kind', 'docs'));
+  assert.deepEqual(kindsIn(readFileSync(ledgerOf(side), 'utf8')), ['- kind: docs']);
+});
+
+test('ledger task new with an unknown --kind fails, names the kinds, and makes no ledger, worktree or branch', (t) => {
+  const { h, app, backlogFile, worktreeOf, ledgerOf } = kindSetup(t);
+  const refused = (ran: Ran): void => {
+    assert.notEqual(ran.status, 0, ran.stdout);
+    for (const kind of ['code', 'docs', 'investigation']) assert.match(ran.stderr, new RegExp(`\\b${kind}\\b`));
+  };
+  refused(ledger(h, app, 'task', 'new', 'odd', '--kind', 'nonsense'));
+  assert.equal(hasLedgerFile(backlogFile('odd')), false);
+  worktreeTask(h, app, { slug: 'epic' });
+  refused(ledger(h, worktreeOf('epic'), 'task', 'new', 'sub', '--stack', '--kind', 'nonsense'));
+  assert.equal(existsSync(worktreeOf('sub')), false);
+  assert.equal(git(h, app, 'branch', '--list', 'sub'), '');
+  const side = worktreeOf('side');
+  git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/side', side, 'main');
+  refused(ledger(h, side, 'task', 'new', '--here', '--kind', 'nonsense'));
+  assert.equal(existsSync(ledgerOf(side)), false);
+});
+
+test('ledger go keeps the kind of a backlog task in its worktree ledger', (t) => {
+  const { h, app, worktreeOf, ledgerOf } = kindSetup(t);
+  ok(ledger(h, app, 'task', 'new', 'docs-task', '--kind', 'docs'));
+  ok(ledger(h, app, 'go', 'docs-task'));
+  assert.deepEqual(kindsIn(readFileSync(ledgerOf(worktreeOf('docs-task')), 'utf8')), ['- kind: docs']);
+});
+
+test('a task made with --kind docs goes from plan straight to build', (t) => {
+  const { h, app, worktreeOf } = kindSetup(t);
+  ok(ledger(h, app, 'task', 'new', 'docs-task', '--kind', 'docs'));
+  ok(ledger(h, app, 'go', 'docs-task'));
+  const worktree = worktreeOf('docs-task');
+  ok(ledger(h, worktree, 'notes', 'stage', 'plan', 'pass'));
+  ok(ledger(h, worktree, 'notes', 'stage', 'build', 'pass'));
 });

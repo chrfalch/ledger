@@ -70,12 +70,17 @@ ledger steps below still apply.
      l=$(readlink "$f")
      case "$l" in /*) f="$l" ;; *) f="$(dirname "$f")/$l" ;; esac
    done
-   "$(cd -P "$(dirname "$f")/.." && pwd)/bin/ledger" task new <slug> --goal '<goal>'
+   "$(cd -P "$(dirname "$f")/.." && pwd)/bin/ledger" task new <slug> --kind <kind> --goal '<goal>'
    ```
 
    If new-task step 3 picked LLPs, add `--design-refs` with their numbers,
    comma-separated, such as `--design-refs 3,12`. The script writes them on
    the `- design refs:` line of the new ledger.
+
+   Pick the kind of task from the goal, and always add `--kind` with it.
+   Use `docs` when the work changes only documentation. Use `investigation`
+   when the result is a report or an answer, with no code change. Use `code`
+   for anything else. The kind sets the stages the task goes through.
 5. Run the same `bin/ledger` as `bin/ledger go <slug>`, with nothing else. It
    makes the worktree and branch. Do not move this session into the worktree:
    the next session does.
