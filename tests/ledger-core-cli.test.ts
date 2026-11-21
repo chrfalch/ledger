@@ -492,9 +492,9 @@ test('ledger --help lists the groups, the short forms and deploy, and hides the 
   for (const command of ['hook', 'session', 'auto-prune', 'park', 'unpark', 'retire', 'archive', 'parent', 'migrate']) assert.doesNotMatch(stdout, listedIn(command), `--help hides ${command}`);
 });
 
-test('ledger task --help lists new, go, park, unpark, retire, show, list and archive', (t) => {
+test('ledger task --help lists new, go, claim, touch, release, park, unpark, retire, show, list and archive', (t) => {
   const stdout = ok(ledger(home(t), path.sep, 'task', '--help'));
-  for (const command of ['new', 'go', 'park', 'unpark', 'retire', 'show', 'list', 'archive']) assert.match(stdout, listedIn(command), `task --help lists ${command}`);
+  for (const command of ['new', 'go', 'claim', 'touch', 'release', 'park', 'unpark', 'retire', 'show', 'list', 'archive']) assert.match(stdout, listedIn(command), `task --help lists ${command}`);
 });
 
 test('ledger worktrees --help hides auto-prune, which only a hook runs', (t) => {

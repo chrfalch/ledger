@@ -1,7 +1,8 @@
 import type { EngineInterface, PluginState, Register, ToolCallResult } from 'claude-code'
 
-import { ledgerJson, ledgerText, LONG_TIMEOUT_MS, message, ownTask, readSession, type AutoPruned, type NextChild, type Parked, type RetirePlan, type Started } from './cli'
+import { ledgerBin, ledgerJson, ledgerSucceeded, ledgerText, LONG_TIMEOUT_MS, message, ownTask, readSession, type AutoPruned, type Claimed, type NextChild, type Parked, type RetirePlan, type Started } from './cli'
 import {
+  claimFailedMessage,
   CLEAR_POINT_OPTION,
   clearPointReminder,
   descriptionMessage,
@@ -11,6 +12,7 @@ import {
   goArgs,
   goCommand,
   goDeniedMessage,
+  heldMessage,
   HELP,
   isDescription,
   isGoArgs,
@@ -34,6 +36,8 @@ import {
   slugExpectedMessage,
   startedElsewhereMessage,
   startFailedMessage,
+  TAKE_OVER_OPTION,
+  TAKE_OVER_UNPICKED,
   taskName,
   typedOnlyMessage,
   type BranchFacts,
@@ -50,10 +54,18 @@ type PreviousTask = NonNullable<GoArm['previous']>
 const armed = { plugin: 'ledger', key: 'armed' } as const
 const titled = { plugin: 'ledger', key: 'titled' } as const
 const clearApproved = { plugin: 'ledger', key: 'clearApproved' } as const
+const takeOverApproved = { plugin: 'ledger', key: 'takeOverApproved' } as const
 const clearPoint = { plugin: 'ledger', key: 'clearPoint' } as const
+const touched = { plugin: 'ledger', key: 'touched' } as const
+const heldTask = { plugin: 'ledger', key: 'heldTask' } as const
 
 /** `ledger go` exits 2 when no task has the slug. */
 const NO_SUCH_TASK = 2
+
+const TAKE_OVER = '--take-over'
+
+/** bin/ledger writes a claim's activity at most this often, so a touch sooner would change nothing. */
+const TOUCH_EVERY_MS = 15 * 60_000
 
 /**
  * The switch a /ledger:go or model-started /ledger:next call is starting, from its armed check until it armed the switch or
@@ -88,29 +100,46 @@ function goFields({ worktree, promoted, chain, parent, children = [], unparked, 
 
 /**
  * Everything /ledger:go does before go.md runs: read this session's ledger, let `ledger go` start the task, and arm the
- * clear. A text says why the task was not started, or where a task of another repo was started; then the clear is not
- * armed, and a clear this turn already armed stays.
+ * clear. A text says why the task was not started, or where a task of another repo was started; `heldArgs` hand go.md the
+ * claim of the session that holds the task. Then the clear is not armed, and a clear this turn already armed stays.
+ * The model may take over only the held task the operator picked "Take over" for, once per pick.
  */
-async function startGo($: EngineInterface, input: string): Promise<{ target: string; fields: GoFields; args: string; arm: GoArm } | { text: string }> {
-  const target = input.trim()
+async function startGo(
+  $: EngineInterface,
+  input: string,
+  by: 'operator' | 'model',
+): Promise<{ target: string; fields: GoFields; args: string; arm: GoArm } | { heldArgs: string } | { text: string }> {
+  const given = input.trim()
+  const takeOver = given === TAKE_OVER || given.endsWith(` ${TAKE_OVER}`)
+  const target = takeOver ? given.slice(0, -TAKE_OVER.length).trim() : given
   if (target === '') return { text: GO_USAGE }
   if (isDescription(target)) return { text: descriptionMessage(target) }
   if (switchStarting !== undefined) return { text: oneSwitchPerTurnMessage(switchStarting, target) }
   switchStarting = { mode: 'go', slug: target }
   try {
+    if (takeOver && by === 'model') {
+      const { value: approved } = await $.state.get(takeOverApproved)
+      if (approved !== target) return { text: TAKE_OVER_UNPICKED }
+      await $.state.set(takeOverApproved, null)
+      await $.state.set(heldTask, null)
+    }
     const { value: alreadyArmed } = await $.state.get(armed)
     if (alreadyArmed) return { text: oneSwitchPerTurnMessage(alreadyArmed, target) }
     const session = await readSession($)
     if (!session.ok) return { text: lookupFailedMessage(session.error) }
     const own = ownTask(session)
     const here = session.main
-    const started = await ledgerJson<Started>($, goCommand(target))
+    const sessionId = await $.session.id()
+    const started = await ledgerJson<Started>($, [...goCommand(target), '--session', sessionId, ...(takeOver ? [TAKE_OVER] : [])])
     let arm: GoArm
     let fields: GoFields
     if (started.ok) {
       if (started.main !== here) return { text: startedElsewhereMessage(started) }
       arm = { mode: 'go', slug: started.slug, ...(own === undefined || own.path === started.ledger ? {} : { previous: previousOf(own) }) }
       fields = goFields(started, here)
+    } else if (started.held !== undefined) {
+      await recordHeld($, sessionId, target)
+      return { heldArgs: goArgs(target, own?.path, { held: started.held }) }
     } else if (started.exitCode === NO_SUCH_TASK && isNewSlug(target) && here !== undefined) {
       arm = { mode: 'go', slug: target, isNew: true, main: here, ...(own === undefined ? {} : { previous: previousOf(own) }) }
       fields = { isNew: true }
@@ -257,6 +286,54 @@ async function takeClearPoint($: EngineInterface): Promise<number | undefined> {
   return value.pending
 }
 
+/** The slug of a prompt that is exactly `go <slug>`, as a /ledger:go or /ledger:next sends it after the clear. */
+const goSlug = (text: string): string | undefined => /^go\s+([^\s-]\S*)$/.exec(text.trim())?.[1]
+
+/** A line for the model beside the prompt; `held` when another session holds the task, so the turn asks the operator. */
+type ClaimLine = { text: string; held: boolean }
+
+/** Names the task a "Take over" pick may approve. A lost record only makes that pick approve nothing. */
+async function recordHeld($: EngineInterface, sessionId: string, slug: string): Promise<void> {
+  await $.state.set(heldTask, { sessionId, slug }).catch(() => undefined)
+}
+
+/**
+ * Claims the task for this session; a line for the model when it could not, which never stops the turn. A claim forgets
+ * a task found held before, so a later "Take over" pick cannot approve taking that one over.
+ */
+async function claimAtGo($: EngineInterface, slug: string): Promise<ClaimLine | undefined> {
+  const sessionId = await $.session.id()
+  const answer = await ledgerJson<Claimed>($, ['task', 'claim', slug, '--session', sessionId])
+  if (answer.ok) {
+    await $.state.set(heldTask, null).catch(() => undefined)
+    return undefined
+  }
+  if (answer.held === undefined) return { text: claimFailedMessage(slug, answer.error), held: false }
+  await recordHeld($, sessionId, slug)
+  return { text: heldMessage(slug, answer.held, ledgerBin($), sessionId), held: true }
+}
+
+/**
+ * Marks every claim of this session active, so that none expires while the session works, whichever way it was taken.
+ * Only a touch that succeeded counts, so a failure is tried again at the next turn end.
+ */
+async function touchClaims($: EngineInterface): Promise<void> {
+  try {
+    const sessionId = await $.session.id()
+    const now = await $.clock.now()
+    const { value } = await $.state.get(touched)
+    if (value?.sessionId === sessionId && now - value.at < TOUCH_EVERY_MS) return
+    if (await ledgerSucceeded($, ['task', 'touch', '--all', '--session', sessionId])) await $.state.set(touched, { sessionId, at: now })
+  } catch {}
+}
+
+/** Ends every claim of session `sessionId`, by default this one. A failure only leaves the claims to expire. */
+async function releaseClaims($: EngineInterface, sessionId?: string): Promise<void> {
+  try {
+    await ledgerText($, ['task', 'release', '--all', '--session', sessionId ?? (await $.session.id())])
+  } catch {}
+}
+
 /** At a turn end that does not clear: the model may have just finished or reopened the task, which auto-prune acts on once. */
 async function finishTurn($: EngineInterface, clearPointTokens: number): Promise<void> {
   const session = await readSession($)
@@ -313,18 +390,34 @@ function answerOf($: EngineInterface, command: string, args: string | undefined)
 // /ledger:next is typed-only too, unless the operator just picked the clear-point option: its own Skill hook decides.
 const TYPED_ONLY = new Set(['ledger:close', 'ledger:park'])
 
-const CLEAR_POINT_PICKS = [CLEAR_POINT_OPTION, `${CLEAR_POINT_OPTION} (Recommended)`]
+/** The operator's answers in a question box. An answer the box gave itself after the operator was away is not the operator's. */
+function operatorAnswers(asked: ToolCallResult<'AskUserQuestion'>): string[] {
+  if (asked.deny !== undefined || asked.isError === true || asked.result.afkTimeoutMs !== undefined) return []
+  return Object.values<unknown>(asked.result.answers).filter(answer => typeof answer === 'string')
+}
+
+const labelsOf = (option: string): string[] => [option, `${option} (Recommended)`]
 
 /**
- * Whether the operator picked the clear-point option in a question box. An answer the box gave itself after the operator
- * was away is not the operator's. A multi-select answer joins its labels with ", ", which the option's label holds too,
- * so a pick is matched as a whole label between separators rather than by splitting.
+ * Whether the operator picked the clear-point option. A multi-select answer joins its labels with ", ", which the
+ * option's label holds too, so a pick is matched as a whole label between separators rather than by splitting.
  */
-function picksClearPoint(asked: ToolCallResult<'AskUserQuestion'>): boolean {
-  if (asked.deny !== undefined || asked.isError === true || asked.result.afkTimeoutMs !== undefined) return false
-  return Object.values<unknown>(asked.result.answers).some(
-    answer => typeof answer === 'string' && CLEAR_POINT_PICKS.some(label => `, ${answer}, `.includes(`, ${label}, `)),
-  )
+const picksClearPoint = (asked: ToolCallResult<'AskUserQuestion'>): boolean =>
+  operatorAnswers(asked).some(answer => labelsOf(CLEAR_POINT_OPTION).some(label => `, ${answer}, `.includes(`, ${label}, `)))
+
+/**
+ * Whether the operator's whole answer is "Take over": one that also names another option is no pick, as it ends a claim.
+ * In a box with several questions the answer may belong to another one, so only a box with one answer counts.
+ */
+const picksTakeOver = (asked: ToolCallResult<'AskUserQuestion'>): boolean => {
+  const answers = operatorAnswers(asked)
+  return answers.length === 1 && labelsOf(TAKE_OVER_OPTION).includes(answers[0])
+}
+
+/** The held task a "Take over" pick approves the take-over of; none when this session found none held. */
+async function heldSlug($: EngineInterface): Promise<string | null> {
+  const { value } = await $.state.get(heldTask)
+  return value?.sessionId === (await $.session.id()) ? value.slug : null
 }
 
 /** Whether only the operator may run `command` with `args`: it deletes, writes or clears the session. */
@@ -390,8 +483,10 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'ledger:go' }, async ($, e, next) => {
     // Should an engine raise both command.run and tool.call for one command, the second one sees this hook's own args.
     if (isGoArgs(e.args ?? '')) return next(e)
-    const started = await startGo($, e.args ?? '')
-    return 'text' in started ? started : disarmedOnFailure($, started.arm, next({ ...e, args: started.args }))
+    const started = await startGo($, e.args ?? '', 'operator')
+    if ('text' in started) return started
+    if ('heldArgs' in started) return next({ ...e, args: started.heldArgs })
+    return disarmedOnFailure($, started.arm, next({ ...e, args: started.args }))
   }).catch(async ($, e, next) => (next.called ? next(e) : { text: lookupFailedMessage(next.error.message ?? next.error.kind) }))
 
   // The other commands raise no command.run through the Skill tool either. A deny answers without running the tool, so the
@@ -411,8 +506,9 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return { deny: GO_FROM_SUBAGENT }
     // No slug has a colon, so even one of the lines this hook writes means the model passed them instead of a slug.
     if (/^(task|ledger):/.test(e.args ?? '')) return { deny: slugExpectedMessage(e.args ?? '') }
-    const started = await startGo($, e.args ?? '')
+    const started = await startGo($, e.args ?? '', 'model')
     if ('text' in started) return { deny: started.text }
+    if ('heldArgs' in started) return next({ ...e, args: started.heldArgs })
     // The permission prompt runs inside next(), after `ledger go`. A started worktree stays: the next /ledger:go finds it.
     const ran = await disarmedOnFailure($, started.arm, next({ ...e, args: started.args }))
     // A person's No at the permission prompt comes back as an error result, not as a deny.
@@ -443,15 +539,18 @@ export const register: Register = (on, options) => {
   }).catch(async ($, e, next) => (next.called ? next(e) : { deny: lookupFailedMessage(next.error.message ?? next.error.kind) }))
 
   // Every answer replaces the last approval, so a later "Not yet" takes back an earlier pick. A subagent's question box
-  // approves nothing: the clear-point question is the main session's. Nor do answers the model wrote into the call itself.
+  // approves nothing: the clear-point and held questions are the main session's. Nor do answers the model wrote into the call itself.
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
     const asked = await next(e)
-    await $.state.set(clearApproved, e.agentId === undefined && e.answers === undefined && picksClearPoint(asked))
+    const byOperator = e.agentId === undefined && e.answers === undefined
+    await $.state.set(clearApproved, byOperator && picksClearPoint(asked))
+    await $.state.set(takeOverApproved, byOperator && picksTakeOver(asked) ? await heldSlug($) : null)
     return asked
   }).catch(async ($, e, next) => {
     // The operator's answer is handed back, never asked again; a pick that was not written approves nothing.
     const asked = await next(e)
     await $.state.set(clearApproved, false).catch(() => undefined)
+    await $.state.set(takeOverApproved, null).catch(() => undefined)
     return asked
   })
 
@@ -485,19 +584,26 @@ export const register: Register = (on, options) => {
     on('command.run', { command }, async ($, e) => ({ text: (await answerOf($, command, e.args)) ?? '' }))
   }
 
-  // The offer reaches the model as context beside the next prompt, which the operator does not see. A slash command's turn
-  // has its own instructions, so the offer waits for the next plain prompt.
+  // The claim line and the offer reach the model as context beside the prompt, which the operator does not see. A slash
+  // command's turn has its own instructions, so the offer waits for the next plain prompt.
   on('prompt.submit', async ($, e, next) => {
     if (e.command !== undefined) return next(e)
-    const tokens = await takeClearPoint($)
-    return next(tokens === undefined ? e : { ...e, context: [...(e.context ?? []), clearPointReminder(tokens)] })
+    const slug = goSlug(e.text)
+    const claim = slug === undefined ? undefined : await claimAtGo($, slug).catch((error): ClaimLine => ({ text: claimFailedMessage(slug, message(error)), held: false }))
+    // The held question has the turn to itself, so the offer waits for a later prompt.
+    const tokens = claim?.held ? undefined : await takeClearPoint($).catch(() => undefined)
+    const lines = [claim?.text, tokens === undefined ? undefined : clearPointReminder(tokens)].filter(line => line !== undefined)
+    return next(lines.length === 0 ? e : { ...e, context: [...(e.context ?? []), ...lines] })
   }).catch(async ($, e, next) => next(e))
 
   // $.command.run and $.prompt.submit must not be awaited inside a command.run hook, so the clear waits for the turn's end.
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
-    // The pick answers the question of this turn only.
-    await $.state.set(clearApproved, false)
+    // A pick answers the question of this turn only. Each reset is its own try, so neither failure leaves the other pick
+    // standing or skips the turn's end; the take-over pick goes first, as it ends another session's claim.
+    await $.state.set(takeOverApproved, null).catch(() => undefined)
+    await $.state.set(clearApproved, false).catch(() => undefined)
+    await touchClaims($)
     const { value } = await $.state.get(armed)
     // A turn that clears does not rename: the session is still in the old task, and the turn of `go <slug>` renames.
     // It prunes through showRetireHint instead, so each turn prunes at most once.
@@ -523,6 +629,8 @@ export const register: Register = (on, options) => {
         return next(e)
       }
     }
+    // The new session has another id, so the claim of this one would hold the task against it.
+    await releaseClaims($)
     const go = `go ${value.slug}`
     const continues = value.mode === 'next' || value.mode === 'go'
     try {
@@ -541,4 +649,10 @@ export const register: Register = (on, options) => {
     }
     return next(e)
   })
+
+  // A /clear ends the session too, so the claims of an armed clear may already be gone; a second release changes nothing.
+  on('session.end', async ($, e, next) => {
+    await releaseClaims($, e.sessionId)
+    return next(e)
+  }).catch(async ($, e, next) => next(e))
 }

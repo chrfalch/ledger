@@ -107,9 +107,36 @@ export const oneSwitchPerTurnMessage = (armed: Switch, target: string): string =
 
 export const nextAfterSwitchMessage = (armed: Switch): string => `${notStarted(armed, '/ledger:next')}.`
 
+/** A session's claim on a task, as bin/ledger stores it: the session, when it claimed the task, and its last activity. */
+export type Claim = { session: string; since: string; active: string }
+
+const claimText = ({ session, since, active }: Claim): string => `session ${session} since ${since}, active ${active}`
+
+/** The held option in a question box; a pick of it lets the model start /ledger:go <slug> --take-over once, for the held task. */
+export const TAKE_OVER_OPTION = 'Take over'
+
+export const TAKE_OVER_UNPICKED = `/ledger:go --take-over ends another session's claim, so the model may run it only right after the operator picks "${TAKE_OVER_OPTION}". Nothing was started. First ask the operator with AskUserQuestion, with the options "${TAKE_OVER_OPTION}", "Pick another task" and "Stop".`
+
+const shellQuoted = (word: string): string => `'${word.replaceAll("'", "'\\''")}'`
+
+export function heldMessage(slug: string, { session, since, active }: Claim, bin: string, own: string): string {
+  const ledger = shellQuoted(bin)
+  return [
+    `Task ${slug} is held by session ${session} since ${since}, last active ${active}. Do not start work on it.`,
+    'Ask the operator what to do with AskUserQuestion, with three options:',
+    `"${TAKE_OVER_OPTION}", which ends the other session's claim: then run \`${ledger} task claim ${shellQuoted(slug)} --take-over --session ${own}\` and continue the task;`,
+    `"Pick another task": list this repo's tasks with \`${ledger} list\` and ask which one to continue;`,
+    '"Stop": nothing changes.',
+  ].join(' ')
+}
+
+export const claimFailedMessage = (slug: string, error: string): string => `Could not claim task ${slug} for this session. ${sentence(error)}`
+
 /** What `ledger go` did, as go.md reads it. `parent` and `children` name tasks as the operator types them. */
 export type GoFields = {
   isNew?: true
+  /** Another session's live claim, which stopped `ledger go`. */
+  held?: Claim
   unparked?: { date: string; reason: string }
   parent?: string
   /** Each child task of the started task, with its status: `fix-login (active)`. */
@@ -122,11 +149,12 @@ export type GoFields = {
 }
 
 // One field per line, because a path can hold spaces. go.md reads this format.
-export function goArgs(target: string, ledger: string | undefined, { isNew, unparked, parent, children = [], promoted, picked, marked, warnings = [] }: GoFields): string {
+export function goArgs(target: string, ledger: string | undefined, { isNew, held, unparked, parent, children = [], promoted, picked, marked, warnings = [] }: GoFields): string {
   return [
     `task: ${target}`,
     `ledger: ${ledger ?? 'none'}`,
     ...(isNew ? ['new: yes'] : []),
+    ...(held ? [`held: ${claimText(held)}`] : []),
     ...(unparked ? [`parked: ${unparked.date} — ${unparked.reason}`] : []),
     ...(parent ? [`parent: ${parent}`] : []),
     ...(children.length > 0 ? [`children: ${children.join(', ')}`] : []),

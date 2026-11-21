@@ -150,7 +150,7 @@ const FULL: TaskRecord = {
   parent: { slug: 'wf-records', main: '/repos/ledger' },
   order: 2,
   dependencies: [{ slug: 'wf-command-groups' }, { slug: 'wf-repo-identity', main: '/repos/ledger' }],
-  claim: 'session 42',
+  claim: { session: '42', since: '2026-11-20T10:00:00Z', active: '2026-11-20T11:30:00Z' },
   pr: 'https://github.com/chrfalch/ledger/pull/109',
   repo: 'github.com/chrfalch/ledger',
   worktree: '/repos/ledger/.claude/worktrees/wf-task-records',
@@ -280,6 +280,19 @@ test('validateRecord rejects a wrong shape and names where', () => {
   rejects({ ...valid, colour: 'red' }, /colour/);
   rejects({ ...valid, designRefs: 'all' }, /designRefs/);
   rejects({ ...valid, questions: [{ id: '1', text: 'q' }] }, /questions\[0\]\.id/);
+  rejects({ ...valid, claim: 'session 42' }, /claim is not an object/);
+  rejects({ ...valid, claim: { session: '42', since: '2026-11-20T10:00:00.000Z', active: '2026-11-20T11:30:00Z' } }, /claim\.since is not a time such as 2026-11-20T10:00:00Z/);
+  rejects({ ...valid, claim: { session: '42', since: '2026-11-20T10:00:00Z', active: '2026-13-20T11:30:00Z' } }, /claim\.active/);
+  rejects({ ...valid, claim: { session: '42', since: '2026-11-20T10:00:00Z' } }, /claim\.active is missing/);
+  rejects({ ...valid, claim: { session: 'two words', since: '2026-11-20T10:00:00Z', active: '2026-11-20T11:30:00Z' } }, /claim/);
+});
+
+test('a claim bullet in any other form than session <id> since <time>, active <time> is no claim: it stays in the notes, under ## Location', () => {
+  for (const value of ['session 42', 'session 42 since 2026-11-20T10:00:00Z', 'session 42 since 2026-11-20T10:00:00.000Z, active 2026-11-20T11:30:00Z', 'session 42 since yesterday, active today']) {
+    const record = parseRecord(fixture('full.md').replace(/^- claim: .*$/m, `- claim: ${value}`));
+    assert.equal(record.claim, undefined, value);
+    assert.deepEqual(record.notes.slice(1), ['## Location', `- claim: ${value}`], value);
+  }
 });
 
 test('validateRecord rejects a record its Markdown cannot carry, so every valid record round-trips', () => {

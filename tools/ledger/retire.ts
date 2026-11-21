@@ -1,6 +1,6 @@
 import { accessSync, constants, lstatSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import path from 'node:path';
-import { markRetired, putChildReport } from './edit.js';
+import { markRetired, putChildReport, withoutClaim } from './edit.js';
 import { fail } from './failure.js';
 import { folderEntries } from './files.js';
 import { isReadableSlug, parseLedger, type Child } from './format.js';
@@ -362,6 +362,8 @@ function evidenceProblem(evidence: string): EvidenceProblem | undefined {
   return walk(evidence, root, 0);
 }
 
+/** The ledger as it is archived: a retired task has no claim, whichever session held it. */
+
 /** Reads what planRetire needs. It writes nothing; the fetch of the default branch only moves origin/<default>. */
 export function readRetire(context: Context, slug: string | undefined): RetireFacts {
   const { cwd, store } = context;
@@ -386,7 +388,7 @@ export function readRetire(context: Context, slug: string | undefined): RetireFa
       buildFolders: xcode === undefined || xcode.keptBecause !== undefined ? [] : [xcode.path],
     };
   }
-  const text = readLedger(context, task);
+  const text = withoutClaim(readLedger(context, task));
   const archiveRepo = repoKey(main);
   const identical = store.archive.list(archiveRepo).find((copy) => copy.text === storedText(text));
   return {
@@ -564,7 +566,7 @@ function stopIfChanged(context: Context, plan: RetirePlan, copy: ArchiveCopy, re
     text = undefined;
   }
   const changed = [
-    ...(text === undefined || storedText(text) !== archive.read(copy.repo, copy.name)?.text ? [`the ledger ${plan.task.file}`] : []),
+    ...(text === undefined || storedText(withoutClaim(text)) !== archive.read(copy.repo, copy.name)?.text ? [`the ledger ${plan.task.file}`] : []),
     ...(archive.evidenceState(copy.repo, copy.name, evidence) === 'differs' ? [evidence === undefined ? 'the archived evidence' : `the evidence ${evidence}/`] : []),
   ];
   if (text === undefined || changed.length > 0) stopBefore(removal, changed, copy);
