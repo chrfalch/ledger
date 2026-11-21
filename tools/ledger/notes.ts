@@ -4,6 +4,7 @@ import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
 import { parseLedger } from './format.js';
 import { sessionLedgers } from './hooks.js';
+import { isKind, KINDS, STAGES } from './kinds.js';
 import { parseRecord, renderRecord, validateRecord, type Constraint, type Decision, type Question, type Step, type TaskRecord } from './record.js';
 import { loadTasks } from './registry.js';
 import { onAnotherMachine, type Task } from './tasks.js';
@@ -54,16 +55,7 @@ function sizeProblem(record: TaskRecord): string[] {
   return [`The ledger is ${count(markdown.length)} characters, over the limit of ${count(LEDGER_SIZE_LIMIT)}. Shorten the largest sections: ${largest.join(', ')}.`];
 }
 
-/** The stages of each kind of task, in the order a task goes through them. */
-export const STAGES: Readonly<Record<'code' | 'docs' | 'investigation', readonly string[]>> = {
-  code: ['plan', 'red', 'build', 'verify', 'review', 'pr'],
-  docs: ['plan', 'build', 'review', 'pr'],
-  investigation: ['plan', 'investigate', 'report', 'review'],
-};
-export type Kind = keyof typeof STAGES;
-const KINDS = Object.keys(STAGES).join(', ');
 const FINISHED = 'finished';
-const isKind = (kind: string): kind is Kind => Object.hasOwn(STAGES, kind);
 
 function stageProblems({ kind = 'code', stage }: TaskRecord): string[] {
   if (!isKind(kind)) return [`The kind ${kind} is not one of ${KINDS}.`];

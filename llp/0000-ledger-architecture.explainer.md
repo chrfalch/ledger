@@ -91,10 +91,12 @@ A tag is `observed`, `confirmed` or `inferred`. A step report keeps only the
 path of its file: relative to the worktree when the file is inside it, else
 absolute.
 
-`ledger notes stage` keeps the stages in order. `STAGES` in `notes.ts` lists
-the stages of each kind: code, docs and investigation. A task with no `kind`
-is code. The record's `stage` is the stage the task is at, and no `stage` means
-the first. The command's first argument must be that stage. Pass and `--skip` move to the next
+`ledger notes stage` keeps the stages in order. `STAGES` in `kinds.ts` lists
+the stages of each kind: code, docs and investigation. `ledger task new
+--kind <kind>` sets the kind, code by default, and writes it as `- kind:`. A
+task with no `kind` is code. The record's `stage` is the stage the task is at,
+and no `stage` means the first. The command's first argument must be that
+stage. Pass and `--skip` move to the next
 stage, or to `finished` after the last. Fail stays, or with `--back` returns
 to an earlier stage. A later stage is refused, as is an earlier one, and the
 message says to use `--skip` or `fail --back`. `--step <n>` also sets the

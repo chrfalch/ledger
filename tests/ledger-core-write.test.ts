@@ -40,7 +40,7 @@ function backlogText(slug: string, goal: string, main: string): string {
   return TEMPLATE.replace('# Task ledger — <slug>', `# Task ledger — ${slug}`)
     .replace('<one paragraph — what done looks like>', goal)
     .replace('## Location\n', `## Location\n- main: ${main}\n`)
-    .replace(/^- design refs: .*\n/m, '');
+    .replace(/^- design refs: .*\n/m, '- kind: code\n');
 }
 
 /** `text` with one line inserted after the line `after`, which must occur once. */
@@ -167,7 +167,7 @@ test('ledger task --here adds a ledger to the current linked worktree, named aft
     .replace('- worktree: <path>', `- worktree: ${worktree}`)
     .replace('- branch: <name>', '- branch: me/side')
     .replace('- base: <branch/commit>', `- base: HEAD @ ${base}`)
-    .replace(/^- design refs: .*\n/m, '');
+    .replace(/^- design refs: .*\n/m, '- kind: code\n');
   assert.equal(read(file), expected);
   assert.deepEqual(registry(h).filter(({ path: entry }) => entry === file).map(({ status }) => status), ['active']);
 });

@@ -65,12 +65,17 @@ parent task.
      l=$(readlink "$f")
      case "$l" in /*) f="$l" ;; *) f="$(dirname "$f")/$l" ;; esac
    done
-   "$(cd -P "$(dirname "$f")/.." && pwd)/bin/ledger" task new <slug> --goal '<goal>'
+   "$(cd -P "$(dirname "$f")/.." && pwd)/bin/ledger" task new <slug> --kind <kind> --goal '<goal>'
    ```
 
    If step 4 picked LLPs, add `--design-refs` with their numbers,
    comma-separated, such as `--design-refs 3,12`. The script writes them on
    the `- design refs:` line of the new ledger.
+
+   Pick the kind of task from the goal, and always add `--kind` with it.
+   Use `docs` when the work changes only documentation. Use `investigation`
+   when the result is a report or an answer, with no code change. Use `code`
+   for anything else. The kind sets the stages the task goes through.
 6. Check for a current ledger: `.claude/ledger.md` in the working directory of
    this session. In the main checkout, treat it as none.
 7. If there is a current ledger, the script already added one line under its
