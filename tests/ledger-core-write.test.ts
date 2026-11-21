@@ -4,7 +4,7 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { parseLedger } from '../tools/ledger/format.js';
 import { REPO } from './helpers.js';
-import { activeFile, archivedTask, backlogTask, git, home, ledger, LEDGER_BIN, ledgerText, ok, readLedgerFile, recordFile, repoKeyOf, repository, spawn, storeFolder, THIS_HOST, worktreeOf, worktreeTask, writeLedgerFile } from './ledger-core-fixtures.js';
+import { activeFile, archivedTask, backlogTask, git, home, ledger, LEDGER_BIN, ledgerText, ok, putActive, readLedgerFile, recordFile, repoKeyOf, repository, spawn, storeFolder, THIS_HOST, worktreeOf, worktreeTask, writeLedgerFile } from './ledger-core-fixtures.js';
 
 const TEMPLATE = readFileSync(path.join(REPO, 'ledger.template.md'), 'utf8');
 
@@ -713,6 +713,17 @@ test('tree order refuses a list that leaves out, adds or repeats a child, names 
   failed(ran, /Not named: b, c\./);
   assert.match(ran.stderr, /Not a live child task of epic; a retired child keeps no order: loose\./);
   assert.match(ran.stderr, /Named more than once: a\./);
+  assert.deepEqual(files.map(read), before);
+});
+
+test('tree order refuses a child that is active on another machine, names it, and writes nothing', (t) => {
+  const { h, app } = setup(t);
+  const parent = worktreeTask(h, app, { slug: 'epic', children: ['- a', '- far'] });
+  const a = backlogTask(h, app, { slug: 'a', parent: 'epic' });
+  const far = putActive(h, app, 'far', ledgerText({ slug: 'far', parent: 'epic', worktree: path.join(h, 'elsewhere/far') }));
+  const files = [parent, a, far];
+  const before = files.map(read);
+  failed(ledger(h, app, 'tree', 'order', 'epic', 'a', 'far'), /\bfar\b.*not on this machine/);
   assert.deepEqual(files.map(read), before);
 });
 

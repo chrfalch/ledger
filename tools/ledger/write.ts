@@ -882,6 +882,8 @@ export function orderChildren(context: Context, parentName: string, childNames: 
       ].join(' '),
     );
   }
+  const readOnly = [parent.task, ...picked.map(({ task }) => task)].filter(({ elsewhere }) => elsewhere);
+  if (readOnly.length > 0) fail(`${readOnly.map(notOnThisMachine).join(' ')} Nothing was changed.`);
   const orders = new Map(picked.map(({ task }, index) => [task, index + 1]));
   for (const [task, order] of orders) updateLedger(context, task, (text) => setLocationBullet(text, 'order', String(order)) ?? fail(`${task.file} has no ## Location section.`));
   updateLedger(context, parent.task, (text) => {
