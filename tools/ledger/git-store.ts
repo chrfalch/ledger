@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { lstatSync } from 'node:fs';
 import path from 'node:path';
-import { checkCommitted, cloneEnv, cloneGit, clonePaths, commitChanges, recordProblem, removeLegacyCopies, repairHook, setUpClone, SyncProblem, upgradeFormat, withCloneLock } from './clone.js';
+import { checkCommitted, cloneEnv, cloneGit, clonePaths, commitChanges, otherOwner, recordProblem, removeLegacyCopies, repairHook, setUpClone, SyncProblem, upgradeFormat, withCloneLock } from './clone.js';
 import { fail } from './failure.js';
 import { fileStoreAt, keptCreated } from './file-store.js';
 import { folderEntries } from './files.js';
@@ -65,6 +65,16 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
   let committed = false;
   /** The clone paths of the ledgers this store wrote since its last commit. */
   const written = new Set<string>();
+  const host = validHost(paths.home);
+  const hosts = ownHosts(paths.home);
+  /** Commits what this store wrote, and checks HEAD holds it as written, each of `texts` with its text. Call it under the clone lock. */
+  const commitWritten = (texts: ReadonlyMap<string, string> = new Map()): void => {
+    const made = commitChanges(clone, { host, ownHosts: hosts, own: written });
+    checkCommitted(clone, [...written], texts);
+    if (made) committed = true;
+    wrote = false;
+    written.clear();
+  };
   /** Fails when the collection folder or a repo folder in it is a symbolic link: a write through it could land anywhere. */
   const checkFolders = (collection: WrittenLedger['place'], repos: string[]): void => {
     for (const folder of [path.join(clone, collection), ...repos.map((repo) => files[collection].repoLocation(repo))]) {
@@ -95,7 +105,16 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
         };
         try {
           const result = write(...args);
-          if (changed(result)) note();
+          if (!changed(result)) return result;
+          note();
+          // A sync puts a change of another machine's record back as HEAD has it, so one between this write and its
+          // commit would undo it. Committed now, under this lock, it is in HEAD before any sync can look. A commit
+          // that fails leaves it to the next one, which says why.
+          if (collection === 'active' && touched.some((repo) => otherOwner(clone, ledgerFiles(collection, repo, args[1])[0], { host, ownHosts: hosts }) !== undefined)) {
+            try {
+              commitWritten();
+            } catch {}
+          }
           return result;
         } catch (error) {
           // A write that failed halfway may have changed a file all the same.
@@ -113,19 +132,10 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
     const file = ledgerFiles(place, repo, name)[0];
     return [file, recordJson(parseRecord(text), keptCreated(path.join(clone, file)))];
   };
-  const host = validHost(paths.home);
-  const hosts = ownHosts(paths.home);
   const commit = (expected: WrittenLedger[] = []): void => {
     if (!wrote && expected.length === 0) return;
     const texts = new Map(expected.map(keptRecord));
-    const made = withCloneLock(clone, () => {
-      const made = commitChanges(clone, { host, ownHosts: hosts, own: written });
-      checkCommitted(clone, [...written], texts);
-      return made;
-    });
-    if (made) committed = true;
-    wrote = false;
-    written.clear();
+    withCloneLock(clone, () => commitWritten(texts));
   };
   const writable = (place: 'backlog' | 'active'): Backlog => ({
     ...files[place],

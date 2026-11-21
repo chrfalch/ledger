@@ -351,8 +351,8 @@ export function commitChanges(clone: string, { message = 'Update ledgers', deadl
   let changed = checkedChanges(clone, deadline);
   // unique: a staged removal of a file that is still on disk is two entries.
   const theirs = unique(changed).flatMap((file) => {
-    const owner = own.has(file) ? undefined : recordOwner(clone, file, deadline);
-    return owner === undefined || owner === host || (host !== undefined && ownHosts.has(owner)) ? [] : [{ file, owner }];
+    const owner = own.has(file) ? undefined : otherOwner(clone, file, { host, ownHosts, deadline });
+    return owner === undefined ? [] : [{ file, owner }];
   });
   if (theirs.length > 0) {
     restoreFromHead(clone, theirs.map(({ file }) => file), deadline);
@@ -389,7 +389,7 @@ function checkedChanges(clone: string, deadline?: number): string[] {
  * makes a record of another machine this one's; as it is on disk only for a record HEAD lacks. Undefined for none, for
  * a record that is no JSON, or for no active record.
  */
-export function recordOwner(clone: string, file: string, deadline?: number): string | undefined {
+function recordOwner(clone: string, file: string, deadline?: number): string | undefined {
   if (!/^active\/[^/]+\/[^/]+\.json$/.test(file)) return undefined;
   const onDisk = path.join(clone, file);
   const committed = cloneGit(clone, ['show', `HEAD:${file}`], { deadline });
@@ -399,6 +399,12 @@ export function recordOwner(clone: string, file: string, deadline?: number): str
   } catch {
     return undefined;
   }
+}
+
+/** The host of the active record at `file`, a clone path, when that is another machine, so a commit puts a change of it back unless the change is its own. */
+export function otherOwner(clone: string, file: string, { host, ownHosts = new Set(), deadline }: Pick<CommitOptions, 'host' | 'ownHosts' | 'deadline'>): string | undefined {
+  const owner = recordOwner(clone, file, deadline);
+  return owner === undefined || owner === host || (host !== undefined && ownHosts.has(owner)) ? undefined : owner;
 }
 
 /** Whether the clone's branch has a commit. A lookup that fails for any other reason throws, so it is never taken for none. */
