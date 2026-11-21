@@ -158,7 +158,10 @@ record names another host, and when git lists no worktree of it here. An
 elsewhere task is read-only: `ledger go`, park, claim, retire's parent step,
 `ledger notes` and `ledger tree add` and `remove` refuse it or leave it alone,
 and name its host. A changed record of another host is put back, never
-committed (`commitChanges` in `tools/ledger/clone.ts`).
+committed (`commitChanges` in `tools/ledger/clone.ts`). The owner of a record
+is read from its committed copy in HEAD, so an edit on disk cannot make another
+machine's record this one's. Only a record HEAD lacks is read from disk
+(`recordOwner` in `tools/ledger/clone.ts`).
 
 "Another host" means a label that is not among `ownHosts`. Each label a machine
 stamps on a record goes into `~/.claude/ledger-hosts.json`, a list that stays
@@ -339,8 +342,10 @@ Then it does these steps:
 2. Removes the worktree, or the backlog ledger.
 3. Marks the task retired in its parent's ledger and copies the child's
    report there.
-4. Updates the task list.
-5. Deletes the merged branch and the worktree's Xcode build folders.
+4. Deletes the merged branch and the worktree's Xcode build folders.
+5. Removes the active record. It goes last, so a retire that stops early
+   leaves the task for a plain rerun to find and finish.
+6. Updates the task list.
 
 An archive copy is never replaced. `Archive.write` throws when the name is
 taken.
