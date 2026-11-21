@@ -226,16 +226,17 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
   const removed = facts.removedWorktree;
   actions.push(
     ...(removed !== undefined
-      ? [{ kind: 'prune-worktrees', main: removed.main, folder: removed.folder } as const, { kind: 'remove-active', ...removal } as const]
+      ? [{ kind: 'prune-worktrees', main: removed.main, folder: removed.folder } as const]
       : worktree === undefined
-      ? [{ kind: task.place === 'backlog' ? 'remove-backlog' : 'remove-active', ...removal } as const]
+      ? task.place === 'backlog'
+        ? [{ kind: 'remove-backlog', ...removal } as const]
+        : []
       : // The worktree first: one git cannot remove keeps the task, for a rerun to find by its active ledger.
-        [{ kind: 'remove-worktree', main: ref.main, folder: worktree.folder, force } as const, { kind: 'remove-active', ...removal } as const]),
+        [{ kind: 'remove-worktree', main: ref.main, folder: worktree.folder, force } as const]),
   );
   const parent = parentActions(facts, warnings);
   const hint = parent.filter(({ kind }) => kind === 'hint');
   actions.push(...parent.filter(({ kind }) => kind !== 'hint'));
-  actions.push({ kind: 'update-registry' });
   const state = worktree?.state ?? removed?.state;
   if (state?.branch !== undefined) {
     actions.push(
@@ -246,7 +247,9 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
   }
   const buildFolders = worktree?.buildFolders ?? removed?.buildFolders ?? [];
   if (buildFolders.length > 0) actions.push({ kind: 'delete-build-folders', folders: buildFolders });
-  actions.push(...hint);
+  // Last, so a retire that stops before it leaves the task for a plain rerun to find and finish.
+  if (task.place === 'active') actions.push({ kind: 'remove-active', ...removal });
+  actions.push({ kind: 'update-registry' }, ...hint);
 
   const blocked = blockers.some((blocker) => !isForceable(blocker) || !force);
   return { task, ...(worktree === undefined ? {} : { worktree }), blockers, blocked, warnings, actions };
@@ -661,7 +664,8 @@ function stopBefore(removal: string, changed: string[], copy: ArchiveCopy): neve
 
 /**
  * Carries out the plan in its order. A failure before the worktree or backlog ledger is removed stops the retire; after
- * that, the task is gone, so a rerun could not finish what a stop would skip, and each later step only warns.
+ * that each step only warns, but for the removal of the active record. That comes last, so a retire that stops on the
+ * way leaves the task for a rerun to find and finish.
  */
 export function executeRetire(context: Context, plan: RetirePlan, out: Output = consoleOutput): void {
   const { store } = context;
