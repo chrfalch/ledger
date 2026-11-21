@@ -760,6 +760,7 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
         const result = deleteBranchAt(action.main, action.branch, action.head);
         if (result === 'deleted') out.line(`deleted  branch ${action.branch}`);
         else if (result === 'moved') out.line(`kept     branch ${action.branch}, because it moved after retire checked it`);
+        else if ('checkedOut' in result) out.line(`kept     branch ${action.branch}, because it is checked out in ${result.checkedOut}`);
         else out.line(`kept     branch ${action.branch}, because git could not delete it: ${result.error}`);
         break;
       }

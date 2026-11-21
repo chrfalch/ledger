@@ -166,9 +166,12 @@ export function pruneWorktrees(main: string): string | undefined {
 
 /**
  * Deletes the branch only while it still points at `commit`, without git's merge check, which a squash-merged branch
- * never passes. `moved` when it points elsewhere now; otherwise git's error text.
+ * never passes. `moved` when it points elsewhere now, `checkedOut` the worktree that has it checked out, which git's
+ * update-ref would not protect; otherwise git's error text.
  */
-export function deleteBranchAt(main: string, branch: string, commit: string): 'deleted' | 'moved' | { error: string } {
+export function deleteBranchAt(main: string, branch: string, commit: string): 'deleted' | 'moved' | { checkedOut: string } | { error: string } {
+  const holder = worktrees(main).find((worktree) => worktree.branch === branch);
+  if (holder !== undefined) return { checkedOut: holder.path };
   const result = run(main, ['update-ref', '-d', `refs/heads/${branch}`, commit]);
   if (result.ok) {
     // update-ref leaves the branch's config section behind, which `git branch -D` would remove.
