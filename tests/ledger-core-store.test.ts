@@ -17,7 +17,7 @@ import { loadTasks } from '../tools/ledger/registry.js';
 import { parseRecord, recordJson, renderRecord } from '../tools/ledger/record.js';
 import { loadSqlite, sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
-import { createTask, goTask, parkTask, type Context } from '../tools/ledger/write.js';
+import { createTask, goTask, orderChildren, parkTask, type Context } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
 import { archivedTask, home, ledgerText, noSqlite, repoKeyOf, repository } from './ledger-core-fixtures.js';
 
@@ -1405,4 +1405,32 @@ test('the core reads and writes backlog ledgers and the registry through the sto
     tasks.map(({ slug, place }) => `${slug} ${place}`),
     ['add-cache active', 'fix-login backlog', 'old-task archive'],
   );
+});
+
+test('tree order checks every child for a ## Location section before it gives any child an order', (t) => {
+  const h = home(t);
+  const app = repository(h, path.join(h, 'repos/app'));
+  const paths = ledgerPaths(h);
+  const inner = fileStore(paths);
+  const key = repoKeyOf(app);
+  inner.backlog.write(key, 'epic', ledgerText({ slug: 'epic', main: app, children: ['- a', '- b'] }));
+  inner.backlog.write(key, 'a', ledgerText({ slug: 'a', main: app, parent: 'epic' }));
+  inner.backlog.write(key, 'b', ledgerText({ slug: 'b', main: app, parent: 'epic' }));
+  // Every store renders a ## Location section, so only a store that hides it gives a child without one.
+  const hidden = (name: string, text: string): string => (name === 'b' ? text.replace(/\n## Location\n[\s\S]*?\n\n/, '\n') : text);
+  const store: LedgerStore = {
+    ...inner,
+    backlog: {
+      ...inner.backlog,
+      list: (repo) => inner.backlog.list(repo).map((entry) => ({ ...entry, text: hidden(entry.name, entry.text) })),
+      read: (repo, name) => {
+        const entry = inner.backlog.read(repo, name);
+        return entry && { ...entry, text: hidden(name, entry.text) };
+      },
+      update: (repo, name, change) => inner.backlog.update(repo, name, (text) => change(hidden(name, text))),
+    },
+  };
+  const before = inner.backlog.read(key, 'a')?.text;
+  assert.throws(() => orderChildren({ paths, cwd: app, store }, 'epic', ['a', 'b']), (error) => error instanceof Failure && /\bb\b.*## Location/.test(error.message));
+  assert.equal(inner.backlog.read(key, 'a')?.text, before);
 });

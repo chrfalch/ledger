@@ -20,7 +20,7 @@ import {
 import { fail } from './failure.js';
 import { exists, isFolder, readText, writeAtomic } from './files.js';
 import { installPackages } from './install.js';
-import { isNewSlug, isReadableSlug, isRepoKeyShape, parseDependencies, parseLedger, showDependencies, type Child, type ChildMark, type Claim, type Dependency, type Location, type TaskRef } from './format.js';
+import { findSection, isNewSlug, isReadableSlug, isRepoKeyShape, parseDependencies, parseLedger, showDependencies, type Child, type ChildMark, type Claim, type Dependency, type Location, type TaskRef } from './format.js';
 import {
   addWorktree,
   branchExists,
@@ -884,6 +884,11 @@ export function orderChildren(context: Context, parentName: string, childNames: 
   }
   const readOnly = [parent.task, ...picked.map(({ task }) => task)].filter(({ elsewhere }) => elsewhere);
   if (readOnly.length > 0) fail(`${readOnly.map(notOnThisMachine).join(' ')} Nothing was changed.`);
+  const unlocated = picked.filter(({ task }) => findSection(task.ledger.sections, 'Location') === undefined);
+  if (unlocated.length > 0) {
+    const named = unlocated.map(({ ref, task }) => `${name(ref)} (${task.file})`).join(', ');
+    fail(`${named} ${unlocated.length === 1 ? 'has' : 'have'} no ## Location section to hold an order. Nothing was changed.`);
+  }
   const orders = new Map(picked.map(({ task }, index) => [task, index + 1]));
   for (const [task, order] of orders) updateLedger(context, task, (text) => setLocationBullet(text, 'order', String(order)) ?? fail(`${task.file} has no ## Location section.`));
   updateLedger(context, parent.task, (text) => {
