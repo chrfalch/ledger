@@ -272,6 +272,8 @@ test('/ledger:task makes the parent task first for a request with separately shi
   assert.match(split, /attach each child task in that order/);
   assert.doesNotMatch(split, /into the parent ledger|Edit/);
   assert.match(split, /`bin\/ledger tree add <parent> <child>`/);
+  assert.match(split, /`bin\/ledger tree order <parent> <child>\.\.\.`/);
+  assert.match(split, /`bin\/ledger tree depends <child> <task>\.\.\.`/);
   assert.match(split, /Never promote the parent task/);
   assert.match(split, /`\/ledger:go <parent>`/);
 });

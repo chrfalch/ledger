@@ -149,7 +149,7 @@ const FULL: TaskRecord = {
   stage: 'implement',
   parent: { slug: 'wf-records', main: '/repos/ledger' },
   order: 2,
-  dependencies: [{ slug: 'wf-command-groups' }, { slug: 'wf-repo-identity', main: '/repos/ledger' }],
+  dependencies: [{ slug: 'wf-command-groups' }, { slug: 'wf-repo-identity', repo: '/repos/ledger' }],
   claim: 'session 42',
   pr: 'https://github.com/chrfalch/ledger/pull/109',
   repo: 'github.com/chrfalch/ledger',
@@ -400,6 +400,80 @@ test('a plan row whose cells hold an escaped bar is a step of five cells, and a 
   assert.deepEqual(validateRecord(JSON.parse(JSON.stringify(record))), record);
   assert.deepEqual(readByPlugin(renderRecord(record)), readByPlugin(markdown));
   assert.deepEqual(lostOrMoved(markdown), []);
+});
+
+test("a dependency names its repo by key, an address or a path, and is left out for the task's own repo; it round-trips", () => {
+  const markdown = ledgerText({ slug: 'b', main: '/repos/app' }).replace('- design refs: none\n', '- design refs: none\n- order: 3\n- depends on: a, api @ github.com/acme/api, lib-x @ /repos/lib\n');
+  const record = parseRecord(markdown);
+  assert.equal(record.order, 3);
+  assert.deepEqual(record.dependencies, [{ slug: 'a' }, { slug: 'api', repo: 'github.com/acme/api' }, { slug: 'lib-x', repo: '/repos/lib' }]);
+  assert.equal(renderRecord(record), markdown);
+  assert.deepEqual(validateRecord(JSON.parse(JSON.stringify(record))), record);
+});
+
+test('validateRecord takes a dependency as a slug and a repo key only, and only one its Markdown can carry', () => {
+  const valid = JSON.parse(JSON.stringify(FULL)) as TaskRecord;
+  assert.throws(() => validateRecord({ ...valid, dependencies: [{ slug: 'a', main: '/repos/app' }] }), /dependencies\[0\]\.main/);
+  assert.throws(() => validateRecord({ ...valid, dependencies: [{ slug: 'a', repo: 7 }] }), /dependencies\[0\]\.repo/);
+  assert.throws(() => validateRecord({ ...valid, dependencies: [{ slug: 'a', repo: '/repos/my app' }] }), /dependencies/);
+});
+
+test('validateRecord refuses a dependency whose slug is no slug or whose repo is no repo key, and the Markdown does not read one', () => {
+  const valid = JSON.parse(JSON.stringify(FULL)) as TaskRecord;
+  assert.throws(() => validateRecord({ ...valid, dependencies: [{ slug: '.', repo: 'github.com/o/r' }] }), /dependencies\[0\]\.slug is not a slug/);
+  for (const repo of ['../bad', './x/y', 'github.com//r', 'github.com/o/r/', 'github.com/../r', 'host', '', '/']) {
+    assert.throws(() => validateRecord({ ...valid, dependencies: [{ slug: 'a', repo }] }), /dependencies\[0\]\.repo is not a repo key/, repo);
+  }
+  for (const repo of ['github.com/acme/api', 'host.example:8443/o/r', '/repos/lib', '/lib']) {
+    assert.deepEqual(validateRecord({ ...valid, dependencies: [{ slug: 'a', repo }] }).dependencies, [{ slug: 'a', repo }], repo);
+  }
+});
+
+const BAD_HOSTS = ['host:banana/o/r', 'host:/o/r', 'host:22x/o/r', 'git@host:o/r.git', 'git@host/o/r', 'https://host/o/r', 'ssh:/host/o/r'];
+
+test('validateRecord refuses a repo key whose host is no hostname with an optional numeric port', () => {
+  const valid = JSON.parse(JSON.stringify(FULL)) as TaskRecord;
+  for (const repo of BAD_HOSTS) {
+    assert.throws(() => validateRecord({ ...valid, dependencies: [{ slug: 'a', repo }] }), /dependencies\[0\]\.repo is not a repo key/, repo);
+  }
+  for (const repo of ['localhost:2222/o/r', 'git.example.com/team/sub/app', 'host_1/r']) {
+    assert.deepEqual(validateRecord({ ...valid, dependencies: [{ slug: 'a', repo }] }).dependencies, [{ slug: 'a', repo }], repo);
+  }
+});
+
+for (const [problem, value] of [
+  ['a slug that is no slug', '. @ github.com/o/r'],
+  ['a repo that is no repo key', 'a @ ../bad'],
+  ...BAD_HOSTS.map((repo) => [`the repo ${repo}`, `a @ ${repo}`]),
+]) {
+  test(`a depends on line with ${problem} reads as no dependency, and the line is kept as text`, () => {
+    const markdown = ledgerText({ slug: 'b', main: '/repos/app' }).replace('- design refs: none\n', `- design refs: none\n- depends on: ${value}\n`);
+    assert.equal(parseLedger(markdown).location.dependencies, undefined);
+    const record = parseRecord(markdown);
+    assert.equal(record.dependencies, undefined);
+    assert.ok(renderRecord(record).split('\n').includes(`- depends on: ${value}`), value);
+  });
+}
+
+test('a bullet under ## Children that reads as a sentence is prose to the record and to the ledger parser alike', () => {
+  const markdown = ledgerText({ slug: 'epic', main: '/repos/app', children: ['First paragraph.', '- a', '- Keep this note.', '- b (started 2026-10-20; PR #31 is open)', `- c @ /repos/lib`] });
+  assert.deepEqual(parseLedger(markdown).children.map(({ slug }) => slug), ['a', 'b', 'c']);
+  const record = parseRecord(markdown);
+  assert.deepEqual(record.children.map(({ slug }) => slug), ['a', 'b', 'c']);
+  assert.deepEqual(record.childNotes, ['First paragraph.', '- Keep this note.']);
+  assert.deepEqual(parseRecord(renderRecord(record)), record);
+});
+
+test('prose between the lines under ## Children stays in that one section, after the child lines, and round-trips', () => {
+  const markdown = ledgerText({ slug: 'epic', main: '/repos/app', children: ['- a', '', 'Ship a before b.', '- b'] });
+  const record = parseRecord(markdown);
+  const rendered = renderRecord(record);
+  assert.equal(rendered.match(/^## Children$/gm)?.length, 1, rendered);
+  assert.equal(rendered.match(/Ship a before b\./g)?.length, 1, rendered);
+  assert.match(rendered, /\n## Children\n- a\n- b\n\nShip a before b\.\n\n## Plan/);
+  assert.deepEqual(parseRecord(rendered), record);
+  assert.deepEqual(validateRecord(JSON.parse(JSON.stringify(record))), record);
+  assert.deepEqual(readByPlugin(rendered).children, readByPlugin(markdown).children);
 });
 
 test('every valid record round-trips whole: the time a task was created is kept by the store beside the record, not in it', () => {

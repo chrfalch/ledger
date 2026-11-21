@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { parseLedger } from '../tools/ledger/format.js';
 import { REPO } from './helpers.js';
-import { archivedTask, backlogTask, git, home, ledger, LEDGER_BIN, ledgerText, ok, readLedgerFile, recordFile, repository, spawn, storeFolder, worktreeTask } from './ledger-core-fixtures.js';
+import { archivedTask, backlogTask, git, home, ledger, LEDGER_BIN, ledgerText, ok, readLedgerFile, recordFile, repoKeyOf, repository, spawn, storeFolder, worktreeTask } from './ledger-core-fixtures.js';
 
 const TEMPLATE = readFileSync(path.join(REPO, 'ledger.template.md'), 'utf8');
 
@@ -57,7 +58,9 @@ test('ledger --help lists the writing commands, and each has its own --help', (t
     'task go': [/<slug>/, /--repo/, /- base:/],
     'task park': [/<slug>/, /--reason/],
     'task unpark': [/<slug>/],
-    tree: [/<slug>/, /\badd\b/, /\bremove\b/, /\bstart\b/, /\bnext\b/, /--json/],
+    tree: [/<slug>/, /\badd\b/, /\bremove\b/, /\bstart\b/, /\bnext\b/, /\border\b/, /\bdepends\b/, /--json/],
+    'tree order': [/<slug>/, /<child\.\.\.>/, /--json/],
+    'tree depends': [/<child>/, /\[task\.\.\.\]/, /github\.com\/\w+\/\w+/, /--json/],
   };
   for (const [command, patterns] of Object.entries(expected)) {
     const stdout = ok(ledger(h, h, ...command.split(' '), '--help'));
@@ -437,7 +440,7 @@ test('ledger parent add links a child in the same repo; remove restores both led
   const child = backlogTask(h, app, { slug: 'idea' });
   const [parentBefore, childBefore] = [read(parent), read(child)];
   ok(ledger(h, app, 'tree', 'add', 'epic', 'idea'));
-  assert.equal(read(child), inserted(childBefore, '- design refs: none', '- parent: epic'));
+  assert.equal(read(child), inserted(childBefore, '- design refs: none', '- parent: epic', '- order: 1'));
   assert.equal(read(parent), inserted(parentBefore, '- design refs: none', '', '## Children', '- idea'));
   const shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'epic', '--json'))) as { children: { slug: string; status: string }[] };
   assert.deepEqual(shown.children.map(({ slug, status }) => [slug, status]), [['idea', 'backlog']]);
@@ -466,7 +469,7 @@ test('parent add of a child in another repo writes both mains; remove drops them
   const child = backlogTask(h, lib, { slug: 'lib-part' });
   const [parentBefore, childBefore] = [read(parent), read(child)];
   ok(ledger(h, app, 'tree', 'add', 'epic', `lib-part@${lib}`));
-  assert.equal(read(child), inserted(childBefore, '- design refs: none', `- parent: epic @ ${app}`));
+  assert.equal(read(child), inserted(childBefore, '- design refs: none', `- parent: epic @ ${app}`, '- order: 1'));
   assert.equal(read(parent), inserted(parentBefore, '- design refs: none', '', '## Children', `- lib-part @ ${lib}`));
   ok(ledger(h, lib, 'tree', 'remove', `epic@${app}`, 'lib-part'));
   assert.equal(read(parent), parentBefore);
@@ -545,6 +548,378 @@ test('parent next passes over a backlog child whose own children are all started
   archivedTask(h, app, '2026-10-19', { slug: 'done-one', parent: 'nested' });
   backlogTask(h, app, { slug: 'leaf', parent: 'epic' });
   assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic leaf\n');
+});
+
+/** Adds `bullets` at the end of the ## Location of a fixture ledger, where the record renders them after `- parent:`. */
+const located = (file: string, ...bullets: string[]): void => writeFileSync(file, readFileSync(file, 'utf8').replace('\n\n## Plan', `\n${bullets.join('\n')}\n\n## Plan`));
+const childrenIn = (text: string): string[] => /\n## Children\n([\s\S]*?)\n\n/.exec(text)?.[1].split('\n') ?? [];
+
+/** An archive copy of `slug` filed under the repo key `key`, such as a remote address no clone here has. */
+function archivedUnder(h: string, key: string, slug: string): string {
+  const file = path.join(h, '.claude/ledger-archive', encodeURIComponent(key), `2026-10-01-${slug}.md`);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, ledgerText({ slug }));
+  return file;
+}
+
+test('tree add gives the new child the order after the highest of its siblings, and the parent lists it in that order', (t) => {
+  const { h, app } = setup(t);
+  const parent = worktreeTask(h, app, { slug: 'epic', children: ['- a', '- b', '- An old note about the plan.'] });
+  located(backlogTask(h, app, { slug: 'a', parent: 'epic' }), '- order: 3');
+  const b = backlogTask(h, app, { slug: 'b', parent: 'epic' });
+  const c = backlogTask(h, app, { slug: 'c' });
+  ok(ledger(h, app, 'tree', 'add', 'epic', 'c'));
+  assert.match(read(b), /^- order: 4$/m, 'a sibling without an order is numbered after the ordered ones');
+  assert.match(read(c), /^- order: 5$/m);
+  assert.deepEqual(childrenIn(read(parent)), ['- a', '- b', '- An old note about the plan.', '- c'], 'a line that names no task keeps its place');
+});
+
+test('tree add to a parent whose children have no order numbers them first, in line order, so the new child comes last', (t) => {
+  const { h, app } = setup(t);
+  const parent = worktreeTask(h, app, { slug: 'epic', children: ['- a', '- b'] });
+  const a = backlogTask(h, app, { slug: 'a', parent: 'epic' });
+  const b = worktreeTask(h, app, { slug: 'b', parent: 'epic' });
+  const c = backlogTask(h, app, { slug: 'c' });
+  ok(ledger(h, app, 'tree', 'add', 'epic', 'c'));
+  for (const [file, order] of [[a, 1], [b, 2], [c, 3]] as const) assert.match(read(file), new RegExp(`^- order: ${order}$`, 'm'), file);
+  assert.deepEqual(childrenIn(read(parent)), ['- a', '- b', '- c']);
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic a\n');
+});
+
+test('tree add refuses a child with no ## Location before it numbers any sibling', (t) => {
+  const { h, app } = setup(t);
+  const parent = worktreeTask(h, app, { slug: 'epic', children: ['- a'] });
+  const a = backlogTask(h, app, { slug: 'a', parent: 'epic' });
+  const c = worktreeTask(h, app, { slug: 'c' });
+  writeFileSync(c, read(c).replace(/^## Location\n(?:- .*\n)*/m, ''));
+  const files = [parent, a, c];
+  const before = files.map(read);
+  failed(ledger(h, app, 'tree', 'add', 'epic', 'c'), /has no ## Location section/);
+  assert.deepEqual(files.map(read), before);
+});
+
+test('tree add leaves alone a sibling listed under the parent whose own ledger names another parent', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'p', children: ['- a', '- b'] });
+  const q = worktreeTask(h, app, { slug: 'q', children: ['- x', '- a'] });
+  const a = backlogTask(h, app, { slug: 'a', parent: 'q' });
+  const b = backlogTask(h, app, { slug: 'b', parent: 'p' });
+  const x = backlogTask(h, app, { slug: 'x', parent: 'q' });
+  const c = backlogTask(h, app, { slug: 'c' });
+  const untouched = [q, a, x];
+  const before = untouched.map(read);
+  ok(ledger(h, app, 'tree', 'add', 'p', 'c'));
+  assert.deepEqual(untouched.map(read), before);
+  assert.match(read(b), /^- order: 1$/m);
+  assert.match(read(c), /^- order: 2$/m);
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'q')), 'q x\n');
+});
+
+test('tree add keeps the line of a child whose own ledger names another parent where it is, and sorts the rest around it', (t) => {
+  const { h, app } = setup(t);
+  const p = worktreeTask(h, app, { slug: 'p', children: ['- a', '- b'] });
+  worktreeTask(h, app, { slug: 'q', children: ['- a'] });
+  const a = backlogTask(h, app, { slug: 'a', parent: 'q' });
+  backlogTask(h, app, { slug: 'b', parent: 'p' });
+  backlogTask(h, app, { slug: 'x' });
+  const before = read(a);
+  ok(ledger(h, app, 'tree', 'add', 'p', 'x'));
+  assert.deepEqual(childrenIn(read(p)), ['- a', '- b', '- x']);
+  assert.equal(read(a), before);
+});
+
+test('tree add keeps the line of a retired child whose archive copy names another parent where it is, and changes nothing of it', (t) => {
+  const { h, app } = setup(t);
+  const p = worktreeTask(h, app, { slug: 'p', children: ['- a', '- b'] });
+  worktreeTask(h, app, { slug: 'q' });
+  const a = archivedTask(h, app, '2026-10-19', { slug: 'a', parent: 'q' });
+  backlogTask(h, app, { slug: 'b', parent: 'p' });
+  backlogTask(h, app, { slug: 'x' });
+  const before = read(a);
+  ok(ledger(h, app, 'tree', 'add', 'p', 'x'));
+  assert.deepEqual(childrenIn(read(p)), ['- a', '- b', '- x']);
+  assert.equal(read(a), before);
+});
+
+test('tree add keeps a line of another parent at its index and sorts the own children around it by order', (t) => {
+  const { h, app } = setup(t);
+  const p = worktreeTask(h, app, { slug: 'p', children: ['- c', '- f', '- b'] });
+  worktreeTask(h, app, { slug: 'q', children: ['- f'] });
+  located(backlogTask(h, app, { slug: 'c', parent: 'p' }), '- order: 2');
+  backlogTask(h, app, { slug: 'f', parent: 'q' });
+  located(backlogTask(h, app, { slug: 'b', parent: 'p' }), '- order: 1');
+  backlogTask(h, app, { slug: 'x' });
+  ok(ledger(h, app, 'tree', 'add', 'p', 'x'));
+  assert.deepEqual(childrenIn(read(p)), ['- b', '- f', '- c', '- x']);
+});
+
+test('tree add of a child already listed under the parent changes no order, of the child or of its siblings', (t) => {
+  const { h, app } = setup(t);
+  const p = worktreeTask(h, app, { slug: 'p', children: ['- a', '- b'] });
+  const files = [p, ...['a', 'b'].map((slug) => backlogTask(h, app, { slug, parent: 'p' }))];
+  const before = files.map(read);
+  ok(ledger(h, app, 'tree', 'add', 'p', 'a'));
+  assert.deepEqual(files.map(read), before);
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'p')), 'p a\n');
+});
+
+test('tree order numbers each current child 1 to n as named, one in another repo too, and sorts the parent lines and tree show', (t) => {
+  const { h, app } = setup(t);
+  const lib = repository(h, path.join(h, 'repos/lib'));
+  const parent = worktreeTask(h, app, { slug: 'epic', children: ['- a', '- Prose that names no task.', '- b', `- c @ ${lib}`, '- old (retired 2026-10-19)'] });
+  const a = backlogTask(h, app, { slug: 'a', parent: 'epic' });
+  const b = worktreeTask(h, app, { slug: 'b', parent: 'epic' });
+  const c = backlogTask(h, lib, { slug: 'c', parent: `epic @ ${app}` });
+  archivedTask(h, app, '2026-10-19', { slug: 'old', parent: 'epic' });
+  assert.equal(ok(ledger(h, app, 'tree', 'order', 'epic', `c@${lib}`, 'a', 'b')), `The child tasks of epic are in this order now: c@${lib}, a, b.\n`);
+  for (const [file, order] of [[c, 1], [a, 2], [b, 3]] as const) assert.match(read(file), new RegExp(`^- order: ${order}$`, 'm'), file);
+  assert.deepEqual(childrenIn(read(parent)), [`- c @ ${lib}`, '- Prose that names no task.', '- a', '- b', '- old (retired 2026-10-19)']);
+  const shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'epic', '--json'))) as { children: { slug: string }[] };
+  assert.deepEqual(shown.children.map(({ slug }) => slug), ['c', 'a', 'b', 'old'], 'a child without an order comes last');
+});
+
+test('tree order on a backlog parent keeps prose under its one ## Children section, after the sorted child lines', (t) => {
+  const { h, app } = setup(t);
+  const parent = backlogTask(h, app, { slug: 'epic', children: ['- a', '', 'Ship a before b.', '- b'] });
+  for (const slug of ['a', 'b']) backlogTask(h, app, { slug, parent: 'epic' });
+  ok(ledger(h, app, 'tree', 'order', 'epic', 'b', 'a'));
+  const text = read(parent);
+  assert.equal(text.match(/^## Children$/gm)?.length, 1, text);
+  assert.equal(text.match(/Ship a before b\./g)?.length, 1, text);
+  assert.match(text, /\n## Children\n- b\n- a\n\nShip a before b\.\n\n## Plan/);
+});
+
+test('tree order on a backlog parent treats a bullet that reads as a sentence as prose, as tree show does', (t) => {
+  const { h, app } = setup(t);
+  const parent = backlogTask(h, app, { slug: 'epic', children: ['First paragraph.', '- a', '- Keep this note.', '- b'] });
+  for (const slug of ['a', 'b']) backlogTask(h, app, { slug, parent: 'epic' });
+  ok(ledger(h, app, 'tree', 'order', 'epic', 'b', 'a'));
+  assert.match(read(parent), /\n## Children\n- b\n- a\n\nFirst paragraph\.\n- Keep this note\.\n\n## Plan/);
+  ok(ledger(h, app, 'tree', 'order', 'epic', 'a', 'b'));
+  assert.match(read(parent), /\n## Children\n- a\n- b\n\nFirst paragraph\.\n- Keep this note\.\n\n## Plan/);
+  const shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'epic', '--json'))) as { children: { slug: string }[] };
+  assert.deepEqual(shown.children.map(({ slug }) => slug), ['a', 'b']);
+});
+
+test('tree add on a backlog parent keeps the prose under its ## Children, after the child lines', (t) => {
+  const { h, app } = setup(t);
+  const parent = backlogTask(h, app, { slug: 'epic', children: ['Ship a before b.', '', '- a'] });
+  backlogTask(h, app, { slug: 'a', parent: 'epic' });
+  backlogTask(h, app, { slug: 'b' });
+  ok(ledger(h, app, 'tree', 'add', 'epic', 'b'));
+  const text = read(parent);
+  assert.equal(text.match(/Ship a before b\./g)?.length, 1, text);
+  assert.match(text, /\n## Children\n- a\n- b\n\nShip a before b\.\n\n## Plan/);
+});
+
+test('tree order refuses a child whose own ledger names another parent, names it, and writes nothing', (t) => {
+  const { h, app } = setup(t);
+  const p = worktreeTask(h, app, { slug: 'p', children: ['- a', '- b'] });
+  const q = worktreeTask(h, app, { slug: 'q', children: ['- x', '- a'] });
+  const a = backlogTask(h, app, { slug: 'a', parent: 'q' });
+  located(a, '- order: 2');
+  const b = backlogTask(h, app, { slug: 'b', parent: 'p' });
+  const x = backlogTask(h, app, { slug: 'x', parent: 'q' });
+  located(x, '- order: 1');
+  const files = [p, q, a, b, x];
+  const before = files.map(read);
+  failed(ledger(h, app, 'tree', 'order', 'p', 'a', 'b'), /\ba \(parent q\)/);
+  assert.deepEqual(files.map(read), before);
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'q')), 'q x\n');
+});
+
+test('tree order refuses a list that leaves out, adds or repeats a child, names each, and writes nothing', (t) => {
+  const { h, app } = setup(t);
+  const parent = worktreeTask(h, app, { slug: 'epic', children: ['- a', '- b', '- c'] });
+  const files = [parent, ...['a', 'b', 'c'].map((slug) => backlogTask(h, app, { slug, parent: 'epic' })), backlogTask(h, app, { slug: 'loose' })];
+  const before = files.map(read);
+  const ran = ledger(h, app, 'tree', 'order', 'epic', 'a', 'loose', 'a', 'loose');
+  failed(ran, /Not named: b, c\./);
+  assert.match(ran.stderr, /Not a live child task of epic; a retired child keeps no order: loose\./);
+  assert.match(ran.stderr, /Named more than once: a\./);
+  assert.deepEqual(files.map(read), before);
+});
+
+test('tree depends sets the tasks a child waits for, by slug, path or address, and with none clears them', (t) => {
+  const { h, app } = setup(t);
+  const lib = repository(h, path.join(h, 'repos/lib'));
+  const b = backlogTask(h, app, { slug: 'b', parent: 'epic' });
+  const stdout = ok(ledger(h, app, 'tree', 'depends', 'b', 'a', `z@${app}`, 'api@github.com/Acme/API.git', `lib-x@${lib}`));
+  assert.equal(stdout, `b waits for a, z, api@github.com/acme/api, lib-x@${repoKeyOf(lib)}.\n`);
+  assert.match(read(b), new RegExp(`^- depends on: a, z, api @ github\\.com/acme/api, lib-x @ ${repoKeyOf(lib)}$`, 'm'));
+  assert.equal(ok(ledger(h, app, 'tree', 'depends', 'b')), 'b waits for no task.\n');
+  assert.doesNotMatch(read(b), /depends on/);
+  const w = worktreeTask(h, app, { slug: 'w' });
+  ok(ledger(h, app, 'tree', 'depends', 'w', 'a'));
+  assert.match(read(w), /^- depends on: a$/m);
+});
+
+test('tree depends takes a remote address as a URL or in the scp form, and stores the key remoteKey gives it', (t) => {
+  const { h, app } = setup(t);
+  const b = backlogTask(h, app, { slug: 'b' });
+  const stdout = ok(ledger(h, app, 'tree', 'depends', 'b', 'api@https://github.com/Acme/API.git', 'web@https://github.com/acme/web', 'cli@git@github.com:Acme/CLI.git', 'ops@ssh://git@host.example:2222/o/ops.git'));
+  assert.equal(stdout, 'b waits for api@github.com/acme/api, web@github.com/acme/web, cli@github.com/acme/cli, ops@host.example:2222/o/ops.\n');
+  assert.match(read(b), /^- depends on: api @ github\.com\/acme\/api, web @ github\.com\/acme\/web, cli @ github\.com\/acme\/cli, ops @ host\.example:2222\/o\/ops$/m);
+});
+
+test('tree depends refuses a slug that is no slug and an address that gives no repo key, and writes nothing', (t) => {
+  const { h, app } = setup(t);
+  const b = backlogTask(h, app, { slug: 'b' });
+  const before = read(b);
+  failed(ledger(h, app, 'tree', 'depends', 'b', '.@github.com/o/r'), /"\." is not a slug/);
+  failed(ledger(h, app, 'tree', 'depends', 'b', 'x@https://github.com/o//r'), /github\.com\/o\/\/r.*neither a folder nor a repo address/);
+  failed(ledger(h, app, 'tree', 'depends', 'b', 'x@https://github.com/../r'), /neither a folder nor a repo address/);
+  assert.equal(read(b), before);
+});
+
+test('tree depends takes a repo key as it stores one, and stores that key unchanged', (t) => {
+  const { h, app } = setup(t);
+  const b = backlogTask(h, app, { slug: 'b' });
+  ok(ledger(h, app, 'tree', 'depends', 'b', 'ops@ssh://git@host.example:2222/o/ops.git', 'api@https://host/o/r', 'one@https://host/r'));
+  const stored = /^- depends on: (.*)$/m.exec(read(b))?.[1] ?? assert.fail(read(b));
+  assert.equal(stored, 'ops @ host.example:2222/o/ops, api @ host/o/r, one @ host/r');
+  const keys = stored.split(', ').map((item) => item.replace(' @ ', '@'));
+  assert.equal(ok(ledger(h, app, 'tree', 'depends', 'b', ...keys)), 'b waits for ops@host.example:2222/o/ops, api@host/o/r, one@host/r.\n');
+  assert.equal(/^- depends on: (.*)$/m.exec(read(b))?.[1], stored);
+});
+
+test('tree depends takes back each key it stored, with a port, an IPv6 host or a + in a folder, unchanged', (t) => {
+  const { h, app } = setup(t);
+  const b = backlogTask(h, app, { slug: 'b' });
+  const keys = ['[2001:db8::1]:2222/o/r', 'git.example/team/r+v', 'host:2222/r'];
+  for (const key of keys) {
+    assert.equal(ok(ledger(h, app, 'tree', 'depends', 'b', `api@${key}`)), `b waits for api@${key}.\n`);
+    assert.equal(/^- depends on: (.*)$/m.exec(read(b))?.[1], `api @ ${key}`);
+    assert.deepEqual(parseLedger(read(b)).location.dependencies, [{ slug: 'api', repo: key }], key);
+  }
+});
+
+test('tree depends takes a repo key with a trailing slash, and stores it without', (t) => {
+  const { h, app } = setup(t);
+  const b = backlogTask(h, app, { slug: 'b' });
+  assert.equal(ok(ledger(h, app, 'tree', 'depends', 'b', 'api@github.com/acme/api/', 'web@host:2222/r//')), 'b waits for api@github.com/acme/api, web@host:2222/r.\n');
+  assert.equal(/^- depends on: (.*)$/m.exec(read(b))?.[1], 'api @ github.com/acme/api, web @ host:2222/r');
+});
+
+test('tree depends takes a stored path key whose checkout is gone, and stores it unchanged', (t) => {
+  const { h, app } = setup(t);
+  const b = backlogTask(h, app, { slug: 'b' });
+  const gone = path.join(h, 'gone', 'lib');
+  assert.equal(ok(ledger(h, app, 'tree', 'depends', 'b', `api@${gone}`)), `b waits for api@${gone}.\n`);
+  assert.equal(/^- depends on: (.*)$/m.exec(read(b))?.[1], `api @ ${gone}`);
+});
+
+test('tree depends refuses a URL whose key would not read back as the same repo, names both, and writes nothing', (t) => {
+  const { h, app } = setup(t);
+  const b = backlogTask(h, app, { slug: 'b' });
+  const before = read(b);
+  failed(ledger(h, app, 'tree', 'depends', 'b', 'api@https://git.example/team/r+v.git.git'), /https:\/\/git\.example\/team\/r\+v\.git\.git.*git\.example\/team\/r\+v\.git\b.*would not read back as the same repo/s);
+  assert.equal(read(b), before);
+  assert.equal(ok(ledger(h, app, 'tree', 'depends', 'b', 'api@https://github.com/o/r.git')), 'b waits for api@github.com/o/r.\n');
+  assert.equal(/^- depends on: (.*)$/m.exec(read(b))?.[1], 'api @ github.com/o/r');
+});
+
+test('tree depends refuses an address whose key is a folder here, which would read back as another repo, and writes nothing', (t) => {
+  const { h, app } = setup(t);
+  mkdirSync(path.join(app, 'tools/ledger'), { recursive: true });
+  const b = backlogTask(h, app, { slug: 'b' });
+  const before = read(b);
+  failed(ledger(h, app, 'tree', 'depends', 'b', 'api@https://tools/ledger.git'), /https:\/\/tools\/ledger\.git.*stored as tools\/ledger\b.*would not read back as the same repo/s);
+  failed(ledger(h, app, 'tree', 'depends', 'b', 'api@tools/ledger.git'), /tools\/ledger\.git.*stored as tools\/ledger\b.*would not read back as the same repo/s);
+  assert.equal(read(b), before);
+});
+
+test('tree depends refuses an @ with no repo after it, and writes nothing', (t) => {
+  const { h, app } = setup(t);
+  const b = backlogTask(h, app, { slug: 'b' });
+  const before = read(b);
+  failed(ledger(h, app, 'tree', 'depends', 'b', 'api@'), /api@ names no repo after the @/);
+  assert.equal(read(b), before);
+});
+
+test('tree depends refuses a checkout whose remote gives a key the ledger could not read back, and writes nothing', (t) => {
+  const { h, app } = setup(t);
+  const lib = repository(h, path.join(h, 'repos/lib'));
+  git(h, lib, 'remote', 'set-url', 'origin', 'https://host.example/x//bad');
+  worktreeTask(h, app, { slug: 'p', children: ['- b'] });
+  const b = backlogTask(h, app, { slug: 'b', parent: 'p' });
+  const before = read(b);
+  failed(ledger(h, app, 'tree', 'depends', 'b', `api@${lib}`), /host\.example\/x\/\/bad/);
+  assert.equal(read(b), before);
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'p')), 'p b\n');
+});
+
+test('tree depends refuses a task that waits for itself, a cycle, also through another repo, and a name that is no folder or address', (t) => {
+  const { h, app } = setup(t);
+  const files = ['a', 'b', 'c'].map((slug) => backlogTask(h, app, { slug }));
+  ok(ledger(h, app, 'tree', 'depends', 'a', 'b'));
+  ok(ledger(h, app, 'tree', 'depends', 'b', 'c'));
+  const api = path.join(h, '.claude/ledger-backlog', encodeURIComponent('github.com/acme/api'), 'api.md');
+  mkdirSync(path.dirname(api), { recursive: true });
+  writeFileSync(api, ledgerText({ slug: 'api' }).replace('\n\n## Plan', `\n- depends on: a @ ${repoKeyOf(app)}\n\n## Plan`));
+  const before = [...files, api].map(read);
+  failed(ledger(h, app, 'tree', 'depends', 'a', 'a'), /a cannot wait for itself/);
+  failed(ledger(h, app, 'tree', 'depends', 'a', `a@${app}`), /a cannot wait for itself/);
+  failed(ledger(h, app, 'tree', 'depends', 'c', 'a'), /cycle: c → a → b → c/);
+  failed(ledger(h, app, 'tree', 'depends', 'c', 'api@github.com/acme/api'), /cycle: c → api@github\.com\/acme\/api → a → b → c/);
+  failed(ledger(h, app, 'tree', 'depends', 'a', 'x@no-such-folder'), /no-such-folder.*neither a folder nor a repo address/);
+  assert.deepEqual([...files, api].map(read), before);
+});
+
+test('tree next picks the first child by order whose dependencies are done: retired, by address too, or in state done', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'epic', children: ['- a', '- b', '- c'] });
+  located(backlogTask(h, app, { slug: 'a', parent: 'epic' }), '- order: 3');
+  located(backlogTask(h, app, { slug: 'b', parent: 'epic' }), '- order: 2', '- depends on: a');
+  located(backlogTask(h, app, { slug: 'c', parent: 'epic' }), '- order: 1', '- depends on: old, shipped, api @ github.com/acme/api');
+  archivedTask(h, app, '2026-10-19', { slug: 'old' });
+  located(worktreeTask(h, app, { slug: 'shipped' }), '- state: done');
+  const api = archivedUnder(h, 'github.com/acme/api', 'api');
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic c\n');
+  rmSync(api);
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic a\n', 'an unknown dependency is not done, so c and b wait');
+});
+
+test('tree next finds a done dependency in a repo without remote that only the dependency names, in a worktree or the archive', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'epic', children: ['- b'] });
+  const b = backlogTask(h, app, { slug: 'b', parent: 'epic' });
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic b\n', 'the registry is written before lib exists, so it does not name lib');
+  const lib = repository(h, path.join(h, 'elsewhere/lib'));
+  git(h, lib, 'remote', 'remove', 'origin');
+  located(worktreeTask(h, lib, { slug: 'shipped' }), '- state: done');
+  archivedTask(h, lib, '2026-10-19', { slug: 'old' });
+  located(b, `- depends on: shipped @ ${lib}, old @ ${lib}`);
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic b\n');
+});
+
+test('tree next with every child waiting prints nothing and says on stderr what each child waits for', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'stuck', children: ['- x', '- y'] });
+  located(backlogTask(h, app, { slug: 'x', parent: 'stuck' }), '- depends on: y');
+  located(backlogTask(h, app, { slug: 'y', parent: 'stuck' }), '- depends on: nowhere, api @ github.com/acme/other');
+  const ran = ledger(h, app, 'tree', 'next', 'stuck');
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(ran.stdout, '');
+  assert.match(ran.stderr, /^No child task of stuck can start yet:$/m);
+  assert.match(ran.stderr, /^ +x waits for y\.$/m);
+  assert.match(ran.stderr, /^ +y waits for nowhere, api@github\.com\/acme\/other\.$/m);
+});
+
+test('go on a parent starts its first ready child by order; a backlog parent whose children all wait fails and names what they wait for', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'epic', children: ['- a', '- b'] });
+  located(backlogTask(h, app, { slug: 'a', parent: 'epic' }), '- order: 2');
+  located(backlogTask(h, app, { slug: 'b', parent: 'epic' }), '- order: 1', '- depends on: a');
+  ok(ledger(h, app, 'go', 'epic'));
+  assert.equal(existsSync(ledgerOf(worktreeOf(app, 'a'))), true);
+  assert.equal(existsSync(worktreeOf(app, 'b')), false);
+
+  backlogTask(h, app, { slug: 'plan', children: ['- p'] });
+  const p = backlogTask(h, app, { slug: 'p', parent: 'plan' });
+  located(p, '- depends on: nope');
+  failed(ledger(h, app, 'go', 'plan'), /p waits for nope/);
+  assert.equal(existsSync(p), true);
 });
 
 /** The command a `start:` line prints, run by a shell: `/ledger:go <slug>` is `ledger go <slug>`. */

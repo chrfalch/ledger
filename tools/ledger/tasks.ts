@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { fail } from './failure.js';
 import { folderEntries, readTimedText, type TimedText } from './files.js';
-import { isReadableSlug, parseLedger, type Child, type ChildMark, type Ledger, type TaskRef } from './format.js';
+import { isReadableSlug, parseLedger, type Child, type Dependency, type Ledger, type TaskRef } from './format.js';
 import { mainCheckout, worktrees } from './git.js';
 import { mainOfTaskWorktree, parseArchiveName, samePath, worktreeLedger } from './paths.js';
 import { repoKey } from './repo-key.js';
@@ -130,12 +130,15 @@ export function scanLedgerFolders(roots: string[]): string[] {
   return folders;
 }
 
-const referencedMains = (task: Task): string[] =>
-  [task.ledger.location.parent?.main, ...task.ledger.children.map(({ main }) => main)].filter((main) => main !== undefined);
+/** A repo without remote is keyed by its main checkout's path, so a dependency's key can be the only way to find it. */
+const referencedMains = ({ ledger: { location, children } }: Task): string[] => [
+  ...[location.parent?.main, ...children.map(({ main }) => main)].filter((main) => main !== undefined),
+  ...(location.dependencies ?? []).flatMap(({ repo }) => (repo !== undefined && path.isAbsolute(repo) ? [repo] : [])),
+];
 
 /**
  * Every task ledger: the backlog, the archive, and the worktrees of the repos at `mains`, of the repos backlog ledgers
- * name, and of the repos any found ledger names as parent or child.
+ * name, and of the repos any found ledger names as parent, child or, by path, dependency.
  */
 export function findTasks(store: LedgerStore, mains: string[]): Task[] {
   const backlog = backlogTasks(store);
@@ -231,26 +234,49 @@ export function namedChildren(parent: Task, tasks: Task[]): Child[] {
   return parent.ledger.children.filter((line) => line.main !== undefined || tasks.some(({ slug }) => slug === line.slug));
 }
 
-const markTime = (mark?: ChildMark): number => (mark === undefined ? 0 : Date.parse(mark.date));
-
-/**
- * The children `parent` lists, each with its status from disk; active first, then newest first, else in list order.
- * A child line without a main is in the parent's repo, `parentMain`.
- */
-export function childrenOf(parent: Task, parentMain: string, tasks: Task[]): ChildView[] {
-  const shown = namedChildren(parent, tasks).map((line) => {
-    const main = line.main ?? parentMain;
-    const found = locateChild(tasks, { slug: line.slug, main }, { slug: parent.slug, main: parentMain });
-    const status: ChildStatus = found?.status ?? 'missing';
-    const view: ChildView = {
-      slug: line.slug,
-      main,
-      status,
-      next: found === undefined || found.status === 'retired' ? '' : found.ledger.next,
-      report: found?.ledger.report ?? [],
-    };
-    return { view, time: found?.mtimeMs ?? markTime(line.mark) };
-  });
-  const active = ({ view }: { view: ChildView }): number => Number(view.status === 'active');
-  return shown.sort((a, b) => active(b) - active(a) || b.time - a.time).map(({ view }) => view);
+/** `items` by the order `orderOf` gives each, lowest first, then those without one; each tie keeps its place. */
+export function inOrder<T>(items: readonly T[], orderOf: (item: T) => number | undefined): T[] {
+  const rank = (item: T): number => orderOf(item) ?? Number.POSITIVE_INFINITY;
+  return [...items].sort((a, b) => (rank(a) === rank(b) ? 0 : rank(a) < rank(b) ? -1 : 1));
 }
+
+/** A ## Children line that names a task, with the task by disk; `task` is undefined for a child no ledger has. */
+export type ListedChild = { line: Child; ref: Required<TaskRef>; task?: Task };
+
+/** The children `parent` names, in the order of their lines. A line without a main is in the parent's repo, `parentMain`. */
+export function listedChildren(parent: Task, parentMain: string, tasks: Task[]): ListedChild[] {
+  return namedChildren(parent, tasks).map((line) => {
+    const ref = { slug: line.slug, main: line.main ?? parentMain };
+    return { line, ref, task: locateChild(tasks, ref, { slug: parent.slug, main: parentMain }) };
+  });
+}
+
+/** listedChildren by the order of each child: its own `- order:`, or what `orderOf` gives, for an order `tasks` predates. */
+export const orderedChildren = (parent: Task, parentMain: string, tasks: Task[], orderOf = (task: Task): number | undefined => task.ledger.location.order): ListedChild[] =>
+  inOrder(listedChildren(parent, parentMain, tasks), ({ task }) => task && orderOf(task));
+
+/** The children `parent` lists, each with its status from disk, by order. */
+export function childrenOf(parent: Task, parentMain: string, tasks: Task[]): ChildView[] {
+  return orderedChildren(parent, parentMain, tasks).map(({ ref, task }) => ({
+    slug: ref.slug,
+    main: ref.main,
+    status: task?.status ?? 'missing',
+    next: task === undefined || task.status === 'retired' ? '' : task.ledger.next,
+    report: task?.ledger.report ?? [],
+  }));
+}
+
+/** The key of the repo of `task`, with an old key it is still filed under resolved. */
+const keyOf = (task: Task): string => task.currentRepo ?? task.repo;
+
+/** The tasks `task` waits for, each with the key of its repo. */
+export const dependenciesOf = (task: Task): Required<Dependency>[] => (task.ledger.location.dependencies ?? []).map(({ slug, repo }) => ({ slug, repo: repo ?? keyOf(task) }));
+
+/** The ledger `dependency` names, by the rule of locateChild: a worktree, then the backlog, then the archive; the newest of each. */
+export function dependencyTask(tasks: Task[], { slug, repo }: Required<Dependency>): Task | undefined {
+  const named = tasks.filter((task) => task.slug === slug && keyOf(task) === repo).sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return PRECEDENCE.map((place) => named.find((task) => task.place === place)).find((task) => task !== undefined);
+}
+
+/** A task no ledger names is not done: it may be in a repo whose worktrees this command did not read. */
+export const isDone = (task: Task | undefined): boolean => task !== undefined && (task.status === 'retired' || task.ledger.location.state === 'done');

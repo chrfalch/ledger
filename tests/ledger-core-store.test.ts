@@ -197,6 +197,20 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.ok(entry.birthtimeMs > 0);
   });
 
+  test(`${name}: a child's order and dependencies, by slug, address and path, read back from the backlog and the archive`, { skip }, (t) => {
+    const store = makeStore(t);
+    const ordered = text('b').replace('- design refs: none\n', '- design refs: none\n- parent: epic\n- order: 2\n- depends on: a, api @ github.com/acme/api, lib-x @ /repos/lib\n');
+    store.backlog.write('app', 'b', ordered);
+    store.archive.write('app', '2026-11-01-b', ordered);
+    for (const entry of [store.backlog.read('app', 'b'), store.archive.read('app', '2026-11-01-b')]) {
+      assert.ok(entry);
+      assert.equal(entry.text, ordered);
+      const record = parseRecord(entry.text);
+      assert.equal(record.order, 2);
+      assert.deepEqual(record.dependencies, [{ slug: 'a' }, { slug: 'api', repo: 'github.com/acme/api' }, { slug: 'lib-x', repo: '/repos/lib' }]);
+    }
+  });
+
   test(`${name}: a second backlog write replaces the text`, { skip }, (t) => {
     const store = makeStore(t);
     store.backlog.write('app', 'fix-login', 'old');

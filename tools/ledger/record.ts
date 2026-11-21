@@ -1,7 +1,23 @@
 // @ref LLP 0001#4-storage — D29: each task is one structured record; the Markdown is a view rendered from it.
 import { isDeepStrictEqual } from 'node:util';
 import { fail, Failure } from './failure.js';
-import { findSection, isParkedMarker, parseLedger, parseRef, plainLine, titleText, type ChildMark, type Section, type TaskRef } from './format.js';
+import {
+  findSection,
+  isParkedMarker,
+  isReadableSlug,
+  isRepoKeyShape,
+  parseDependencies,
+  parseLedger,
+  parseOrder,
+  parseRef,
+  plainLine,
+  showDependencies,
+  titleText,
+  type ChildMark,
+  type Dependency,
+  type Section,
+  type TaskRef,
+} from './format.js';
 
 export type Step = { n: string; step: string; status: string; owner: string; note: string };
 export type Decision = { text: string; reason?: string; tag?: string; date?: string };
@@ -26,7 +42,7 @@ export type TaskRecord = {
   stage?: string;
   parent?: TaskRef;
   order?: number;
-  dependencies?: TaskRef[];
+  dependencies?: Dependency[];
   claim?: string;
   pr?: string;
   repo?: string;
@@ -47,6 +63,8 @@ export type TaskRecord = {
   /** The report to the parent task, line by line. */
   report: string[];
   children: ChildLine[];
+  /** The text under ## Children that is no child line, written after the child lines, so sorting them keeps it there. */
+  childNotes?: string[];
   notes: string[];
   next: string;
 };
@@ -78,6 +96,7 @@ const FIELDS = [
   'stepReports',
   'report',
   'children',
+  'childNotes',
   'notes',
   'next',
 ] as const satisfies readonly (keyof TaskRecord)[];
@@ -185,8 +204,8 @@ const BULLETS: Bullet[] = [
   bullet('kind', 'kind', asText, asText),
   bullet('state', 'state', asText, asText),
   bullet('stage', 'stage', asText, asText),
-  bullet('order', 'order', (value) => (/^(0|[1-9]\d*)$/.test(value) ? Number(value) : undefined), String),
-  bullet('depends on', 'dependencies', (value) => listOf(value, parseRef), (refs) => refs.map(showRef).join(', ')),
+  bullet('order', 'order', parseOrder, String),
+  bullet('depends on', 'dependencies', parseDependencies, showDependencies),
   bullet('claim', 'claim', asText, asText),
   bullet('pr', 'pr', asText, asText),
   bullet('repo', 'repo', asText, asText),
@@ -332,7 +351,9 @@ const READERS: Record<Exclude<Known, 'Notes'>, Reader> = {
   Location: readLocation,
   Children: (record, lines, { start, children, childLines }) => {
     record.children = children;
-    return lines.filter((_, offset) => !childLines.includes(start + 1 + offset));
+    const notes = tidy(lines.filter((_, offset) => !childLines.includes(start + 1 + offset)));
+    if (notes.length > 0) record.childNotes = notes;
+    return [];
   },
   Plan: (record, lines, { heading }) => {
     const [, approved] = PLAN_HEADING.exec(heading) ?? [];
@@ -445,7 +466,9 @@ export function renderRecord(record: TaskRecord): string {
     '## Location',
     ...writeLocation(record),
     '',
-    ...(record.children.length > 0 || copied('Children') ? ['## Children', ...record.children.map(writeChild), ''] : []),
+    ...(record.children.length > 0 || record.childNotes !== undefined || copied('Children')
+      ? ['## Children', ...record.children.map(writeChild), ...(record.childNotes === undefined ? [] : ['', ...record.childNotes]), '']
+      : []),
     `## Plan (approved ${plan.approved ?? '<date>'})`,
     ...TABLE,
     ...planRows,
@@ -485,6 +508,8 @@ const passes = (test: (value: unknown) => boolean, problem: string): Check => (v
 const isText = passes((value) => typeof value === 'string', 'is not a string');
 const isWhole = passes(Number.isInteger, 'is not a whole number');
 const isTrue = passes((value) => value === true, 'is not true');
+const isSlug = passes((value) => typeof value === 'string' && isReadableSlug(value), 'is not a slug');
+const isKey = passes((value) => typeof value === 'string' && isRepoKeyShape(value), 'is not a repo key such as github.com/owner/repo or the path of a main checkout');
 const isTime = passes((value) => typeof value === 'string' && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value, 'is not a time such as 2026-11-20T12:00:00.000Z');
 const isOne = (...allowed: unknown[]): Check => passes((value) => allowed.includes(value), `is not ${allowed.map((each) => JSON.stringify(each)).join(' or ')}`);
 const listOfChecks = (item: Check): Check => (value, where) => {
@@ -526,7 +551,8 @@ const isRecord = shape(
     ...Object.fromEntries((['title', 'kind', 'state', 'stage', 'claim', 'pr', 'repo', 'worktree', 'branch', 'main'] as const).map((key) => [key, isText])),
     parent: isRef,
     order: isWhole,
-    dependencies: listOfChecks(isRef),
+    childNotes: listOfChecks(isText),
+    dependencies: listOfChecks(shape({ slug: isSlug }, { repo: isKey })),
     base: shape({ ref: isText }, { commit: isText }),
     designRefs: isDesignRefs,
     parked: shape({ date: isText, reason: isText }),
