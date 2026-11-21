@@ -35,8 +35,8 @@ task, first to last. When a child task cannot start until another task is
 retired, run `bin/ledger tree depends <child> <task>...`. A task in another
 repository is `<slug>@<path>`, or `<slug>@<address>` such as
 `api@github.com/acme/api`. Never promote the parent task.
-Steps 6 to 8 do not apply, except that a current ledger gets one line under
-its Decisions that names the parent task.
+Steps 6 to 8 do not apply, except that a current ledger gets one decision that
+names the parent task, written with `ledger notes decide`.
 Reply with `/ledger:go <parent>` as the start line: it starts the first child
 task. If the split shows up while you plan the current ledger's task, the Plan
 gate applies instead: the current task becomes the first child task of a new
@@ -76,21 +76,23 @@ parent task.
    Use `docs` when the work changes only documentation. Use `investigation`
    when the result is a report or an answer, with no code change. Use `code`
    for anything else. The kind sets the stages the task goes through.
-6. Check for a current ledger: `.claude/ledger.md` in the working directory of
-   this session. In the main checkout, treat it as none.
+6. Check for a current ledger: `ledger show` succeeds in the working directory
+   of this session. In the main checkout, treat it as none.
 7. If there is a current ledger, the script already added one line under its
    Decisions that names the new task, and printed that ledger on its `noted`
    line. Reply with the `start:` line the script printed, and nothing else of
    substance. Do not plan the task and do not start it in this session.
 8. If there is no current ledger, there is no old task to clear. Without
    `--stack`, start the task now: run `bin/ledger go <slug>` as in step 5,
-   with nothing else. It makes the worktree and branch, and moves the ledger
-   into the worktree. If it fails, reply with its error and stop. Then move
-   this session into the new worktree with the EnterWorktree tool. Set `path`
+   with nothing else. It makes the worktree and branch, and makes the ledger
+   the active ledger of that worktree. If it fails, reply with its error and
+   stop. Then move this session into the new worktree with the EnterWorktree tool. Set `path`
    to the path on the `worktree` line that `ledger go` printed, or that the
-   script printed for `--stack`. Read `.claude/ledger.md` in
+   script printed for `--stack`. Read its ledger with `ledger show` in
    the new worktree: the SessionStart hook does not put it in context in this
    case. Then continue with the operator's request in this session, through
    the normal pipeline. When the task changes more than one file or involves
    a design choice, get the plan approved with the widget question that
-   `ledger task gate plan` prints. Then write the plan into the ledger.
+   `ledger task gate plan` prints. Then write the plan into the ledger with
+   `ledger notes plan add`, one step per command, and
+   `ledger notes plan approve`.

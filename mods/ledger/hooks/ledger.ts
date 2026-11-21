@@ -5,7 +5,8 @@ export type ListedTask = {
   slug: string
   main?: string
   status: string
-  path: string
+  /** The linked worktree of an active task; a backlog task has none. */
+  worktree?: string
   goal: string
   next: string
   current: { number: string; step: string; status: string } | null
@@ -151,7 +152,8 @@ export type GoFields = {
   warnings?: string[]
 }
 
-// One field per line, because a path can hold spaces. go.md reads this format.
+// One field per line, because a path can hold spaces. go.md reads this format. `ledger` names the session's own task as
+// `ledger notes --task` takes it.
 export function goArgs(target: string, ledger: string | undefined, { isNew, held, unparked, parent, children = [], promoted, picked, marked, warnings = [] }: GoFields): string {
   return [
     `task: ${target}`,

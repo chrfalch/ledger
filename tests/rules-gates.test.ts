@@ -180,8 +180,9 @@ test('rule 10 tells the operator how to clear when /ledger:next cannot', () => {
 test('rule 10 states each ledger rule in exact words', () => {
   const rule = flatRule10();
   for (const sentence of [
-    "The ledger lives in the task's worktree at `.claude/ledger.md`, never in the main checkout.",
-    'Keep cited files small, in its `.claude/evidence/`, never in the session scratchpad.',
+    'The ledger lives in the ledger store.',
+    'Write it with `ledger notes`, one item per command.',
+    "Keep cited files small, in the worktree's `.claude/evidence/`, never in the session scratchpad.",
     'Keep the ledger under ~4k tokens.',
     'Never pass `--force`.',
     'Never remove or delete a worktree whose ledger is unarchived.',

@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { REPO, snapshot } from './helpers.js';
-import { archivedTask, asCli, backlogTask, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, ok, readLedgerFile, repository, spawn, storeFolder, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { activeFile, archivedTask, asCli, backlogTask, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, ok, putActive, readLedgerFile, repoKeyOf, repository, spawn, storeFolder, worktreeTask, writeLedgerFile, type Ran } from './ledger-core-fixtures.js';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
@@ -84,8 +84,7 @@ test('ledger retire names the archive copy after the ledger title, not the branc
   const { h, app } = setup(t);
   const worktree = worktreeOf(app, 'wip');
   git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/wip', worktree, 'main');
-  mkdirSync(path.join(worktree, '.claude'));
-  writeFileSync(path.join(worktree, '.claude/ledger.md'), ledgerText({ slug: 'login-fix', worktree, branch: 'me/wip' }));
+  putActive(h, app, 'login-fix', ledgerText({ slug: 'login-fix', worktree, branch: 'me/wip' }));
   ok(ledger(h, app, 'task', 'retire', 'login-fix'));
   assert.deepEqual(archiveList(h, app), [`${today()}-login-fix.json`]);
 });
@@ -104,7 +103,7 @@ test('ledger retire finds an identical copy already in the archive and archives 
   const file = worktreeTask(h, app, { slug: 'fix-login' });
   mkdirSync(archiveFolder(h, app), { recursive: true });
   const earlier = path.join(archiveFolder(h, app), '2026-01-02-fix-login.md');
-  copyFileSync(file, earlier);
+  writeFileSync(earlier, read(file));
   const stdout = ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   assert.match(stdout, new RegExp(`already archived ${earlier.replaceAll('/', '\\/')}`));
   assert.deepEqual(archiveList(h, app), ['2026-01-02-fix-login.md']);
@@ -178,7 +177,7 @@ test('ledger retire refuses, even with --force, an identical archive copy that h
   const { h, app } = setup(t);
   const file = worktreeTask(h, app, { slug: 'fix-login' });
   mkdirSync(archiveFolder(h, app), { recursive: true });
-  copyFileSync(file, path.join(archiveFolder(h, app), '2026-01-02-fix-login.md'));
+  writeFileSync(path.join(archiveFolder(h, app), '2026-01-02-fix-login.md'), read(file));
   const evidence = path.join(worktreeOf(app, 'fix-login'), '.claude/evidence');
   mkdirSync(evidence, { recursive: true });
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
@@ -193,7 +192,7 @@ test('ledger retire quotes the archive name as one shell word in the show comman
   const { h, app } = setup(t);
   const file = worktreeTask(h, app, { slug: 'fix-login' });
   mkdirSync(archiveFolder(h, app), { recursive: true });
-  copyFileSync(file, path.join(archiveFolder(h, app), "2026-01-02-fix login's copy.md"));
+  writeFileSync(path.join(archiveFolder(h, app), "2026-01-02-fix login's copy.md"), read(file));
   mkdirSync(path.join(worktreeOf(app, 'fix-login'), '.claude/evidence'));
   writeFileSync(path.join(worktreeOf(app, 'fix-login'), '.claude/evidence/red.txt'), 'failing\n');
   const name = escapeRegExp(shellWord("2026-01-02-fix login's copy"));
@@ -275,7 +274,7 @@ test('ledger retire names its own bin/ledger in what to run, quoted as one shell
   failed(spawn(h, h, bin, ['task', 'retire', 'fix-login']), new RegExp(`is not inside a git repository\\. Run ${command} task retire in the repo of the task\\.$`, 'm'));
   const file = worktreeTask(h, app, { slug: 'fix-login' });
   mkdirSync(archiveFolder(h, app), { recursive: true });
-  copyFileSync(file, path.join(archiveFolder(h, app), '2026-01-02-fix-login.md'));
+  writeFileSync(path.join(archiveFolder(h, app), '2026-01-02-fix-login.md'), read(file));
   mkdirSync(path.join(worktreeOf(app, 'fix-login'), '.claude/evidence'));
   writeFileSync(path.join(worktreeOf(app, 'fix-login'), '.claude/evidence/red.txt'), 'failing\n');
   failed(spawn(h, app, bin, ['task', 'retire', 'fix-login']), new RegExp(`with \`${command} show 2026-01-02-fix-login --evidence\`, then make the two match`));
@@ -336,7 +335,7 @@ test('ledger retire archives a relative symbolic link in the evidence as the sam
 function refusedEvenForced(h: string, app: string, pattern: RegExp): void {
   for (const flags of [[], ['--force']]) {
     failed(ledger(h, app, 'task', 'retire', 'fix-login', ...flags), pattern);
-    assert.ok(existsSync(path.join(worktreeOf(app, 'fix-login'), '.claude/ledger.md')));
+    assert.ok(existsSync(activeFile(h, app, 'fix-login')));
     assert.deepEqual(archiveList(h, app), []);
   }
 }
@@ -482,9 +481,9 @@ test('ledger retire refuses, even with --force, evidence that holds a FIFO, befo
   mkdirSync(path.join(evidence, 'logs'), { recursive: true });
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
   execFileSync('mkfifo', [path.join(evidence, 'logs/pipe')]);
-  const ledgerBefore = read(path.join(worktree, '.claude/ledger.md'));
+  const ledgerBefore = read(activeFile(h, app, 'fix-login'));
   refusedEvenForced(h, app, new RegExp(`^Not retired: logs\\/pipe in .*\\/\\.claude\\/evidence\\/ is not a file, a folder or a symbolic link\\. Move it out of the evidence folder, then run ${retireCommand} again\\.$`, 'm'));
-  assert.equal(read(path.join(worktree, '.claude/ledger.md')), ledgerBefore);
+  assert.equal(read(activeFile(h, app, 'fix-login')), ledgerBefore);
   assert.ok(lstatSync(path.join(evidence, 'logs/pipe')).isFIFO());
   assert.equal(read(path.join(evidence, 'red.txt')), 'failing\n');
 });
@@ -596,7 +595,8 @@ test('ledger retire fetches the default branch first, so work merged on origin s
 test('ledger retire warns when the fetch fails and still decides on origin/main as it was', (t) => {
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'fix-login' });
-  git(h, app, 'remote', 'set-url', 'origin', path.join(h, 'remotes/missing.git'));
+  // Moved rather than renamed in the config, so the repo keeps its key, which comes from the origin's address.
+  renameSync(path.join(h, 'remotes/app.git'), path.join(h, 'remotes/moved.git'));
   const ran = ledger(h, app, 'task', 'retire', 'fix-login');
   assert.equal(ran.status, 0, ran.stderr);
   assert.match(ran.stderr, /^warning: .*fetch.*origin main/m);
@@ -704,7 +704,7 @@ test('ledger retire marks the child retired in its parent, copies its report, an
   const text = read(epic);
   assert.match(text, new RegExp(`^- part \\(retired ${today()}\\)$`, 'm'));
   assert.match(text, /^- other$/m);
-  assert.match(text, /## Child reports\n\n### part\nPR #12 merged\.\n\\# not a heading\n/);
+  assert.match(text, /## Child reports\n### part\nPR #12 merged\.\n\\# not a heading\n/);
   assert.match(stdout, /^Parent epic has no active children left\. Retire it with \/ledger:retire epic\.$/m);
 });
 
@@ -744,11 +744,12 @@ test('ledger retire resolves no slug in the main checkout, an unknown slug and a
   const { h, app } = setup(t);
   failed(ledger(h, app, 'task', 'retire'), new RegExp(`^No task ledger in or above .*Give a slug: ${retireCommand} <slug>\\.$`, 'm'));
   failed(ledger(h, app, 'task', 'retire', 'nothing'), /^No task ledger is named "nothing"/m);
-  for (const folder of ['one', 'two']) {
+  // One repo files one active ledger per slug, so the second is under an old key of the repo, as a conversion can leave it.
+  fileStore(ledgerPaths(h)).aliases.add('app', repoKeyOf(app));
+  for (const [folder, key] of [['one', undefined], ['two', 'app']] as const) {
     const worktree = worktreeOf(app, folder);
     git(h, app, 'worktree', 'add', '--quiet', '-b', `me/${folder}`, worktree, 'main');
-    mkdirSync(path.join(worktree, '.claude'));
-    writeFileSync(path.join(worktree, '.claude/ledger.md'), ledgerText({ slug: 'same', worktree, branch: `me/${folder}` }));
+    putActive(h, app, 'same', ledgerText({ slug: 'same', worktree, branch: `me/${folder}` }), key);
   }
   failed(ledger(h, app, 'task', 'retire', 'same'), /^Several task ledgers are named "same"/m);
   assert.deepEqual(archiveList(h, app), []);
@@ -756,10 +757,9 @@ test('ledger retire resolves no slug in the main checkout, an unknown slug and a
 
 test('ledger retire refuses the main checkout', (t) => {
   const { h, app } = setup(t);
-  mkdirSync(path.join(app, '.claude'), { recursive: true });
-  writeFileSync(path.join(app, '.claude/ledger.md'), ledgerText({ slug: 'in-main' }));
+  const file = putActive(h, app, 'in-main', ledgerText({ slug: 'in-main', worktree: app }));
   failed(ledger(h, app, 'task', 'retire', 'in-main', '--force'), /is the main checkout, not a linked worktree/);
-  assert.ok(existsSync(path.join(app, '.claude/ledger.md')));
+  assert.ok(existsSync(file));
   assert.deepEqual(archiveList(h, app), []);
 });
 
@@ -857,7 +857,7 @@ test('ledger retire never takes an archive <name>.md that is a symbolic link to 
 
 /**
  * A forced retire of `slug`, planned in this process; carrying it out runs `meanwhile` right after the archive copy is
- * written, or, with `beforeRemoval`, right before the store is asked to delete the backlog ledger.
+ * written, or, with `beforeRemoval`, right before the store is asked to delete the backlog or active ledger.
  */
 function retireWithChange(t: TestContext, h: string, app: string, slug: string, meanwhile: () => void, beforeRemoval = false): () => void {
   asCli(t, h);
@@ -877,6 +877,13 @@ function retireWithChange(t: TestContext, h: string, app: string, slug: string, 
       remove: (...args: Parameters<typeof real.backlog.remove>) => {
         if (beforeRemoval) meanwhile();
         return real.backlog.remove(...args);
+      },
+    },
+    active: {
+      ...real.active,
+      remove: (...args: Parameters<typeof real.active.remove>) => {
+        if (beforeRemoval) meanwhile();
+        return real.active.remove(...args);
       },
     },
   };
@@ -899,8 +906,8 @@ function stopsWith(run: () => void, pattern: RegExp): void {
 test('ledger retire stops, even with --force, and keeps the worktree when the ledger changes after the archive copy is written', (t) => {
   const { h, app } = setup(t);
   const file = worktreeTask(h, app, { slug: 'fix-login' });
-  const run = retireWithChange(t, h, app, 'fix-login', () => writeFileSync(file, `${read(file)}- a late decision\n`));
-  stopsWith(run, /^Stopped before removing the worktree .*\/fix-login: the ledger .*\/\.claude\/ledger\.md changed after the archive copy .*\/[0-9-]+-fix-login\.json was written\./);
+  const run = retireWithChange(t, h, app, 'fix-login', () => writeLedgerFile(file, `${read(file)}- a late decision\n`));
+  stopsWith(run, /^Stopped before removing the worktree .*\/fix-login: the ledger .*\/fix-login\.json changed after the archive copy .*\/[0-9-]+-fix-login\.json was written\./);
   assert.ok(existsSync(worktreeOf(app, 'fix-login')));
   assert.match(read(file), /a late decision/);
 });
@@ -929,6 +936,15 @@ test('ledger retire keeps the backlog ledger when it changes between the check a
   const file = backlogTask(h, app, { slug: 'later' });
   const run = retireWithChange(t, h, app, 'later', () => writeFileSync(file, `${read(file)}- a late note\n`), true);
   stopsWith(run, /^Stopped before removing the backlog ledger .*\/later\.md: the ledger .*\/later\.md changed after the archive copy .*-later\.json was written\./);
+  assert.match(read(file), /a late note/);
+});
+
+test('ledger retire leaves the active ledger, and says so, when it changes after the worktree is removed', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'fix-login' });
+  const run = retireWithChange(t, h, app, 'fix-login', () => writeLedgerFile(file, `${read(file)}- a late note\n`), true);
+  assert.throws(run, (error) => error instanceof Failure && /^The worktree is removed and the ledger archived, but the active ledger .*fix-login\.json is left: it changed after the archive copy .* was written\. Retire it with .* task retire fix-login --force\.$/.test(error.message));
+  assert.equal(existsSync(worktreeOf(app, 'fix-login')), false);
   assert.match(read(file), /a late note/);
 });
 

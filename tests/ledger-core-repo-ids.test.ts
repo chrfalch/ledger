@@ -14,7 +14,7 @@ import { repoLabel } from '../tools/ledger/repo-key.js';
 import { sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { REPO } from './helpers.js';
-import { commandEnv, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, noSqlite, ok, readLedgerFile, repoKeyOf, repository, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { commandEnv, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, noSqlite, ok, readLedgerFile, repoKeyOf, repository, worktreeOf, worktreeTask, type Ran } from './ledger-core-fixtures.js';
 
 type Storage = 'file' | 'sqlite';
 
@@ -50,6 +50,16 @@ function appWorld(t: TestContext, storage: Storage = 'file') {
 }
 
 const created = '2025-12-01T00:00:00.000Z';
+
+/** A linked worktree of `main` with a .claude/ledger.md, as an active task was kept before the store held it, for a registry entry from then. */
+function legacyWorktreeLedger(h: string, main: string, slug: string): string {
+  const worktree = path.join(main, '.claude/worktrees', slug);
+  git(h, main, 'worktree', 'add', '--quiet', '-b', `me/${slug}`, worktree, 'main');
+  const file = path.join(worktree, '.claude/ledger.md');
+  mkdirSync(path.dirname(file));
+  writeFileSync(file, ledgerText({ slug, worktree, branch: `me/${slug}` }));
+  return file;
+}
 const backlogEntry = (store: LedgerStore, repo: string, slug: string, main?: string) => ({
   repo,
   slug,
@@ -277,7 +287,7 @@ test('an active entry of a folder in no git repo, with no main, gets that folder
 
 test('an active entry whose ledger is there gets the new key, and no alias as nothing moved', (t) => {
   const { h, app, key, store } = appWorld(t);
-  const live = worktreeTask(h, app, { slug: 'live' });
+  const live = legacyWorktreeLedger(h, app, 'live');
   writeRegistry(store, [{ ...backlogEntry(store, 'app', 'live', app), status: 'active', path: live }]);
   ok(convert(h));
   assert.deepEqual([...store.aliases.read()], []);
@@ -362,7 +372,7 @@ test('a backlog task made in one clone of an origin starts with ledger go in ano
   ok(ledger(h, first, 'task', 'new', 'shared', '--goal', 'Shared work.'));
   const started = JSON.parse(ok(ledger(h, second, 'go', 'shared', '--json'))) as { worktree: string };
   assert.equal(started.worktree, path.join(second, '.claude/worktrees/shared'));
-  assert.ok(existsSync(path.join(second, '.claude/worktrees/shared/.claude/ledger.md')));
+  assert.ok(fileStore(ledgerPaths(h)).active.has(repoKeyOf(first), 'shared'));
 });
 
 // --- 16. A storage switch takes the aliases along ---
@@ -596,14 +606,23 @@ test('a backlog task named from two clones of its repo cannot be its own parent'
   assert.match(ran.stderr, /cannot be its own parent/);
 });
 
-test('worktree tasks with one slug in two clones of one repo are two tasks, each of its own clone', (t) => {
+/** Fails, naming the task `slug` and the worktree it is active in. */
+function refusedAsTaken(ran: Ran, slug: string, worktree: string): void {
+  assert.equal(ran.status, 1, ran.stdout);
+  assert.match(ran.stderr, new RegExp(`\\b${slug}\\b`));
+  assert.ok(ran.stderr.includes(worktree), ran.stderr);
+}
+
+test('a slug that is active in one clone of a repo names no other task in another clone of it', (t) => {
   const { h, first, second } = twoClones(t);
   worktreeTask(h, first, { slug: 'epic' });
-  worktreeTask(h, first, { slug: 'x' });
-  const theirs = worktreeTask(h, second, { slug: 'x' });
+  const mine = worktreeTask(h, first, { slug: 'x' });
+  const loose = path.join(second, '.claude/worktrees/loose');
+  git(h, second, 'worktree', 'add', '--quiet', '-b', 'loose', loose);
+  refusedAsTaken(ledger(h, loose, 'task', 'new', '--here', 'x'), 'x', worktreeOf(first, 'x'));
   ok(ledger(h, second, 'list'));
   ok(ledger(h, first, 'tree', 'add', 'epic', 'x'));
-  assert.doesNotMatch(readFileSync(theirs, 'utf8'), /- parent:/);
+  assert.match(readLedgerFile(mine), /^- parent: epic$/m);
 });
 
 test('a path that is now a clone of another origin has none of the tasks filed under the old key that name it', (t) => {
@@ -869,18 +888,18 @@ test('an alias whose target is a folder name is ignored, and no alias is made to
 
 // --- 32. Tree edits keep two clones' worktree tasks apart ---
 
-test('tree add and remove of a worktree task leave the line of the task with its slug in another clone', (t) => {
+test('tree add of an active task named from another clone of the repo lists the one task once, and remove from either clone removes it', (t) => {
   const { h, first, second } = twoClones(t);
   const epic = worktreeTask(h, first, { slug: 'epic' });
-  worktreeTask(h, first, { slug: 'x' });
-  const theirs = worktreeTask(h, second, { slug: 'x' });
-  const childLines = (): string[] => readFileSync(epic, 'utf8').split('\n').filter((line) => /^- x\b/.test(line));
+  const x = worktreeTask(h, first, { slug: 'x' });
+  const childLines = (): string[] => readLedgerFile(epic).split('\n').filter((line) => /^- x\b/.test(line));
   ok(ledger(h, second, 'tree', 'add', `epic@${first}`, 'x'));
   ok(ledger(h, first, 'tree', 'add', 'epic', 'x'));
-  assert.deepEqual(childLines(), [`- x @ ${second}`, '- x']);
-  ok(ledger(h, first, 'tree', 'remove', 'epic', 'x'));
   assert.deepEqual(childLines(), [`- x @ ${second}`]);
-  assert.match(readFileSync(theirs, 'utf8'), /- parent: epic @ /);
+  assert.match(readLedgerFile(x), /- parent: epic @ /);
+  ok(ledger(h, first, 'tree', 'remove', 'epic', 'x'));
+  assert.deepEqual(childLines(), []);
+  assert.doesNotMatch(readLedgerFile(x), /- parent:/);
 });
 
 // --- 33. SQLite evidence is never written through a link it holds ---
@@ -1062,19 +1081,18 @@ test('sqlite store: an evidence link under an evidence link restored before it i
 
 // --- 42. A shared backlog parent keeps each clone's worktree child apart ---
 
-test('tree add and remove of worktree children with one slug in two clones keep one line per clone under a backlog parent', (t) => {
+test('an active child named from either clone of the repo has one line under a backlog parent, which names the clone of its worktree', (t) => {
   const { h, first, second } = twoClones(t);
   ok(ledger(h, first, 'task', 'new', 'epic', '--goal', 'Shared work.'));
   const mine = worktreeTask(h, first, { slug: 'x' });
-  worktreeTask(h, second, { slug: 'x' });
   const store = fileStore(ledgerPaths(h));
   const childLines = (): string[] => (store.backlog.read(repoKeyOf(first), 'epic')?.text ?? '').split('\n').filter((line) => /^- x\b/.test(line));
   ok(ledger(h, first, 'tree', 'add', 'epic', 'x'));
   ok(ledger(h, second, 'tree', 'add', 'epic', 'x'));
-  assert.deepEqual(childLines(), [`- x @ ${first}`, `- x @ ${second}`]);
-  ok(ledger(h, second, 'tree', 'remove', 'epic', 'x'));
   assert.deepEqual(childLines(), [`- x @ ${first}`]);
-  assert.match(readFileSync(mine, 'utf8'), /- parent: epic\n/);
+  assert.match(readLedgerFile(mine), /- parent: epic\n/);
+  ok(ledger(h, second, 'tree', 'remove', 'epic', 'x'));
+  assert.deepEqual(childLines(), []);
 });
 
 // --- 43. ledger go checks the slug of the child it starts ---
@@ -1250,7 +1268,7 @@ test('a stale registry entry is not resumed onto a ledger of its name under the 
 
 test('an active entry whose path is in a checkout of another folder name is reported and keeps its key', (t) => {
   const { h, app, store } = appWorld(t);
-  const live = worktreeTask(h, app, { slug: 'live' });
+  const live = legacyWorktreeLedger(h, app, 'live');
   writeRegistry(store, [{ ...backlogEntry(store, 'lib', 'live', app), status: 'active', path: live }]);
   assert.match(lineWith(failedWith(convert(h)), 'registry entry lib/live'), /^left /);
   assert.equal(registryEntries(store)[0].repo, 'lib');
@@ -1259,7 +1277,7 @@ test('an active entry whose path is in a checkout of another folder name is repo
 test('an active entry whose main is a checkout of another repo than the one that holds its ledger is reported and keeps its key', (t) => {
   const { h, app, store } = appWorld(t);
   const lib = repository(h, path.join(h, 'repos/lib'));
-  const live = worktreeTask(h, app, { slug: 'live' });
+  const live = legacyWorktreeLedger(h, app, 'live');
   writeRegistry(store, [{ ...backlogEntry(store, 'app', 'live', lib), status: 'active', path: live }]);
   assert.match(lineWith(failedWith(convert(h)), 'registry entry app/live'), new RegExp(`^left .*${app}.*${lib}`));
   assert.equal(registryEntries(store)[0].repo, 'app');
@@ -1332,14 +1350,15 @@ test('ledger go of a backlog child in one clone rewrites its line that names ano
   assert.ok(childLines()[0].startsWith(`- x @ ${second} (started `), childLines()[0]);
 });
 
-test('ledger go of a backlog child in one clone keeps the line of a worktree task with its slug in another clone', (t) => {
+test('ledger go in one clone of a slug active in another clone fails, naming that worktree, and keeps the line of the active task', (t) => {
   const { h, first, second } = twoClones(t);
   ok(ledger(h, first, 'task', 'new', 'epic', '--goal', 'Shared work.'));
   worktreeTask(h, first, { slug: 'x' });
   ok(ledger(h, first, 'tree', 'add', 'epic', 'x'));
   const store = fileStore(ledgerPaths(h));
   store.backlog.write(repoKeyOf(first), 'x', ledgerText({ slug: 'x', main: second, parent: 'epic' }));
-  ok(ledger(h, second, 'go', 'x'));
+  refusedAsTaken(ledger(h, second, 'go', 'x'), 'x', worktreeOf(first, 'x'));
+  assert.equal(existsSync(worktreeOf(second, 'x')), false);
   assert.deepEqual(
     (store.backlog.read(repoKeyOf(first), 'epic')?.text ?? '').split('\n').filter((line) => /^- x\b/.test(line)),
     [`- x @ ${first}`],
@@ -1352,7 +1371,7 @@ test('ledger show prints the worktree ledger of a task, not an older archive cop
   const { h, app, key, store } = appWorld(t);
   const live = worktreeTask(h, app, { slug: 'x' });
   store.archive.write(key, '2026-01-01-x', 'archived\n');
-  assert.equal(ok(ledger(h, app, 'show', 'x')), readFileSync(live, 'utf8'));
+  assert.equal(ok(ledger(h, app, 'show', 'x')), readLedgerFile(live));
 });
 
 test('ledger show prints the worktree ledger of a task, not a backlog ledger of its slug under an alias of the repo', (t) => {
@@ -1360,12 +1379,12 @@ test('ledger show prints the worktree ledger of a task, not a backlog ledger of 
   store.aliases.add('app', key);
   store.backlog.write('app', 'x', 'in the backlog\n');
   const live = worktreeTask(h, app, { slug: 'x' });
-  assert.equal(ok(ledger(h, app, 'show', 'x')), readFileSync(live, 'utf8'));
+  assert.equal(ok(ledger(h, app, 'show', 'x')), readLedgerFile(live));
 });
 
 // --- 55. A clone that is gone has no worktree task to keep its child line ---
 
-test('ledger go of a backlog child in one clone rewrites its line that names a removed clone to name this one', (t) => {
+test('ledger go in one clone of a slug whose active task was in a removed clone fails, naming that worktree, and keeps its line', (t) => {
   const { h, first, second } = twoClones(t);
   const key = repoKeyOf(first);
   ok(ledger(h, first, 'task', 'new', 'epic', '--goal', 'Shared work.'));
@@ -1376,9 +1395,8 @@ test('ledger go of a backlog child in one clone rewrites its line that names a r
   assert.deepEqual(childLines(), [`- x @ ${first}`]);
   rmSync(first, { recursive: true, force: true });
   store.backlog.write(key, 'x', ledgerText({ slug: 'x', main: second, parent: 'epic' }));
-  ok(ledger(h, second, 'go', 'x'));
-  assert.equal(childLines().length, 1);
-  assert.ok(childLines()[0].startsWith(`- x @ ${second} (started `), childLines()[0]);
+  refusedAsTaken(ledger(h, second, 'go', 'x'), 'x', worktreeOf(first, 'x'));
+  assert.deepEqual(childLines(), [`- x @ ${first}`]);
 });
 
 // --- 56. ledger show --repo takes the short label of the clone it runs in ---
@@ -1386,14 +1404,14 @@ test('ledger go of a backlog child in one clone rewrites its line that names a r
 test('ledger show --repo with the short label of the clone it runs in finds its worktree ledger, though the store has nothing of the repo', (t) => {
   const { h, app, key } = appWorld(t);
   const live = worktreeTask(h, app, { slug: 'x' });
-  assert.equal(ok(ledger(h, app, 'show', 'x', '--repo', repoLabel(key))), readFileSync(live, 'utf8'));
+  assert.equal(ok(ledger(h, app, 'show', 'x', '--repo', repoLabel(key))), readLedgerFile(live));
 });
 
-test('the error of ledger show --repo of another repo names no worktree, as it searched none', (t) => {
+test('the error of ledger show --repo of another repo names what it searched: the active tasks, the backlog and the archive', (t) => {
   const { h, app } = appWorld(t);
   const ran = ledger(h, app, 'show', 'nothing', '--repo', OTHER);
   assert.equal(ran.status, 1);
-  assert.equal(ran.stderr.trim(), 'No ledger named nothing is in the backlog or the archive of the repo me/app.');
+  assert.equal(ran.stderr.trim(), 'No ledger named nothing is in the active tasks, the backlog or the archive of the repo me/app.');
 });
 
 // --- 57. An active entry with no main takes the main checkout git names ---

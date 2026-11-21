@@ -3,32 +3,31 @@ import path from 'node:path';
 import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
 import { parseLedger } from './format.js';
-import { sessionLedgers } from './hooks.js';
 import { isKind, KINDS, STAGES } from './kinds.js';
+import { CITATION_ADVICE, realPath, SESSION_CITATION } from './paths.js';
 import { parseRecord, renderRecord, validateRecord, type Constraint, type Decision, type Question, type Step, type TaskRecord } from './record.js';
 import { loadTasks } from './registry.js';
-import { onAnotherMachine, type Task } from './tasks.js';
-import { liveTask, readLedger, today, updateLedger, type Context } from './write.js';
+import { notOnThisMachine, type Task } from './tasks.js';
+import { currentTask, liveTask, readLedger, today, updateLedger, type Context } from './write.js';
 
 export const TAGS = ['observed', 'confirmed', 'inferred'] as const;
 export type Tag = (typeof TAGS)[number];
 
 /**
  * The task `name` gives, else the one whose worktree holds the folder the command runs in. Never an archive copy, and
- * never the read-only copy of a worktree ledger of another machine: that fails before its text is read.
+ * never a task of another machine: that fails before its text is read.
  */
 function notesTask(context: Context, name: string | undefined): Task {
-  if (name !== undefined) {
-    const { task } = liveTask(context, name);
-    return task.place === 'remote' ? fail(onAnotherMachine(task)) : task;
-  }
-  const { tasks, own } = sessionLedgers(context.cwd);
-  return own && tasks.length === 1 ? tasks[0] : fail('No task in this folder. Pass --task <slug>.');
+  const task = name === undefined ? (currentTask(context.store, context.cwd) ?? fail('No task in this folder. Pass --task <slug>.')) : liveTask(context, name).task;
+  return task.elsewhere ? fail(notOnThisMachine(task)) : task;
 }
 
-/** `text` without the white space around it; a Failure that names `what` when nothing is left. */
+/** `text`; a Failure when it cites a file in a Claude Code session folder, which macOS deletes. */
+const uncited = (text: string): string => (SESSION_CITATION.test(text) ? fail(`${CITATION_ADVICE} Nothing was written; run the command again with that path.`) : text);
+
+/** `text` without the white space around it; a Failure that names `what` when nothing is left, or when it cites a session file. */
 function given(text: string, what: string): string {
-  const trimmed = text.trim();
+  const trimmed = uncited(text.trim());
   return trimmed === '' ? fail(`${what} is empty.`) : trimmed;
 }
 
@@ -116,7 +115,7 @@ function write<T extends object>(context: Context, name: string | undefined, app
   });
   if (done === undefined) return fail(`The ledger ${task.file} is gone.`);
   // The task list caches each ledger's next step and state; reload it so `ledger list` shows this write.
-  if (task.main !== undefined) loadTasks(context, [task.main]);
+  loadTasks(context);
   return { ...done.details, slug: task.slug, ledger: task.file, warnings: problemsOf(done.record) };
 }
 
@@ -134,6 +133,19 @@ export function addStep(context: Context, name: string | undefined, text: string
 }
 
 export const addStepText = ({ slug, step }: ReturnType<typeof addStep>): string => `Added step ${step.n} to ${slug}.`;
+
+/** Sets the status of plan step `n`, or its note, or both; an empty note clears it. */
+export function setStep(context: Context, name: string | undefined, n: number, { status, note }: { status?: string; note?: string }) {
+  if (status === undefined && note === undefined) fail('ledger notes step needs --status <status>, --note <text>, or both.');
+  const fields = { ...(status === undefined ? {} : { status: given(status, '--status') }), ...(note === undefined ? {} : { note: uncited(note.trim()) }) };
+  return write(context, name, ({ plan }, task) => {
+    const step = plan.steps.find((each) => each.n === String(n)) ?? fail(`${task.slug} has no step ${n} in its plan.`);
+    Object.assign(step, fields);
+    return { step };
+  });
+}
+
+export const setStepText = ({ slug, step }: ReturnType<typeof setStep>): string => `Updated step ${step.n} of ${slug}.`;
 
 export const approvePlan = (context: Context, name: string | undefined) =>
   write(context, name, ({ plan }) => {
@@ -180,8 +192,8 @@ export const resolveQuestionText = ({ slug, question }: ReturnType<typeof resolv
 
 /** `file` as a step report names it: relative to the task's worktree when it lies inside, else absolute. */
 function reportPath(task: Task, file: string): string {
-  if (task.place !== 'worktree') return file;
-  const relative = path.relative(path.dirname(path.dirname(task.file)), file);
+  if (task.worktree === undefined) return file;
+  const relative = path.relative(task.worktree, file);
   const outside = relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
   return outside ? file : relative;
 }
@@ -190,6 +202,8 @@ function reportPath(task: Task, file: string): string {
 export function reportStep(context: Context, name: string | undefined, step: number, file: string) {
   const absolute = path.resolve(context.cwd, given(file, '--file'));
   if (!exists(absolute)) fail(`No file at ${absolute}.`);
+  uncited(absolute);
+  uncited(realPath(absolute));
   return write(context, name, ({ plan, stepReports }, task) => {
     const n = String(step);
     if (!plan.steps.some((each) => each.n === n)) fail(`${task.slug} has no step ${n} in its plan.`);

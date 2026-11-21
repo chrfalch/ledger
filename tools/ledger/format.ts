@@ -34,6 +34,7 @@ export type Claim = { session: string; since: string; active: string };
 
 export type Location = {
   worktree?: string;
+  host?: string;
   branch?: string;
   base?: { ref: string; commit?: string };
   main?: string;
@@ -221,7 +222,7 @@ function parseLocation(plain: string[], range: number[]): Location {
     const [, name, raw] = FIELD.exec(plain[index].trim()) ?? [];
     const value = raw?.trim();
     if (name === undefined || !value || value.startsWith('<')) continue;
-    if (name === 'worktree' || name === 'branch' || name === 'main') location[name] ??= value;
+    if (name === 'worktree' || name === 'host' || name === 'branch' || name === 'main') location[name] ??= value;
     else if (name === 'base' && location.base === undefined) {
       const [ref, commit] = value.split(/[ \t]+@[ \t]+/);
       location.base = commit === undefined ? { ref } : { ref, commit };

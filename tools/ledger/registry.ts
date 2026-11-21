@@ -1,10 +1,11 @@
+import { statSync } from 'node:fs';
 import path from 'node:path';
-import { fail } from './failure.js';
-import { mainCheckout } from './git.js';
-import { mainOfTaskWorktree, worktreeLedger, type LedgerPaths } from './paths.js';
+import { fail, Failure } from './failure.js';
+import { checkoutRoot, inMainCheckout } from './git.js';
+import { samePath } from './paths.js';
 import type { LedgerStore } from './store.js';
 import { pauseForTest } from './wait.js';
-import { findTasks, folderTask, scanLedgerFolders, type Task } from './tasks.js';
+import { findTasks, type Task } from './tasks.js';
 
 // @ref LLP 0000#the-registry — why the registry is a cache that a rebuild can always replace.
 
@@ -40,12 +41,12 @@ const sameLedger = (task: Task) => (entry: RegistryEntry): boolean =>
   task.place === 'archive' ? entry.archivePath === task.file : entry.status !== 'archived' && entry.path === task.file;
 
 function toEntry(task: Task, previous: RegistryEntry | undefined): RegistryEntry {
-  const { parent, worktree } = task.ledger.location;
+  const { parent } = task.ledger.location;
   const archived = task.place === 'archive';
   return {
     repo: task.repo,
     slug: task.slug,
-    path: archived ? (worktree === undefined ? '' : worktreeLedger(worktree)) : task.file,
+    path: archived ? '' : task.file,
     branch: task.branch ?? '',
     ...(parent === undefined ? {} : { parent: parent.slug }),
     ...(parent?.main === undefined ? {} : { parentMain: parent.main }),
@@ -57,47 +58,63 @@ function toEntry(task: Task, previous: RegistryEntry | undefined): RegistryEntry
   };
 }
 
-/** The repo of an entry: its stored main, else for an active entry the folder its worktree sits in. */
-export function entryMain(entry: RegistryEntry): string | undefined {
-  if (entry.main !== undefined || entry.status !== 'active') return entry.main;
-  const worktree = path.dirname(path.dirname(entry.path));
-  return mainOfTaskWorktree(worktree) ?? worktree;
+type Context = { store: LedgerStore };
+
+const LEGACY_LEDGER = path.join('.claude', 'ledger.md');
+
+/** As bash's [ -f ]: a path that cannot be checked, such as one too long or not readable, is no file. */
+function isFile(file: string): boolean {
+  try {
+    return statSync(file).isFile();
+  } catch {
+    return false;
+  }
 }
 
-type Context = { store: LedgerStore; paths: LedgerPaths };
+/** Whether `folder` still keeps its ledger as a .claude/ledger.md that no active record has replaced. */
+export function keepsUnmovedLedger(store: LedgerStore, folder: string): boolean {
+  if (!isFile(path.join(folder, LEGACY_LEDGER))) return false;
+  try {
+    return store.active.byWorktree(folder) === undefined;
+  } catch (error) {
+    // Two records name the folder: it has moved, and the worktree-removal gate names the clash.
+    if (error instanceof Failure) return false;
+    throw error;
+  }
+}
+
+/** Whether `folder` is a linked worktree whose ledger is still a .claude/ledger.md: one that migrate --active moves. */
+export function holdsUnmovedLedger(store: LedgerStore, folder: string): boolean {
+  if (!keepsUnmovedLedger(store, folder)) return false;
+  const root = checkoutRoot(folder);
+  return root !== undefined && samePath(root, folder) && !inMainCheckout(folder);
+}
+
+/** Whether `entry` names the .claude/ledger.md of a worktree that `ledger store migrate --active` has yet to move. */
+const isUnmoved = (store: LedgerStore, { path: file }: RegistryEntry): boolean =>
+  file.endsWith(`${path.sep}${LEGACY_LEDGER}`) && holdsUnmovedLedger(store, path.dirname(path.dirname(file)));
 
 /** A try fails only when another command wrote the registry in between, so running out of tries takes 20 such writes. */
 const REBUILD_TRIES = 20;
 
 /** The tasks on disk, and the registry text that lists them, read with `current` as the registry. */
-function rebuild({ store, paths }: Context, extraMains: string[], current: string | undefined): { tasks: Task[]; text: string } {
+function rebuild({ store }: Context, current: string | undefined): { tasks: Task[]; text: string } {
   const stored = current === undefined ? undefined : parseRegistry(current);
-  const storedMains = (stored ?? []).flatMap((entry) => entryMain(entry) ?? []);
-  const scanned = stored === undefined ? scanLedgerFolders(paths.scanRoots) : [];
-  const mains = [...extraMains, ...(stored === undefined ? scanned : storedMains)];
-  const ledgerFolders = stored === undefined ? scanned : stored.flatMap((entry) => (entry.status === 'active' ? [path.dirname(path.dirname(entry.path))] : []));
-  const plainFolders = ledgerFolders.filter((folder) => mainOfTaskWorktree(folder) === undefined && mainCheckout(folder) === undefined);
-  const tasks = [...findTasks(store, mains), ...plainFolders.flatMap((folder) => folderTask(folder) ?? [])];
-  const unreadable = (stored ?? []).filter((entry) => {
-    const main = entryMain(entry);
-    return entry.status === 'active' && main !== undefined && mainCheckout(main) === undefined && !tasks.some(({ file }) => file === entry.path);
-  });
-  // A remote task's ledger is on another machine; the ledger plugin would take its entry for one of this machine.
-  const local = tasks.filter(({ place }) => place !== 'remote');
-  const entries = [...local.map((task) => toEntry(task, stored?.find(sameLedger(task)))), ...unreadable].sort((a, b) => b.updated.localeCompare(a.updated));
+  const tasks = findTasks(store);
+  const unmoved = (stored ?? []).filter((entry) => isUnmoved(store, entry));
+  const entries = [...tasks.map((task) => toEntry(task, stored?.find(sameLedger(task)))), ...unmoved].sort((a, b) => b.updated.localeCompare(a.updated));
   return { tasks, text: `${JSON.stringify(entries, null, 2)}\n` };
 }
 
 /**
- * Every task on disk, with the registry brought in line with it. The registry only tells which repos to look in; when it
- * is missing or unreadable, the repos under the scan roots stand in. `extraMains` are repos the caller knows about.
- * Disk wins only where git can read it: the active entries of a repo that is gone or on a disk that is not connected
- * are kept as stored. A ledger at <folder>/.claude/ledger.md in no git repository is read from disk all the same.
+ * Every task in the store, with the registry brought in line with it: an entry whose ledger the store no longer holds,
+ * such as a task retired on another machine, is dropped. An entry of a .claude/ledger.md not yet moved into the store
+ * is kept, though it is no task, so that `ledger store migrate --active` still finds it from any repo.
  */
-export function loadTasks(context: Context, extraMains: string[]): Task[] {
+export function loadTasks(context: Context): Task[] {
   let read = context.store.registry.read();
   for (let tries = 1; ; tries++) {
-    const found = rebuild(context, extraMains, read);
+    const found = rebuild(context, read);
     if (found.text === read) return found.tasks;
     pauseForTest();
     // A rebuild runs git and may take seconds, so it never runs while the registry is held: other commands would wait

@@ -5,6 +5,7 @@ import { createRequire, syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import { FORMAT } from '../tools/ledger/clone.js';
 import { park } from '../tools/ledger/edit.js';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
@@ -600,7 +601,7 @@ function fileHome(t: TestContext) {
 const openGitStore = (h: string): LedgerStore => {
   const clone = path.join(h, '.claude/ledger-data');
   spawnSync('git', ['init', '--quiet', clone]);
-  writeFileSync(path.join(clone, '.ledger-data'), '{"format":1}\n');
+  writeFileSync(path.join(clone, '.ledger-data'), `${JSON.stringify({ format: FORMAT })}\n`);
   return gitStore(ledgerPaths(h), { backgroundSync: false });
 };
 
@@ -1315,6 +1316,7 @@ function recording(inner: LedgerStore): { store: LedgerStore; calls: string[] } 
   const calls: string[] = [];
   const note = (...call: string[]): void => void calls.push(call.join(' '));
   const store: LedgerStore = {
+    active: inner.active,
     backlog: {
       location: (repo, name) => inner.backlog.location(repo, name),
       repoLocation: (repo) => inner.backlog.repoLocation(repo),
@@ -1392,13 +1394,13 @@ test('the core reads and writes backlog ledgers and the registry through the sto
   goTask(context, 'add-cache', undefined);
   includesAll(calls, [`backlog.read ${key} add-cache`, `backlog.remove ${key} add-cache`]);
   assert.equal(store.backlog.has(key, 'add-cache'), false);
-  assert.ok(existsSync(path.join(app, '.claude/worktrees/add-cache/.claude/ledger.md')));
+  assert.ok(store.active.has(key, 'add-cache'));
 
   calls.length = 0;
-  const tasks = loadTasks(context, [app]);
+  const tasks = loadTasks(context);
   includesAll(calls, ['registry.read', 'backlog.repos', `backlog.list ${key}`, 'archive.repos', `archive.list ${key}`]);
   assert.deepEqual(
     tasks.map(({ slug, place }) => `${slug} ${place}`),
-    ['add-cache worktree', 'fix-login backlog', 'old-task archive'],
+    ['add-cache active', 'fix-login backlog', 'old-task archive'],
   );
 });

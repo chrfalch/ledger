@@ -1414,3 +1414,51 @@ the archive copy, the rule the rest of the retire uses, and holds the ledger's
 lock while it checks and deletes. The copies are interim: D8 in LLP 0001 keeps
 every task record, active ones included, in the store, and then no copy is
 needed.
+
+## 2026-11-21 — Active ledgers live in the ledger store
+
+**The worktree keeps no ledger.** The ledger of an active task is a record in
+the ledger store, as backlog and archived ledgers already were, in every
+storage: files, SQLite and git. `.claude/ledger.md` is gone. One place for
+every task means the task tree is whole, and with git storage it is on every
+machine. Hooks, commands and people read a task with `ledger show` and write it
+with `ledger notes`, one checked item per command, so a hand edit can no longer
+break the record. A PreToolUse hook denies a write to any `.claude/ledger.md`
+and names those commands. The worktree's `.claude/evidence/` stays where it
+is: agents write evidence there, and retire archives it. See LLP 0001, D8.
+
+**A one-time move.** `ledger store migrate --active` moves the
+`.claude/ledger.md` of each linked worktree into an active record and deletes
+the file. Until it runs, the session start says how many are left.
+
+**`ledger notes step` is interim.** The slash commands must set a step's status
+without an edit, and the `stage` command of LLP 0001, D30 is not built yet.
+`ledger notes step <n> [--status <status>] [--note <text>]` sets the status, the note, or both,
+of one plan step until `stage` replaces it.
+
+**It replaces the active copies.** The copies of 2026-11-19 to 2026-11-21 are
+gone: `ledger store mirror`, its runs at each answered turn and at session
+start, the host folders `active/<host>/`, the held-back copies, the undo of a
+failed retire, and the check of a leftover worktree ledger against its archive
+copy. An active record is the one ledger of its task, so nothing needs copying.
+What the copies gave stays, from the records: another machine's task is listed
+as `active on <host>`, `ledger show` prints it under a line that says it is
+read-only, and go, notes, park, claim and tree add and remove refuse it and
+name the host. A retire of a child whose parent is on another machine warns
+and leaves the parent alone. `ledger list --json` gives `host` and
+`currentRepo`; `ledger session --json` gives the repo key.
+
+**The host is in the record.** An active record names the machine that started
+it in `- host:`, `"host"` in `~/.claude/ledger-settings.json`, else the label of
+the host name, as the copies did. A record that names another host is that
+machine's task, even when its worktree path exists here, as two machines may
+see one disk. A record without a host, from before this, counts as on an
+unknown host unless git lists its worktree here. A sync, and every other
+commit, puts back a changed record that names another host instead of
+committing it, with one warning each; only the command that wrote it may
+commit such a change, such as a forced retire of a task whose machine is gone.
+
+**Old copies are dropped.** A clone that still holds copies from the folders
+`active/<host>/` reads past them, and the first write under the clone lock
+removes them in its commit. The allowlist and the pre-push hook still take
+their paths, so that removal can be pushed.

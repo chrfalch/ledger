@@ -1,11 +1,12 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, lstatSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, lstatSync, realpathSync, rmdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fail, Failure } from './failure.js';
-import { isReadableFile, isTaken, readText, writeAtomic } from './files.js';
+import { folderEntries, isReadableFile, isTaken, readText, writeAtomic } from './files.js';
 import { withLock, type LockOptions } from './lock.js';
 import type { LedgerPaths } from './paths.js';
+import { readRecordJson } from './record.js';
 import { isSecretLike, prePushHook, RAW_CHANGES_LOG, WITHHELD } from './secret-scan.js';
 import { HOST_LABEL } from './settings.js';
 
@@ -37,9 +38,15 @@ export function clonePaths({ home }: LedgerPaths) {
 }
 
 export const MARKER = '.ledger-data';
-export const FORMAT = 1;
+export const FORMAT = 2;
+/** The format from before active records; the first write to such a clone upgrades it, so an older ledger refuses it. */
+const FORMAT_BEFORE_ACTIVE = 1;
+/** Whether this ledger reads a clone of `format`. */
+export const isKnownFormat = (format: unknown): boolean => format === FORMAT || format === FORMAT_BEFORE_ACTIVE;
+/** The text of the marker file of a clone of this format. */
+export const markerText = (): string => `${JSON.stringify({ format: FORMAT })}\n`;
 /** What `ledger store sync init` writes or expects, and must never find as a symbolic link. */
-export const GENERATED = [MARKER, '.gitignore', 'backlog', 'archive'];
+export const GENERATED = [MARKER, '.gitignore', 'backlog', 'active', 'archive'];
 
 /** Git ignores everything but the allowlist, so `git status` shows no lock or temporary file. */
 export const GITIGNORE = [
@@ -51,27 +58,29 @@ export const GITIGNORE = [
   '!/backlog/*/',
   '!/backlog/*/*.md',
   '!/backlog/*/*.json',
+  '!/active/',
+  '!/active/*/',
+  '!/active/*/*.json',
   '!/archive/',
   '!/archive/*/',
   '!/archive/*/*.md',
   '!/archive/*/*.json',
-  '!/active/',
-  '!/active/*/',
-  '!/active/*/*/',
-  '!/active/*/*/*.md',
   '',
 ].join('\n');
 
-// A host folder is a host label. A repo folder and a ledger name are never . or .., which would make a path that leaves
-// its folder, and hold no / or \, as in the file store, and no line break, which would split a name where git or the
-// hook prints one per line. An active copy is Markdown only. The pre-push hook checks the same rule in bash.
-const FOLDER = String.raw`(?!\.\.?\/)[^/\\\n]+\/`;
-const LEDGER = String.raw`(?!\.\.?\.(md|json)$)[^/\\\n]+\.(md|json)`;
-const COPY = String.raw`(?!\.\.?\.md$)[^/\\\n]+\.md`;
-const ALLOWED = new RegExp(String.raw`^(\.ledger-data|\.gitignore|(backlog|archive)\/${FOLDER}${LEDGER}|active\/${HOST_LABEL}\/${FOLDER}${COPY})$`);
+// A repo folder and a ledger name are never . or .., which would make a path that leaves its folder, and hold no / or \,
+// as in the file store, and no line break, which would split a name where git or the hook prints one per line. The
+// pre-push hook checks the same rule in bash.
+const ALLOWED = /^(\.ledger-data|\.gitignore|(backlog|active|archive)\/(?!\.\.?\/)[^/\\\n]+\/(?!\.\.?\.(md|json)$)[^/\\\n]+\.(md|json))$/;
+
+/**
+ * A copy of a worktree ledger as git storage kept it before active records, active/<host>/<repo>/<slug>.md. Reads skip
+ * it and the first write removes it, so such a path is allowed only for a clone that still holds one.
+ */
+export const LEGACY_COPY = new RegExp(String.raw`^active\/${HOST_LABEL}\/(?!\.\.?\/)[^/\\\n]+\/(?!\.\.?\.md$)[^/\\\n]+\.md$`);
 
 /** Whether a path of the clone may be committed and pushed. It is checked on its own, as a nested .gitignore can un-ignore any file. */
-export const isAllowed = (file: string): boolean => ALLOWED.test(file);
+export const isAllowed = (file: string): boolean => (ALLOWED.test(file) && (!file.startsWith('active/') || file.endsWith('.json'))) || LEGACY_COPY.test(file);
 
 export const unique = (files: string[]): string[] => [...new Set(files)].sort();
 
@@ -164,28 +173,12 @@ export const remoteGit = (clone: string, args: string[], { deadline, env }: Pick
 /** NUL-separated paths, as `-z` prints them, each exactly as git gave it. */
 export const nulSeparated = (text: string): string[] => text.split('\0').filter(Boolean);
 
-const heldClones = new Set<string>();
-
 /**
  * Runs `work` while this process holds the clone lock, ~/.claude/ledger-data.lock: every write to the clone and every git
  * call that changes it, a fetch too. A sync holds it for every step but the push, which changes nothing in the clone. A
- * process that still runs keeps it, however long it takes. `work` may take it again: it then runs at once.
+ * process that still runs keeps it, however long it takes.
  */
-export function withCloneLock<T>(clone: string, work: () => T, { waitMs }: Pick<LockOptions, 'waitMs'> = {}): T {
-  if (heldClones.has(clone)) return work();
-  return withLock(
-    clone,
-    () => {
-      heldClones.add(clone);
-      try {
-        return work();
-      } finally {
-        heldClones.delete(clone);
-      }
-    },
-    { waitMs, keepWhileRunning: true },
-  );
-}
+export const withCloneLock = <T>(clone: string, work: () => T, { waitMs }: Pick<LockOptions, 'waitMs'> = {}): T => withLock(clone, work, { waitMs, keepWhileRunning: true });
 
 /** The format of the clone's marker; 'none' when it has none, 'unreadable' when it is no JSON object with a number. */
 export function markerFormat(clone: string): number | 'none' | 'unreadable' {
@@ -215,7 +208,7 @@ export function cloneProblem(clone: string, deadline?: number): string | undefin
   if (lstatSync(hooksFolder(clone), { throwIfNoEntry: false })?.isSymbolicLink()) return 'its .git/hooks is a symbolic link';
   const format = markerFormat(clone);
   if (format === 'none') return `it has no ${MARKER} file`;
-  if (format !== FORMAT) return `its ${MARKER} file names a format this ledger does not know`;
+  if (!isKnownFormat(format)) return `its ${MARKER} file names a format this ledger does not know`;
   const linked = linkedGenerated(clone);
   if (linked.length > 0) return `${linked.join(', ')} is a symbolic link`;
   const top = cloneGit(clone, ['rev-parse', '--show-toplevel'], { deadline }).stdout.trim();
@@ -271,8 +264,8 @@ const hasGitignore = (clone: string): boolean => {
 };
 
 /**
- * Writes the .gitignore again where it differs, as one from before active copies does, so a manual git status in the
- * clone shows the copies too; the next commit pushes it. Call it under the clone lock.
+ * Writes the .gitignore again where it differs, as one from before active records does, so a manual git status in the
+ * clone shows the records too; the next commit pushes it. Call it under the clone lock.
  */
 export function installGitignore(clone: string): void {
   if (!hasGitignore(clone)) writeAtomic(path.join(clone, '.gitignore'), GITIGNORE);
@@ -324,11 +317,76 @@ export function checkFinished(clone: string, deadline?: number): void {
   }
 }
 
-/** The host folder of `file` when it is under active/ but not in the folder of `host`, this machine's. */
-const otherHostOf = (file: string, host: string | undefined): string | undefined => {
-  const [top, folder] = file.split('/');
-  return top === 'active' && folder !== host ? folder : undefined;
+export type CommitOptions = {
+  message?: string;
+  deadline?: number;
+  /**
+   * This machine's host label. A changed active record that names another host is that machine's to change, so it is
+   * put back as HEAD has it, never committed; without a host label, so is one that names any host.
+   */
+  host?: string;
+  /** Clone paths this command wrote itself, such as the removal of a record a forced retire made: committed whatever host they name. */
+  own?: ReadonlySet<string>;
+  /** Says that a record of another machine was put back; on stderr by default. */
+  warn?: (text: string) => void;
 };
+
+/**
+ * Commits the changes of the clone's working tree; true when it made a commit. Unfinished work, or any changed path
+ * outside the allowlist, staged or not, stops it with nothing committed. Call it under the clone lock.
+ */
+export function commitChanges(clone: string, { message = 'Update ledgers', deadline, host, own = new Set(), warn = (text) => console.error(`warning: ${text}`) }: CommitOptions = {}): boolean {
+  let changed = checkedChanges(clone, deadline);
+  // unique: a staged removal of a file that is still on disk is two entries.
+  const theirs = unique(changed).flatMap((file) => {
+    const owner = own.has(file) ? undefined : recordHost(clone, file, deadline);
+    return owner === undefined || owner === host ? [] : [{ file, owner }];
+  });
+  if (theirs.length > 0) {
+    restoreFromHead(clone, theirs.map(({ file }) => file), deadline);
+    for (const { file, owner } of theirs) warn(`put back ${shownPaths([file])} as git storage holds it: it is the record of a task on ${owner}, and only ${owner} changes it.`);
+    changed = checkedChanges(clone, deadline);
+  }
+  if (changed.length === 0) return false;
+  must(cloneGit(clone, ['add', '-A', '-f', '--pathspec-from-file=-', '--pathspec-file-nul'], { input: changed.join('\0'), env: { GIT_LITERAL_PATHSPECS: '1' }, deadline }));
+  if (nulSeparated(must(cloneGit(clone, ['diff', '--cached', '--name-only', '-z'], { deadline }))).length === 0) return false;
+  must(committingGit(clone, ['commit', '--quiet', '--no-verify', '-m', message], deadline));
+  return true;
+}
+
+/** The paths a commit would take, once no rebase or merge is unfinished; throws, as a commit does, for a path no commit may take. */
+function checkedChanges(clone: string, deadline?: number): string[] {
+  checkFinished(clone, deadline);
+  // Porcelain v1 with -z: "XY <path>", and no second path as renames are off. An ignored path is "!! <path>": the
+  // allowlist decides whether it is a ledger to commit, so no .gitignore from the remote or exclude file can hide one.
+  const entries = nulSeparated(must(cloneGit(clone, ['status', '--porcelain', '-z', '--no-renames', '--untracked-files=all', '--ignored'], { deadline })));
+  const changed = entries.flatMap((entry) => (entry.startsWith('!! ') && !isAllowed(entry.slice(3)) ? [] : [entry.slice(3)]));
+  const stray = changed.filter((file) => !isAllowed(file));
+  if (stray.length > 0) {
+    throw new SyncProblem('allowlist', `${outsideAllowlist(stray)}\nRemove them from ${clone}, or unstage them there with git restore --staged <path>, then run ledger store sync again.`);
+  }
+  const unplain = changed.filter((file) => !isPlainOrGone(path.join(clone, file)));
+  if (unplain.length > 0) {
+    throw new SyncProblem('allowlist', `${notPlain(unplain)}\nMake each a plain file in ${clone}, or remove it, then run ledger store sync again.`);
+  }
+  return changed;
+}
+
+/** The host an active record at `file`, a clone path, names: as it is on disk, else as HEAD has it; undefined for none, or for no active record. */
+function recordHost(clone: string, file: string, deadline?: number): string | undefined {
+  if (!/^active\/[^/]+\/[^/]+\.json$/.test(file)) return undefined;
+  const onDisk = path.join(clone, file);
+  const inHead = (): string | undefined => {
+    const shown = cloneGit(clone, ['show', `HEAD:${file}`], { deadline });
+    return shown.ok ? shown.stdout : undefined;
+  };
+  const text = isReadableFile(onDisk) ? readText(onDisk) : inHead();
+  try {
+    return text === undefined ? undefined : readRecordJson(text, file).host;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Whether the clone's branch has a commit. A lookup that fails for any other reason throws, so it is never taken for none. */
 function hasHead(clone: string, deadline?: number): boolean {
@@ -337,9 +395,6 @@ function hasHead(clone: string, deadline?: number): boolean {
   if (!run.ok && (run.status !== 1 || run.stderr !== '')) must(run);
   return run.ok;
 }
-
-/** Whether HEAD of the clone holds the path `file`; a lookup that fails counts as no. */
-export const inHead = (clone: string, file: string): boolean => cloneGit(clone, ['cat-file', '-e', `HEAD:${file}`]).ok;
 
 /** Puts each of `files`, changed paths of the clone, back as HEAD has it, in the index and on disk; a path HEAD lacks is removed. */
 export function restoreFromHead(clone: string, files: string[], deadline?: number): void {
@@ -353,144 +408,35 @@ export function restoreFromHead(clone: string, files: string[], deadline?: numbe
   for (const file of added) rmSync(path.join(clone, file), { force: true });
 }
 
-/** Inside .git, so it is never committed. */
-const heldBackFile = (clone: string): string => path.join(clone, '.git', 'ledger-held-back.json');
-
 /**
- * The clone paths commitChanges leaves out: copies a failed mirror or retire changed and could not put back. Undefined
- * for a list that is there but cannot be read, or names anything but copies, as which copies it holds is then unknown.
+ * Removes each copy of a worktree ledger that git storage kept before active records, so the next commit removes it
+ * too; true when it removed any. Only such a copy sits a folder deeper than a record. Call it under the clone lock.
  */
-export function heldBack(clone: string): string[] | undefined {
-  let text: string;
-  try {
-    text = readText(heldBackFile(clone));
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? [] : undefined;
+export function removeLegacyCopies(clone: string): boolean {
+  const active = path.join(clone, 'active');
+  let removed = false;
+  for (const host of folderEntries(active)) {
+    if (!host.isDirectory()) continue;
+    const folder = path.join(active, host.name);
+    const repos = folderEntries(folder).filter((entry) => entry.isDirectory());
+    for (const repo of repos) rmSync(path.join(folder, repo.name), { recursive: true, force: true });
+    if (repos.length > 0 && folderEntries(folder).length === 0) rmdirSync(folder);
+    removed ||= repos.length > 0;
   }
-  try {
-    const files: unknown = JSON.parse(text);
-    // The allowlist lets control characters through, but no copy path has one, and no git path has a NUL.
-    const isCopy = (file: unknown): file is string => typeof file === 'string' && file.startsWith('active/') && isAllowed(file) && !/[\u0000-\u001f\u007f]/.test(file);
-    return Array.isArray(files) && files.every(isCopy) ? files : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** Whether `held`, what heldBack gave, holds `file` back: a list that cannot be read holds every copy. */
-export const isHeld = (held: string[] | undefined, file: string): boolean => (held === undefined ? file.startsWith('active/') : held.includes(file));
-
-/** The changed paths under `folder` of the clone that are ledgers: staged or not, untracked or ignored. */
-export const changedFiles = (clone: string, folder: string, deadline?: number): string[] =>
-  nulSeparated(must(cloneGit(clone, ['status', '--porcelain', '-z', '--no-renames', '--untracked-files=all', '--ignored', '--', folder], { deadline })))
-    .map((entry) => entry.slice(3))
-    .filter(isAllowed);
-
-/** The changed copies that commitChanges leaves out. */
-export function heldChanges(clone: string, deadline?: number): string[] {
-  const held = heldBack(clone);
-  return unique(changedFiles(clone, 'active/', deadline).filter((file) => isHeld(held, file)));
-}
-
-// Its own mode, as one that kept the mode of a list that cannot be read could not be read either.
-const writeHeldBack = (clone: string, files: string[]): void =>
-  files.length === 0 ? rmSync(heldBackFile(clone), { force: true }) : writeAtomic(heldBackFile(clone), `${JSON.stringify(unique(files))}\n`, 0o600);
-
-/** Adds `files` to those commitChanges leaves out; a list that cannot be read holds them already. Call it under the clone lock. */
-export function holdBack(clone: string, files: string[]): void {
-  const held = heldBack(clone);
-  if (held !== undefined) writeHeldBack(clone, [...held, ...files]);
+  return removed;
 }
 
 /**
- * By the real path of a clone: its paths that no commit of this process takes, as their hold could not be recorded, or
- * they are half undone. Shared, as any other commit of the clone in this process, a sync's too, would otherwise take them.
+ * Writes the marker of this format in a clone of the format before active records, and commits it alone; true when it
+ * did. It first checks the clone as a commit does, so a clone no commit can be made in fails here and is left as it was.
+ * Call it under the clone lock.
  */
-const heldInProcess = new Map<string, Set<string>>();
-
-/** The paths of `clone` that this process holds back: what each commit of it passes to commitChanges as `held`. */
-export function heldInProcessFor(clone: string): Set<string> {
-  const key = realpathSync.native(clone);
-  const held = heldInProcess.get(key) ?? new Set<string>();
-  heldInProcess.set(key, held);
-  return held;
-}
-
-/**
- * Takes `files`, copies a mirror or a retire decided, out of those commitChanges leaves out. A list that cannot be read
- * is written again as the changed copies it held, less `files`. Call it under the clone lock.
- */
-export function releaseHeldBack(clone: string, files: string[]): void {
-  const held = heldBack(clone) ?? changedFiles(clone, 'active/');
-  writeHeldBack(clone, held.filter((file) => !files.includes(file)));
-}
-
-/** Puts each of `files` in the index as HEAD has it, and leaves it on disk as it is. */
-function unstage(clone: string, files: string[], deadline?: number): void {
-  const literal = { env: { GIT_LITERAL_PATHSPECS: '1' }, deadline };
-  if (hasHead(clone, deadline)) must(cloneGit(clone, ['reset', '--quiet', 'HEAD', '--', ...files], literal));
-  else must(cloneGit(clone, ['rm', '--quiet', '--cached', '--ignore-unmatch', '--', ...files], literal));
-}
-
-/** The clones whose unreadable held-back list this process warned about, so a command that commits twice warns once. */
-const warnedUnreadable = new Set<string>();
-
-export type CommitOptions = {
-  message?: string;
-  deadline?: number;
-  /** This machine's host folder under active/. Every other one holds read-only copies, which are put back, never committed. */
-  host?: string;
-  /** Says that a copy of another machine was put back; on stderr by default. */
-  warn?: (text: string) => void;
-  /** Clone paths this commit leaves out too, as heldBack's: what this process could not record there. */
-  held?: ReadonlySet<string>;
-};
-
-/**
- * Commits the changes of the clone's working tree, but not the paths heldBack holds back, which it unstages; true when it made a commit.
- * Unfinished work, or any changed path outside the allowlist, staged or not, stops it with nothing committed. Call it
- * under the clone lock.
- */
-export function commitChanges(clone: string, { message = 'Update ledgers', deadline, host, warn = (text) => console.error(`warning: ${text}`), held: heldHere = new Set() }: CommitOptions = {}): boolean {
-  checkFinished(clone, deadline);
-  // Porcelain v1 with -z: "XY <path>", and no second path as renames are off. An ignored path is "!! <path>": the
-  // allowlist decides whether it is a ledger to commit, so no .gitignore from the remote or exclude file can hide one.
-  const entries = nulSeparated(must(cloneGit(clone, ['status', '--porcelain', '-z', '--no-renames', '--untracked-files=all', '--ignored'], { deadline })));
-  const listed = entries.flatMap((entry) => (entry.startsWith('!! ') && !isAllowed(entry.slice(3)) ? [] : [entry.slice(3)]));
-  // unique: a staged removal of a file that is still on disk is two entries.
-  const theirs = unique(listed.filter((file) => otherHostOf(file, host) !== undefined));
-  if (theirs.length > 0) {
-    restoreFromHead(clone, theirs, deadline);
-    for (const file of theirs) {
-      const owner = shownPaths([otherHostOf(file, host) ?? '']);
-      warn(`put back ${shownPaths([file])} as git storage holds it: it is a read-only copy of a ledger on ${owner}, and only ${owner} changes it.`);
-    }
-  }
-  const held = heldBack(clone);
-  const isKept = (file: string): boolean => isHeld(held, file) || heldHere.has(file);
-  const ours = listed.filter((file) => !theirs.includes(file));
-  const kept = ours.filter(isKept);
-  if (held === undefined && kept.some((file) => isHeld(held, file)) && !warnedUnreadable.has(clone)) {
-    warnedUnreadable.add(clone);
-    warn(`.git/ledger-held-back.json in ${clone} cannot be read, so no copy of this machine is committed until ledger store mirror goes through.`);
-  }
-  // A held copy staged by hand would be committed even though git add leaves it out.
-  const staged = entries.filter((entry) => !' ?!'.includes(entry[0])).map((entry) => entry.slice(3));
-  const keptStaged = unique(kept.filter((file) => staged.includes(file)));
-  if (keptStaged.length > 0) unstage(clone, keptStaged, deadline);
-  const changed = ours.filter((file) => !isKept(file));
-  const stray = changed.filter((file) => !isAllowed(file));
-  if (stray.length > 0) {
-    throw new SyncProblem('allowlist', `${outsideAllowlist(stray)}\nRemove them from ${clone}, or unstage them there with git restore --staged <path>, then run ledger store sync again.`);
-  }
-  const unplain = changed.filter((file) => !isPlainOrGone(path.join(clone, file)));
-  if (unplain.length > 0) {
-    throw new SyncProblem('allowlist', `${notPlain(unplain)}\nMake each a plain file in ${clone}, or remove it, then run ledger store sync again.`);
-  }
-  if (changed.length === 0) return false;
-  must(cloneGit(clone, ['add', '-A', '-f', '--pathspec-from-file=-', '--pathspec-file-nul'], { input: changed.join('\0'), env: { GIT_LITERAL_PATHSPECS: '1' }, deadline }));
-  if (nulSeparated(must(cloneGit(clone, ['diff', '--cached', '--name-only', '-z'], { deadline }))).length === 0) return false;
-  must(committingGit(clone, ['commit', '--quiet', '--no-verify', '-m', message], deadline));
+export function upgradeFormat(clone: string): boolean {
+  if (markerFormat(clone) !== FORMAT_BEFORE_ACTIVE) return false;
+  checkedChanges(clone);
+  writeAtomic(path.join(clone, MARKER), markerText());
+  must(cloneGit(clone, ['add', '-f', '--', MARKER]));
+  must(committingGit(clone, ['commit', '--quiet', '--no-verify', '-m', `Upgrade git storage to format ${FORMAT}`, '--', MARKER]));
   return true;
 }
 

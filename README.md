@@ -124,7 +124,6 @@ ledgers; each edit changes only the lines it names.
 | `ledger store migrate --repo-ids [--dry-run]` | Once, for ledgers filed under the folder name of a checkout, as before repo keys: moves each to its repo's key, with its evidence and registry entry, and keeps the folder name as an alias. It only renames on the same disk. A ledger whose checkout is gone or cannot be told, that lies on another disk, or whose name the key already has, stays where it is for you to move by hand, and the command exits 1. With git storage, it commits and pushes the moves; the aliases stay on the machine that ran it. `--dry-run` prints the plan, changes nothing, and exits the same way. |
 | `ledger store sync init <url>` | Sets up git storage in `~/.claude/ledger-data` from a private GitHub repository. It asks `gh` whether the repository is private, and stops when it is not, or when `gh` cannot tell. An empty repository gets its layout, pushed at once; a repository another machine set up keeps its contents; any other repository is refused. It does not change the storage setting. |
 | `ledger store sync [--quiet]` | With git storage: asks `gh` whether the repository is still private, commits the ledgers, pulls with a rebase, checks that the commits hold only ledgers and no secret-like text, and pushes. It exits 1, with nothing pushed, on a conflict, a check that fails, or a network failure, and names the file or `file:line`. `--quiet` prints nothing, asks `gh` once a day, and exits at once when another `--quiet` sync runs; the background push after each command uses it. |
-| `ledger store mirror [--quiet]` | With git storage: copies each worktree ledger of this machine to `active/<host>/<repo key>/<slug>.md` in the clone, removes a copy only when git confirms that its worktree is gone or when it copied that worktree's ledger under another repo key or slug, commits, and pushes in the background. It also commits a copy that an earlier failed commit left out. Another machine lists such a task as `active on <host>`, and `ledger show` prints it read-only. With file or SQLite storage it does nothing. `--quiet` prints no output and no warning, and stops git after 5 seconds; a failed commit is still recorded for the next session start. The end of each answered turn of the main agent uses it. |
 | `ledger worktrees` | Shows each linked worktree of this repo: size, last commit, uncommitted files, ledger and PR, largest first. |
 | `ledger worktrees prune <name>\|--all [--dry-run]` | Deletes the git-ignored build folders (`.build`, `.expo-prebuild`, `.cache`, `build`, `.DerivedData`) and the worktree's own Xcode build folder, `.claude/worktrees/.build/<name>` in the main checkout, each of 0.05 GB or more. It never deletes anything else in `.claude`, nor anything in `node_modules` or `Pods`. `--dry-run` only lists the folders. It exits 1 when a folder could not be deleted. |
 | `ledger worktrees prune-orphans [--dry-run]` | Deletes the Xcode build folders in `.claude/worktrees/.build/` whose worktree git no longer lists. It keeps `.main`, the folder of the main checkout. `--dry-run` only lists the folders. It exits 1 when a folder could not be deleted. |
@@ -133,9 +132,11 @@ ledgers; each edit changes only the lines it names.
 
 ### Where the ledgers are kept
 
-The active ledger is always `.claude/ledger.md` in the task's worktree. The
-backlog ledgers, the archive and the registry, `~/.claude/ledgers.json`, are
-files by default, at the paths this README names. To keep them in one SQLite
+Every ledger is kept in the ledger store: the active ledgers, the backlog
+ledgers and the archive. Read a ledger with `ledger show`, and write it one item
+at a time with `ledger notes`. The ledgers and the registry,
+`~/.claude/ledgers.json`, are files by default, at the paths this README names.
+An active ledger is `~/.claude/ledger-active/<repo>/<slug>.json`. To keep them in one SQLite
 database, `~/.claude/ledgers.db`, write this to `~/.claude/ledger-settings.json`:
 
 ```json
@@ -155,12 +156,11 @@ To share the backlog and the archive between machines, use git storage: a
 clone of a private GitHub repository at `~/.claude/ledger-data`. Run
 `ledger store sync init <url>` once on each machine, then `ledger store migrate --to git`.
 Each command that changes a ledger commits it and pushes in the background,
-and each session start pulls. Evidence and the registry stay on the machine.
-The active `.claude/ledger.md` stays too, but git storage keeps a read-only
-copy of it, `active/<host>/<repo key>/<slug>.md`, updated at the end of each
-answered turn and at session start, so your other machines can read it.
-`"host"` in `~/.claude/ledger-settings.json` names the machine; without it,
-the host name does. A secret scan and an allowlist guard
+and each session start pulls. Evidence and the registry stay on the
+machine. Your other machines list a task you started here as
+`active on <host>`, and read its ledger, but cannot change it. `"host"` in
+`~/.claude/ledger-settings.json` names the machine; without it, the host name
+does. A secret scan and an allowlist guard
 every push, a manual `git push` in the clone too: the clone sets its own
 `core.hooksPath`, so hooks from a global one do not run there.
 `git push --no-verify` skips that pre-push hook, and with it the scan and the
@@ -410,7 +410,7 @@ documents and the links to them.
 rules/                    the orchestrator contract, one file per topic
 agents/                   the ten subagents
 docs/                     this documentation
-ledger.template.md        copied per task to .claude/ledger.md
+ledger.template.md        the starting text of each new task ledger
 notes/                    rationale, not rules
 DECISIONS.md              why the setup is shaped this way
 llp/                      design documents, checked by npm run llp

@@ -79,9 +79,12 @@ export function listView(tasks: Task[]): string {
   if (tasks.length === 0) return 'No live tasks. Retired tasks are listed by: ledger task archive';
   const count = (status: string): number => tasks.filter((task) => task.status === status).length;
   const counts = [`${count('active')} active`, `${count('parked')} parked`, `${count('backlog')} backlog`];
-  const status = (task: Task): string => (task.host === undefined ? task.status : `${task.status} on ${task.host}`);
+  // A task of another machine names that machine; one of this machine whose worktree is gone gets the footnote.
+  const isGone = ({ elsewhere, host }: Task): boolean => elsewhere === true && host === undefined;
+  const status = (task: Task): string => (task.host !== undefined ? `${task.status} on ${task.host}` : isGone(task) ? `${task.status}*` : task.status);
   const rows = familyOrder(tasks).map(({ task, depth }) => [repoLabel(task.repo), nestedName(task.slug, depth), status(task), parentCell(task), localDate(task.mtimeMs), truncate(task.ledger.next)]);
-  return [heading('Task ledgers', `${plural(tasks.length, 'task')}: ${counts.join(', ')}`), '', ...table(['repo', 'task', 'status', 'parent', 'updated', 'next'], rows)].join('\n');
+  const note = tasks.some(isGone) ? ['', '* its worktree is not on this machine'] : [];
+  return [heading('Task ledgers', `${plural(tasks.length, 'task')}: ${counts.join(', ')}`), '', ...table(['repo', 'task', 'status', 'parent', 'updated', 'next'], rows), ...note].join('\n');
 }
 
 export type ArchiveRow = { task: Task; match?: string };

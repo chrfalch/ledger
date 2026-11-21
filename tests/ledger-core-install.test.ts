@@ -4,7 +4,7 @@ import { accessSync, chmodSync, constants, copyFileSync, existsSync, mkdirSync, 
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { REPO } from './helpers.js';
-import { commandEnv, git, home, LEDGER_BIN, ok, readLedgerFile, repository, storeFolder, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { activeFile, commandEnv, git, hasLedgerFile, home, LEDGER_BIN, ok, readLedgerFile, repository, storeFolder, worktreeOf, worktreeTask, type Ran } from './ledger-core-fixtures.js';
 
 /** A HOME with ~/.claude/ledger.template.md and the repo ~/repos/app. */
 function setup(t: TestContext) {
@@ -14,8 +14,6 @@ function setup(t: TestContext) {
   return { h, app };
 }
 
-const worktreeOf = (main: string, slug: string): string => path.join(main, '.claude/worktrees', slug);
-const ledgerOf = (worktree: string): string => path.join(worktree, '.claude/ledger.md');
 const installLog = (h: string): string => path.join(h, 'installs.log');
 
 /** Each install the stubs ran, as `<tool> <args> in <folder>`. */
@@ -89,7 +87,8 @@ test('the first lockfile in the order bun, pnpm, yarn, npm picks the package man
     ['no-bun', ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'], 'pnpm install --frozen-lockfile'],
     ['no-pnpm', ['package-lock.json', 'yarn.lock'], 'yarn install --frozen-lockfile'],
   ] as const) {
-    const worktree = path.dirname(path.dirname(worktreeTask(h, app, { slug })));
+    worktreeTask(h, app, { slug });
+    const worktree = worktreeOf(app, slug);
     for (const lockfile of LOCKFILES.filter((name) => !(kept as readonly string[]).includes(name))) rmSync(path.join(worktree, lockfile), { force: true });
     assert.equal(goJson(h, app, slug).installed, expected);
   }
@@ -101,8 +100,8 @@ test('ledger go runs no install without a lockfile, and none when node_modules e
   ok(run(h, app, {}, 'task', 'new', 'plain'));
   const plain = goJson(h, app, 'plain');
   assert.equal('installed' in plain, false);
-  const file = worktreeTask(h, app, { slug: 'has-modules' });
-  const worktree = path.dirname(path.dirname(file));
+  worktreeTask(h, app, { slug: 'has-modules' });
+  const worktree = worktreeOf(app, 'has-modules');
   writeFileSync(path.join(worktree, 'package-lock.json'), '{}\n');
   mkdirSync(path.join(worktree, 'node_modules'));
   const present = goJson(h, app, 'has-modules');
@@ -113,8 +112,8 @@ test('ledger go runs no install without a lockfile, and none when node_modules e
 test('ledger go to a task that has a worktree installs when node_modules is missing, and not again once it exists', (t) => {
   const { h, app } = setup(t);
   stubInstallers(h);
-  const file = worktreeTask(h, app, { slug: 'fix-login' });
-  const worktree = path.dirname(path.dirname(file));
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const worktree = worktreeOf(app, 'fix-login');
   writeFileSync(path.join(worktree, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n');
   const first = run(h, app, {}, 'go', 'fix-login');
   assert.equal(first.status, 0, first.stderr);
@@ -136,9 +135,9 @@ test('a failed install exits 5, names the command and its last 10 lines, keeps t
   for (let line = 6; line <= 15; line += 1) assert.match(failed.stderr, new RegExp(`^line ${line}$`, 'm'));
   assert.doesNotMatch(failed.stderr, /^line 5$/m, 'only the last 10 lines');
   const worktree = worktreeOf(app, 'fix-login');
-  assert.equal(existsSync(ledgerOf(worktree)), true, 'the worktree and its ledger stay');
+  assert.equal(existsSync(worktree) && hasLedgerFile(activeFile(h, app, 'fix-login')), true, 'the worktree and its ledger stay');
   assert.equal(existsSync(backlog), false, 'the ledger is not moved back');
-  assert.match(readLedgerFile(ledgerOf(worktree)), /^- claim: session s1 /m);
+  assert.match(readLedgerFile(activeFile(h, app, 'fix-login')), /^- claim: session s1 /m);
 
   const json = JSON.parse(run(h, app, { session: 's1' }, 'go', 'fix-login', '--json').stdout);
   assert.equal(json.ok, false);
@@ -157,8 +156,8 @@ test('an install whose command is not on PATH is a failed install: exit 5, namin
   for (const tool of ['node', 'git']) symlinkSync(onPath(tool) ?? assert.fail(`${tool} is not on PATH`), path.join(bin, tool));
   const searched = [path.join(h, 'stub-bin'), bin, '/usr/bin', '/bin'];
   if (searched.some((folder) => isExecutable(path.join(folder, 'bun')))) return t.skip('bun is installed in a system folder');
-  const file = worktreeTask(h, app, { slug: 'fix-login' });
-  writeFileSync(path.join(path.dirname(path.dirname(file)), 'bun.lock'), '{}\n');
+  worktreeTask(h, app, { slug: 'fix-login' });
+  writeFileSync(path.join(worktreeOf(app, 'fix-login'), 'bun.lock'), '{}\n');
   const ran = run(h, app, { env: { PATH: searched.join(path.delimiter) } }, 'go', 'fix-login');
   assert.equal(ran.status, 5, ran.stderr);
   assert.match(ran.stderr, /bun install --frozen-lockfile/);

@@ -18,11 +18,6 @@ export function limitGitCalls(ms: number, until = Infinity): void {
   deadline = until;
 }
 
-/** Asks git again in each folder whose call the limit of limitGitCalls stopped: for the steps after one with a shorter limit. */
-export function forgetStoppedGitCalls(): void {
-  unanswered.clear();
-}
-
 /** Whether a git call in `folder` or a folder that holds it was stopped by the limit of limitGitCalls. */
 export function gitTimedOut(folder: string): boolean {
   for (let current = path.resolve(folder); ; current = path.dirname(current)) {
@@ -117,12 +112,11 @@ export function removeWorktree(main: string, folder: string, branch: string): vo
 export type Worktree = { path: string; branch?: string };
 
 /** Every checkout of the repo at `main`, the main checkout first. Empty when `main` is not a repo. */
-export const worktrees = (main: string): Worktree[] => readWorktreeList(main) ?? [];
-
-/** Every checkout of the repo at `main`, the main checkout first; undefined when git cannot list them. */
-export function readWorktreeList(main: string): Worktree[] | undefined {
-  return git(main, 'worktree', 'list', '--porcelain')
-    ?.split('\n\n')
+export function worktrees(main: string): Worktree[] {
+  const listed = git(main, 'worktree', 'list', '--porcelain');
+  if (listed === undefined) return [];
+  return listed
+    .split('\n\n')
     .map((block) => block.split('\n'))
     .flatMap((lines) => {
       const folder = lines.find((line) => line.startsWith('worktree '))?.slice('worktree '.length);

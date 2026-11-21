@@ -6,7 +6,7 @@ import type { LedgerCollection, LedgerStore } from './store.js';
 import { plural } from './views.js';
 
 /** The lines of `text` that went to its record's general notes, without the copies of the headings they stood under. */
-function notedLines(text: string): number {
+export function notedLines(text: string): number {
   const { notes } = parseRecord(text);
   const headings = new Set(parseLedger(notes.join('\n')).sections.map(({ start }) => start));
   return notes.filter((line, index) => line.trim() !== '' && !headings.has(index)).length;

@@ -11,10 +11,9 @@ import { remoteKey, repoKey, repoLabel } from '../tools/ledger/repo-key.js';
 import { shownLedger } from '../tools/ledger/show.js';
 import { sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
-import { archivedTasks, folderTask, inRepo } from '../tools/ledger/tasks.js';
-import { listView } from '../tools/ledger/views.js';
+import { archivedTasks, inRepo } from '../tools/ledger/tasks.js';
 import { REPO } from './helpers.js';
-import { asCli, commandEnv, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, noSqlite, ok, repository, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { asCli, commandEnv, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, noSqlite, ok, repository, worktreeOf, worktreeTask, type Ran } from './ledger-core-fixtures.js';
 
 type Storage = 'file' | 'sqlite';
 
@@ -152,7 +151,7 @@ test('ledger task new in a linked worktree files the backlog ledger under the ke
   const h = home(t);
   copyFileSync(path.join(REPO, 'ledger.template.md'), path.join(h, '.claude/ledger.template.md'));
   const main = repoWithRemotes(h, path.join(h, 'repos/app'), { origin: 'git@github.com:me/app.git' });
-  const worktree = path.dirname(path.dirname(worktreeTask(h, main, { slug: 'epic' })));
+  const worktree = (worktreeTask(h, main, { slug: 'epic' }), worktreeOf(main, 'epic'));
   ok(ledger(h, worktree, 'task', 'new', 'idea', '--goal', 'An idea.'));
   assert.ok(existsSync(path.join(h, '.claude/ledger-backlog/github.com%2Fme%2Fapp/idea.json')));
 });
@@ -195,25 +194,6 @@ test('ledger task archive --all shows the short label in its repo column', (t) =
   const store = fileStore(ledgerPaths(h));
   store.archive.write('github.com/me/app', '2026-11-01-old', ledgerText({ slug: 'old' }));
   assert.match(lineWith(ok(ledger(h, h, 'task', 'archive', '--all')), 'old'), /^2026-11-01\s+me\/app\s+old/);
-});
-
-test('listView names a task in no git repo by its folder name', (t) => {
-  const h = home(t);
-  const folder = path.join(h, 'notes/scratch');
-  mkdirSync(path.join(folder, '.claude'), { recursive: true });
-  writeFileSync(path.join(folder, '.claude/ledger.md'), ledgerText({ slug: 'scratch' }));
-  const task = folderTask(folder) ?? assert.fail('no task');
-  assert.match(listView([task]).split('\n')[3], /^scratch\s+scratch\s+active/);
-});
-
-// --- A ledger folder in no git repo ---
-
-test('a ledger in a folder that is in no git repo is keyed by the absolute path of the folder', (t) => {
-  const h = home(t);
-  const folder = path.join(h, 'notes/scratch');
-  mkdirSync(path.join(folder, '.claude'), { recursive: true });
-  writeFileSync(path.join(folder, '.claude/ledger.md'), ledgerText({ slug: 'scratch' }));
-  assert.equal(folderTask(folder)?.repo, folder);
 });
 
 // --- The file store's folders ---
@@ -362,7 +342,7 @@ test('the error of ledger show names the repo by its short label', (t) => {
   const app = repoWithRemotes(h, path.join(h, 'repos/app'), { origin: 'git@github.com:me/app.git' });
   const ran = ledger(h, app, 'show', 'nothing');
   assert.equal(ran.status, 1);
-  assert.equal(ran.stderr.trim(), 'No ledger named nothing is in a worktree of this clone, or in the backlog or the archive of the repo me/app.');
+  assert.equal(ran.stderr.trim(), 'No ledger named nothing is in the active tasks, the backlog or the archive of the repo me/app.');
 });
 
 // --- ledger store migrate --repo-ids ---
@@ -504,7 +484,7 @@ const HINT = '2 ledgers still use folder names (app, gone); run `ledger store mi
 function hintWorld(t: TestContext, legacy = true) {
   const h = home(t);
   const app = repository(h, path.join(h, 'repos/app'));
-  const epic = path.dirname(path.dirname(worktreeTask(h, app, { slug: 'epic' })));
+  const epic = (worktreeTask(h, app, { slug: 'epic' }), worktreeOf(app, 'epic'));
   const store = fileStore(ledgerPaths(h));
   if (legacy) {
     store.backlog.write('app', 'idea', ledgerText({ slug: 'idea', main: app }));
@@ -544,13 +524,13 @@ test('ledger go and ledger show that find no task add the hint when ledgers stil
   assert.ok(go.stderr.trim().endsWith(HINT), go.stderr);
   const show = ledger(h, app, 'show', 'nothing');
   assert.equal(show.status, 1);
-  assert.equal(show.stderr.trim(), `No ledger named nothing is in a worktree of this clone, or in the backlog or the archive of the repo app. ${HINT}`);
+  assert.equal(show.stderr.trim(), `No ledger named nothing is in the active tasks, the backlog or the archive of the repo app. ${HINT}`);
 });
 
 test('ledger go and ledger show that find no task give no hint when no ledger uses a folder name', (t) => {
   const { h, app } = hintWorld(t, false);
   assert.doesNotMatch(ledger(h, app, 'go', 'idea').stderr, /migrate --repo-ids/);
-  assert.equal(ledger(h, app, 'show', 'nothing').stderr.trim(), 'No ledger named nothing is in a worktree of this clone, or in the backlog or the archive of the repo app.');
+  assert.equal(ledger(h, app, 'show', 'nothing').stderr.trim(), 'No ledger named nothing is in the active tasks, the backlog or the archive of the repo app.');
 });
 
 test('store migrate takes --to or --repo-ids, not both and not neither', (t) => {

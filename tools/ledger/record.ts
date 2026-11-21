@@ -51,6 +51,8 @@ export type TaskRecord = {
   pr?: string;
   repo?: string;
   worktree?: string;
+  /** The host label of the machine whose worktree an active task is in. */
+  host?: string;
   branch?: string;
   base?: { ref: string; commit?: string };
   main?: string;
@@ -87,6 +89,7 @@ const FIELDS = [
   'pr',
   'repo',
   'worktree',
+  'host',
   'branch',
   'base',
   'main',
@@ -144,7 +147,7 @@ function tidy(lines: readonly string[]): string[] {
   return kept;
 }
 
-type LocationKey = 'main' | 'worktree' | 'branch' | 'base' | 'designRefs' | 'parent' | 'title' | 'kind' | 'state' | 'stage' | 'order' | 'dependencies' | 'claim' | 'pr' | 'repo';
+type LocationKey = 'main' | 'worktree' | 'host' | 'branch' | 'base' | 'designRefs' | 'parent' | 'title' | 'kind' | 'state' | 'stage' | 'order' | 'dependencies' | 'claim' | 'pr' | 'repo';
 
 /**
  * A `- <name>: <value>` bullet under ## Location. `template` is the value ledger.template.md gives it, which reads as
@@ -197,6 +200,7 @@ function parseBase(value: string): TaskRecord['base'] {
 const BULLETS: Bullet[] = [
   bullet('main', 'main', asText, asText),
   bullet('worktree', 'worktree', asText, asText, { template: '<path>' }),
+  bullet('host', 'host', asText, asText),
   bullet('branch', 'branch', asText, asText, { template: '<name>' }),
   bullet('base', 'base', parseBase, ({ ref, commit }) => (commit === undefined ? ref : `${ref} @ ${commit}`), { template: '<branch/commit>' }),
   bullet('design refs', 'designRefs', (value) => (value === 'none' ? 'none' : listOf(value, (item) => item || undefined)), (refs) => (refs === 'none' ? refs : refs.join(',')), {
@@ -553,7 +557,7 @@ const isRecord = shape(
     next: isText,
   },
   {
-    ...Object.fromEntries((['title', 'kind', 'state', 'stage', 'pr', 'repo', 'worktree', 'branch', 'main'] as const).map((key) => [key, isText])),
+    ...Object.fromEntries((['title', 'kind', 'state', 'stage', 'pr', 'repo', 'worktree', 'host', 'branch', 'main'] as const).map((key) => [key, isText])),
     claim: shape({ session: isText, since: isClaimStamp, active: isClaimStamp }),
     parent: isRef,
     order: isWhole,

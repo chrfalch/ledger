@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
 import { buildGate, GATE_NAMES, gateQuestion, type GateDefinition, type GateQuestion } from '../tools/ledger/gates.js';
-import { home, ledger, ok, repository, worktreeTask } from './ledger-core-fixtures.js';
+import { home, ledger, ok, readLedgerFile, repository, worktreeOf, worktreeTask, writeLedgerFile } from './ledger-core-fixtures.js';
 
 const pick: GateDefinition = {
   name: 'pick',
@@ -148,8 +147,8 @@ test('ledger task gate plan prints one AskUserQuestion question as JSON', (t) =>
 test('ledger task gate takes the slug of the worktree it runs in', (t) => {
   const h = home(t);
   const app = repository(h, path.join(h, 'repos/app'));
-  const file = worktreeTask(h, app, { slug: 'fix-login' });
-  const question = JSON.parse(ok(ledger(h, path.dirname(path.dirname(file)), 'task', 'gate', 'pr'))) as GateQuestion;
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const question = JSON.parse(ok(ledger(h, worktreeOf(app, 'fix-login'), 'task', 'gate', 'pr'))) as GateQuestion;
   assert.deepEqual(question, gateQuestion('pr', 'fix-login'));
 });
 
@@ -157,8 +156,8 @@ test('ledger task gate in an untitled worktree ledger takes the folder slug', (t
   const h = home(t);
   const app = repository(h, path.join(h, 'repos/app'));
   const file = worktreeTask(h, app, { slug: 'fix-login' });
-  writeFileSync(file, readFileSync(file, 'utf8').replace('# Task ledger — fix-login', '# Task ledger — <slug>'));
-  const question = JSON.parse(ok(ledger(h, path.dirname(path.dirname(file)), 'task', 'gate', 'pr'))) as GateQuestion;
+  writeLedgerFile(file, readLedgerFile(file).replace('# Task ledger — fix-login', '# Task ledger — <slug>'));
+  const question = JSON.parse(ok(ledger(h, worktreeOf(app, 'fix-login'), 'task', 'gate', 'pr'))) as GateQuestion;
   assert.deepEqual(question, gateQuestion('pr', 'fix-login'));
 });
 

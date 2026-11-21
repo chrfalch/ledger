@@ -9,16 +9,12 @@ export const ledgerBin = fileURLToPath(new URL('../../bin/ledger', import.meta.u
 export function ledgerPaths(home: string) {
   return {
     home,
-    /** Where a rebuild looks for repos when the registry cannot name them. */
-    scanRoots: [path.join(home, 'repos'), path.join(home, 'issues')],
     /** The path as a person reads it, with HOME as ~. */
     tilde: (file: string): string => (file === home || file.startsWith(`${home}${path.sep}`) ? `~${file.slice(home.length)}` : file),
   };
 }
 
 export type LedgerPaths = ReturnType<typeof ledgerPaths>;
-
-export const worktreeLedger = (worktree: string): string => path.join(worktree, '.claude', 'ledger.md');
 
 export const taskWorktree = (main: string, folder: string): string => path.join(main, '.claude', 'worktrees', folder);
 
@@ -46,3 +42,12 @@ export function realPath(file: string): string {
 
 /** A ledger may name a folder through a symbolic link or with a trailing slash, and the folder may be gone. */
 export const samePath = (a: string, b: string): boolean => a === b || realPath(a) === realPath(b);
+
+const UUID = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
+
+/** A path into a Claude Code session folder or its scratchpad, which macOS deletes, so no ledger may cite one. */
+export const SESSION_CITATION = new RegExp(`/tmp/claude-[0-9]+/[^/\\s]+/${UUID}|<scratchpad>/\\S|scratchpad/[A-Za-z0-9_.-]`);
+
+/** Why a ledger may not cite a session file, and where to put the file instead. */
+export const CITATION_ADVICE =
+  "A task ledger may not cite files in the Claude Code session folder or its scratchpad, because macOS deletes them. Move the file to .claude/evidence/ in the task's worktree and cite that path, for example .claude/evidence/xcodebuild-red.log.";

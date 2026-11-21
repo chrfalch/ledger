@@ -10,7 +10,8 @@ import { joined, plural } from './views.js';
 
 // @ref LLP 0001#4-storage — D10: the one-time conversion from folder-name keys to repo addresses.
 
-type Place = 'backlog' | 'archive';
+const places = ['backlog', 'active', 'archive'] as const;
+type Place = (typeof places)[number];
 /** Where a ledger goes, or why it stays: no key for it is sure. */
 type Outcome = { to: string } | { left: string };
 type Moved = { repo: string; location: string };
@@ -57,8 +58,7 @@ export function withHint(store: LedgerStore, message: string): string {
  * evidence with no archive copy, each by the folder name it is under.
  */
 function leftUnderFolderNames(store: LedgerStore): { ledgers: string[]; entries: string[]; evidence: string[] } {
-  const { backlog, archive } = store;
-  const ledgers = [...new Set([...backlog.repos(), ...archive.repos()].filter(isFolderName))].flatMap((repo) => [...backlog.list(repo), ...archive.list(repo)]);
+  const ledgers = places.flatMap((place) => store[place].repos().filter(isFolderName).flatMap((repo) => store[place].list(repo)));
   const locations = new Set(ledgers.map(({ location }) => location));
   const entries = (parseRegistry(store.registry.read() ?? '') ?? []).filter((entry) => {
     const location = entryLocation(entry);
@@ -67,7 +67,7 @@ function leftUnderFolderNames(store: LedgerStore): { ledgers: string[]; entries:
   return {
     ledgers: ledgers.map(({ repo }) => repo),
     entries: entries.map(({ repo }) => repo),
-    evidence: archive.orphanEvidence().flatMap(({ repo }) => (isFolderName(repo) ? [repo] : [])),
+    evidence: store.archive.orphanEvidence().flatMap(({ repo }) => (isFolderName(repo) ? [repo] : [])),
   };
 }
 
@@ -88,7 +88,7 @@ export function conversionHint(store: LedgerStore): string | undefined {
 }
 
 /**
- * `ledger store migrate --repo-ids [--dry-run]`: files each backlog ledger and archive copy kept under a folder name
+ * `ledger store migrate --repo-ids [--dry-run]`: files each backlog ledger, active record and archive copy kept under a folder name
  * under its repo's D10 key, with its evidence, by a rename on one disk. The main checkout comes from the ledger itself,
  * else from the registry and the other ledgers of that folder name when they name exactly one checkout, else from the
  * alias an earlier run recorded. Whatever is not that sure stays for a person to move: a ledger whose main is gone, one
@@ -111,7 +111,7 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
   const nothing = (): number => (line(`${dryRun ? 'Would move' : 'Moved'} 0 ledgers; nothing uses a folder name.`), 0);
   if (store === undefined) return nothing();
   const filed = new Map<string, { place: Place; ledger: StoredLedger }[]>();
-  for (const place of ['backlog', 'archive'] as const) {
+  for (const place of places) {
     for (const repo of store[place].repos().filter(isFolderName)) {
       filed.set(repo, [...(filed.get(repo) ?? []), ...store[place].list(repo).map((ledger) => ({ place, ledger }))]);
     }

@@ -5,20 +5,18 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claimResultText, claimTask, Held, knownSession, releaseAll, releaseTask, requiredSession, touchAll, touchTask, type AllResult } from './claims.js';
-import { limitCloneGitCalls } from './clone.js';
 import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
 import { planProgress } from './format.js';
 import { GATE_NAMES, gateQuestion } from './gates.js';
-import { limitGitCalls, mainCheckout } from './git.js';
-import { gitStore } from './git-store.js';
+import { mainCheckout } from './git.js';
 import { logHookFailure, oneLine } from './hook-failures.js';
-import { answerHook, GIT_TIMEOUT_MS, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookContext, type HookEvent } from './hooks.js';
+import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookContext, type HookEvent } from './hooks.js';
 import { KINDS, STAGES } from './kinds.js';
-import { limitLockWaits } from './lock.js';
 import { ledgerBin, ledgerPaths, realPath } from './paths.js';
 import { repoKey, repoLabel } from './repo-key.js';
 import { migrateStorage } from './migrate.js';
+import { migrateActive } from './migrate-active.js';
 import { migrateRecords } from './migrate-records.js';
 import { migrateRepoIds } from './migrate-repo-ids.js';
 import {
@@ -48,15 +46,16 @@ import {
   resolveQuestionText,
   setNext,
   setNextText,
+  setStep,
+  setStepText,
   TAGS,
   type Tag,
 } from './notes.js';
-import { mirrorLedgers, mirrorText } from './mirror.js';
 import { openStore } from './open-store.js';
 import { loadTasks } from './registry.js';
-import { PartlyRemoved, retireTask, retireText } from './retire.js';
+import { retireTask, retireText } from './retire.js';
 import { readStorage, STORAGES, type Storage } from './settings.js';
-import { shownLedger } from './show.js';
+import { ownLedger, shownLedger } from './show.js';
 import { sqliteFile } from './sqlite-store.js';
 import type { LedgerStore } from './store.js';
 import { initSync, syncInBackground, syncLedgers } from './sync.js';
@@ -76,6 +75,7 @@ import {
   changeParent,
   createdText,
   createTask,
+  currentTask,
   dependsText,
   goTask,
   goText,
@@ -106,8 +106,9 @@ function listed(task: Task) {
     ...(task.main === undefined ? {} : { main: task.main }),
     status: task.status,
     place: task.place,
+    ...(task.worktree === undefined ? {} : { worktree: task.worktree }),
+    ...(task.elsewhere ? { elsewhere: true } : {}),
     ...(task.host === undefined ? {} : { host: task.host }),
-    path: task.file,
     branch: task.branch ?? '',
     ...(parent === undefined ? {} : { parent: { slug: parent.slug, ...(parentMain === undefined ? {} : { main: parentMain }) } }),
     updated: new Date(task.mtimeMs).toISOString(),
@@ -131,8 +132,7 @@ function realMains<T>(value: T): T {
 
 /** The tasks of every known repo, newest first; retired ones only with `archived`. */
 function list(context: Context, archived: boolean): Task[] {
-  const here = mainCheckout(context.cwd);
-  return loadTasks(context, here === undefined ? [] : [here])
+  return loadTasks(context)
     .filter((task) => archived || task.place !== 'archive')
     .sort(newestFirst);
 }
@@ -176,18 +176,18 @@ const archiveFields = ({ repo, term, folder, rows }: ArchiveList) => ({
 function parent(context: Context, name: string) {
   const ref = taskRef(context.cwd, name);
   const { main } = ref;
-  const tasks = loadTasks(context, [main]);
+  const tasks = loadTasks(context);
   const task = theTask(tasks, ref);
   return { task, main, children: childrenOf(task, main, tasks) };
 }
 
 /**
  * The ledgers a session in `folder` works on, as `ledger hook session-start` finds them; none when the folder is gone.
- * `main` is the main checkout of the repo that holds the folder, and `repo` its repo key.
+ * `main` is the main checkout of the repo that holds the folder.
  */
-function session(folder: string) {
+function session(store: LedgerStore, folder: string) {
   if (!exists(folder)) return { folder, removed: true, own: false, ledgers: [] };
-  const found = sessionLedgers(folder);
+  const found = sessionLedgers(store, folder);
   const title = sessionTitle(found);
   const main = mainCheckout(folder);
   return {
@@ -205,12 +205,6 @@ function session(folder: string) {
       })),
     })),
   };
-}
-
-/** The ledger of the linked worktree that holds `cwd`, if it has one. */
-function ownLedger(cwd: string): string | undefined {
-  const { tasks, own } = sessionLedgers(cwd);
-  return own && tasks.length === 1 ? tasks[0].file : undefined;
 }
 
 function deploy(args: string[]): number {
@@ -308,15 +302,16 @@ export async function main(argv: string[]): Promise<number> {
       });
   const showCommand = (command: Command): Command =>
     command
-      .description("Print a task's ledger: its worktree ledger in this clone, else the copy of it in a worktree on another machine, else its backlog ledger in this repo, else its newest archive copy.")
-      .argument('<slug>', 'the task, or a full archive name <date>-<slug>[-N] for that one copy')
+      .description("Print a task's ledger from this repo: its active ledger, whichever clone holds its worktree, else its backlog ledger, else its newest archive copy.")
+      .argument('[slug]', 'the task, or a full archive name <date>-<slug>[-N] for that one copy; by default the task of the worktree you are in')
       .option('--repo <repo>', 'read the ledgers of another repo: its key, such as github.com/me/app, an alias, or its short label, such as me/app')
       .addOption(new Option('--evidence [file]', "list the archive copy's evidence files, one path per line, or print the bytes of one").conflicts('json'))
       .option('--json', 'print one JSON object: {"ok":true,"repo":...,"name":...,"location":...,"text":...}')
-      .action((slug: string, { repo, evidence }: { repo?: string; evidence?: string | true }) => {
+      .action((slug: string | undefined, { repo, evidence }: { repo?: string; evidence?: string | true }) => {
         // Every failure goes to stderr as plain text, also with --json, whose stdout is only ever the ledger.
         try {
-          const found = shownLedger(context, slug, { repo, archived: evidence !== undefined });
+          if (slug === undefined && (repo !== undefined || evidence !== undefined)) fail('--repo and --evidence name a task of their own: ledger show <slug>');
+          const found = slug === undefined ? ownLedger(context) : shownLedger(context, slug, { repo, archived: evidence !== undefined });
           if (evidence === true) process.stdout.write(context.store.archive.evidenceFiles(found.repo, found.name).map((file) => `${file}\n`).join(''));
           else if (evidence !== undefined) {
             const bytes = context.store.archive.readEvidence(found.repo, found.name, evidence) ?? fail(`${evidence} is not an evidence file of ${slug}, archived as ${found.name} in the repo ${repoLabel(found.repo)}.`);
@@ -406,16 +401,8 @@ export async function main(argv: string[]): Promise<number> {
     .option('--force', 'retire it anyway with uncommitted changes, an unmerged branch or active children')
     .option('--json', JSON_HELP)
     .action((slug: string | undefined, { dryRun = false, force = false }: { dryRun?: boolean; force?: boolean }) => {
-      if (!json) return show(retireTask(context, slug, { dryRun, force }), retireText);
-      const warnings: string[] = [];
-      try {
-        printJson(retireTask(context, slug, { dryRun, force }, { line: () => {}, warn: (text) => void warnings.push(text) }));
-      } catch (error) {
-        // This retire went on after the error and warned about later steps, as one that goes through does.
-        if (!(error instanceof PartlyRemoved)) throw error;
-        printJson({ warnings }, error.message);
-        exitCode = error.exitCode;
-      }
+      const silent = { line: () => {}, warn: () => {} };
+      show(json ? retireTask(context, slug, { dryRun, force }, silent) : retireTask(context, slug, { dryRun, force }), retireText);
     });
   showCommand(taskGroup.command('show'));
   listCommand(taskGroup.command('list'));
@@ -436,9 +423,7 @@ export async function main(argv: string[]): Promise<number> {
     .argument('<name>', `the gate: ${GATE_NAMES.join(', ')}`)
     .argument('[slug]', 'the task the question names; by default the task of the worktree you are in')
     .action((name: string, slug: string | undefined) => {
-      const { tasks, own } = sessionLedgers(cwd);
-      const here = own && tasks.length === 1 ? tasks[0].slug : undefined;
-      print(JSON.stringify(gateQuestion(name, slug ?? here), null, 2));
+      print(JSON.stringify(gateQuestion(name, slug ?? currentTask(context.store, cwd)?.slug), null, 2));
     });
 
   const notesGroup = program
@@ -450,6 +435,7 @@ export async function main(argv: string[]): Promise<number> {
         '',
         'Examples:',
         '  ledger notes plan add "write the tests" --owner opus-implementer',
+        '  ledger notes step 1 --status done --note "reviewed"',
         '  ledger notes decide "Keep files" --because "they are simple" --tag observed',
         '  ledger notes question "Which port?" --blocks 2',
         '  ledger notes report --step 2 --file .claude/evidence/red.txt',
@@ -479,6 +465,11 @@ export async function main(argv: string[]): Promise<number> {
     .option('--note <text>', 'one line for the note column')
     .action((step: string, { owner, note, task }: TaskOption & { owner: string; note?: string }) => written(addStep(context, task, step, owner, note), addStepText));
   notesCommand(planGroup, 'approve', 'Mark the plan approved today, in place of any earlier date.').action(({ task }: TaskOption) => written(approvePlan(context, task), approvePlanText));
+  notesCommand(notesGroup, 'step', 'Set the status of a plan step, or replace its note, or both.')
+    .argument('<n>', 'the number of the step')
+    .option('--status <status>', 'the new status, such as done')
+    .option('--note <text>', 'one line for the note column, in place of the one there; "" clears it')
+    .action((n: string, { status, note, task }: TaskOption & { status?: string; note?: string }) => written(setStep(context, task, positive(n, 'The step'), { status, note }), setStepText));
   notesCommand(notesGroup, 'decide', 'Add a decision, dated today, with its reason and how it is known.')
     .argument('<text>', 'the decision')
     .requiredOption('--because <reason>', 'why it was decided')
@@ -630,7 +621,7 @@ export async function main(argv: string[]): Promise<number> {
   storeGroup
     .command('migrate')
     .description(
-      'Move the backlog ledgers, the archive with its evidence, and the registry from one storage to the storage --to names. It copies everything, reads every copy back, and then sets "storage" in ~/.claude/ledger-settings.json. Exits 1, with nothing changed, when the target already has a name to copy. A move into or out of git storage commits and pushes; a failed push is reported, and ledger store sync pushes later. With --repo-ids instead, it files the ledgers kept under the folder name of a repo under its address, once. With --records instead, it rewrites each backlog and archive ledger still kept as Markdown as a task record, once; a line that fits no field of the record goes to its general notes.',
+      'Move the backlog ledgers, the archive with its evidence, and the registry from one storage to the storage --to names. It copies everything, reads every copy back, and then sets "storage" in ~/.claude/ledger-settings.json. Exits 1, with nothing changed, when the target already has a name to copy. A move into or out of git storage commits and pushes; a failed push is reported, and ledger store sync pushes later. With --repo-ids instead, it files the ledgers kept under the folder name of a repo under its address, once. With --records instead, it rewrites each backlog and archive ledger still kept as Markdown as a task record, once; a line that fits no field of the record goes to its general notes. With --active instead, it moves the .claude/ledger.md of each linked worktree into an active record for that worktree, once, and deletes the file; .claude/evidence/ stays. Exits 1, with that ledger left as it is, when its slug or worktree is taken.',
     )
     .addOption(new Option('--to <storage>', 'the storage to move the ledgers to').choices(STORAGES))
     .addOption(new Option('--from <storage>', 'the storage to move the ledgers from; by default the one "storage" names, and when that is --to, the other of file and sqlite').choices(STORAGES))
@@ -638,7 +629,8 @@ export async function main(argv: string[]): Promise<number> {
       new Option('--repo-ids', "file each ledger kept under a repo's folder name under the repo's address, or its path without a remote, and keep the folder name as an alias").conflicts(['to', 'from']),
     )
     .addOption(new Option('--records', 'rewrite each backlog and archive ledger kept as Markdown as a task record').conflicts(['to', 'from', 'repoIds']))
-    .addOption(new Option('--remove-source', 'remove what was copied from the other storage, after the check').conflicts(['repoIds', 'records']))
+    .addOption(new Option('--active', 'move the .claude/ledger.md of each linked worktree into an active record').conflicts(['to', 'from', 'repoIds', 'records']))
+    .addOption(new Option('--remove-source', 'remove what was copied from the other storage, after the check').conflicts(['repoIds', 'records', 'active']))
     .option('--dry-run', 'print what would be copied, moved, switched and removed, and change nothing')
     .addHelpText(
       'after',
@@ -652,6 +644,7 @@ export async function main(argv: string[]): Promise<number> {
         '  ledger store migrate --from git --to file       copy from git storage back to files',
         '  ledger store migrate --repo-ids --dry-run       show which ledgers would move to their repo address',
         '  ledger store migrate --records --dry-run        show which ledgers would become task records, and their lines left to notes',
+        '  ledger store migrate --active --dry-run         show which .claude/ledger.md files would move into active records',
       ].join('\n'),
     )
     .action(
@@ -660,6 +653,7 @@ export async function main(argv: string[]): Promise<number> {
         from,
         repoIds = false,
         records = false,
+        active = false,
         removeSource = false,
         dryRun = false,
       }: {
@@ -667,17 +661,19 @@ export async function main(argv: string[]): Promise<number> {
         from?: Storage;
         repoIds?: boolean;
         records?: boolean;
+        active?: boolean;
         removeSource?: boolean;
         dryRun?: boolean;
       }) => {
-        if (repoIds || records) {
+        if (repoIds || records || active) {
           // A dry run reads the store as it is: on SQLite it makes no database and adds no table; on git it repairs no hook
           // and commits and pushes nothing.
           const storage = readStorage(paths.home);
           const dryStore = dryRun && (storage !== 'sqlite' || exists(sqliteFile(paths.home))) ? openStore(paths, storage, { readOnly: true }) : undefined;
           const store = dryRun ? dryStore : context.store;
           try {
-            if ((records ? migrateRecords : migrateRepoIds)(store, { dryRun }, print) > 0) exitCode = 1;
+            const conflicts = active ? migrateActive(store, { dryRun, cwd }, print) : (records ? migrateRecords : migrateRepoIds)(store, { dryRun }, print);
+            if (conflicts > 0) exitCode = 1;
           } finally {
             dryStore?.close?.();
           }
@@ -685,7 +681,7 @@ export async function main(argv: string[]): Promise<number> {
         }
         migrateStorage(
           paths,
-          to ?? fail('ledger store migrate needs --to <storage>, --repo-ids to file the ledgers under repo addresses, or --records to make them task records.'),
+          to ?? fail('ledger store migrate needs --to <storage>, --repo-ids to file the ledgers under repo addresses, --records to make them task records, or --active to move .claude/ledger.md files into the store.'),
           { from, removeSource, dryRun },
           print,
         );
@@ -721,35 +717,6 @@ export async function main(argv: string[]): Promise<number> {
     )
     .argument('<url>', 'the private repository, as https://github.com/<owner>/<repo>.git or git@github.com:<owner>/<repo>.git')
     .action((url: string) => initSync(paths, url, print));
-  storeGroup
-    .command('mirror')
-    .description(
-      'Copy each worktree ledger of this machine into git storage, as active/<host>/<repo>/<slug>.md, so your other machines can read it; remove the copies whose worktree ledger is gone, commit, and push in the background. With file or SQLite storage it does nothing.',
-    )
-    .option('--quiet', 'print nothing, exit 1 without a word when it fails, and stop git and lock waits after 5 s, as a hook does; for the copy after each answered turn')
-    .action(({ quiet = false }: { quiet?: boolean }) => {
-      try {
-        if (readStorage(paths.home) !== 'git') return;
-        if (quiet) {
-          const deadline = Date.now() + GIT_TIMEOUT_MS;
-          limitGitCalls(GIT_TIMEOUT_MS, deadline);
-          limitCloneGitCalls(deadline);
-          limitLockWaits(deadline);
-        }
-        const store = gitStore(paths, { backgroundSync: true, quiet });
-        try {
-          const mirrored = mirrorLedgers({ paths, cwd, store });
-          // The mirror leaves a commit that fails to close(), which only records and reports it; this one fails the command.
-          store.commit?.();
-          if (!quiet && mirrored !== undefined) print(mirrorText(mirrored));
-        } finally {
-          store.close?.();
-        }
-      } catch (error) {
-        if (!quiet) throw error;
-        exitCode = 1;
-      }
-    });
 
   const worktrees = program
     .command('worktrees')
@@ -785,13 +752,13 @@ export async function main(argv: string[]): Promise<number> {
     .description(
       `Prune the build folders of a finished task's linked worktree once, in the background, and mark it with .claude/build-folders-pruned; a task whose plan is reopened loses the mark. Prints a line only when it did something; a folder with no ledger of its own is outcome no-ledger.`,
     )
-    .argument('[ledger]', 'the task ledger; by default the one of the linked worktree you are in')
+    .argument('[worktree]', 'the linked worktree of the task; by default the one you are in')
     .option('--json', JSON_HELP)
-    .action((ledger: string | undefined) => {
+    .action((worktree: string | undefined) => {
       // Claude Code runs this at every turn end, also in a session that has no ledger; that is no failure.
-      const file = ledger === undefined ? ownLedger(cwd) : path.resolve(cwd, ledger);
-      if (file === undefined) return show({ outcome: 'no-ledger', folder: cwd, finished: false }, () => '');
-      show(autoPrune(context, file), (result) => result.message ?? '');
+      const folder = worktree === undefined ? currentTask(context.store, cwd)?.worktree : path.resolve(cwd, worktree);
+      if (folder === undefined) return show({ outcome: 'no-ledger', folder: cwd, finished: false }, () => '');
+      show(autoPrune(context, folder), (result) => result.message ?? '');
     });
 
   goCommand(program.command('go'));
@@ -799,10 +766,12 @@ export async function main(argv: string[]): Promise<number> {
   showCommand(program.command('show'));
   program
     .command('session', { hidden: true })
-    .description('Print the ledgers a Claude Code session in a folder works on, as the session-start hook finds them: one path per line.')
+    .description('Print the tasks a Claude Code session in a folder works on, as the session-start hook finds them: the worktree of each, one per line.')
     .argument('[folder]', 'the session folder; by default the one you are in')
     .option('--json', JSON_HELP)
-    .action((folder: string | undefined) => show(realMains(session(folder === undefined ? cwd : path.resolve(cwd, folder))), ({ ledgers }) => ledgers.map(({ path: file }) => file).join('\n')));
+    .action((folder: string | undefined) =>
+      show(realMains(session(context.store, folder === undefined ? cwd : path.resolve(cwd, folder))), ({ ledgers }) => ledgers.flatMap(({ worktree }) => worktree ?? []).join('\n')),
+    );
   program
     .command('hook', { hidden: true })
     .description('Answer a Claude Code hook: read its JSON input on stdin and print the hook output. For settings.json, not for a person.')

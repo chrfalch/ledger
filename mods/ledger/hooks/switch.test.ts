@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { done, ledgerOf, MAIN, ran, refused, removedSession, session, task, turnEnd, world, worktreeOf } from './fake-ledger.test-helper'
+import { done, ledgerOf, MAIN, refused, removedSession, session, task, turnEnd, world, worktreeOf } from './fake-ledger.test-helper'
 import { GO_FROM_SUBAGENT, NEXT_FROM_SUBAGENT, nextAfterSwitchMessage, noLedgerMessage, oneSwitchPerTurnMessage, removedFolderMessage, typedOnlyMessage } from './ledger'
 
 const CWD = worktreeOf('epic')
@@ -8,8 +8,8 @@ const SESSION = `session ${CWD} --json`
 const EPIC = ledgerOf('epic')
 const UNCHANGED = 'Nothing was written, and the session was not cleared.'
 
-const autoPrune = (ledger: string) => `worktrees auto-prune ${ledger} --json`
-const unchanged = (ledger: string, finished = false) => done({ ledger, worktree: ledger.replace('/.claude/ledger.md', ''), marker: '', finished, outcome: 'unchanged' })
+const autoPrune = (worktree: string) => `worktrees auto-prune ${worktree} --json`
+const unchanged = (worktree: string, finished = false) => done({ ledger: EPIC, worktree, marker: '', finished, outcome: 'unchanged' })
 
 /** `ledger go --json` of a task that already has a worktree, unless `fields` say otherwise. */
 const started = (slug: string, fields: object = {}) =>
@@ -19,15 +19,23 @@ const ownEpic = (extra: Parameters<typeof task>[1] = {}) => session(CWD, task('e
 
 // close and next
 
-test('/ledger:close passes the ledger path to close.md, and the turn end clears without a go', async ($, on) => {
+test('/ledger:close passes the task to close.md, and the turn end clears without a go', async ($, on) => {
   const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
 
   await $.command.run({ command: 'ledger:close', args: '' })
   await $.turn.complete(turnEnd)
 
-  expect(w.markdown()).toEqual({ command: 'ledger:close', args: `ledger: ${EPIC}` })
-  expect(w.argvs()).toEqual([['session', CWD, '--json'], ['store', 'mirror', '--quiet'], ['task', 'release', '--all', '--session', 'session-1']])
+  expect(w.markdown()).toEqual({ command: 'ledger:close', args: 'ledger: epic' })
+  expect(w.argvs()).toEqual([['session', CWD, '--json'], ['task', 'release', '--all', '--session', 'session-1']])
   expect(w.events).toEqual(['clear'])
+})
+
+test('/ledger:close names a task whose repo is not the session repo as <slug>@<main>, as ledger notes --task takes it', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic({ main: '/lib' }) }, { cwd: CWD })
+
+  await $.command.run({ command: 'ledger:close', args: '' })
+
+  expect(w.markdown()).toEqual({ command: 'ledger:close', args: 'ledger: epic@/lib' })
 })
 
 test('/ledger:close in a removed session folder tells close.md there is no ledger, and still clears', async ($, on) => {
@@ -66,7 +74,7 @@ for (const command of ['ledger:close', 'ledger:next']) {
 }
 
 test('/ledger:next clears at the turn end, then continues the same task with go <slug>', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
 
   await $.command.run({ command: 'ledger:next', args: '' })
   await $.turn.complete(turnEnd)
@@ -75,9 +83,8 @@ test('/ledger:next clears at the turn end, then continues the same task with go 
   expect(w.events).toEqual(['clear', 'submit: go epic'])
   expect(w.argvs()).toEqual([
     ['session', CWD, '--json'],
-    ['store', 'mirror', '--quiet'],
     ['task', 'release', '--all', '--session', 'session-1'],
-    ['worktrees', 'auto-prune', EPIC, '--json'],
+    ['worktrees', 'auto-prune', CWD, '--json'],
     ['task', 'claim', 'epic', '--session', 'session-1', '--json'],
   ])
 })
@@ -88,7 +95,7 @@ test('/ledger:next of a finished child task shows the prune, how to retire it, a
     on,
     {
       [SESSION]: ownEpic({ parent }),
-      [autoPrune(EPIC)]: done({ ledger: EPIC, worktree: CWD, marker: '', finished: true, outcome: 'pruned', message: 'Pruned the build folders of epic, because its task is finished: 1.2 GB freed in 1 folder.' }),
+      [autoPrune(CWD)]: done({ ledger: EPIC, worktree: CWD, marker: '', finished: true, outcome: 'pruned', message: 'Pruned the build folders of epic, because its task is finished: 1.2 GB freed in 1 folder.' }),
       [`tree next umbrella@${MAIN} --json`]: done({ action: 'next', parent, chain: [parent, { slug: 'part', main: MAIN }] }),
     },
     { cwd: CWD },
@@ -107,7 +114,7 @@ test('/ledger:next of a finished child task shows the prune, how to retire it, a
 })
 
 test('a turn that ends without an answer clears nothing, and the arm is gone after it', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
 
   await $.command.run({ command: 'ledger:next', args: '' })
   await $.turn.complete({ ...turnEnd, reason: 'aborted', isAborted: true })
@@ -130,13 +137,13 @@ test('a subagent turn end neither clears nor runs bin/ledger', async ($, on) => 
 // go
 
 test('/ledger:go <slug> reads the session ledger, starts the task with one ledger go call, then clears and sends go <slug>', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
 
   await $.command.run({ command: 'ledger:go', args: 'kid' })
 
   expect(w.argvs()).toEqual([['session', CWD, '--json'], ['go', 'kid', '--session', 'session-1', '--json']])
   expect(w.calls[1]?.cwd).toBe(CWD)
-  expect(w.markdown()).toEqual({ command: 'ledger:go', args: `task: kid\nledger: ${EPIC}` })
+  expect(w.markdown()).toEqual({ command: 'ledger:go', args: 'task: kid\nledger: epic' })
   expect(w.armed.length).toBe(1)
   await $.turn.complete(turnEnd)
   expect(w.events).toEqual(['clear', 'submit: go kid'])
@@ -165,6 +172,15 @@ test('a ledger go whose package install failed (exit 5) says the worktree and le
   expect(w.markdown()).toBeUndefined()
   expect(w.armed).toEqual([])
   expect(w.events.filter(event => event === 'clear')).toEqual([])
+})
+
+test('/ledger:go of the own task of the session arms no previous task: the same slug and repo is the same task', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), 'go epic --session session-1 --json': started('epic', { ledger: 'the store copy of epic' }) }, { cwd: CWD })
+
+  await $.command.run({ command: 'ledger:go', args: 'epic' })
+
+  expect(w.armed).toEqual([{ mode: 'go', slug: 'epic', sessionId: 'session-1' }])
+  expect(w.markdown()?.args).toBe('task: epic\nledger: epic')
 })
 
 test('/ledger:go <parent> passes on the child it picked, the promotion, the unpark, the mark and each warning', async ($, on) => {
@@ -236,13 +252,13 @@ test('/ledger:go <new slug> asks go.md to make the task, and clears once a ledge
       [SESSION]: ownEpic(),
       'go new-api --session session-1 --json': refused('No backlog task new-api for the repo at /repo.', 2),
       'list --json': done({ tasks: [task('new-api', { status: 'active' })] }),
-      [autoPrune(EPIC)]: unchanged(EPIC),
+      [autoPrune(CWD)]: unchanged(CWD),
     },
     { cwd: CWD },
   )
 
   await $.command.run({ command: 'ledger:go', args: 'new-api' })
-  expect(w.markdown()?.args).toBe(`task: new-api\nledger: ${EPIC}\nnew: yes`)
+  expect(w.markdown()?.args).toBe('task: new-api\nledger: epic\nnew: yes')
   await $.turn.complete(turnEnd)
 
   expect(w.argvs().slice(0, w.callsBeforeClear[0]).slice(-2)).toEqual([['list', '--json'], ['task', 'release', '--all', '--session', 'session-1']])
@@ -295,7 +311,7 @@ test('/ledger:go with no slug or with a description answers usage and runs nothi
 })
 
 test('a turn switches once: /ledger:go after /ledger:next is refused before ledger go runs', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
 
   await $.command.run({ command: 'ledger:next', args: '' })
   const { text } = await $.command.run({ command: 'ledger:go', args: 'kid' })
@@ -324,7 +340,7 @@ test('/ledger:go through the Skill tool starts the task and hands go.md the same
   const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:go', args: 'kid' })
 
   expect(answer.deny).toBeUndefined()
-  expect(w.skills).toEqual([{ skill: 'ledger:go', args: `task: kid\nledger: ${EPIC}` }])
+  expect(w.skills).toEqual([{ skill: 'ledger:go', args: 'task: kid\nledger: epic' }])
   await $.turn.complete(turnEnd)
   expect(w.events).toEqual(['clear', 'submit: go kid'])
 })
@@ -342,7 +358,7 @@ test('/ledger:go through the Skill tool from a subagent is refused before anythi
 test('/ledger:go through the Skill tool with the task: and ledger: lines as its argument is refused', async ($, on) => {
   const w = world(on, {}, { cwd: CWD })
 
-  const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:go', args: `task: kid\nledger: ${EPIC}` })
+  const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:go', args: 'task: kid\nledger: epic' })
 
   expect(answer.deny).toContain('takes a task slug, such as kid')
   expect(w.calls).toEqual([])
@@ -351,7 +367,7 @@ test('/ledger:go through the Skill tool with the task: and ledger: lines as its 
 test('a No at the permission prompt disarms /ledger:go and says what was already done', async ($, on) => {
   const w = world(
     on,
-    { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid', { promoted: true, base: 'origin/main @ abc1234' }), [autoPrune(EPIC)]: unchanged(EPIC) },
+    { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid', { promoted: true, base: 'origin/main @ abc1234' }), [autoPrune(CWD)]: unchanged(CWD) },
     { cwd: CWD },
   )
   w.answerSkill({ isError: true, text: 'The user said no.' })
@@ -378,11 +394,11 @@ const clearPointQuestions = [
   },
 ]
 const askClearPoint = { tool: 'AskUserQuestion', questions: clearPointQuestions } as const
-const NEXT_ARM = { mode: 'next', slug: 'epic', previous: { slug: 'epic', ledger: EPIC, main: MAIN } }
+const NEXT_ARM = { mode: 'next', slug: 'epic', previous: { slug: 'epic', worktree: CWD, main: MAIN } }
 
 for (const pick of ['Save, clear and continue (Recommended)', 'Save, clear and continue', 'Retire this task, Save, clear and continue']) {
   test(`/ledger:next through the Skill tool runs after the operator picks "${pick}", and the turn end clears and sends go <slug>`, async ($, on) => {
-    const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+    const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
     w.answerQuestion({ answers: { [CLEAR_POINT]: pick } })
 
     await $.tool.call(askClearPoint)
@@ -519,7 +535,7 @@ test('a subagent ledger:next leaves the pick to the main session, whose ledger:n
 })
 
 test('the pick ends with the main turn: /ledger:next in the next turn is refused', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
   w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
 
   await $.tool.call(askClearPoint)
@@ -600,7 +616,7 @@ for (const [command, args] of [
 }
 
 test('/ledger:next through the Skill tool after /ledger:go in the same turn is refused, and the go stays armed', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
   w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
 
   await $.command.run({ command: 'ledger:go', args: 'kid' })
@@ -638,7 +654,7 @@ test('/ledger:next through the Skill tool in a removed session folder says so an
 })
 
 test('a No at the permission prompt disarms /ledger:next: the turn end does not clear', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
   w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
   w.answerSkill({ isError: true, text: 'The user said no.' })
 
@@ -651,7 +667,7 @@ test('a No at the permission prompt disarms /ledger:next: the turn end does not 
 })
 
 test('a deny of the /ledger:next Skill call disarms it: the turn end does not clear', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
   w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
   w.answerSkill({ deny: 'Blocked.' })
 
@@ -677,48 +693,25 @@ test('/ledger:park <reason> parks this task after the model turn, then clears wi
   )
 
   await $.command.run({ command: 'ledger:park', args: 'waits for review' })
-  expect(w.markdown()).toEqual({ command: 'ledger:park', args: `task: epic\nledger: ${EPIC}\nreason: waits for review` })
+  expect(w.markdown()).toEqual({ command: 'ledger:park', args: 'task: epic\nledger: epic\nreason: waits for review' })
   expect(w.argvs().some(([group, command]) => group === 'task' && command === 'park')).toBe(false)
   await $.turn.complete(turnEnd)
 
-  expect(w.argvs().slice(-3)).toEqual([
+  expect(w.argvs().slice(-2)).toEqual([
     ['task', 'park', 'epic', '--reason', 'waits for review', '--json'],
-    ['store', 'mirror', '--quiet'],
     ['task', 'release', '--all', '--session', 'session-1'],
   ])
   expect(w.events).toEqual(['clear'])
 })
 
-test('at the turn end of /ledger:park, the parked marker is written before the worktree ledgers are copied', async ($, on) => {
-  const w = world(
-    on,
-    {
-      [SESSION]: ownEpic(),
-      'list --json': done({ tasks: [task('epic')] }),
-      'task park epic --reason waits for review --json': done({ slug: 'epic', main: MAIN, ledger: EPIC, parked: { date: '2026-11-18', reason: 'waits for review' } }),
-      'store mirror --quiet': ran(0, ''),
-    },
-    { cwd: CWD },
-  )
-
-  await $.command.run({ command: 'ledger:park', args: 'waits for review' })
-  await $.turn.complete(turnEnd)
-
-  expect(w.argvs().filter(([group, command]) => command === 'park' || group === 'store')).toEqual([
-    ['task', 'park', 'epic', '--reason', 'waits for review', '--json'],
-    ['store', 'mirror', '--quiet'],
-  ])
-  expect(w.events).toEqual(['clear'])
-})
-
-const ON_HOST_A = 'fix-login is in a worktree on host-a, and this machine has only a read-only copy of its ledger. Continue the task on host-a.'
+const ON_HOST_A = 'fix-login is active in the worktree /other/repo/.claude/worktrees/fix-login on host-a, which is not on this machine, and this machine has only a read-only copy of its ledger. Continue the task on host-a.'
 
 test('/ledger:park <slug of a task on another machine> <reason> answers that it is read-only here, and parks nothing here', async ($, on) => {
   const w = world(
     on,
     {
       [SESSION]: ownEpic(),
-      'list --json': done({ tasks: [task('epic'), { ...task('fix-login'), main: undefined, place: 'remote', host: 'host-a' }] }),
+      'list --json': done({ tasks: [task('epic'), { ...task('fix-login'), main: undefined, place: 'active', elsewhere: true, host: 'host-a' }] }),
       'task park fix-login --reason waits for review --json': refused(ON_HOST_A),
     },
     { cwd: CWD },
@@ -741,7 +734,7 @@ test('/ledger:park <slug> <reason> finds a task on another machine by the repo k
     on,
     {
       [SESSION]: keyedSession,
-      'list --json': done({ tasks: [{ ...task('epic'), repo: APP_KEY }, { ...task('fix-login'), repo: APP_KEY, main: undefined, place: 'remote', host: 'host-a' }] }),
+      'list --json': done({ tasks: [{ ...task('epic'), repo: APP_KEY }, { ...task('fix-login'), repo: APP_KEY, main: undefined, place: 'active', elsewhere: true, host: 'host-a' }] }),
       'task park fix-login --reason waits for review --json': refused(ON_HOST_A),
     },
     { cwd: CWD },
@@ -759,7 +752,7 @@ test('/ledger:park <slug> <reason> finds a task on another machine filed under a
     {
       [SESSION]: keyedSession,
       'list --json': done({
-        tasks: [{ ...task('epic'), repo: APP_KEY }, { ...task('fix-login'), repo: 'app', currentRepo: APP_KEY, main: undefined, place: 'remote', host: 'host-a' }],
+        tasks: [{ ...task('epic'), repo: APP_KEY }, { ...task('fix-login'), repo: 'app', currentRepo: APP_KEY, main: undefined, place: 'active', elsewhere: true, host: 'host-a' }],
       }),
       'task park fix-login --reason waits for review --json': refused(ON_HOST_A),
     },
@@ -778,14 +771,14 @@ test('/ledger:park <slug> <reason> takes a task on another machine in a repo who
     on,
     {
       [SESSION]: keyedSession,
-      'list --json': done({ tasks: [{ ...task('epic'), repo: APP_KEY }, { ...task('fix-login'), repo: 'repo', main: undefined, place: 'remote', host: 'host-a' }] }),
+      'list --json': done({ tasks: [{ ...task('epic'), repo: APP_KEY }, { ...task('fix-login'), repo: 'repo', main: undefined, place: 'active', elsewhere: true, host: 'host-a' }] }),
     },
     { cwd: CWD },
   )
 
   await $.command.run({ command: 'ledger:park', args: 'fix-login waits for review' })
 
-  expect(w.markdown()?.args).toBe(`task: epic\nledger: ${EPIC}\nreason: fix-login waits for review`)
+  expect(w.markdown()?.args).toBe('task: epic\nledger: epic\nreason: fix-login waits for review')
   expect(w.argvs().some(([group, command]) => group === 'task' && command === 'park')).toBe(false)
 })
 
@@ -794,7 +787,7 @@ test('/ledger:park <own slug> <reason> parks this task, with the reason after th
 
   await $.command.run({ command: 'ledger:park', args: 'epic waits for review' })
 
-  expect(w.markdown()?.args).toBe(`task: epic\nledger: ${EPIC}\nreason: waits for review`)
+  expect(w.markdown()?.args).toBe('task: epic\nledger: epic\nreason: waits for review')
   expect(w.argvs()).toEqual([['session', CWD, '--json']])
 })
 
@@ -839,26 +832,19 @@ test('/ledger:park with no reason answers its usage and runs nothing', async ($,
 // turn end without a switch
 
 test('an answered turn names the session after its task once per slug, and runs auto-prune once per turn', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
 
   await $.turn.complete(turnEnd)
   await $.turn.complete({ ...turnEnd, turnId: 't2' })
 
   expect(w.events).toEqual(['rename: epic'])
-  expect(w.argvs()).toEqual([
-    ['session', CWD, '--json'],
-    ['worktrees', 'auto-prune', EPIC, '--json'],
-    ['store', 'mirror', '--quiet'],
-    ['session', CWD, '--json'],
-    ['worktrees', 'auto-prune', EPIC, '--json'],
-    ['store', 'mirror', '--quiet'],
-  ])
+  expect(w.argvs()).toEqual([['session', CWD, '--json'], ['worktrees', 'auto-prune', CWD, '--json'], ['session', CWD, '--json'], ['worktrees', 'auto-prune', CWD, '--json']])
 })
 
 test('an answered turn shows the line auto-prune gives when it pruned a finished task', async ($, on) => {
   const w = world(
     on,
-    { [SESSION]: ownEpic({ finished: true }), [autoPrune(EPIC)]: done({ ledger: EPIC, worktree: CWD, marker: '', finished: true, outcome: 'pruned', message: 'Pruned the build folders of epic.' }) },
+    { [SESSION]: ownEpic({ finished: true }), [autoPrune(CWD)]: done({ ledger: EPIC, worktree: CWD, marker: '', finished: true, outcome: 'pruned', message: 'Pruned the build folders of epic.' }) },
     { cwd: CWD },
   )
 
@@ -868,14 +854,13 @@ test('an answered turn shows the line auto-prune gives when it pruned a finished
 })
 
 test('a turn that clears neither renames nor runs auto-prune a second time', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC), 'go kid --session session-1 --json': started('kid') }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD), 'go kid --session session-1 --json': started('kid') }, { cwd: CWD })
 
   await $.command.run({ command: 'ledger:go', args: 'kid' })
   await $.turn.complete(turnEnd)
 
   expect(w.events).toEqual(['clear', 'submit: go kid'])
   expect(w.argvs().filter(([, command]) => command === 'auto-prune').length).toBe(1)
-  expect(w.argvs().filter(([group]) => group === 'store')).toEqual([['store', 'mirror', '--quiet']])
 })
 
 test('an answered turn in a folder with no ledger of its own renames nothing and prunes nothing', async ($, on) => {
@@ -884,11 +869,11 @@ test('an answered turn in a folder with no ledger of its own renames nothing and
   await $.turn.complete(turnEnd)
 
   expect(w.events).toEqual([])
-  expect(w.argvs()).toEqual([['session', MAIN, '--json'], ['store', 'mirror', '--quiet']])
+  expect(w.argvs()).toEqual([['session', MAIN, '--json']])
 })
 
 test('no switch runs a program other than bin/ledger', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid', { promoted: true }), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid', { promoted: true }), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
 
   await $.command.run({ command: 'ledger:go', args: 'kid' })
   await $.turn.complete(turnEnd)
@@ -916,7 +901,7 @@ test('/ledger:park <one word> that is no task slug parks this task with that wor
 
   await $.command.run({ command: 'ledger:park', args: 'later' })
 
-  expect(w.markdown()?.args).toBe(`task: epic\nledger: ${EPIC}\nreason: later`)
+  expect(w.markdown()?.args).toBe('task: epic\nledger: epic\nreason: later')
 })
 
 test('/ledger:park <slug of a task in another repo> <reason> parks this task, with the whole text as the reason', async ($, on) => {
@@ -924,7 +909,7 @@ test('/ledger:park <slug of a task in another repo> <reason> parks this task, wi
 
   await $.command.run({ command: 'ledger:park', args: 'fix-login waits for review' })
 
-  expect(w.markdown()?.args).toBe(`task: epic\nledger: ${EPIC}\nreason: fix-login waits for review`)
+  expect(w.markdown()?.args).toBe('task: epic\nledger: epic\nreason: fix-login waits for review')
   expect(w.argvs().some(([group, command]) => group === 'task' && command === 'park')).toBe(false)
 })
 
@@ -943,7 +928,7 @@ test('a /clear that fails at the turn end says so in the log, and sends no go', 
 })
 
 test('a prompt submit that fails after the clear says what to type', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
   w.breakCall('submit')
 
   await $.command.run({ command: 'ledger:next', args: '' })
@@ -967,7 +952,7 @@ test('two /ledger:go calls that overlap start only the first: the second is refu
 })
 
 test('a deny of the Skill call after ledger go disarms /ledger:go and answers with the deny', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
   w.answerSkill({ deny: 'Skill calls are blocked here.' })
 
   const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:go', args: 'kid' })
@@ -987,7 +972,7 @@ test('a deny of the Skill call after a promotion says what was already done', as
 })
 
 test('a typed /ledger:go whose markdown throws after the arm disarms it: the turn end does not clear', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
   w.breakCall('markdown')
 
   await $.command.run({ command: 'ledger:go', args: 'kid' }).catch(() => undefined)
@@ -998,7 +983,7 @@ test('a typed /ledger:go whose markdown throws after the arm disarms it: the tur
 })
 
 test('a /ledger:go Skill call that throws after the arm disarms it: the turn end does not clear', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
   w.breakCall('skill')
 
   await $.tool.call({ tool: 'Skill', skill: 'ledger:go', args: 'kid' }).catch(() => undefined)
@@ -1010,7 +995,7 @@ test('a /ledger:go Skill call that throws after the arm disarms it: the turn end
 
 test('/ledger:go with the task: and ledger: lines it wrote itself passes them to go.md untouched', async ($, on) => {
   const w = world(on, {}, { cwd: CWD })
-  const lines = `task: kid\nledger: ${EPIC}`
+  const lines = 'task: kid\nledger: epic'
 
   await $.command.run({ command: 'ledger:go', args: lines })
 
@@ -1024,7 +1009,7 @@ test('/ledger:go through the Skill tool with a leading slash on its name starts 
 
   await $.tool.call({ tool: 'Skill', skill: '/ledger:go', args: 'kid' })
 
-  expect(w.skills).toEqual([{ skill: '/ledger:go', args: `task: kid\nledger: ${EPIC}` }])
+  expect(w.skills).toEqual([{ skill: '/ledger:go', args: 'task: kid\nledger: epic' }])
   expect(w.argvs()).toEqual([['session', CWD, '--json'], ['go', 'kid', '--session', 'session-1', '--json']])
 })
 
@@ -1085,7 +1070,7 @@ test('/ledger:go <new slug> does not clear when only another machine has a task 
     {
       [SESSION]: ownEpic(),
       'go new-api --session session-1 --json': refused('No backlog task new-api for the repo at /repo.', 2),
-      'list --json': done({ tasks: [task('epic'), { ...task('new-api'), main: undefined, place: 'remote', host: 'host-a' }] }),
+      'list --json': done({ tasks: [task('epic'), { ...task('new-api'), main: undefined, place: 'active', elsewhere: true, host: 'host-a' }] }),
     },
     { cwd: CWD },
   )
@@ -1131,7 +1116,7 @@ test('/ledger:go passes on the parent of the task it starts and the status of ea
 
   await $.command.run({ command: 'ledger:go', args: 'kid' })
 
-  expect(w.markdown()?.args).toBe(`task: kid\nledger: ${EPIC}\nparent: epic\nchildren: a (active), b@/lib (backlog)`)
+  expect(w.markdown()?.args).toBe('task: kid\nledger: epic\nparent: epic\nchildren: a (active), b@/lib (backlog)')
 })
 
 // the lines after a finished task's clear
@@ -1142,7 +1127,7 @@ const retirePlan = (worktree: object, fields: object = {}) =>
   done({
     slug: 'epic',
     main: MAIN,
-    place: 'worktree',
+    place: 'active',
     ledger: EPIC,
     dryRun: true,
     blocked: false,
@@ -1158,7 +1143,7 @@ const retirePlan = (worktree: object, fields: object = {}) =>
 test('/ledger:go from a finished task shows how to retire it, and looks up no next child: go already picked it', async ($, on) => {
   const w = world(
     on,
-    { [SESSION]: ownEpic({ finished: true, parent: { slug: 'umbrella', main: MAIN } }), 'go kid --session session-1 --json': started('kid'), [autoPrune(EPIC)]: finishedPrune },
+    { [SESSION]: ownEpic({ finished: true, parent: { slug: 'umbrella', main: MAIN } }), 'go kid --session session-1 --json': started('kid'), [autoPrune(CWD)]: finishedPrune },
     { cwd: CWD },
   )
 
@@ -1172,7 +1157,7 @@ test('/ledger:go from a finished task shows how to retire it, and looks up no ne
 })
 
 test('a finished task whose branch is merged gets the line to retire it', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic({ finished: true }), [autoPrune(EPIC)]: finishedPrune, [RETIRE_PLAN]: retirePlan({ ahead: 0, mergedPr: 'at-head', merged: true }) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic({ finished: true }), [autoPrune(CWD)]: finishedPrune, [RETIRE_PLAN]: retirePlan({ ahead: 0, mergedPr: 'at-head', merged: true }) }, { cwd: CWD })
 
   await $.command.run({ command: 'ledger:next', args: '' })
   await $.turn.complete(turnEnd)
@@ -1186,7 +1171,7 @@ test('a finished, merged task whose retire is blocked says what blocks it, not t
     { kind: 'children', reason: 'it has active children: part', forceable: true },
   ]
   const plan = retirePlan({ ahead: 0, mergedPr: 'at-head', merged: true, dirty: 2 }, { blocked: true, needsForce: true, blockers })
-  const w = world(on, { [SESSION]: ownEpic({ finished: true }), [autoPrune(EPIC)]: finishedPrune, [RETIRE_PLAN]: plan }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic({ finished: true }), [autoPrune(CWD)]: finishedPrune, [RETIRE_PLAN]: plan }, { cwd: CWD })
 
   await $.command.run({ command: 'ledger:next', args: '' })
   await $.turn.complete(turnEnd)
@@ -1200,7 +1185,7 @@ test('a finished, merged task whose retire is blocked says what blocks it, not t
 test('a finished task whose PR is still open says so, and to retire it once the PR merges', async ($, on) => {
   const w = world(
     on,
-    { [SESSION]: ownEpic({ finished: true }), [autoPrune(EPIC)]: finishedPrune, [RETIRE_PLAN]: retirePlan({ ahead: 3, mergedPr: 'none', merged: false, openPr: 12 }) },
+    { [SESSION]: ownEpic({ finished: true }), [autoPrune(CWD)]: finishedPrune, [RETIRE_PLAN]: retirePlan({ ahead: 3, mergedPr: 'none', merged: false, openPr: 12 }) },
     { cwd: CWD },
   )
 
@@ -1214,7 +1199,7 @@ test('a finished child task whose parent has no child left says so', async ($, o
   const parent = { slug: 'umbrella', main: MAIN }
   const w = world(
     on,
-    { [SESSION]: ownEpic({ finished: true, parent }), [autoPrune(EPIC)]: finishedPrune, [`tree next umbrella@${MAIN} --json`]: done({ action: 'next', parent, chain: [] }) },
+    { [SESSION]: ownEpic({ finished: true, parent }), [autoPrune(CWD)]: finishedPrune, [`tree next umbrella@${MAIN} --json`]: done({ action: 'next', parent, chain: [] }) },
     { cwd: CWD },
   )
 
@@ -1229,7 +1214,7 @@ test('a finished child task whose next-child lookup fails shows no child line, a
   const parent = { slug: 'umbrella', main: MAIN }
   const w = world(
     on,
-    { [SESSION]: ownEpic({ finished: true, parent }), [autoPrune(EPIC)]: finishedPrune, [`tree next umbrella@${MAIN} --json`]: refused('umbrella is retired') },
+    { [SESSION]: ownEpic({ finished: true, parent }), [autoPrune(CWD)]: finishedPrune, [`tree next umbrella@${MAIN} --json`]: refused('umbrella is retired') },
     { cwd: CWD },
   )
 
@@ -1246,7 +1231,7 @@ test('a finished child task of a parent in another repo names the parent as /led
     on,
     {
       [SESSION]: ownEpic({ finished: true, parent }),
-      [autoPrune(EPIC)]: finishedPrune,
+      [autoPrune(CWD)]: finishedPrune,
       'tree next umbrella@/lib --json': done({ action: 'next', parent, chain: [parent, { slug: 'part', main: '/lib' }] }),
     },
     { cwd: CWD },
@@ -1261,7 +1246,7 @@ test('a finished child task of a parent in another repo names the parent as /led
 // rename
 
 test('a /rename that fails is tried again at the next turn end', async ($, on) => {
-  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
   w.breakCall('rename', 1)
 
   await $.turn.complete(turnEnd)

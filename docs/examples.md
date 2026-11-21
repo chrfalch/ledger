@@ -19,7 +19,7 @@ then `ledger go`, which prints:
 worktree ~/repos/expo/expo/.claude/worktrees/image-clear-disk-cache
 branch   image-clear-disk-cache
 base     main @ 4f2a9c1
-ledger   ~/repos/expo/expo/.claude/worktrees/image-clear-disk-cache/.claude/ledger.md
+ledger   ~/.claude/ledger-active/github.com%2Fexpo%2Fexpo/image-clear-disk-cache.json
 ```
 
 The session moves into the new worktree and continues there.
@@ -97,7 +97,7 @@ This does four things:
 1. It writes the latest results to the ledger of `image-clear-disk-cache`.
 2. It creates the branch `router-modal-e2e-flake` and its worktree at
    `.claude/worktrees/router-modal-e2e-flake`.
-3. It moves the backlog ledger into that worktree, at `.claude/ledger.md`.
+3. It makes the backlog ledger the active ledger of that worktree.
 4. It clears the session, and the fresh session continues in the new task.
 
 Both tasks now have a worktree. Each has its own branch and its own ledger, so

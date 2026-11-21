@@ -21,7 +21,7 @@ const TOUCH_ALL = touchAllArgv().join(' ')
 const RELEASE_ALL = releaseAllArgv().join(' ')
 const touchedSome = ran(0, 'touched epic\ntouched kid')
 const touches = (w: ReturnType<typeof world>) => w.argvs().filter(argv => argv[1] === 'touch')
-const autoPrune = { [`worktrees auto-prune ${EPIC} --json`]: done({ ledger: EPIC, worktree: CWD, marker: '', finished: false, outcome: 'unchanged' }) }
+const autoPrune = { [`worktrees auto-prune ${CWD} --json`]: done({ ledger: EPIC, worktree: CWD, marker: '', finished: false, outcome: 'unchanged' }) }
 const started = (slug: string) => done({ slug, main: MAIN, ledger: ledgerOf(slug), worktree: worktreeOf(slug), branch: `me/${slug}`, promoted: false, chain: [], warnings: [] })
 
 // the go <slug> prompt
@@ -161,7 +161,7 @@ test('/ledger:go of a task another session holds hands go.md a held: line and ar
   await $.command.run({ command: 'ledger:go', args: 'kid' })
   await $.turn.complete(turnEnd)
 
-  expect(w.markdown()).toEqual({ command: 'ledger:go', args: `task: kid\nledger: ${EPIC}\n${HELD_TEXT}` })
+  expect(w.markdown()).toEqual({ command: 'ledger:go', args: `task: kid\nledger: epic\n${HELD_TEXT}` })
   expect(w.armed).toEqual([])
   expect(w.events.filter(event => event === 'clear')).toEqual([])
 })
@@ -173,7 +173,7 @@ test('/ledger:go through the Skill tool of a held task hands go.md the held: lin
   await $.turn.complete(turnEnd)
 
   expect(answer.deny).toBeUndefined()
-  expect(w.skills).toEqual([{ skill: 'ledger:go', args: `task: kid\nledger: ${EPIC}\n${HELD_TEXT}` }])
+  expect(w.skills).toEqual([{ skill: 'ledger:go', args: `task: kid\nledger: epic\n${HELD_TEXT}` }])
   expect(w.armed).toEqual([])
   expect(w.events.filter(event => event === 'clear')).toEqual([])
 })
@@ -194,7 +194,7 @@ test('/ledger:go <slug> --take-over forwards --take-over to ledger go and switch
   await $.turn.complete(turnEnd)
 
   expect(w.argvs()[1]).toEqual(['go', 'kid', '--session', 'session-1', '--take-over', '--json'])
-  expect(w.markdown()).toEqual({ command: 'ledger:go', args: `task: kid\nledger: ${EPIC}` })
+  expect(w.markdown()).toEqual({ command: 'ledger:go', args: 'task: kid\nledger: epic' })
   expect(w.events.filter(event => event !== 'rename: epic')).toEqual(['clear', 'submit: go kid'])
 })
 
@@ -240,7 +240,7 @@ for (const pick of ['Take over', 'Take over (Recommended)']) {
 
     expect(answer.deny).toBeUndefined()
     expect(goCalls(w)).toEqual([['go', 'kid', '--session', 'session-1', '--take-over', '--json']])
-    expect(w.skills).toEqual([{ skill: 'ledger:go', args: `task: kid\nledger: ${EPIC}` }])
+    expect(w.skills).toEqual([{ skill: 'ledger:go', args: 'task: kid\nledger: epic' }])
   })
 }
 
@@ -517,7 +517,7 @@ test('the touch runs before an armed clear, which then releases every claim of t
   await $.command.run({ command: 'ledger:close', args: '' })
   await $.turn.complete(turnEnd)
 
-  expect(w.argvs()).toEqual([['session', CWD, '--json'], touchAllArgv(), ['store', 'mirror', '--quiet'], releaseAllArgv()])
+  expect(w.argvs()).toEqual([['session', CWD, '--json'], touchAllArgv(), releaseAllArgv()])
   expect(w.events).toEqual(['clear'])
 })
 
@@ -550,8 +550,8 @@ test('an armed /ledger:close releases every claim of the session before it clear
   await $.command.run({ command: 'ledger:close', args: '' })
   await $.turn.complete(turnEnd)
 
-  expect(w.argvs()).toEqual([['session', CWD, '--json'], ['store', 'mirror', '--quiet'], releaseAllArgv()])
-  expect(w.callsBeforeClear).toEqual([3])
+  expect(w.argvs()).toEqual([['session', CWD, '--json'], releaseAllArgv()])
+  expect(w.callsBeforeClear).toEqual([2])
   expect(w.events).toEqual(['clear'])
 })
 
@@ -623,7 +623,7 @@ test('an armed /ledger:park releases every claim of the session after the park a
   await $.command.run({ command: 'ledger:park', args: 'waiting' })
   await $.turn.complete(turnEnd)
 
-  expect(w.argvs().slice(-3)).toEqual([['task', 'park', 'epic', '--reason', 'waiting', '--json'], ['store', 'mirror', '--quiet'], releaseAllArgv()])
+  expect(w.argvs().slice(-2)).toEqual([['task', 'park', 'epic', '--reason', 'waiting', '--json'], releaseAllArgv()])
   expect(w.callsBeforeClear).toEqual([w.calls.length])
 })
 

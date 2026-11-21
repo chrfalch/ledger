@@ -1,8 +1,8 @@
-import { accessSync, constants, lstatSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
+import { accessSync, constants, lstatSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { markRetired, putChildReport, withoutClaim } from './edit.js';
-import { fail, Failure } from './failure.js';
-import { folderEntries, isTaken, readText, treeEntries } from './files.js';
+import { fail } from './failure.js';
+import { folderEntries } from './files.js';
 import { isReadableSlug, parseLedger, type Child } from './format.js';
 import {
   branchPrs,
@@ -17,17 +17,14 @@ import {
   mainCheckout,
   mergedPrHeads,
   originHead,
-  readWorktreeList,
   removeLinkedWorktree,
-  worktrees,
 } from './git.js';
-import { withLock } from './lock.js';
-import { ledgerBin, samePath, worktreeLedger } from './paths.js';
+import { ledgerBin, samePath } from './paths.js';
 import { storedText } from './record.js';
 import { loadTasks } from './registry.js';
 import { repoKey } from './repo-key.js';
-import { NameTaken, wasCreatedHere, type EvidenceState, type LedgerStore, type RemovedCopy } from './store.js';
-import { findNamed, findTasks, inRepo, locateChild, namedChildren, onAnotherMachine, sameTask, type Task } from './tasks.js';
+import type { EvidenceState } from './store.js';
+import { findNamed, findTasks, inRepo, locateChild, namedChildren, sameTask, type Task } from './tasks.js';
 import { plural } from './views.js';
 import { below, deleteInBackground, linkAboveBuildFolders, xcodeFolderOf } from './worktrees.js';
 import { readLedger, shellWord, today, updateLedger, type Context } from './write.js';
@@ -83,19 +80,21 @@ export type Blocker =
   | { kind: 'missing-child'; name: string }
   | { kind: 'dirty'; count: number }
   | { kind: 'unmerged' }
+  | { kind: 'elsewhere'; worktree?: string }
   | { kind: 'evidence'; name: string; copy: string; evidenceLocation: string; evidence: string }
   | EvidenceProblem;
 
-const isForceable = ({ kind }: Blocker): boolean => kind === 'children' || kind === 'missing-child' || kind === 'dirty' || kind === 'unmerged';
+const isForceable = ({ kind }: Blocker): boolean => kind === 'children' || kind === 'missing-child' || kind === 'dirty' || kind === 'unmerged' || kind === 'elsewhere';
 
 export type RetireAction =
   | { kind: 'archive'; repo: string; name: string; location: string; evidenceLocation: string; text: string; evidence?: string }
   | { kind: 'already-archived'; repo: string; name: string; location: string }
   | { kind: 'remove-worktree'; main: string; folder: string; force: boolean }
+  | { kind: 'remove-active'; repo: string; name: string; location: string }
   | { kind: 'remove-backlog'; repo: string; name: string; location: string }
   | { kind: 'mark-parent'; parent: Task; parentRef: Ref; child: Ref; childName: string }
   | { kind: 'copy-report'; parent: Task; parentRef: Ref; heading: string; report: readonly string[]; childName: string }
-  | { kind: 'update-registry'; mains: string[] }
+  | { kind: 'update-registry' }
   | { kind: 'delete-branch'; main: string; branch: string; head: string }
   | { kind: 'keep-branch'; branch: string; reason: string }
   | { kind: 'delete-build-folders'; folders: string[] }
@@ -139,40 +138,38 @@ function archiveName(facts: RetireFacts): string {
 }
 
 /** The parent's ## Children line, report copy and hint; warnings for what cannot be done. */
-function parentActions({ task, ref, tasks }: RetireFacts, warnings: string[]): { actions: RetireAction[]; parentMain?: string } {
+function parentActions({ task, ref, tasks }: RetireFacts, warnings: string[]): RetireAction[] {
   const named = task.ledger.location.parent;
-  if (named === undefined) return { actions: [] };
+  if (named === undefined) return [];
   const parentRef = { slug: named.slug, main: named.main ?? ref.main };
   const shown = linkFrom(ref.main, parentRef);
   const live = findNamed(tasks, parentRef).filter(({ place }) => place !== 'archive');
   if (live.length !== 1) {
     const found = live.length === 0 ? 'no live ledger' : `${live.length} ledgers (${live.map(({ file }) => file).join(', ')})`;
     warnings.push(`the parent ${shown} has ${found}, so no ## Children line is marked and the report is not copied.`);
-    return { actions: [], parentMain: parentRef.main };
+    return [];
   }
   const [parent] = live;
-  if (parent.place === 'remote') {
-    warnings.push(
-      `the parent ${shown} is in a worktree on ${parent.host}, and this machine has only a read-only copy of its ledger, so no ## Children line is marked and the report is not copied. Do both on ${parent.host}.`,
-    );
-    return { actions: [], parentMain: parentRef.main };
+  if (parent.elsewhere) {
+    warnings.push(`the parent ${shown} is active on ${parent.host ?? 'another machine'}, and this machine has only a read-only copy of its ledger, so no ## Children line is marked and the report is not copied. Do both there.`);
+    return [];
   }
   const childName = linkFrom(parentRef.main, ref);
   const actions: RetireAction[] = [];
-  const line = parent.ledger.children.find((child) => sameTask(lineRef(child, parentRef.main), ref, task.place));
+  const line = parent.ledger.children.find((child) => sameTask(lineRef(child, parentRef.main), ref));
   if (line === undefined) warnings.push(`${childName} is not listed under ## Children of ${parentRef.slug} in ${parent.file}, so no line is marked retired.`);
   else if (line.mark?.kind !== 'retired') actions.push({ kind: 'mark-parent', parent, parentRef, child: ref, childName });
   const { report } = task.ledger;
   if (report.length === 0) warnings.push(`${task.file} has no report under ## Report, so none is copied to ${shown}.`);
   else actions.push({ kind: 'copy-report', parent, parentRef, heading: samePath(parentRef.main, ref.main) ? ref.slug : `${ref.slug}@${ref.main}`, report, childName });
-  const siblingsActive = namedChildren(parent, tasks).some((child) => !sameTask(lineRef(child, parentRef.main), ref, task.place) && childStatus(tasks, child, parentRef) !== 'retired');
+  const siblingsActive = namedChildren(parent, tasks).some((child) => !sameTask(lineRef(child, parentRef.main), ref) && childStatus(tasks, child, parentRef) !== 'retired');
   if (line !== undefined && !siblingsActive) {
     const text = samePath(parentRef.main, ref.main)
       ? `Parent ${parentRef.slug} has no active children left. Retire it with /ledger:retire ${parentRef.slug}.`
       : `Parent ${parentRef.slug} @ ${parentRef.main} has no active children left. Retire it from a session in ${parentRef.main} with /ledger:retire ${parentRef.slug}.`;
-    return { actions: [...actions, { kind: 'hint', text }], parentMain: parentRef.main };
+    return [...actions, { kind: 'hint', text }];
   }
-  return { actions, parentMain: parentRef.main };
+  return actions;
 }
 
 /** What retiring would check and do, in order, from facts alone; it reads and writes nothing. */
@@ -187,6 +184,7 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
   const active = named('live');
   if (active.length > 0) blockers.push({ kind: 'children', names: active });
   for (const name of named('missing')) blockers.push({ kind: 'missing-child', name });
+  if (task.elsewhere) blockers.push({ kind: 'elsewhere', ...(task.worktree === undefined ? {} : { worktree: task.worktree }) });
   if (worktree !== undefined) {
     if (worktree.state.dirty > 0) blockers.push({ kind: 'dirty', count: worktree.state.dirty });
     if (!isMerged(worktree.state)) blockers.push({ kind: 'unmerged' });
@@ -214,15 +212,17 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
       ...(worktree?.evidence === undefined ? {} : { evidence: worktree.evidence }),
     });
   }
+  const removal = { repo: task.repo, name: task.name, location: task.file };
   actions.push(
-    worktree === undefined
-      ? { kind: 'remove-backlog', repo: task.repo, name: task.name, location: task.file }
-      : { kind: 'remove-worktree', main: ref.main, folder: worktree.folder, force },
+    ...(worktree === undefined
+      ? [{ kind: task.place === 'backlog' ? 'remove-backlog' : 'remove-active', ...removal } as const]
+      : // The worktree first: one git cannot remove keeps the task, for a rerun to find by its active ledger.
+        [{ kind: 'remove-worktree', main: ref.main, folder: worktree.folder, force } as const, { kind: 'remove-active', ...removal } as const]),
   );
   const parent = parentActions(facts, warnings);
-  const hint = parent.actions.filter(({ kind }) => kind === 'hint');
-  actions.push(...parent.actions.filter(({ kind }) => kind !== 'hint'));
-  actions.push({ kind: 'update-registry', mains: [ref.main, ...(parent.parentMain === undefined ? [] : [parent.parentMain])] });
+  const hint = parent.filter(({ kind }) => kind === 'hint');
+  actions.push(...parent.filter(({ kind }) => kind !== 'hint'));
+  actions.push({ kind: 'update-registry' });
   const state = worktree?.state;
   if (state?.branch !== undefined) {
     actions.push(
@@ -275,24 +275,23 @@ function stateFacts(folder: string, main: string, warnings: string[]): BranchSta
 
 const NOTHING = 'Nothing was retired.';
 
-/** The task: the ledger of the checkout that holds cwd, else the one titled `slug` in a worktree of this repo, else in its backlog. */
+/** The task: the active task of the checkout that holds cwd, else the one titled `slug` in a worktree of this repo, else in its backlog. */
 function findTarget(tasks: Task[], cwd: string, main: string, slug: string | undefined): Task {
   if (slug === undefined) {
     const root = checkoutRoot(cwd);
-    const own = root === undefined ? undefined : tasks.find(({ place, file }) => place === 'worktree' && samePath(file, worktreeLedger(root)));
+    const own = root === undefined ? undefined : tasks.find(({ worktree }) => worktree !== undefined && samePath(worktree, root));
     return own ?? fail(`No task ledger in or above ${cwd}. Give a slug: ${ledgerCommand} task retire <slug>.`);
   }
   const named = findNamed(tasks, { slug, main });
   if (named.length === 1 && named[0].place === 'archive') fail(`${slug} is retired already: ${named[0].file}`);
   const live = named.filter(({ place }) => place !== 'archive');
-  const inWorktrees = live.filter(({ place }) => place === 'worktree');
+  const inWorktrees = live.filter(({ place }) => place === 'active');
   const found = inWorktrees.length > 0 ? inWorktrees : live;
   if (found.length > 1) fail(`Several task ledgers are named "${slug}": ${found.map(({ file }) => file).join(', ')}. ${NOTHING} Give each task its own slug in its ledger's title.`);
   if (found.length === 0) {
     const known = tasks.filter((task) => task.place !== 'archive' && inRepo(task, main)).map((task) => task.slug);
     fail(`No task ledger is named "${slug}" in the repo at ${main}. ${NOTHING} Task ledgers: ${known.join(', ') || 'none'}.`);
   }
-  if (found[0].place === 'remote') fail(`${onAnotherMachine(found[0])} ${NOTHING}`);
   return found[0];
 }
 
@@ -378,13 +377,17 @@ function evidenceProblem(evidence: string): EvidenceProblem | undefined {
 export function readRetire(context: Context, slug: string | undefined): RetireFacts {
   const { cwd, store } = context;
   const main = mainCheckout(cwd) ?? fail(`${cwd} is not inside a git repository. Run ${ledgerCommand} task retire in the repo of the task.`);
-  const tasks = findTasks(store, [main]);
+  const tasks = findTasks(store);
   const task = findTarget(tasks, cwd, main, slug);
+  if (task.place === 'active' && !task.elsewhere && (task.main === undefined || !samePath(task.main, main))) {
+    const where = task.worktree ?? 'the worktree its ledger names';
+    fail(`The task ${task.slug} is active in another clone of this repo, in ${where}. Retire it from there: cd ${where} && ${ledgerCommand} task retire ${task.slug}`);
+  }
   const warnings: string[] = [];
   let worktree: WorktreeFacts | undefined;
   let evidence: string | undefined;
-  if (task.place === 'worktree') {
-    const folder = path.dirname(path.dirname(task.file));
+  if (task.worktree !== undefined && !task.elsewhere) {
+    const folder = task.worktree;
     if (samePath(folder, main)) fail(`${folder} is the main checkout, not a linked worktree. ledger task retire removes only linked worktrees.`);
     evidence = path.join(folder, '.claude', 'evidence');
     const problem = evidenceProblem(evidence);
@@ -427,6 +430,8 @@ function reasonOf(blocker: Blocker): string {
       return `it has ${plural(blocker.count, 'uncommitted change')}`;
     case 'unmerged':
       return 'its branch is not merged';
+    case 'elsewhere':
+      return `its worktree${blocker.worktree === undefined ? '' : ` ${blocker.worktree}`} is not on this machine, so the task may be live on another machine`;
     case 'evidence':
       return `${blocker.copy} is archived already, but its evidence differs from ${blocker.evidence}`;
     case 'evidence-link':
@@ -477,6 +482,9 @@ function refusal({ task, blockers }: RetirePlan, force: boolean): string {
     if (blocker.kind === 'children' && !force) lines.push(`${task.slug} has active children: ${blocker.names.join(', ')}. Retire them first, or pass --force.`);
     if (blocker.kind === 'missing-child' && !force) lines.push(`Not retired: ${reasonOf(blocker)}. Remove its line under ## Children, or pass --force.`);
   }
+  for (const blocker of blockers) {
+    if (blocker.kind === 'elsewhere' && !force) lines.push(`Not retired: ${reasonOf(blocker)}. Add --force to archive its ledger and remove it from the store; no worktree is removed.`);
+  }
   const state = force ? [] : blockers.filter(({ kind }) => kind === 'dirty' || kind === 'unmerged');
   if (state.length > 0) lines.push(`Not retired: ${state.map(reasonOf).join(' and ')}. Add --force to retire it anyway. Uncommitted changes are lost with the worktree.`);
   for (const blocker of blockers) {
@@ -493,6 +501,8 @@ function stepText(action: RetireAction): string | string[] | undefined {
       return `leave the archive as it is: the ledger is archived already at ${action.location}`;
     case 'remove-worktree':
       return `remove the worktree ${action.folder}${action.force ? ' with --force' : ''}`;
+    case 'remove-active':
+      return `delete the active ledger ${action.location}`;
     case 'remove-backlog':
       return `delete the backlog ledger ${action.location}`;
     case 'mark-parent':
@@ -589,306 +599,124 @@ function stopBefore(removal: string, changed: string[], copy: ArchiveCopy): neve
 
 /**
  * Carries out the plan in its order. A failure before the worktree or backlog ledger is removed stops the retire; after
- * that, the task is gone, so a rerun could not finish what a stop would skip, and each later step only warns. A worktree
- * that git removed only in part counts as gone: the retire goes on, then fails naming the folder left over. A store
- * that commits does so once for all of it, so no sync or mirror meanwhile pushes the archive copy while the active copy
- * is still there; a stop of a worktree retire undoes the retire there before that commit, so the task stays active with
- * no archive copy. A backlog retire has no active copy, so it keeps the archive copy of a stop, as every other store
- * does, and a rerun goes on from it.
+ * that, the task is gone, so a rerun could not finish what a stop would skip, and each later step only warns.
  */
 export function executeRetire(context: Context, plan: RetirePlan, out: Output = consoleOutput): void {
-  const carryOut = (): void => {
-    const copy = removeCopy(context.store, plan);
-    const undo: Undo = { archive: context.store.inOneCommit !== undefined && removesWorktree(plan), taskRemoved: false };
-    try {
-      carryOutRetire(context, plan, out, undo);
-    } catch (error) {
-      if (undo.taskRemoved) throw error;
-      undoRetire(context, plan, undo, copy, error);
-    }
-  };
-  if (context.store.inOneCommit === undefined) carryOut();
-  else context.store.inOneCommit(carryOut);
-}
-
-const removesWorktree = (plan: RetirePlan): boolean => plan.actions.some((action) => action.kind === 'remove-worktree');
-
-/**
- * Removes this machine's copy of a worktree task first, while a failure still leaves everything as it was: the commit
- * must never hold the archive copy without this removal.
- */
-function removeCopy({ active }: LedgerStore, plan: RetirePlan): RemovedCopy | undefined {
-  if (active === undefined || !removesWorktree(plan)) return undefined;
-  try {
-    return active.remove(plan.task.repo, plan.task.slug);
-  } catch (error) {
-    const fix = active.host === undefined ? 'Fix "host" first' : 'Fix the cause';
-    return fail(`Could not remove the copy of ${plan.task.slug} from git storage: ${sentence(message(error))} Nothing was archived or removed. ${fix}, then run ${ledgerCommand} task retire again.`);
-  }
-}
-
-/**
- * Whether a stopped retire removes the archive copy it wrote; `written` is that copy, once this retire created any of
- * it. Once `taskRemoved`, the worktree or backlog ledger is gone, and nothing is undone.
- */
-type Undo = { archive: boolean; written?: ArchiveCopy; taskRemoved: boolean };
-
-/**
- * After a retire failed with `cause` while the task is still there: removes the archive copy and its evidence, which
- * this retire wrote, where `undo` says so, and puts back the copy that it removed from git storage, all before the
- * store commits. Then fails with `cause` and how the undo went.
- */
-function undoRetire({ store }: Context, plan: RetirePlan, undo: Undo, copy: RemovedCopy | undefined, cause: unknown): never {
-  const problems: string[] = [];
-  const archived = undo.written;
-  if (undo.archive && archived !== undefined && store.archive.nameTaken(archived.repo, archived.name)) {
-    try {
-      store.archive.remove(archived.repo, archived.name);
-    } catch (error) {
-      problems.push(
-        `Could not remove the archive copy ${archived.location} that it wrote either: ${sentence(message(error))} This retire does not commit it. Remove it and its evidence by hand, before a sync commits it and before ${ledgerCommand} task retire runs again.`,
-      );
-    }
-  }
-  try {
-    copy?.putBack();
-  } catch (error) {
-    problems.push(
-      `Could not put the copy of ${plan.task.slug} back in git storage either: ${sentence(message(error))} This retire commits neither the copy nor its removal. Run ledger store mirror before the next sync; it copies each worktree ledger again.`,
-    );
-  }
-  if (problems.length > 0) fail([message(cause), ...problems].join('\n'));
-  if (!undo.archive) throw cause;
-  fail(`${message(cause)}\nNothing was archived.`);
-}
-
-function carryOutRetire(context: Context, plan: RetirePlan, out: Output, undo: Undo): void {
   const { store } = context;
   const [copy] = plan.actions.flatMap((action): ArchiveCopy[] =>
     action.kind === 'archive' || action.kind === 'already-archived' ? [{ repo: action.repo, name: action.name, location: action.location }] : [],
   );
   let parentMarked = true;
-  let leftover: Leftover | undefined;
-  const keepBranch = (branch: string, because: string): void => {
-    out.line(`kept     branch ${branch}, because ${because}`);
-    if (leftover === undefined) return;
-    leftover.keptBranch = branch;
-    // A --json retire that fails on the leftover drops every line; its warnings are what it still reports.
-    out.warn(`kept the branch ${branch}, because ${because}.`);
-  };
+  /** The ledger's text as it was checked before its worktree was removed, with the evidence that is gone now. */
+  let checked: string | undefined;
   for (const action of plan.actions) {
-    try {
-      switch (action.kind) {
-        case 'archive': {
-          const evidenceCopy = `${action.evidenceLocation}/`;
-          const archived = { repo: action.repo, name: action.name, location: action.location };
-          try {
-            store.archive.write(action.repo, action.name, action.text, action.evidence);
-            undo.written = archived;
-            if (store.archive.read(action.repo, action.name)?.text !== storedText(action.text)) fail(`the archive copy does not match the ledger`);
-          } catch (error) {
-            // Only a copy this retire created is its own to remove: another command may have taken the name meanwhile.
-            if (!(error instanceof NameTaken) && wasCreatedHere(store.archive.location(action.repo, action.name))) undo.written = archived;
-            const copies = action.evidence === undefined ? `The ledger copy ${action.location} may exist` : `The ledger copy ${action.location} and the evidence copy ${evidenceCopy} may exist`;
-            const left = undo.archive ? '' : ` ${copies} already.`;
-            fail(`Could not archive ${plan.task.slug}: ${sentence(message(error))}${left} Fix the cause, then run ${ledgerCommand} task retire again.`);
-          }
-          out.line(`archived ${action.location}`);
-          if (action.evidence !== undefined) out.line(`archived evidence ${evidenceCopy}`);
-          break;
+    switch (action.kind) {
+      case 'archive': {
+        const evidenceCopy = `${action.evidenceLocation}/`;
+        try {
+          store.archive.write(action.repo, action.name, action.text, action.evidence);
+          if (store.archive.read(action.repo, action.name)?.text !== storedText(action.text)) fail(`the archive copy does not match the ledger`);
+        } catch (error) {
+          const copies = action.evidence === undefined ? `The ledger copy ${action.location} may exist` : `The ledger copy ${action.location} and the evidence copy ${evidenceCopy} may exist`;
+          fail(`Could not archive ${plan.task.slug}: ${sentence(message(error))} ${copies} already. Fix the cause, then run ${ledgerCommand} task retire again.`);
         }
-        case 'already-archived':
-          out.line(`already archived ${action.location}`);
-          break;
-        case 'remove-worktree': {
-          stopIfChanged(context, plan, copy, `the worktree ${action.folder}`);
-          const evidence = evidenceBefore(action.folder);
-          const error = removeLinkedWorktree(action.main, action.folder, action.force);
-          if (error === undefined) {
-            undo.taskRemoved = true;
-            out.line(`removed  ${action.folder}`);
-            break;
-          }
-          if (deletedBeforeFailing(action.folder, evidence)) {
-            undo.taskRemoved = true;
-            const ledger = deleteLeftoverLedger(store, copy, action.folder, out);
-            leftover = { main: action.main, folder: action.folder, error, ...(ledger === undefined ? {} : { ledger }) };
-            break;
-          }
-          // A store that undoes the retire says whether the archive copy is gone once it tried.
-          const again = `${ledgerCommand} task retire again once git can remove the worktree.`;
-          fail(`Could not remove the worktree ${action.folder}: ${error}\n${undo.archive ? `Run ${again}` : `The ledger is archived; run ${again}`}`);
-        }
-        case 'remove-backlog': {
-          const removal = `the backlog ledger ${action.location}`;
-          const text = stopIfChanged(context, plan, copy, removal);
-          let removed: boolean;
-          try {
-            removed = store.backlog.remove(action.repo, action.name, text);
-          } catch (error) {
-            const archive = undo.archive ? '' : ' Its archive copy is written.';
-            fail(`Could not delete the backlog ledger ${action.location}: ${sentence(message(error))}${archive} Fix the cause, then run ${ledgerCommand} task retire again.`);
-          }
-          if (!removed) stopBefore(removal, [`the ledger ${plan.task.file}`], copy);
-          undo.taskRemoved = true;
-          out.line(`removed  ${action.location}`);
-          break;
-        }
-        case 'mark-parent':
-          try {
-            const marked = updateLedger(context, action.parent, (text) => {
-              const line = parseLedger(text).children.find((child) => sameTask(lineRef(child, action.parentRef.main), action.child, plan.task.place));
-              return line === undefined || line.mark?.kind === 'retired' ? undefined : markRetired(text, line, today());
-            });
-            if (marked) out.line(`retired ${action.childName} in ${action.parent.file}`);
-          } catch (error) {
-            parentMarked = false;
-            out.warn(`could not update ${action.parent.file} (${message(error)}); under ## Children, end the line - ${action.childName} with (retired ${today()}) by hand.`);
-          }
-          break;
-        case 'copy-report':
-          try {
-            updateLedger(context, action.parent, (text) => putChildReport(text, action.heading, action.report));
-            out.line(`copied the report of ${action.childName} to ${action.parent.file}`);
-          } catch (error) {
-            out.warn(`could not copy the report of ${action.childName} to ${action.parent.file}: ${message(error)}`);
-          }
-          break;
-        case 'update-registry':
-          try {
-            loadTasks(context, action.mains);
-          } catch (error) {
-            out.warn(`the registry is not updated: ${message(error)}`);
-          }
-          break;
-        case 'delete-branch': {
-          // With a worktree left over, a list git cannot give must not pass for one where no worktree has the branch.
-          const listed = leftover === undefined ? worktrees(action.main) : readWorktreeList(action.main);
-          const user = listed?.find(({ branch }) => branch === action.branch);
-          if (listed === undefined || user !== undefined) {
-            const because = user === undefined ? 'the worktree list could not be read, and the worktree left over may still have it checked out' : `the worktree ${user.path} still has it checked out`;
-            keepBranch(action.branch, because);
-            break;
-          }
-          const result = deleteBranchAt(action.main, action.branch, action.head);
-          if (result === 'deleted') out.line(`deleted  branch ${action.branch}`);
-          else if (result === 'moved') keepBranch(action.branch, 'it moved after retire checked it');
-          else keepBranch(action.branch, `git could not delete it: ${result.error}`);
-          break;
-        }
-        case 'keep-branch':
-          keepBranch(action.branch, action.reason);
-          break;
-        case 'delete-build-folders': {
-          const link = linkAboveBuildFolders(path.dirname(action.folders[0]));
-          if (link !== undefined) {
-            out.warn(`kept the build folders ${action.folders.join(', ')}: ${link} is a symbolic link.`);
-            break;
-          }
-          try {
-            deleteInBackground(action.folders, path.dirname(action.folders[0]));
-            for (const folder of action.folders) out.line(`deleted  ${folder}`);
-          } catch (error) {
-            out.warn(`could not delete the build folders ${action.folders.join(', ')}: ${message(error)}`);
-          }
-          break;
-        }
-        case 'hint':
-          if (parentMarked) out.line(action.text);
-          break;
+        out.line(`archived ${action.location}`);
+        if (action.evidence !== undefined) out.line(`archived evidence ${evidenceCopy}`);
+        break;
       }
-    } catch (error) {
-      if (leftover === undefined) throw error;
-      const [step = action.kind] = [stepText(action) ?? []].flat();
-      out.warn(`could not ${step}: ${message(error)}`);
+      case 'already-archived':
+        out.line(`already archived ${action.location}`);
+        break;
+      case 'remove-worktree': {
+        checked = stopIfChanged(context, plan, copy, `the worktree ${action.folder}`);
+        const error = removeLinkedWorktree(action.main, action.folder, action.force);
+        if (error !== undefined) fail(`Could not remove the worktree ${action.folder}: ${error}\nThe ledger is archived; run ${ledgerCommand} task retire again once git can remove the worktree.`);
+        out.line(`removed  ${action.folder}`);
+        break;
+      }
+      case 'remove-active': {
+        // The worktree is gone by now, so a rerun finds the record as a task that is not on this machine: it needs --force.
+        const left = `The worktree is removed and the ledger archived, but the active ledger ${action.location} is left`;
+        const remedy = `Retire it with ${ledgerCommand} task retire ${shellWord(plan.task.slug)} --force.`;
+        let removed: boolean;
+        try {
+          removed = store.active.remove(action.repo, action.name, checked ?? stopIfChanged(context, plan, copy, `the active ledger ${action.location}`));
+        } catch (error) {
+          fail(`${left}: ${sentence(message(error))} ${remedy}`);
+        }
+        if (!removed) fail(`${left}: it changed after the archive copy ${copy.location} was written. ${remedy}`);
+        out.line(`removed  ${action.location}`);
+        break;
+      }
+      case 'remove-backlog': {
+        const removal = `the backlog ledger ${action.location}`;
+        const text = stopIfChanged(context, plan, copy, removal);
+        let removed: boolean;
+        try {
+          removed = store.backlog.remove(action.repo, action.name, text);
+        } catch (error) {
+          fail(`Could not delete the backlog ledger ${action.location}: ${sentence(message(error))} Its archive copy is written. Fix the cause, then run ${ledgerCommand} task retire again.`);
+        }
+        if (!removed) stopBefore(removal, [`the ledger ${plan.task.file}`], copy);
+        out.line(`removed  ${action.location}`);
+        break;
+      }
+      case 'mark-parent':
+        try {
+          const marked = updateLedger(context, action.parent, (text) => {
+            const line = parseLedger(text).children.find((child) => sameTask(lineRef(child, action.parentRef.main), action.child));
+            return line === undefined || line.mark?.kind === 'retired' ? undefined : markRetired(text, line, today());
+          });
+          if (marked) out.line(`retired ${action.childName} in ${action.parent.file}`);
+        } catch (error) {
+          parentMarked = false;
+          out.warn(`could not update ${action.parent.file} (${message(error)}); under ## Children, end the line - ${action.childName} with (retired ${today()}) by hand.`);
+        }
+        break;
+      case 'copy-report':
+        try {
+          updateLedger(context, action.parent, (text) => putChildReport(text, action.heading, action.report));
+          out.line(`copied the report of ${action.childName} to ${action.parent.file}`);
+        } catch (error) {
+          out.warn(`could not copy the report of ${action.childName} to ${action.parent.file}: ${message(error)}`);
+        }
+        break;
+      case 'update-registry':
+        try {
+          loadTasks(context);
+        } catch (error) {
+          out.warn(`the registry is not updated: ${message(error)}`);
+        }
+        break;
+      case 'delete-branch': {
+        const result = deleteBranchAt(action.main, action.branch, action.head);
+        if (result === 'deleted') out.line(`deleted  branch ${action.branch}`);
+        else if (result === 'moved') out.line(`kept     branch ${action.branch}, because it moved after retire checked it`);
+        else out.line(`kept     branch ${action.branch}, because git could not delete it: ${result.error}`);
+        break;
+      }
+      case 'keep-branch':
+        out.line(`kept     branch ${action.branch}, because ${action.reason}`);
+        break;
+      case 'delete-build-folders': {
+        const link = linkAboveBuildFolders(path.dirname(action.folders[0]));
+        if (link !== undefined) {
+          out.warn(`kept the build folders ${action.folders.join(', ')}: ${link} is a symbolic link.`);
+          break;
+        }
+        try {
+          deleteInBackground(action.folders, path.dirname(action.folders[0]));
+          for (const folder of action.folders) out.line(`deleted  ${folder}`);
+        } catch (error) {
+          out.warn(`could not delete the build folders ${action.folders.join(', ')}: ${message(error)}`);
+        }
+        break;
+      }
+      case 'hint':
+        if (parentMarked) out.line(action.text);
+        break;
     }
   }
-  if (leftover !== undefined) throw new PartlyRemoved(leftoverError(leftover));
-}
-
-/** The failure of a retire that went on after git removed the worktree only in part: the task is retired, its worktree is not gone. */
-export class PartlyRemoved extends Failure {}
-
-/**
- * A worktree that git removed only in part before it failed with `error`; `ledger` is its ledger, when the retire could
- * not delete that; `keptBranch` the branch it kept, for any reason.
- */
-type Leftover = { main: string; folder: string; error: string; ledger?: string; keptBranch?: string };
-
-function leftoverError({ main, folder, error, ledger, keptBranch }: Leftover): string {
-  const failed = `Could not remove the worktree ${folder}: ${error}`;
-  const kept = ledger === undefined ? '' : `\nThe retire did not delete the worktree ledger ${ledger}; while it is there, the registry lists the task as active again.`;
-  if (isGone(folder)) {
-    const branch = keptBranch === undefined ? '' : ` The retire kept the branch ${keptBranch}; delete it after the prune.`;
-    return `${failed}\nGit deleted the folder before it failed, and the retire went on. Run git -C ${shellWord(main)} worktree prune so git forgets the worktree.${branch}${kept}`;
-  }
-  return `${failed}\nThe retire went on, as git may have deleted the ledger or its evidence before it failed, but the worktree folder ${folder} remains. Remove it by hand.${kept}`;
-}
-
-const isGone = (file: string): boolean => {
-  try {
-    return !isTaken(file);
-  } catch {
-    return false;
-  }
-};
-
-const evidenceOf = (worktree: string): string => path.join(worktree, '.claude', 'evidence');
-
-/**
- * The evidence folder of the worktree and every file and link in it, before git removes any; none when it holds none.
- * A folder alone is no evidence: an empty one git deleted lost nothing. Stops the retire when the folder cannot be
- * read, as a removal that fails part way could then not be judged.
- */
-function evidenceBefore(worktree: string): string[] {
-  const evidence = evidenceOf(worktree);
-  try {
-    if (!isTaken(evidence)) return [];
-    const files = treeEntries(evidence).flatMap((entry) => (entry.isDirectory() ? [] : [path.join(entry.parentPath, entry.name)]));
-    return files.length === 0 ? [] : [evidence, ...files];
-  } catch (error) {
-    return fail(`Stopped before removing the worktree ${worktree}: could not read its evidence ${evidence}/: ${sentence(message(error))} Nothing was removed. Fix the cause, then run ${ledgerCommand} task retire again.`);
-  }
-}
-
-/**
- * Whether git deleted the worktree ledger, or any of the `evidence` the worktree had, before it failed: the archive then
- * holds their only copy, so the task counts as removed. A check that fails counts so too, as an archive copy left over
- * can be removed by hand, while evidence an undo deleted is lost.
- */
-function deletedBeforeFailing(worktree: string, evidence: string[]): boolean {
-  try {
-    return !isTaken(worktreeLedger(worktree)) || evidence.some((entry) => !isTaken(entry));
-  } catch {
-    return true;
-  }
-}
-
-/**
- * Deletes the ledger of a worktree that git removed only in part, when the archive copy holds its text as the store
- * keeps it, the rule of stopIfChanged: left there, the registry would list the task as active again, and the next mirror
- * would copy it back. Under the lock of the ledger, so a write to it either lands before the check or waits for the
- * deletion. Returns the ledger when it stays.
- */
-function deleteLeftoverLedger(store: LedgerStore, copy: ArchiveCopy, worktree: string, out: Output): string | undefined {
-  const ledger = worktreeLedger(worktree);
-  try {
-    if (!isTaken(ledger)) return undefined;
-    const kept = withLock(ledger, () => {
-      if (storedText(readText(ledger)) !== store.archive.read(copy.repo, copy.name)?.text) return true;
-      rmSync(ledger);
-      return false;
-    });
-    if (kept) {
-      out.warn(`kept the worktree ledger ${ledger}: it is not the same as the archive copy ${copy.location}.`);
-      return ledger;
-    }
-  } catch (error) {
-    out.warn(`the worktree ledger ${ledger} may remain: ${message(error)}`);
-    return ledger;
-  }
-  out.line(`deleted  ${ledger}`);
-  return undefined;
 }
 
 /**
@@ -899,7 +727,7 @@ function deleteLeftoverLedger(store: LedgerStore, copy: ArchiveCopy, worktree: s
 export type RetireResult = {
   slug: string;
   main: string;
-  place: 'worktree' | 'backlog';
+  place: 'active' | 'backlog';
   ledger: string;
   dryRun: boolean;
   blocked: boolean;
@@ -940,7 +768,7 @@ export function retireTask(context: Context, slug: string | undefined, { dryRun,
   return {
     slug: task.slug,
     main: facts.ref.main,
-    place: worktree === undefined ? 'backlog' : 'worktree',
+    place: worktree === undefined ? 'backlog' : 'active',
     ledger: task.file,
     dryRun,
     blocked: plan.blocked,
