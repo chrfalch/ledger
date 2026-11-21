@@ -39,7 +39,8 @@ import { withHint } from './migrate-repo-ids.js';
 import { isKind, KINDS, type Kind } from './kinds.js';
 import { storedText } from './record.js';
 import { remoteKey, repoKey } from './repo-key.js';
-import { loadTasks } from './registry.js';
+import { holdsUnmovedLedger, loadTasks } from './registry.js';
+import { noteOwnHost } from './settings.js';
 import { keyAndAliases, type Change, type LedgerStore } from './store.js';
 import { pauseForTest } from './wait.js';
 import {
@@ -74,10 +75,33 @@ export function readLedger({ store }: Context, task: Task): string {
 }
 
 /** Rewrites a live ledger with `change` of its text as it is now, which may differ from the text in `task`. True when it was written. */
-export function updateLedger({ store }: Context, task: Task, change: Change<string>): boolean {
+export function updateLedger(context: Context, task: Task, change: Change<string>): boolean {
   if (task.place === 'archive') throw new Error(`An archive copy is never changed: ${task.file}`);
   if (task.elsewhere) fail(notOnThisMachine(task));
-  return store[task.place].update(task.repo, task.name, change);
+  return task.place === 'active' ? updateActive(context, task, change) : context.store.backlog.update(task.repo, task.name, change);
+}
+
+/** Adds the host label this machine stamps on records to its own, so they stay its own after "host" changes. */
+function noteStamped({ store, paths }: Context): void {
+  if (store.host !== undefined) noteOwnHost(paths.home, store.host);
+}
+
+/**
+ * Rewrites the active record `name` of `repo` with `change`, as Active.update does. A record that names a label this
+ * machine stamped before "host" changed names its host now, so other machines see whose task it is.
+ */
+export function updateActive(context: Context, { repo, name }: { repo: string; name: string }, change: Change<string>): boolean {
+  const { host, ownHosts } = context.store;
+  let restamped = false;
+  const written = context.store.active.update(repo, name, (text) => {
+    const changed = change(text);
+    if (changed === undefined || host === undefined) return changed;
+    const named = parseLedger(changed).location.host;
+    restamped = named !== undefined && named !== host && (ownHosts?.has(named) ?? false);
+    return restamped ? (setLocationBullet(changed, 'host', host) ?? changed) : changed;
+  });
+  if (restamped) noteStamped(context);
+  return written;
 }
 
 /** Why a slug an active task has names no other task: a slug is one task in every clone of a repo, as in the backlog. */
@@ -210,7 +234,8 @@ function createActive(store: LedgerStore, main: string, slug: string, text: stri
  * the Location values. `moved` runs once the record is written; a throw there removes the record again. Any failure
  * removes the worktree and branch again.
  */
-function startWorktree(store: LedgerStore, main: string, slug: string, branch: string, base: string, ledgerText: (started: Omit<Started, 'ledger'>) => string, moved = (): void => {}): Started {
+function startWorktree(context: Context, main: string, slug: string, branch: string, base: string, ledgerText: (started: Omit<Started, 'ledger'>) => string, moved = (): void => {}): Started {
+  const { store } = context;
   const commit = commitOf(main, base) ?? fail(`${base} names no commit in ${main}.`);
   checkTarget(main, slug, branch);
   const worktree = taskWorktree(main, slug);
@@ -231,6 +256,7 @@ function startWorktree(store: LedgerStore, main: string, slug: string, branch: s
     removeWorktree(main, worktree, branch);
     throw error;
   }
+  noteStamped(context);
   excludeEvidence(main);
   return started;
 }
@@ -261,7 +287,7 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
   if (stack) {
     const base = currentBranch(cwd) ?? fail(`--stack needs a branch, but HEAD is detached in ${cwd}.`);
     const root = checkoutRoot(cwd) ?? cwd;
-    const started = startWorktree(store, main, slug, slug, base, (filled) => fillLedger(template, { slug, goal, ...filled, designRefs: designRefs(root, refs), kind }));
+    const started = startWorktree(context, main, slug, slug, base, (filled) => fillLedger(template, { slug, goal, ...filled, designRefs: designRefs(root, refs), kind }));
     created = { slug, main, status: 'active', ...started };
   } else {
     checkTarget(main, slug, slug);
@@ -286,6 +312,9 @@ function hereTask(context: Context, given: string | undefined, goal: string | un
   if (samePath(worktree, main)) fail(`--here needs a linked worktree, and ${cwd} is in the main checkout. A ledger lives only in a linked worktree.`);
   const own = store.active.byWorktree(worktree);
   if (own !== undefined) fail(`This worktree already has a ledger: ${store.active.location(own.repo, own.slug)}`);
+  if (holdsUnmovedLedger(store, worktree)) {
+    fail(`This worktree already has a ledger in ${path.join(worktree, '.claude', 'ledger.md')}, not yet moved into the ledger store. Move it with ledger store migrate --active.`);
+  }
   const branch = currentBranch(cwd);
   const slug = given ?? (branch?.split('/').at(-1) || path.basename(worktree));
   if (!isNewSlug(slug)) fail(`${slugRule(slug)} Name it: ledger task new --here <slug>`);
@@ -294,6 +323,7 @@ function hereTask(context: Context, given: string | undefined, goal: string | un
   const location = { worktree, branch: branch ?? 'detached HEAD', base: `HEAD @ ${short(cwd, commit)}` };
   const ledger = createActive(store, main, slug, onThisHost(store, fillLedger(readTemplate(paths, refs), { slug, goal, ...location, designRefs: designRefs(worktree, refs), kind })));
   const started: Started = { ...location, ledger };
+  noteStamped(context);
   excludeEvidence(main);
   refreshRegistry(context);
   return { slug, main, status: 'active', ...started };
@@ -312,7 +342,7 @@ function promote(context: Context, slug: string, main: string, repo: string): St
   location.main ?? fail(`The backlog ledger ${backlog.location} has no "- main:" line, so its repo is unknown.`, 4);
   const base = location.base?.ref ?? originHead(main) ?? currentBranch(main) ?? fail(`${main} has no origin/HEAD and a detached HEAD, so there is no branch to start from.`);
   const started = startWorktree(
-    store,
+    context,
     main,
     slug,
     location.branch ?? slug,
@@ -430,7 +460,7 @@ export function goTask(context: Context, slug: string, repo: string | undefined,
 
   const { active } = context.store;
   const { parked, location } = parseLedger(active.read(record.repo, record.name)?.text ?? fail(`The ledger ${place.ledger} is gone.`));
-  if (parked !== undefined) active.update(record.repo, record.name, unpark);
+  if (parked !== undefined) updateActive(context, record, unpark);
   const warnings: string[] = [];
   let marked: GoResult['marked'];
   const parent = location.parent && { slug: location.parent.slug, main: location.parent.main ?? target.main };

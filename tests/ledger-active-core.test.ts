@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -460,6 +460,7 @@ test('listing active tasks costs git no call per record, and at most one worktre
   const prompt = (): string => hook(h, 'prompt-submit', { cwd: app, prompt: 'go three' });
   const promptWithThree = measured(prompt);
 
+  assert.ok(withOne.length > 0 && promptWithThree.length > 0, 'the stub git logged no call, so the counts below would prove nothing');
   assert.equal(withThree.length, withOne.length, withThree.join('\n'));
   assert.ok(withThree.filter((call) => call.includes('worktree list')).length <= 1, withThree.join('\n'));
   assert.equal(promptWithThree.filter((call) => call.includes('worktree list') || call.includes('--git-common-dir')).length <= 1, true, promptWithThree.join('\n'));
@@ -530,4 +531,129 @@ test('an active record whose worktree folder exists but is no worktree of its cl
   ok(ledger(h, app, 'task', 'retire', 'stale', '--force'));
   assert.equal(store().active.has(key, 'stale'), false);
   assert.ok(existsSync(folder), 'retire removed a folder that is no worktree');
+});
+
+test('an active record whose worktree path is a checkout of a repo with another key is elsewhere, and retire --force leaves that checkout', (t) => {
+  const { h, app, key, store } = setup(t);
+  const other = repository(h, path.join(h, 'repos/other'));
+  const folder = worktreeOf(other, 'x');
+  git(h, other, 'worktree', 'add', '--quiet', '-b', 'me/x', folder);
+  store().active.write(key, 'x', ledgerText({ slug: 'x', main: app, worktree: folder }));
+
+  const { tasks } = json(ledger(h, app, 'list', '--json')) as { tasks: Record<string, unknown>[] };
+  assert.equal(tasks.find(({ slug }) => slug === 'x')?.elsewhere, true);
+
+  ok(ledger(h, app, 'task', 'retire', 'x', '--force'));
+  assert.equal(store().active.has(key, 'x'), false);
+  assert.ok(existsSync(folder), 'retire removed the checkout of the other repo');
+});
+
+test('ledger task retire with no slug, in a folder two active records name, refuses, names both slugs, and removes nothing', (t) => {
+  const { h, app, key, store } = setup(t);
+  worktreeTask(h, app, { slug: 'a' });
+  store().active.write(key, 'b', ledgerText({ slug: 'b', main: app, worktree: worktreeOf(app, 'a') }));
+
+  for (const flags of [[], ['--force']]) {
+    const ran = ledger(h, worktreeOf(app, 'a'), 'task', 'retire', ...flags);
+    assert.equal(ran.status, 1, ran.stdout);
+    assert.match(ran.stderr, /\ba\b.*\bb\b|\bb\b.*\ba\b/, flags.join(' '));
+  }
+  assert.ok(existsSync(worktreeOf(app, 'a')));
+  assert.ok(store().active.has(key, 'a') && store().active.has(key, 'b'));
+  assert.deepEqual(store().archive.list(key), []);
+});
+
+/** A worktree task whose .claude/evidence/ holds red.txt, and which git ignores, as excludeEvidence makes it. */
+function taskWithEvidence(t: TestContext, slug: string) {
+  const world = setup(t);
+  worktreeTask(world.h, world.app, { slug });
+  writeFileSync(path.join(world.app, '.git/info/exclude'), '.claude/\n');
+  const evidence = path.join(worktreeOf(world.app, slug), '.claude/evidence');
+  mkdirSync(evidence);
+  writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
+  return { ...world, worktree: worktreeOf(world.app, slug), evidence };
+}
+
+test('ledger task retire --force finishes a retire that stopped after it archived the task and removed its worktree', (t) => {
+  const { h, app, key, store, worktree, evidence } = taskWithEvidence(t, 'fix');
+  const { text } = store().active.read(key, 'fix') ?? assert.fail('no active record');
+  store().archive.write(key, '2026-11-01-fix', text, evidence);
+  git(h, app, 'worktree', 'remove', '--force', worktree);
+
+  ok(ledger(h, app, 'task', 'retire', 'fix', '--force'));
+
+  assert.equal(store().active.has(key, 'fix'), false);
+  assert.deepEqual(store().archive.list(key).map((copy) => copy.text), [text]);
+});
+
+test('a second ledger task retire finishes one whose worktree removal failed halfway, after it deleted the evidence', (t) => {
+  const { h, app, key, store, worktree, evidence } = taskWithEvidence(t, 'fix');
+  const { text } = store().active.read(key, 'fix') ?? assert.fail('no active record');
+  const real = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  const stub = path.join(h, 'stub-bin/git');
+  writeFileSync(stub, `#!/bin/sh\ncase "$*" in *"worktree remove"*) rm -rf '${evidence}'; echo "fatal: refused by the test" >&2; exit 128 ;; esac\nexec '${real}' "$@"\n`, { mode: 0o755 });
+  const first = ledger(h, app, 'task', 'retire', 'fix');
+  rmSync(stub);
+  assert.equal(first.status, 1, first.stdout);
+  assert.match(first.stderr, /Could not remove the worktree/);
+  assert.ok(existsSync(worktree) && !existsSync(evidence), 'the stub did not leave a worktree without its evidence');
+
+  const second = ledger(h, app, 'task', 'retire', 'fix');
+
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(store().active.has(key, 'fix'), false);
+  assert.deepEqual(store().archive.list(key).map((copy) => copy.text), [text]);
+  assert.equal(existsSync(worktree), false);
+});
+
+test('ledger task new --here refuses a worktree whose .claude/ledger.md is not moved into the store yet, and names ledger store migrate --active', (t) => {
+  const { h, app, key, store } = setup(t);
+  const loose = path.join(app, '.claude/worktrees/loose');
+  git(h, app, 'worktree', 'add', '--quiet', '-b', 'loose', loose);
+  mkdirSync(path.join(loose, '.claude'));
+  writeFileSync(path.join(loose, '.claude/ledger.md'), ledgerText({ slug: 'old', worktree: loose }));
+
+  const ran = ledger(h, loose, 'task', 'new', '--here');
+
+  assert.equal(ran.status, 1, ran.stdout);
+  assert.match(ran.stderr, /ledger store migrate --active/);
+  assert.deepEqual(store().active.list(key), []);
+  assert.ok(existsSync(path.join(loose, '.claude/ledger.md')));
+});
+
+test('git storage of format 1 whose upgrade commit failed upgrades in a commit of its own at the next write', (t) => {
+  const { h, app } = setup(t);
+  const clone = gitStorage(h, 1);
+  git(h, clone, 'add', '.ledger-data');
+  git(h, clone, 'commit', '--quiet', '-m', 'format 1');
+  const real = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  const stub = path.join(h, 'stub-bin/git');
+  writeFileSync(stub, `#!/bin/sh\ncase "$*" in *"commit --quiet --no-verify -m Upgrade"*) exit 1 ;; esac\nexec '${real}' "$@"\n`, { mode: 0o755 });
+  const failed = ledger(h, app, 'task', 'new', 'first', '--goal', 'A first idea.');
+  rmSync(stub);
+  assert.equal(failed.status, 1, failed.stdout);
+
+  ok(ledger(h, app, 'task', 'new', 'second', '--goal', 'A second idea.'));
+
+  const commits = git(h, clone, 'rev-list', 'HEAD').split('\n').map((sha) => git(h, clone, 'show', '--name-only', '--format=%s', sha));
+  assert.ok(commits.includes('Upgrade git storage to format 2\n\n.ledger-data'), commits.join('\n---\n'));
+  assert.equal(git(h, clone, 'show', 'HEAD:.ledger-data'), JSON.stringify({ format: 2 }));
+});
+
+test('store migrate --to sqlite stops, and changes nothing, when an active slug is a backlog slug of the target, or two active records would name one worktree', { skip: noSqlite }, (t) => {
+  for (const clash of ['backlog', 'worktree'] as const) {
+    const { h, app, key, store } = setup(t);
+    store().active.write(key, 'x', ledgerText({ slug: 'x', main: app, worktree: worktreeOf(app, 'x') }));
+    const target = sqliteStore({ home: h });
+    if (clash === 'backlog') target.backlog.write(key, 'x', ledgerText({ slug: 'x', main: app }));
+    else target.active.write(key, 'y', ledgerText({ slug: 'y', main: app, worktree: worktreeOf(app, 'x') }));
+    target.close?.();
+
+    const ran = ledger(h, h, 'store', 'migrate', '--to', 'sqlite');
+
+    assert.equal(ran.status, 1, `${clash}: ${ran.stdout}`);
+    assert.match(ran.stderr, /stopped, and nothing changed/, clash);
+    assert.ok(ran.stderr.includes(clash === 'backlog' ? 'x' : worktreeOf(app, 'x')), ran.stderr);
+    assert.equal(existsSync(path.join(h, '.claude/ledger-settings.json')), false, `${clash}: the setting was switched`);
+  }
 });

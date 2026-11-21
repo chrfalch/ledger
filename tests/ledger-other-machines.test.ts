@@ -801,3 +801,88 @@ test('readTimedText reads no file through a symbolic link that replaced the file
   assert.ok(swapped, 'the read never reached the point where the test swaps the file for a link');
   assert.equal(read?.text, 'the ledger\n');
 });
+
+// --------------------------------------------------------------------------------------------------------- host rename
+
+/** Machine A, named host-a, with a started task, then renamed host-a-renamed; `shown` is the ledger as A printed it before. */
+function renamedHost(t: TestContext, before: (a: Machine, record: string) => void = () => {}) {
+  const a = machine(t, remote(t));
+  setUpAs(a, 'host-a');
+  const record = startTask(a);
+  before(a, record);
+  const shown = ledgerOk(a, 'show', SLUG);
+  writeSettings(a, { storage: 'git', host: 'host-a-renamed' });
+  return { a, record, shown };
+}
+
+test('starting a task notes its host label in ~/.claude/ledger-hosts.json, outside the store', (t) => {
+  const { a } = renamedHost(t);
+
+  assert.deepEqual(JSON.parse(readFileSync(path.join(a.h, '.claude/ledger-hosts.json'), 'utf8')), ['host-a']);
+  assert.equal(git(a.h, a.clone, 'ls-files', '--', '*ledger-hosts*'), '');
+});
+
+test('after "host" changes, this machine lists its task as active here, not as one on its old host', (t) => {
+  const { a } = renamedHost(t);
+
+  const entries = listed(a).filter(({ slug }) => slug === SLUG);
+
+  assert.deepEqual(entries.map(({ status, place, host }) => ({ status, place, host })), [{ status: 'active', place: 'active', host: undefined }]);
+});
+
+test('after "host" changes, ledger show prints the ledger of a task of this machine without the read-only line', (t) => {
+  const { a, shown } = renamedHost(t);
+
+  const ran = run(a, ['show', SLUG]);
+
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(ran.stderr, '');
+  assert.equal(ran.stdout, shown);
+});
+
+test('after "host" changes, ledger show --repo from a folder outside the repo prints the ledger without the read-only line', (t) => {
+  const { a, shown } = renamedHost(t);
+
+  assert.equal(ledgerOk(a, 'show', SLUG, '--repo', APP_KEY), shown);
+  assert.equal(ok(run(a, ['show', SLUG, '--repo', APP_KEY], { cwd: a.h })), shown);
+});
+
+test('after "host" changes, ledger show --repo from a folder outside the repo prints the ledger without the read-only line, also when the registry entry of the task has no "main"', (t) => {
+  const { a, shown } = renamedHost(t);
+  const registry = path.join(a.h, '.claude/ledgers-git.json');
+  ledgerOk(a, 'list');
+  const entries = JSON.parse(readFileSync(registry, 'utf8')) as Record<string, unknown>[];
+  assert.ok(entries.some((entry) => entry.slug === SLUG), 'the registry has no entry of the task');
+  writeFileSync(registry, JSON.stringify(entries.map(({ main: _main, ...entry }) => entry)));
+
+  assert.equal(ok(run(a, ['show', SLUG, '--repo', APP_KEY], { cwd: a.h })), shown);
+});
+
+test('after "host" changes, a task of this machine filed under an old repo key is listed as active here and shown without the read-only line', (t) => {
+  const { a, shown } = renamedHost(t, (m) => {
+    mkdirSync(path.join(m.clone, 'active/app'), { recursive: true });
+    git(m.h, m.clone, 'mv', '--', recordOf(), `active/app/${SLUG}.json`);
+    git(m.h, m.clone, 'commit', '--quiet', '-m', 'A record under the folder name of the repo, from before repo keys.');
+    writeAliases(m, { app: APP_KEY });
+  });
+
+  const tasks = listed(a).filter(({ slug }) => slug === SLUG);
+
+  assert.deepEqual(tasks.map(({ place, host }) => ({ place, host })), [{ place: 'active', host: undefined }]);
+  assert.equal(ledgerOk(a, 'show', SLUG), shown);
+});
+
+test('after "host" changes, notes, park, go and retire of a task this machine started go through, and the first write names the new host', (t) => {
+  const { a, record } = renamedHost(t);
+
+  ledgerOk(a, 'notes', 'note', 'Written after the rename.', '--task', SLUG);
+  assert.match(readLedgerFile(record), /^- host: host-a-renamed$/m);
+  assert.match(headText(a, recordOf()), /"host": "host-a-renamed"/);
+  assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
+  assert.deepEqual(JSON.parse(readFileSync(path.join(a.h, '.claude/ledger-hosts.json'), 'utf8')), ['host-a', 'host-a-renamed']);
+
+  ledgerOk(a, 'task', 'park', SLUG, '--reason', 'waits for review');
+  ledgerOk(a, 'go', SLUG);
+  ledgerOk(a, 'task', 'retire', SLUG, '--force');
+  assert.equal(inHead(a, recordOf()), false);
+});

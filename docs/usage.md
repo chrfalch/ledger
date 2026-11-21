@@ -445,6 +445,10 @@ other machines can read it:
   their worktree is not there.
 - ⚠ Two machines with the same host name take each other's tasks for their
   own. Set a different `"host"` on each of them.
+- Each machine lists every host name it has written on a record in
+  `~/.claude/ledger-hosts.json`. After you change `"host"`, the tasks it started
+  under an older name are still its own, and the next change to each one writes
+  the new name.
 - On another machine, `ledger list` shows the task as `active on <host>`, and
   it replaces a backlog ledger with the same repo and slug. `ledger show
   <slug>` prints one line that says the ledger is read-only and names the host,

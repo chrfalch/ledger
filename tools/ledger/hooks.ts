@@ -457,13 +457,15 @@ const SED_IN_PLACE = new RegExp(`${COMMAND_START}sed\\s(?:${ARGUMENTS}\\s)?-(?:-
 const COPY = new RegExp(`${COMMAND_START}(?:cp|mv)\\s${ARGUMENTS}`, 'g');
 const INPUT_REDIRECT = /[0-9]*<<?<?\s*\S*/g;
 const ANY_REDIRECT = /[0-9]*(?:>[>|&]?|<<?<?)\s*\S*/g;
-const LEDGER_WORD = /^["']?[^\s;&|<>"']*\.claude\/(?:ledger|ledger-backlog\/[^/\s]+\/[^/\s]+)\.md["']?$/;
 
 const matches = (line: string, pattern: RegExp): string[] => [...line.matchAll(pattern)].map(([match]) => match);
 const words = (part: string): string[] => part.split(/\s+/).filter((word) => word !== '');
 
-/** A heuristic, line by line: a ledger a command writes is a redirect target, a tee or sed -i argument, or the last argument of cp or mv. */
-function bashLedgerTargets(command: string): string[] {
+/**
+ * A heuristic, line by line: a file a command writes is a redirect target, a tee or sed -i argument, or the last argument
+ * of cp or mv. The words are as written: only resolved against the cwd can they be told to be a ledger.
+ */
+function bashWriteTargets(command: string): string[] {
   return command
     .split('\n')
     .flatMap((line) => [
@@ -472,7 +474,7 @@ function bashLedgerTargets(command: string): string[] {
       ...matches(line, SED_IN_PLACE).flatMap(words),
       ...matches(line, COPY).map((match) => words(match.replace(ANY_REDIRECT, '')).at(-1) ?? ''),
     ])
-    .filter((word) => LEDGER_WORD.test(word));
+    .filter((word) => word !== '');
 }
 
 /** Only the text being written: an Edit's old_string may still name an old path. For Bash, the whole command. */
@@ -489,7 +491,7 @@ function newText(toolInput: Record<string, unknown>): string {
  */
 function ledgerWriteReason(input: HookInput, context: HookContext): string | undefined {
   const { toolName, toolInput } = input;
-  const targets = toolName === 'Bash' ? bashLedgerTargets(text(toolInput.command)) : FILE_TOOLS.includes(toolName) ? [text(toolInput.file_path)] : [];
+  const targets = toolName === 'Bash' ? bashWriteTargets(text(toolInput.command)) : FILE_TOOLS.includes(toolName) ? [text(toolInput.file_path)] : [];
   const cwd = folderOf(input, context);
   const files = targets.map((target) => pathOf(target, cwd, context.paths.home));
   const legacy = files.filter((file) => LEGACY_LEDGER_FILE.test(file));

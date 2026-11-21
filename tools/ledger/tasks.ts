@@ -117,23 +117,28 @@ function checkoutFinder(): (main: string, folder: string) => Worktree | undefine
 /** How a task names the machine of an active record that names none, as one from before records named their host. */
 export const UNKNOWN_HOST = 'unknown host';
 
-type ActiveContext = { aliases: ReadonlyMap<string, string>; checkoutOf: ReturnType<typeof checkoutFinder>; host: string | undefined };
+type ActiveContext = { aliases: ReadonlyMap<string, string>; checkoutOf: ReturnType<typeof checkoutFinder>; host: string | undefined; ownHosts: ReadonlySet<string> };
 
-const activeContext = (store: LedgerStore): ActiveContext => ({ aliases: store.aliases.read(), checkoutOf: checkoutFinder(), host: store.host });
+const activeContext = (store: LedgerStore): ActiveContext => ({
+  aliases: store.aliases.read(),
+  checkoutOf: checkoutFinder(),
+  host: store.host,
+  ownHosts: store.ownHosts ?? new Set(store.host === undefined ? [] : [store.host]),
+});
 
 /**
  * `entry` as a task. Its clone comes from the worktree's path, else from the record's main, and only then from git. It
- * is `elsewhere` when its record names a host other than this machine's, and unless git lists its worktree folder as a
- * checkout of that clone. Two machines can see one disk, so a worktree folder that is here proves no record this
- * machine's; the host does.
+ * is `elsewhere` when its record names a host that is none of this machine's, and unless git lists its worktree folder
+ * as a checkout of that clone, a clone of the record's repo. Two machines can see one disk, so a worktree folder that is
+ * here proves no record this machine's; the host does.
  */
-function activeOf(entry: StoredLedger, { aliases, checkoutOf, host: thisHost }: ActiveContext): Task {
+function activeOf(entry: StoredLedger, { aliases, checkoutOf, host: thisHost, ownHosts }: ActiveContext): Task {
   const { location } = parseLedger(entry.text);
   const { worktree } = location;
   const exists = worktree !== undefined && isFolder(worktree);
   const main = (worktree === undefined ? undefined : mainOfTaskWorktree(worktree)) ?? location.main ?? (exists ? mainCheckout(worktree) : undefined);
-  const otherHost = location.host !== undefined && thisHost !== undefined && location.host !== thisHost;
-  const checkout = !otherHost && exists && main !== undefined ? checkoutOf(main, worktree) : undefined;
+  const otherHost = location.host !== undefined && thisHost !== undefined && !ownHosts.has(location.host);
+  const checkout = !otherHost && exists && main !== undefined && repoKey(main) === (aliases.get(entry.repo) ?? entry.repo) ? checkoutOf(main, worktree) : undefined;
   const host = otherHost ? location.host : checkout === undefined && location.host === undefined ? UNKNOWN_HOST : undefined;
   const found = { file: entry.location, name: entry.name, place: 'active', repo: entry.repo, currentRepo: aliases.get(entry.repo), fallbackSlug: entry.name, mainOf: () => main, branch: checkout?.branch, worktree, elsewhere: checkout === undefined, host } as const;
   return toTask(found, entry);

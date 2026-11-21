@@ -4,7 +4,7 @@ import { fail } from './failure.js';
 import { createFile, folderEntries, holdsAnything, isEntryName, isFolder, isReadableFile, isTaken, moveAside, putBack, readText, readTimedText, sameTree, treeEntries, writeAtomic, type TimedText } from './files.js';
 import { withLock } from './lock.js';
 import type { LedgerPaths } from './paths.js';
-import { validHost } from './settings.js';
+import { ownHosts, validHost } from './settings.js';
 import { parseRecord, readStoredRecord, recordJson, recordToWrite, renderRecord, type StoredRecord } from './record.js';
 import { byCodeUnit, checkedAliases, findWorktree, isAsChecked, NameTaken, needsAlias, noteCreated, readable, refuseHiddenMarkdown, resolvedWorktree, type Archive, type Backlog, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
 import { pauseForTest } from './wait.js';
@@ -203,7 +203,7 @@ export function fileStore({ home }: LedgerPaths, options: FileStoreOptions = {})
   const claude = path.join(home, '.claude');
   const archive = path.join(claude, 'ledger-archive');
   const roots = { backlog: path.join(claude, 'ledger-backlog'), active: path.join(claude, 'ledger-active'), archive, evidence: archive, registry: path.join(claude, 'ledgers.json'), aliases: path.join(claude, 'ledger-aliases.json') };
-  return { ...fileStoreAt(roots, options), host: validHost(home) };
+  return { ...fileStoreAt(roots, options), host: validHost(home), ownHosts: ownHosts(home) };
 }
 
 /**

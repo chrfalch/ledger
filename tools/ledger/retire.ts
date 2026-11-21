@@ -1,8 +1,8 @@
-import { accessSync, constants, lstatSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
+import { accessSync, constants, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { markRetired, putChildReport, withoutClaim } from './edit.js';
 import { fail } from './failure.js';
-import { folderEntries } from './files.js';
+import { folderEntries, holdsAnything, treeEntries } from './files.js';
 import { isReadableSlug, parseLedger, type Child } from './format.js';
 import {
   branchPrs,
@@ -23,7 +23,7 @@ import { ledgerBin, samePath } from './paths.js';
 import { storedText } from './record.js';
 import { loadTasks } from './registry.js';
 import { repoKey } from './repo-key.js';
-import type { EvidenceState } from './store.js';
+import type { Archive } from './store.js';
 import { findNamed, findTasks, inRepo, locateChild, namedChildren, sameTask, type Task } from './tasks.js';
 import { plural } from './views.js';
 import { below, deleteInBackground, linkAboveBuildFolders, xcodeFolderOf } from './worktrees.js';
@@ -66,8 +66,8 @@ export type RetireFacts = {
   archiveRepo: string;
   /** Whether a copy or an evidence folder already uses the archive name. */
   archiveNameTaken: (name: string) => boolean;
-  /** An archive copy with the ledger's text, and how its evidence compares with the worktree's. */
-  alreadyArchived?: { name: string; location: string; evidence: EvidenceState };
+  /** An archive copy with the ledger's text, and whether removing the worktree would lose evidence it does not hold. */
+  alreadyArchived?: { name: string; location: string; losesEvidence: boolean };
   archiveLocation: (name: string) => string;
   archiveEvidenceLocation: (name: string) => string;
   today: string;
@@ -196,7 +196,7 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
   if (archived !== undefined) {
     // A rerun after a failed worktree removal lands here. It goes on only when no evidence would be lost.
     actions.push({ kind: 'already-archived', repo: facts.archiveRepo, name: archived.name, location: archived.location });
-    if (archived.evidence === 'differs') {
+    if (archived.losesEvidence) {
       const evidence = worktree === undefined ? 'the backlog task, which has none' : `${path.join(worktree.folder, '.claude', 'evidence')}/`;
       blockers.push({ kind: 'evidence', name: archived.name, copy: archived.location, evidenceLocation: facts.archiveEvidenceLocation(archived.name), evidence });
     }
@@ -279,8 +279,9 @@ const NOTHING = 'Nothing was retired.';
 function findTarget(tasks: Task[], cwd: string, main: string, slug: string | undefined): Task {
   if (slug === undefined) {
     const root = checkoutRoot(cwd);
-    const own = root === undefined ? undefined : tasks.find(({ worktree }) => worktree !== undefined && samePath(worktree, root));
-    return own ?? fail(`No task ledger in or above ${cwd}. Give a slug: ${ledgerCommand} task retire <slug>.`);
+    const own = root === undefined ? [] : tasks.filter(({ worktree }) => worktree !== undefined && samePath(worktree, root));
+    if (own.length > 1) fail(`${own.length} active tasks name the worktree ${root}: ${own.map(({ slug }) => slug).join(', ')}. ${NOTHING} Give the slug of the one to retire: ${ledgerCommand} task retire <slug>.`);
+    return own[0] ?? fail(`No task ledger in or above ${cwd}. Give a slug: ${ledgerCommand} task retire <slug>.`);
   }
   const named = findNamed(tasks, { slug, main });
   if (named.length === 1 && named[0].place === 'archive') fail(`${slug} is retired already: ${named[0].file}`);
@@ -412,7 +413,7 @@ export function readRetire(context: Context, slug: string | undefined): RetireFa
     tasks,
     archiveRepo,
     archiveNameTaken: (name) => store.archive.nameTaken(archiveRepo, name),
-    ...(identical === undefined ? {} : { alreadyArchived: { name: identical.name, location: identical.location, evidence: store.archive.evidenceState(archiveRepo, identical.name, evidence) } }),
+    ...(identical === undefined ? {} : { alreadyArchived: { name: identical.name, location: identical.location, losesEvidence: losesEvidence(store.archive, archiveRepo, identical.name, evidence) } }),
     archiveLocation: (name) => store.archive.location(archiveRepo, name),
     archiveEvidenceLocation: (name) => store.archive.evidenceLocation(archiveRepo, name),
     today: today(),
@@ -572,9 +573,29 @@ const sentence = (text: string): string => `${text.replace(/[.\s]+$/, '')}.`;
 type ArchiveCopy = { repo: string; name: string; location: string };
 
 /**
- * Stops the retire, before `removal` deletes the task, when the ledger or its evidence no longer matches the archive
- * copy: another session may have written to them since the copy was made, and that work would be lost. Returns the
- * text of the ledger, which the copy holds as a record.
+ * Whether deleting the folder `evidence` would lose evidence that the archive copy `name` does not hold: a file it
+ * lacks or holds with other bytes, or a symbolic link, unless the two match whole. Evidence the copy holds and the
+ * folder lacks is lost by nothing, as when a worktree removal that failed halfway deleted it.
+ */
+function losesEvidence(archive: Archive, repo: string, name: string, evidence: string | undefined): boolean {
+  try {
+    if (evidence === undefined || !holdsAnything(evidence) || archive.evidenceState(repo, name, evidence) !== 'differs') return false;
+    const archived = new Set(archive.evidenceFiles(repo, name));
+    return treeEntries(evidence).some((entry) => {
+      if (entry.isDirectory()) return false;
+      const file = path.relative(evidence, path.join(entry.parentPath, entry.name));
+      return !entry.isFile() || !archived.has(file) || archive.readEvidence(repo, name, file)?.equals(readFileSync(path.join(evidence, file))) !== true;
+    });
+  } catch {
+    // A folder that cannot be read may hold anything.
+    return true;
+  }
+}
+
+/**
+ * Stops the retire, before `removal` deletes the task, when the ledger no longer matches the archive copy, or its
+ * evidence holds what the copy lacks: another session may have written to them since the copy was made, and that work
+ * would be lost. Returns the text of the ledger, which the copy holds as a record.
  */
 function stopIfChanged(context: Context, plan: RetirePlan, copy: ArchiveCopy, removal: string): string {
   const { archive } = context.store;
@@ -587,7 +608,7 @@ function stopIfChanged(context: Context, plan: RetirePlan, copy: ArchiveCopy, re
   }
   const changed = [
     ...(text === undefined || storedText(withoutClaim(text)) !== archive.read(copy.repo, copy.name)?.text ? [`the ledger ${plan.task.file}`] : []),
-    ...(archive.evidenceState(copy.repo, copy.name, evidence) === 'differs' ? [evidence === undefined ? 'the archived evidence' : `the evidence ${evidence}/`] : []),
+    ...(losesEvidence(archive, copy.repo, copy.name, evidence) ? [`the evidence ${evidence}/`] : []),
   ];
   if (text === undefined || changed.length > 0) stopBefore(removal, changed, copy);
   return text;

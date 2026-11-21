@@ -3,13 +3,15 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { FORMAT } from '../tools/ledger/clone.js';
+import { fileStore } from '../tools/ledger/file-store.js';
+import { migrateActive } from '../tools/ledger/migrate-active.js';
 import { openStore } from '../tools/ledger/open-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { parseRecord, renderRecord } from '../tools/ledger/record.js';
 import type { Storage } from '../tools/ledger/settings.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { REPO } from './helpers.js';
-import { git, home, ledger, ledgerText, lineWith, noSqlite, ok, repoKeyOf, repository, THIS_HOST, touch, worktreeOf } from './ledger-core-fixtures.js';
+import { asCli, git, home, ledger, ledgerText, lineWith, noSqlite, ok, repoKeyOf, repository, THIS_HOST, touch, worktreeOf } from './ledger-core-fixtures.js';
 
 const ODD = '## Odd\nan odd line\n';
 
@@ -205,4 +207,105 @@ test('migrate --active takes no --to, --from, --repo-ids, --records or --remove-
 
 test('ledger store migrate --help shows the --active example', (t) => {
   assert.match(ok(ledger(home(t), REPO, 'store', 'migrate', '--help')), /ledger store migrate --active --dry-run +\S/);
+});
+
+/** Runs migrateActive in this process on the file store of `h`, changed by `change`; gives its lines and how many it left. */
+function migrateWith(t: TestContext, h: string, cwd: string, change: (store: LedgerStore) => LedgerStore) {
+  asCli(t, h);
+  const lines: string[] = [];
+  const left = migrateActive(change(fileStore(ledgerPaths(h))), { dryRun: false, cwd, home: h }, (text) => lines.push(text));
+  return { left, out: lines.join('\n') };
+}
+
+test('migrate --active keeps a .claude/ledger.md that changed after its record was written, and says so', (t) => {
+  const { h, app, key, read } = setup(t, 'file');
+  const { file } = legacyWorktree(h, app, 'task');
+  const edited = `${readFileSync(file, 'utf8')}- An edit made while the move ran.\n`;
+
+  const { left, out } = migrateWith(t, h, app, (store) => ({
+    ...store,
+    active: {
+      ...store.active,
+      create: (repo, slug, text) => {
+        const created = store.active.create(repo, slug, text);
+        writeFileSync(file, edited);
+        return created;
+      },
+    },
+  }));
+
+  assert.equal(left, 1, out);
+  assert.match(lineWith(out, file), /^left /);
+  assert.equal(readFileSync(file, 'utf8'), edited);
+  assert.ok(read((store) => store.active.has(key, 'task')));
+});
+
+test('migrate --active keeps a .claude/ledger.md whose record the store could not commit, and says so', (t) => {
+  const { h, app, key, read } = setup(t, 'file');
+  const { file, markdown } = legacyWorktree(h, app, 'task');
+
+  const { left, out } = migrateWith(t, h, app, (store) => ({
+    ...store,
+    commit: () => {
+      throw new Error('the commit failed in the test');
+    },
+  }));
+
+  assert.equal(left, 1, out);
+  assert.match(lineWith(out, file), /^left .*the commit failed in the test/);
+  assert.equal(readFileSync(file, 'utf8'), markdown);
+  assert.ok(read((store) => store.active.has(key, 'task')));
+});
+
+for (const storage of ['file', 'git'] as const) {
+  test(`${storage} store: a rerun of migrate --active after one that wrote the record but kept the file removes the file, and keeps the record`, (t) => {
+    const { h, app, key, read } = setup(t, storage);
+    const { folder, file, markdown } = legacyWorktree(h, app, 'task');
+    const text = renderRecord({ ...parseRecord(markdown), worktree: folder, host: THIS_HOST });
+    const store = openStore(ledgerPaths(h), storage, { backgroundSync: false });
+    store.active.write(key, 'task', text);
+    store.close?.();
+
+    const out = ok(migrate(h, app));
+
+    assert.match(lineWith(out, file), /^moved /);
+    assert.equal(existsSync(file), false);
+    assert.equal(read((s) => s.active.read(key, 'task')?.text), text);
+  });
+}
+
+test('migrate --active --dry-run reports the second of two ledgers with one slug as left, as the real run leaves it', (t) => {
+  const { h, app } = setup(t, 'file');
+  const lib = repository(h, path.join(h, 'repos/lib'));
+  git(h, app, 'remote', 'set-url', 'origin', path.join(h, 'remotes/shared.git'));
+  git(h, lib, 'remote', 'set-url', 'origin', path.join(h, 'remotes/shared.git'));
+  const first = legacyWorktree(h, app, 'fix');
+  const second = legacyWorktree(h, lib, 'fix');
+  const registry = (main: string) => ({ repo: 'x', slug: 'fix', branch: '', status: 'active', main, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' });
+  writeFileSync(path.join(h, '.claude/ledgers.json'), JSON.stringify([{ ...registry(app), path: first.file }, { ...registry(lib), path: second.file }]));
+
+  const dry = migrate(h, h, '--dry-run');
+  const real = migrate(h, h);
+
+  for (const ran of [dry, real]) {
+    assert.equal(ran.status, 1, ran.stdout);
+    assert.match(ran.stdout, /^Left 1 ledger in \.claude\/ledger\.md/m);
+  }
+});
+
+test('migrate --active leaves, and reports, a .claude/ledger.md a registry entry names in a folder that is no linked worktree', (t) => {
+  const { h, app, key, read } = setup(t, 'file');
+  const folder = worktreeOf(app, 'pruned');
+  mkdirSync(path.join(folder, '.claude'), { recursive: true });
+  const file = path.join(folder, '.claude/ledger.md');
+  const markdown = ledgerText({ slug: 'pruned' });
+  writeFileSync(file, markdown);
+  writeFileSync(path.join(h, '.claude/ledgers.json'), JSON.stringify([{ repo: key, slug: 'pruned', path: file, branch: '', status: 'active', main: app, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' }]));
+
+  const ran = migrate(h, h);
+
+  assert.equal(ran.status, 1, ran.stdout);
+  assert.match(lineWith(ran.stdout, file), /^left .*no linked git worktree/);
+  assert.equal(readFileSync(file, 'utf8'), markdown);
+  assert.equal(read((store) => store.active.has(key, 'pruned')), false);
 });

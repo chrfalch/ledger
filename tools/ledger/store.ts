@@ -276,6 +276,11 @@ export interface LedgerStore {
    */
   readonly host?: string;
   /**
+   * Each host label of this machine: `host`, and each label it stamped on a record before "host" changed. A record that
+   * names one of them is this machine's.
+   */
+  readonly ownHosts?: ReadonlySet<string>;
+  /**
    * Records what the store wrote where it must be recorded, as git storage commits it; throws when it cannot, and when
    * it recorded a ledger of `expected` with any other text.
    */

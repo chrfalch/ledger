@@ -1458,6 +1458,12 @@ commit, puts back a changed record that names another host instead of
 committing it, with one warning each; only the command that wrote it may
 commit such a change, such as a forced retire of a task whose machine is gone.
 
+**A machine keeps its old host names.** Each label a machine stamps on a record
+is added to `~/.claude/ledger-hosts.json`, a list kept on that machine and never
+synced, and a record that names any label on it is that machine's. So after
+`"host"` changes, the machine still works on and retires the tasks it started,
+and the next write to such a record names the new label.
+
 **Old copies are dropped.** A clone that still holds copies from the folders
 `active/<host>/` reads past them, and the first write under the clone lock
 removes them in its commit. The allowlist and the pre-push hook still take

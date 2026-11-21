@@ -50,12 +50,14 @@ and exits 1. Move those by hand, then run the command again to check that
 nothing is left.
 
 Active ledgers used to be files inside each task's worktree. They now live in
-the ledger store, like the backlog. After you update, run
-`ledger store migrate --active` once, from any repo: it moves each active ledger
-that is still a file in a worktree into the store, and deletes the file.
-`--dry-run` lists them first. The `.claude/evidence/` folder stays in the
-worktree. Until you run it, each session start in a repo with such a worktree
-says how many are left.
+the ledger store, like the backlog. Each deploy runs
+`ledger store migrate --active` once: it moves each active ledger that is still
+a file in a worktree into the store, and deletes the file. The
+`.claude/evidence/` folder stays in the worktree. Deploy prints each ledger it
+moved or left. A ledger it left stays a file and the deploy still finishes. Fix
+what it names, then run `ledger store migrate --active` yourself, from any repo;
+`--dry-run` lists what it would move. Until every ledger is moved, each session
+start in a repo with such a worktree says how many are left.
 
 Run the dry run first. It tells you which files would be linked, which policy
 keys would change, and whether any file of your own would be replaced.

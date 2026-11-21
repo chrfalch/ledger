@@ -16,9 +16,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 
-import { freshHome, REPO, run, snapshot } from './helpers.js';
+import { fileStore } from '../tools/ledger/file-store.js';
+import { ledgerPaths } from '../tools/ledger/paths.js';
+import { freshHome, REPO, run, runWithoutClaude, snapshot } from './helpers.js';
+import { git, home as fixtureHome, ledgerText, repository, worktreeOf } from './ledger-core-fixtures.js';
 
 const DEPLOY = [path.join(REPO, 'bin/deploy')] as const;
 
@@ -653,4 +656,49 @@ test('the drift hook reports a deployed hook link whose hook left the repo', (t)
 
   symlinkSync(path.join(REPO, 'hooks/retired-gate.sh'), path.join(home, '.claude/hooks/retired-gate.sh'));
   assert.match(run(home, [drift]).stdout, /stale link: \.claude\/hooks\/retired-gate\.sh/);
+});
+
+/** A HOME whose registry names the .claude/ledger.md of a linked worktree of ~/repos/app, from before active records. */
+function homeWithUnmovedLedger(t: TestContext, markdown = ledgerText({ slug: 'task' })) {
+  const home = fixtureHome(t);
+  const app = repository(home, path.join(home, 'repos/app'));
+  const folder = worktreeOf(app, 'task');
+  git(home, app, 'worktree', 'add', '--quiet', '-b', 'me/task', folder);
+  mkdirSync(path.join(folder, '.claude'));
+  const file = path.join(folder, '.claude/ledger.md');
+  writeFileSync(file, markdown);
+  const entry = { repo: 'x', slug: 'task', path: file, branch: 'me/task', status: 'active', main: app, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' };
+  writeFileSync(path.join(home, '.claude/ledgers.json'), JSON.stringify([entry]));
+  return { home, file, folder };
+}
+
+test('deploy moves each .claude/ledger.md into the ledger store once, and prints what moved', (t) => {
+  const { home, file, folder } = homeWithUnmovedLedger(t);
+
+  const deployed = runWithoutClaude(home, DEPLOY, '--no-codex');
+
+  assert.equal(deployed.status, 0, deployed.stderr);
+  assert.match(deployed.stdout, /^ledgers +moved .*\.claude\/ledger\.md to active app task/m);
+  assert.equal(existsSync(file), false);
+  assert.ok(fileStore(ledgerPaths(home)).active.byWorktree(folder), 'no active record names the worktree');
+});
+
+test('deploy --dry-run moves no .claude/ledger.md', (t) => {
+  const { home, file } = homeWithUnmovedLedger(t);
+
+  const deployed = runWithoutClaude(home, DEPLOY, '--dry-run', '--no-codex');
+
+  assert.equal(deployed.status, 0, deployed.stderr);
+  assert.ok(existsSync(file));
+});
+
+test('a deploy whose move of the ledgers leaves one says so, names the command to run again, and still exits 0', (t) => {
+  const { home, file } = homeWithUnmovedLedger(t, '## Goal\nA ledger whose heading names no slug.\n');
+
+  const deployed = runWithoutClaude(home, DEPLOY, '--no-codex');
+
+  assert.equal(deployed.status, 0, deployed.stderr);
+  assert.match(deployed.stdout, /^ledgers +left .*its heading names no task slug/m);
+  assert.match(deployed.stdout, /ledger store migrate --active/);
+  assert.ok(existsSync(file));
 });

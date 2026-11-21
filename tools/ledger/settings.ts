@@ -102,6 +102,40 @@ export function hostProblem(home: string): string | undefined {
 /** readHost, or undefined where it fails: then no active record counts as this machine's by its host. */
 export const validHost = (home: string): string | undefined => (hostProblem(home) === undefined ? readHost(home) : undefined);
 
+/**
+ * Every host label this machine stamped on an active record, as a JSON array. It stays on this machine, outside the
+ * store, so that after "host" changes the records of its earlier label are still its own.
+ */
+export const ownHostsFile = (home: string): string => path.join(home, '.claude', 'ledger-hosts.json');
+
+function stampedHosts(home: string): string[] {
+  try {
+    const hosts: unknown = JSON.parse(readFileSync(ownHostsFile(home), 'utf8'));
+    return Array.isArray(hosts) ? hosts.filter((host): host is string => typeof host === 'string' && isHostLabel(host)) : [];
+  } catch {
+    // A list that is missing or broken costs only the earlier labels: their records count as another machine's.
+    return [];
+  }
+}
+
+/** This machine's host labels: validHost, and each label in the hosts file; none where neither gives one. */
+export function ownHosts(home: string): ReadonlySet<string> {
+  const host = validHost(home);
+  return new Set([...stampedHosts(home), ...(host === undefined ? [] : [host])]);
+}
+
+/** Adds `host`, a label just stamped on an active record, to the hosts file, unless it is there. */
+export function noteOwnHost(home: string, host: string): void {
+  const hosts = stampedHosts(home);
+  if (hosts.includes(host)) return;
+  try {
+    writeAtomic(ownHostsFile(home), `${JSON.stringify([...hosts, host])}\n`);
+  } catch (error) {
+    // The record is written; only a later change of "host" would miss this label.
+    console.error(`warning: could not add the host ${host} to ${ledgerPaths(home).tilde(ownHostsFile(home))}: ${(error as Error).message}`);
+  }
+}
+
 /** Sets "storage" in the settings file and keeps every other key. Call readStorage first: it refuses a broken file. */
 export function writeStorage(home: string, storage: Storage): void {
   const file = settingsFile(home);

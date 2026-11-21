@@ -193,6 +193,16 @@ export function markerFormat(clone: string): number | 'none' | 'unreadable' {
   }
 }
 
+/** The format of the marker as HEAD holds it; undefined without a HEAD or a marker in it, or for one that names none. */
+function committedFormat(clone: string): unknown {
+  const shown = cloneGit(clone, ['show', `HEAD:${MARKER}`]);
+  try {
+    return shown.ok ? (JSON.parse(shown.stdout) as { format?: unknown }).format : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The generated paths of the clone that are symbolic links. */
 export const linkedGenerated = (clone: string): string[] => GENERATED.filter((name) => lstatSync(path.join(clone, name), { throwIfNoEntry: false })?.isSymbolicLink());
 
@@ -429,10 +439,12 @@ export function removeLegacyCopies(clone: string): boolean {
 /**
  * Writes the marker of this format in a clone of the format before active records, and commits it alone; true when it
  * did. It first checks the clone as a commit does, so a clone no commit can be made in fails here and is left as it was.
- * Call it under the clone lock.
+ * A clone whose marker names this format while HEAD still names the one before is upgraded too: an upgrade whose commit
+ * failed left it so. Call it under the clone lock.
  */
 export function upgradeFormat(clone: string): boolean {
-  if (markerFormat(clone) !== FORMAT_BEFORE_ACTIVE) return false;
+  const format = markerFormat(clone);
+  if (format !== FORMAT_BEFORE_ACTIVE && (format !== FORMAT || committedFormat(clone) !== FORMAT_BEFORE_ACTIVE)) return false;
   checkedChanges(clone);
   writeAtomic(path.join(clone, MARKER), markerText());
   must(cloneGit(clone, ['add', '-f', '--', MARKER]));

@@ -672,7 +672,7 @@ export async function main(argv: string[]): Promise<number> {
           const dryStore = dryRun && (storage !== 'sqlite' || exists(sqliteFile(paths.home))) ? openStore(paths, storage, { readOnly: true }) : undefined;
           const store = dryRun ? dryStore : context.store;
           try {
-            const conflicts = active ? migrateActive(store, { dryRun, cwd }, print) : (records ? migrateRecords : migrateRepoIds)(store, { dryRun }, print);
+            const conflicts = active ? migrateActive(store, { dryRun, cwd, home: paths.home }, print) : (records ? migrateRecords : migrateRepoIds)(store, { dryRun }, print);
             if (conflicts > 0) exitCode = 1;
           } finally {
             dryStore?.close?.();

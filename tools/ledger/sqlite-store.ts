@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { fail } from './failure.js';
 import { holdsAnything, treeEntries } from './files.js';
-import { shownSettingsFile, validHost } from './settings.js';
+import { ownHosts, shownSettingsFile, validHost } from './settings.js';
 import { parseRecord, readRecordJson, recordJson, recordToWrite, renderRecord, type TaskRecord } from './record.js';
 import { byCodeUnit, checkedAliases, findWorktree, isAsChecked, NameTaken, needsAlias, noteCreated, readable, refuseHiddenMarkdown, resolvedWorktree, type Archive, type Backlog, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
 import { pauseForTest } from './wait.js';
@@ -407,6 +407,7 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
   }
   return {
     host: validHost(home),
+    ownHosts: ownHosts(home),
     backlog: writable('backlog'),
     active: {
       ...writable('active'),

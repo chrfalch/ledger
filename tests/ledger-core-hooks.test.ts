@@ -914,6 +914,17 @@ test('a Bash write after cd into a worktree is denied', () => {
   assert.equal(assertDenied(gate(gateWorld.main, 'Bash', { command: 'cd .claude/worktrees/task && echo x > .claude/ledger.md' })), STORE_REASON);
 });
 
+test('a Bash write to ledger.md from inside .claude/ is denied, as is its absolute path', () => {
+  for (const folder of [gateWorld.main, gateWorld.worktree]) {
+    const claude = path.join(folder, '.claude');
+    mkdirSync(claude, { recursive: true });
+    for (const command of ['echo x > ledger.md', 'cp /tmp/x ./ledger.md', 'echo x | tee ledger.md', "sed -i '' 's/a/b/' ledger.md"]) {
+      assert.equal(assertDenied(gate(claude, 'Bash', { command })), STORE_REASON, `${command} in ${claude}`);
+    }
+    assertAllowed(gate(folder, 'Bash', { command: 'echo x > ledger.md' }));
+  }
+});
+
 test('Bash write through ~ to .claude/ledger.md is denied', () => {
   const { h, main, plain } = gateWorld;
   assertDenied(gate(plain, 'Bash', { command: `echo x > ~/${path.relative(h, path.join(main, '.claude/ledger.md'))}` }));

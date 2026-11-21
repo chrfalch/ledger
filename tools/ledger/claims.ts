@@ -6,9 +6,8 @@ import { checkoutRoot, mainCheckout } from './git.js';
 import { loadTasks } from './registry.js';
 import { repoKey } from './repo-key.js';
 import { readClaimExpiryMinutes } from './settings.js';
-import type { LedgerStore } from './store.js';
 import { activeTasks, activeTask as worktreeTask, findNamed, notOnThisMachine, taskRef, theTask, type Task } from './tasks.js';
-import type { Context } from './write.js';
+import { updateActive, type Context } from './write.js';
 
 /** How old the activity of a claim must be before touch writes it again, so a hook that touches at every turn rarely writes. */
 const TOUCH_MINUTES = 15;
@@ -82,9 +81,9 @@ type ClaimState = { task: ClaimedLedger; text: string; stored?: Claim; live?: Cl
 type ClaimChange<T> = { result: T; text?: string };
 
 /** Runs `work` on the ledger of `task` and its live claim, read and written as one change of its record. */
-function lockedClaim<T>(store: LedgerStore, task: ClaimedLedger, clock: ClaimClock, work: (state: ClaimState) => ClaimChange<T>): T {
+function lockedClaim<T>(context: Context, task: ClaimedLedger, clock: ClaimClock, work: (state: ClaimState) => ClaimChange<T>): T {
   let done: ClaimChange<T> | undefined;
-  store.active.update(task.repo, task.name, (text) => {
+  updateActive(context, task, (text) => {
     const stored = parseLedger(text).location.claim;
     const live = liveClaim(stored, clock);
     done = work({ task, text, now: clock.now, ...(stored === undefined ? {} : { stored }), ...(live === undefined ? {} : { live }) });
@@ -94,7 +93,7 @@ function lockedClaim<T>(store: LedgerStore, task: ClaimedLedger, clock: ClaimClo
 }
 
 function underLock<T>(context: Context, name: string | undefined, work: (state: ClaimState) => ClaimChange<T>): T {
-  return lockedClaim(context.store, activeTask(context, name), claimClock(context.paths.home), work);
+  return lockedClaim(context, activeTask(context, name), claimClock(context.paths.home), work);
 }
 
 /** What a `--all` touch or release did: the slugs whose claim it changed, and a line for each task it could not do. */
@@ -110,7 +109,7 @@ function changedInRepo(context: Context, verb: string, work: (state: ClaimState)
   const result: AllResult = { changed: [], failures: [] };
   for (const task of activeTasks(context.store, repoKey(main)).filter(({ elsewhere }) => !elsewhere)) {
     try {
-      if (lockedClaim(context.store, task, clock, work)) result.changed.push(task.slug);
+      if (lockedClaim(context, task, clock, work)) result.changed.push(task.slug);
     } catch (error) {
       result.failures.push(`Could not ${verb} the claim on ${task.slug}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -127,7 +126,7 @@ export type ClaimOptions = { takeOver: boolean; from?: string };
 
 /** Claims `task` for `session`; refuses with Held while a session other than `session` or `from` holds it live, unless `takeOver`. */
 export function claimLedger(context: Context, task: ClaimedLedger, session: string, { takeOver, from }: ClaimOptions): ClaimResult {
-  return lockedClaim(context.store, task, claimClock(context.paths.home), ({ text, live, now: at }) => {
+  return lockedClaim(context, task, claimClock(context.paths.home), ({ text, live, now: at }) => {
     const other = live === undefined || live.session === session || live.session === from ? undefined : live;
     if (other !== undefined && !takeOver) throw new Held(other);
     const time = stamp(at);
@@ -182,5 +181,5 @@ export function refuseIfHeld(context: Context, task: Task, takeOver: boolean): v
   const other = claim === undefined ? undefined : otherClaim(claim, undefined, claimClock(context.paths.home));
   if (other === undefined) return;
   if (!takeOver) throw new Held(other);
-  context.store.active.update(task.repo, task.name, withoutClaim);
+  updateActive(context, task, withoutClaim);
 }

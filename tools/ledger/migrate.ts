@@ -4,6 +4,7 @@ import path from 'node:path';
 import { redacted } from './clone.js';
 import { fail } from './failure.js';
 import { exists, holdsAnything } from './files.js';
+import { parseLedger } from './format.js';
 import { openStore } from './open-store.js';
 import type { LedgerPaths } from './paths.js';
 import { parseRegistry, type RegistryEntry } from './registry.js';
@@ -43,6 +44,16 @@ const openIfThere = (paths: LedgerPaths, storage: Storage, open: OpenStore, read
 const everyLedger = (collection: LedgerCollection | undefined): StoredLedger[] => collection?.repos().flatMap((repo) => collection.list(repo)) ?? [];
 
 const shortName = ({ repo, name }: StoredLedger): string => `${repo}/${name}`;
+
+/** A line for each worktree that more than one of the active records `records` names, by its path as written. */
+function sharedWorktrees(records: StoredLedger[]): string[] {
+  const byWorktree = new Map<string, Set<string>>();
+  for (const record of records) {
+    const { worktree } = parseLedger(record.text).location;
+    if (worktree !== undefined) byWorktree.set(worktree, (byWorktree.get(worktree) ?? new Set()).add(shortName(record)));
+  }
+  return [...byWorktree].filter(([, names]) => names.size > 1).map(([worktree, names]) => redacted(`  ${worktree}  ${[...names].join(', ')}`));
+}
 
 /** The ledger an entry stands for, as loadTasks matches entries to ledgers; undefined for an archived entry that names none. */
 const entryKey = (entry: RegistryEntry): string | undefined => (entry.status === 'archived' ? entry.archivePath : entry.path);
@@ -129,13 +140,20 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
   if (target !== undefined) {
     const conflict = (place: string, collection: LedgerCollection) => (ledger: StoredLedger) =>
       redacted(`  ${place} ${shortName(ledger)}  ${paths.tilde(collection.location(ledger.repo, ledger.name))}`);
+    // A slug is one task per repo, live in the backlog or active, so a slug of one is taken by the other too.
     const conflicts = [
-      ...slugPlaces.flatMap((place) => ledgers[place].filter(({ repo, name }) => target[place].has(repo, name)).map(conflict(place, target[place]))),
+      ...slugPlaces.flatMap((place) =>
+        slugPlaces.flatMap((taken) => ledgers[place].filter(({ repo, name }) => target[taken].has(repo, name)).map(conflict(place, target[taken]))),
+      ),
       ...archive.filter(({ repo, name }) => target.archive.nameTaken(repo, name)).map(conflict('archive', target.archive)),
     ];
     if (conflicts.length > 0) {
       const summary = `ledger store migrate stopped, and nothing changed: the ${STORAGE_NAME[to]} already has ${plural(conflicts.length, 'name')} to copy. A ledger with identical text counts too.`;
       fail([summary, ...conflicts].join('\n'));
+    }
+    const shared = sharedWorktrees([...active, ...everyLedger(target.active)]);
+    if (shared.length > 0) {
+      fail([`ledger store migrate stopped, and nothing changed: in the ${STORAGE_NAME[to]}, more than one active task would name a worktree. Retire or fix all but one of each.`, ...shared].join('\n'));
     }
     const kept = target.aliases.read();
     const otherKeys = [...(source?.aliases.read() ?? [])].flatMap(([old, key]) => {

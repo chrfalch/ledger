@@ -6,7 +6,7 @@ import { fail } from './failure.js';
 import { fileStoreAt, keptCreated } from './file-store.js';
 import { folderEntries } from './files.js';
 import { ledgerBin, type LedgerPaths } from './paths.js';
-import { validHost } from './settings.js';
+import { ownHosts, validHost } from './settings.js';
 import { parseRecord, recordJson } from './record.js';
 import type { Backlog, LedgerCollection, LedgerStore, WrittenLedger } from './store.js';
 
@@ -138,6 +138,7 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
   const isRepoFolder = (repo: string): boolean => !folderEntries(files.active.repoLocation(repo)).some((entry) => entry.isDirectory());
   return {
     host,
+    ownHosts: ownHosts(paths.home),
     backlog: { ...writable('backlog'), toRecord: locked('backlog', toRecordOf(files.backlog), (converted) => converted) },
     active: { ...writable('active'), repos: () => files.active.repos().filter(isRepoFolder), byWorktree: files.active.byWorktree },
     archive: {
