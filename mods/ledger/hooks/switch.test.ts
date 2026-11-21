@@ -782,6 +782,15 @@ test('/ledger:park <slug> <reason> takes a task on another machine in a repo who
   expect(w.argvs().some(([group, command]) => group === 'task' && command === 'park')).toBe(false)
 })
 
+test('/ledger:park <slug> <reason> takes a task whose main is this main checkout but whose repo key is another as part of the reason', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), 'list --json': done({ tasks: [task('epic'), { ...task('fix-login'), repo: 'github.com/someone/else' }] }) }, { cwd: CWD })
+
+  await $.command.run({ command: 'ledger:park', args: 'fix-login waits for review' })
+
+  expect(w.markdown()?.args).toBe('task: epic\nledger: epic\nreason: fix-login waits for review')
+  expect(w.argvs().some(([group, command]) => group === 'task' && command === 'park')).toBe(false)
+})
+
 test('/ledger:park <own slug> <reason> parks this task, with the reason after the slug', async ($, on) => {
   const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
 

@@ -225,13 +225,16 @@ async function parkOther($: EngineInterface, slug: string, reason: string): Prom
 type Listed = { tasks: { slug: string; repo: string; currentRepo?: string; main?: string; host?: string }[] }
 
 /**
- * Whether the repo at `main` has a live task `slug`; with `remoteRepo`, the repo key of that repo, also one in a worktree
- * on another machine, whose main is a path of that machine, so only its repo key matches. An error when `ledger list` failed.
+ * Whether the repo at `main` has a live task `slug`; with `remoteRepo`, the repo key of that repo, only one filed under
+ * that key, and also one in a worktree on another machine, whose main is a path of that machine, so only its repo key
+ * matches. An error when `ledger list` failed.
  */
 async function hasTask($: EngineInterface, slug: string, main: string, { remoteRepo }: { remoteRepo?: string } = {}): Promise<boolean | { error: string }> {
   const listed = await ledgerJson<Listed>($, ['list'])
-  const inRepo = (task: Listed['tasks'][number]): boolean =>
-    task.main === main || (remoteRepo !== undefined && task.host !== undefined && (task.currentRepo ?? task.repo) === remoteRepo)
+  const inRepo = (task: Listed['tasks'][number]): boolean => {
+    const keyed = (task.currentRepo ?? task.repo) === remoteRepo
+    return remoteRepo === undefined ? task.main === main : keyed && (task.main === main || task.host !== undefined)
+  }
   return listed.ok ? listed.tasks.some(task => task.slug === slug && inRepo(task)) : { error: listed.error }
 }
 
