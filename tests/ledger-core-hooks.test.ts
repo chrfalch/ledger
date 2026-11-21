@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { after, before, type TestContext } from 'node:test';
@@ -816,6 +816,27 @@ test('.claude/ledger.md outside any git repository is denied too', () => {
   const { plain } = gateWorld;
   assert.equal(assertDenied(gate(plain, 'Write', { file_path: path.join(plain, '.claude/ledger.md') })), STORE_REASON);
   assert.equal(assertDenied(gate(plain, 'Bash', { command: 'echo x > .claude/ledger.md' })), STORE_REASON);
+});
+
+test('a Bash write to ledger.md after a cd into .claude in the same command is denied', () => {
+  for (const command of ['cd .claude && echo x > ledger.md', 'cd .claude; tee -a ledger.md < /dev/null', `cd ${gateWorld.worktree}/.claude && cp /dev/null ledger.md`]) {
+    assert.equal(assertDenied(gate(gateWorld.main, 'Bash', { command })), STORE_REASON, command);
+  }
+  assertAllowed(gate(gateWorld.main, 'Bash', { command: 'cd docs && echo x > ledger.md' }));
+});
+
+test('a write to .claude/ledger.md through a symbolic link to the file or to its folder is denied', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  mkdirSync(path.join(main, '.claude'), { recursive: true });
+  writeFileSync(path.join(main, '.claude/ledger.md'), ledgerText({ slug: 'main' }));
+  symlinkSync('.claude/ledger.md', path.join(main, 'notes.md'));
+  symlinkSync('.claude', path.join(main, 'meta'));
+
+  for (const file of [path.join(main, 'notes.md'), path.join(main, 'meta/ledger.md')]) {
+    assert.equal(assertDenied(gate(main, 'Write', { file_path: file }, h)), STORE_REASON, file);
+    assert.equal(assertDenied(gate(main, 'Bash', { command: `echo x > ${file}` }, h)), STORE_REASON, file);
+  }
 });
 
 test('a .claude/ledger.md that exists without an active record adds the line naming ledger store migrate --active', (t) => {

@@ -9,7 +9,7 @@ import { findSection, parseLedger, serializeLedger, type Child, type Claim, type
 import { checkoutRoot, gitTimedOut, inMainCheckout, limitGitCalls, mainCheckout, worktrees } from './git.js';
 import { limitLockWaits } from './lock.js';
 import { conversionHint } from './migrate-repo-ids.js';
-import { CITATION_ADVICE, samePath, SESSION_CITATION } from './paths.js';
+import { CITATION_ADVICE, realPath, samePath, SESSION_CITATION } from './paths.js';
 import { repoKey, repoLabel } from './repo-key.js';
 import { holdsUnmovedLedger, keepsUnmovedLedger, loadTasks } from './registry.js';
 import { pullForSession, syncNotice } from './sync.js';
@@ -456,27 +456,36 @@ const REDIRECT_TARGET = />\s*[^\s;&|<>]+/g;
 const TEE = new RegExp(`${COMMAND_START}tee\\s${ARGUMENTS}`, 'g');
 const SED_IN_PLACE = new RegExp(`${COMMAND_START}sed\\s(?:${ARGUMENTS}\\s)?-(?:-in-place|[A-Za-z]*i)${ARGUMENTS}`, 'g');
 const COPY = new RegExp(`${COMMAND_START}(?:cp|mv)\\s${ARGUMENTS}`, 'g');
+const CD = new RegExp(`${COMMAND_START}cd\\s+([^\\s;&|)]+)`, 'g');
 const INPUT_REDIRECT = /[0-9]*<<?<?\s*\S*/g;
 const ANY_REDIRECT = /[0-9]*(?:>[>|&]?|<<?<?)\s*\S*/g;
 
-const matches = (line: string, pattern: RegExp): string[] => [...line.matchAll(pattern)].map(([match]) => match);
+/** Each match of `pattern` in `line`, as `read` gives its words, with where in the line it starts. */
+const matches = (line: string, pattern: RegExp, read: (match: string) => string[]): { word: string; at: number }[] =>
+  [...line.matchAll(pattern)].flatMap(({ 0: match, index }) => read(match).map((word) => ({ word, at: index })));
 const words = (part: string): string[] => part.split(/\s+/).filter((word) => word !== '');
 
 /**
  * A heuristic, line by line: a file a command writes is a redirect target, a tee or sed -i argument, or the last argument
- * of cp or mv. The words are as written: only resolved against the cwd can they be told to be a ledger.
+ * of cp or mv. Each is resolved against `cwd` as each cd before it on its line changed it.
  */
-function bashWriteTargets(command: string): string[] {
-  return command
-    .split('\n')
-    .flatMap((line) => [
-      ...matches(line, REDIRECT_TARGET).map((match) => match.replace(/^>\s*/, '')),
-      ...matches(line, TEE).flatMap((match) => words(match.replace(INPUT_REDIRECT, ''))),
-      ...matches(line, SED_IN_PLACE).flatMap(words),
-      ...matches(line, COPY).map((match) => words(match.replace(ANY_REDIRECT, '')).at(-1) ?? ''),
-    ])
-    .filter((word) => word !== '');
+function bashWriteTargets(command: string, cwd: string, home: string): string[] {
+  return command.split('\n').flatMap((line) => {
+    const cds = [...line.matchAll(CD)].map(({ 1: folder, index }) => ({ folder, at: index }));
+    const folderAt = (at: number): string => cds.filter((cd) => cd.at < at).reduce((folder, cd) => pathOf(cd.folder, folder, home), cwd);
+    return [
+      ...matches(line, REDIRECT_TARGET, (match) => [match.replace(/^>\s*/, '')]),
+      ...matches(line, TEE, (match) => words(match.replace(INPUT_REDIRECT, ''))),
+      ...matches(line, SED_IN_PLACE, words),
+      ...matches(line, COPY, (match) => words(match.replace(ANY_REDIRECT, '')).slice(-1)),
+    ]
+      .filter(({ word }) => word !== '')
+      .map(({ word, at }) => pathOf(word, folderAt(at), home));
+  });
 }
+
+/** `file` as written, with the symbolic links to it resolved, and with those of its folder resolved. */
+const pathsOf = (file: string): string[] => [file, realPath(file), path.join(realPath(path.dirname(file)), path.basename(file))];
 
 /** Only the text being written: an Edit's old_string may still name an old path. For Bash, the whole command. */
 function newText(toolInput: Record<string, unknown>): string {
@@ -492,10 +501,10 @@ function newText(toolInput: Record<string, unknown>): string {
  */
 function ledgerWriteReason(input: HookInput, context: HookContext): string | undefined {
   const { toolName, toolInput } = input;
-  const targets = toolName === 'Bash' ? bashWriteTargets(text(toolInput.command)) : FILE_TOOLS.includes(toolName) ? [text(toolInput.file_path)] : [];
   const cwd = folderOf(input, context);
-  const files = targets.map((target) => pathOf(target, cwd, context.paths.home));
-  const legacy = files.filter((file) => LEGACY_LEDGER_FILE.test(file));
+  const { home } = context.paths;
+  const files = toolName === 'Bash' ? bashWriteTargets(text(toolInput.command), cwd, home) : FILE_TOOLS.includes(toolName) ? [pathOf(text(toolInput.file_path), cwd, home)] : [];
+  const legacy = files.flatMap(pathsOf).filter((file) => LEGACY_LEDGER_FILE.test(file));
   if (legacy.length > 0) {
     const bin = context.ledgerBin;
     const unmoved = legacy.some((file) => {
