@@ -7,9 +7,12 @@ import test, { type TestContext } from 'node:test';
 import { FORMAT, isAllowed } from '../tools/ledger/clone.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { parseLedger } from '../tools/ledger/format.js';
+import { limitLockWaits } from '../tools/ledger/lock.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { prePushHook } from '../tools/ledger/secret-scan.js';
 import { sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
+import type { LedgerStore } from '../tools/ledger/store.js';
+import { createTask, currentTask, updateLedger } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
 import { backlogTask, commandEnv, git, home, LEDGER_BIN, ledger, ledgerText, noSqlite, ok, repoKeyOf, repository, worktreeOf, worktreeTask, type Ran } from './ledger-core-fixtures.js';
 
@@ -664,4 +667,91 @@ test('ledger task retire --json of an active task whose worktree is not on this 
   const retired = json(ledger(h, app, 'task', 'retire', 'far', '--force', '--json'));
 
   assert.equal(retired.place, 'active');
+});
+
+/** A linked worktree of `app` on a branch of its own, with no task yet. */
+function looseWorktree(h: string, app: string, name: string): string {
+  const folder = worktreeOf(app, name);
+  git(h, app, 'worktree', 'add', '--quiet', '-b', name, folder);
+  return folder;
+}
+
+const recordsNaming = (store: LedgerStore, key: string, worktree: string): string[] =>
+  store.active.list(key).flatMap(({ name, text }) => (parseLedger(text).location.worktree === worktree ? [name] : []));
+
+test('of two ledger task new --here in one worktree, the one that checks while the other writes is refused: one record names the worktree', (t) => {
+  const { h, app, key, store } = setup(t);
+  const loose = looseWorktree(h, app, 'loose');
+  const paths = ledgerPaths(h);
+  const files = store();
+  let second: unknown;
+  // The second command runs whole between the check and the create of the first.
+  const racing: LedgerStore = {
+    ...files,
+    active: {
+      ...files.active,
+      create: (repo, slug, text) => {
+        limitLockWaits(Date.now() + 200);
+        try {
+          second = createTask({ paths, cwd: loose, store: files }, 'second', { here: true });
+        } catch (error) {
+          second = error;
+        } finally {
+          limitLockWaits(Infinity);
+        }
+        return files.active.create(repo, slug, text);
+      },
+    },
+  };
+
+  createTask({ paths, cwd: loose, store: racing }, 'first', { here: true });
+
+  assert.ok(second instanceof Error, 'the second --here went through');
+  assert.deepEqual(recordsNaming(store(), key, loose), ['first']);
+});
+
+test('a write to an active task whose record a pull replaced with one of another machine is refused, and the pulled record stays', (t) => {
+  const { h, app, key, store } = setup(t);
+  worktreeTask(h, app, { slug: 'fix' });
+  const worktree = worktreeOf(app, 'fix');
+  const context = { paths: ledgerPaths(h), cwd: worktree, store: store() };
+  const task = currentTask(context.store, worktree) ?? assert.fail('no task in its worktree');
+  store().active.write(key, 'fix', ledgerText({ slug: 'fix', worktree }).replace('- design refs: none\n', '- design refs: none\n- host: other-host\n'));
+  const pulled = store().active.read(key, 'fix')?.text;
+
+  assert.throws(() => updateLedger(context, task, (text) => text.replace('## Next step\n', '## Next step\nA note.\n')), /other-host/);
+  assert.equal(store().active.read(key, 'fix')?.text, pulled);
+});
+
+test('ledger task new --here and --stack make no active record while "host" is no host label, and say how to fix it', (t) => {
+  const { h, app, key, store } = setup(t);
+  worktreeTask(h, app, { slug: 'epic' });
+  const loose = looseWorktree(h, app, 'loose');
+  writeFileSync(path.join(h, '.claude/ledger-settings.json'), JSON.stringify({ host: 'Not A Label' }));
+
+  for (const [cwd, args] of [[loose, ['--here']], [worktreeOf(app, 'epic'), ['side', '--stack']]] as const) {
+    const ran = ledger(h, cwd, 'task', 'new', ...args);
+    assert.equal(ran.status, 1, ran.stdout);
+    assert.match(ran.stderr, /"host"/);
+  }
+  assert.deepEqual(recordsNaming(store(), key, loose), []);
+  assert.equal(store().active.has(key, 'side'), false);
+  assert.equal(existsSync(worktreeOf(app, 'side')), false);
+});
+
+test('ledger task new --here and --stack make no active record from a template with no "- worktree:" bullet, and say so', (t) => {
+  const { h, app, key, store } = setup(t);
+  worktreeTask(h, app, { slug: 'epic' });
+  const loose = looseWorktree(h, app, 'loose');
+  const template = path.join(h, '.claude/ledger.template.md');
+  writeFileSync(template, readFileSync(template, 'utf8').replace(/^- worktree:.*\n/m, ''));
+
+  for (const [cwd, args] of [[loose, ['--here']], [worktreeOf(app, 'epic'), ['side', '--stack']]] as const) {
+    const ran = ledger(h, cwd, 'task', 'new', ...args);
+    assert.equal(ran.status, 1, ran.stdout);
+    assert.match(ran.stderr, /worktree/);
+  }
+  assert.deepEqual(recordsNaming(store(), key, loose), []);
+  assert.equal(store().active.has(key, 'side'), false);
+  assert.equal(existsSync(worktreeOf(app, 'side')), false);
 });

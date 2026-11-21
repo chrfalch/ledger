@@ -163,7 +163,7 @@ export function activeTasks(store: LedgerStore, repo?: string): Task[] {
 }
 
 /** Why an elsewhere task is not written or gone to here. */
-export const notOnThisMachine = ({ slug, worktree, host }: Task): string => {
+export const notOnThisMachine = ({ slug, worktree, host }: Pick<Task, 'slug' | 'worktree' | 'host'>): string => {
   const where = `the worktree ${worktree ?? 'its ledger names'}`;
   return host === undefined
     ? `${slug} is active in ${where}, which is not on this machine. Work on it there.`

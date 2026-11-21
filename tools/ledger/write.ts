@@ -90,12 +90,15 @@ function noteStamped({ store, paths }: Context): void {
 
 /**
  * Rewrites the active record `name` of `repo` with `change`, as Active.update does. A record that names a label this
- * machine stamped before "host" changed names its host now, so other machines see whose task it is.
+ * machine stamped before "host" changed names its host now, so other machines see whose task it is. A record that
+ * names another machine is refused as the record lock reads it, as a pull may have put one there since it was looked up.
  */
 export function updateActive(context: Context, { repo, name }: { repo: string; name: string }, change: Change<string>): boolean {
   const { host, ownHosts } = context.store;
   let restamped = false;
   const written = context.store.active.update(repo, name, (text) => {
+    const { host: owner, worktree } = parseLedger(text).location;
+    if (owner !== undefined && host !== undefined && owner !== host && !(ownHosts?.has(owner) ?? false)) fail(notOnThisMachine({ slug: name, worktree, host: owner }));
     const changed = change(text);
     if (changed === undefined || host === undefined) return changed;
     const named = parseLedger(changed).location.host;
