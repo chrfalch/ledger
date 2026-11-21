@@ -23,12 +23,12 @@ import {
   withCloneLock,
 } from './clone.js';
 import { fail } from './failure.js';
-import { collection, fileStoreAt, keptCreated } from './file-store.js';
-import { isTaken, readTimedText, writeAtomic } from './files.js';
+import { fileStoreAt, keptCreated, markdownCollection } from './file-store.js';
+import { folderEntries, isFolder, isTaken, readTimedText, writeAtomic } from './files.js';
 import { ledgerBin, type LedgerPaths } from './paths.js';
 import { parseRecord, recordJson } from './record.js';
 import { readHost, validHost } from './settings.js';
-import type { Archive, LedgerCollection, LedgerStore, RemovedCopy, WrittenLedger } from './store.js';
+import { byCodeUnit, type Archive, type LedgerCollection, type LedgerStore, type RemovedCopy, type WrittenLedger } from './store.js';
 
 export type GitStoreOptions = {
   /** Start `ledger store sync --quiet` after a command that wrote, so the push never makes the command wait. */
@@ -95,7 +95,8 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false,
   // Read on first use, so a "host" setting that is no label fails only what reaches this machine's copies.
   const ownHost = (): string => (host ??= readHost(paths.home));
   const validOwnHost = (): string | undefined => (host ??= validHost(paths.home));
-  const copiesOf = (name: string): LedgerCollection => collection(path.join(clone, 'active', name));
+  const activeRoot = path.join(clone, 'active');
+  const copiesOf = (host: string): LedgerCollection => markdownCollection(path.join(activeRoot, host));
   const warn = (text: string): void => {
     if (!quiet) console.error(`warning: ${text}`);
   };
@@ -104,7 +105,7 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false,
     files: (repo, name) => ledgerFiles(collection, repo, name),
   });
   const copyPlace = (own: LedgerCollection): Place => ({
-    folders: (repos) => [path.join(clone, 'active'), own.repoLocation(), ...repos.map((repo) => own.repoLocation(repo))],
+    folders: (repos) => [activeRoot, own.repoLocation(), ...repos.map((repo) => own.repoLocation(repo))],
     files: (repo, name) => [path.relative(clone, own.location(repo, name))],
   });
   /**
@@ -270,7 +271,11 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false,
       get host() {
         return validOwnHost();
       },
-      hosts: () => collection(path.join(clone, 'active')).repos(),
+      hosts: () =>
+        folderEntries(activeRoot)
+          .map(({ name }) => name)
+          .filter((name) => isFolder(path.join(activeRoot, name)))
+          .sort(byCodeUnit),
       copiesOf,
       write: ownCopy(
         (own, repo: string, slug: string, text: string) => {

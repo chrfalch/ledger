@@ -26,24 +26,24 @@ function newestCopy(archive: Archive, repos: string[], slug: string): StoredLedg
 }
 
 /**
- * The copy of the worktree ledger `slug` of another machine, with that machine's host folder. As in findTasks, a worktree
- * task here with the same repo folder and slug makes the copy this machine's own, under a "host" it had before; that
- * worktree is looked for in the repo of cwd and in each main checkout the registry lists for `repo`.
+ * The copy of the worktree ledger `slug` of another machine, filed under one of the repo keys `repos`, with that
+ * machine's host folder. As in findTasks, a worktree task here with one of those keys and that slug makes the copy this
+ * machine's own, under a "host" it had before; that worktree is looked for in the repo of cwd and in each main checkout
+ * the registry lists under those keys.
  */
-function remoteCopy({ store, cwd }: Context, repo: string, slug: string): ShownLedger | undefined {
+function remoteCopy({ store, cwd }: Context, repos: string[], slug: string): ShownLedger | undefined {
   const { active } = store;
   if (active === undefined) return undefined;
-  const hosts = active.hosts().filter((name) => name !== active.host && active.copiesOf(name).has(repo, slug));
-  if (hosts.length === 0) return undefined;
+  const copies = active
+    .hosts()
+    .filter((host) => host !== active.host)
+    .flatMap((host) => repos.flatMap((repo) => active.copiesOf(host).read(repo, slug) ?? []).map((copy) => ({ ...copy, host })));
+  if (copies.length === 0) return undefined;
   const here = mainCheckout(cwd);
-  const registered = (parseRegistry(store.registry.read() ?? '') ?? []).filter((entry) => entry.repo === repo).flatMap((entry) => entryMain(entry) ?? []);
+  const registered = (parseRegistry(store.registry.read() ?? '') ?? []).filter((entry) => repos.includes(entry.repo)).flatMap((entry) => entryMain(entry) ?? []);
   const mains = [...(here === undefined ? [] : [here]), ...registered];
-  if (findTasks(store, mains).some((task) => task.place === 'worktree' && task.repo === repo && task.slug === slug)) return undefined;
-  for (const host of hosts) {
-    const copy = active.copiesOf(host).read(repo, slug);
-    if (copy !== undefined) return { ...copy, host };
-  }
-  return undefined;
+  const ownWorktree = findTasks(store, mains).some((task) => task.place === 'worktree' && task.slug === slug && repos.includes(task.repo));
+  return ownWorktree ? undefined : copies[0];
 }
 
 /** A name that stays one entry of the store: a file store joins it into a path. */
@@ -92,11 +92,11 @@ export function shownLedger(context: Context, slug: string, { repo: named, archi
       ? keyAndAliases(store.aliases.read(), main === undefined ? fail(`Could not tell which repo ${cwd} is in. It is not inside a git repository. Pass --repo <repo>.`) : repoKey(main))
       : namedRepos(store, named, main);
   const clone = main !== undefined && repos.includes(repoKey(main)) ? main : undefined;
-  const firstIn = <T extends StoredLedger>(read: (repo: string) => T | undefined): T | undefined => repos.map(read).find((found) => found !== undefined);
+  const firstIn = (read: (repo: string) => StoredLedger | undefined): StoredLedger | undefined => repos.map(read).find((found) => found !== undefined);
   const found =
     (parseArchiveName(slug) === undefined ? undefined : firstIn((repo) => store.archive.read(repo, slug))) ??
     (archived || clone === undefined ? undefined : ledgerInWorktree(clone, slug)) ??
-    (archived ? undefined : (firstIn((repo) => remoteCopy(context, repo, slug)) ?? firstIn((repo) => store.backlog.read(repo, slug)))) ??
+    (archived ? undefined : (remoteCopy(context, repos, slug) ?? firstIn((repo) => store.backlog.read(repo, slug)))) ??
     newestCopy(store.archive, repos, slug);
   if (found !== undefined) return found;
   const [repo] = repos;

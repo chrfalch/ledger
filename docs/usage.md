@@ -460,7 +460,9 @@ can read it:
   background. A subagent's turn, or a turn that ends without an answer,
   copies nothing; its changes go with the next answered turn.
   `ledger store mirror` does it by hand. A copy is removed only when git
-  confirms that its worktree is gone. `ledger task retire` removes the copy
+  confirms that its worktree is gone, or when the same worktree's ledger was
+  just copied under another repo key, as for a copy under a repo folder name
+  from before repo keys. `ledger task retire` removes the copy
   in the same commit that adds the archive copy.
 - A machine never commits the copies of another machine. A sync puts an
   edited or added file in another machine's folder back as git storage holds

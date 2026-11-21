@@ -11,6 +11,7 @@ import { Failure } from '../tools/ledger/failure.js';
 import { readTimedText } from '../tools/ledger/files.js';
 import { gitStore } from '../tools/ledger/git-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
+import { parseRecord, recordJson } from '../tools/ledger/record.js';
 import { executeRetire, planRetire, readRetire, type Output } from '../tools/ledger/retire.js';
 import * as settings from '../tools/ledger/settings.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
@@ -20,6 +21,9 @@ import { REPO } from './helpers.js';
 import { asCli, git, home, LEDGER_BIN, ledgerText, noSqlite, ok, worktreeTask, type Ran } from './ledger-core-fixtures.js';
 import {
   answerGh,
+  APP,
+  APP_KEY,
+  APP_ORIGIN,
   backgroundPids,
   failed,
   gitRan,
@@ -69,8 +73,8 @@ const SLUG = 'fix-login';
 // Root reads and writes past every permission bit.
 const asRoot = process.getuid?.() === 0;
 
-/** Where a machine named `host` keeps the active copy of the task `slug` of the repo `app`. */
-const copyOf = (host: string, slug = SLUG): string => `active/${host}/app/${slug}.md`;
+/** Where a machine named `host` keeps the active copy of the task `slug` of the repo `app`, in the folder of its repo key. */
+const copyOf = (host: string, slug = SLUG): string => `active/${host}/${APP}/${slug}.md`;
 
 const writeSettings = (m: Machine, fields: object): void => writeFileSync(path.join(m.h, '.claude/ledger-settings.json'), JSON.stringify(fields));
 
@@ -502,7 +506,7 @@ test('ledger task retire removes the copy in the commit that archives the task, 
 
   ledgerOk(a, 'task', 'retire', SLUG, '--force');
 
-  const archived = `archive/app/${today()}-${SLUG}.md`;
+  const archived = `archive/${APP}/${today()}-${SLUG}.json`;
   const archiving = git(a.h, a.clone, 'log', '--format=%H', '--diff-filter=A', '--', archived);
   assert.notEqual(archiving, '', `no commit adds ${archived}`);
   const changes = git(a.h, a.clone, 'show', '--no-renames', '--name-status', '--format=', archiving).split('\n');
@@ -546,10 +550,10 @@ test("a machine ignores the copies in its own host folder: its worktree task is 
 
 test('an active copy hides a backlog ledger with the same repo and slug', (t) => {
   const { b } = twoMachines(t);
-  const twin = path.join(b.clone, 'backlog/app', `${SLUG}.md`);
+  const twin = path.join(b.clone, 'backlog', APP, `${SLUG}.md`);
   mkdirSync(path.dirname(twin), { recursive: true });
   writeFileSync(twin, ledgerText({ slug: SLUG, main: b.app, goal: 'The backlog twin.' }));
-  git(b.h, b.clone, 'add', '-f', '--', `backlog/app/${SLUG}.md`);
+  git(b.h, b.clone, 'add', '-f', '--', `backlog/${APP}/${SLUG}.md`);
   git(b.h, b.clone, 'commit', '--quiet', '-m', 'a backlog twin');
 
   const entries = listed(b).filter(({ slug }) => slug === SLUG);
@@ -679,7 +683,7 @@ test('a sync while a retire runs waits for it, so the commit that archives the t
   assert.equal(endedBeforeRetire, false, 'the sync ended while the retire still held the clone lock');
   assert.equal(synced.status, 0, synced.stderr);
   assert.equal(retired.status, 0, retired.stderr);
-  const archived = `archive/app/${today()}-${SLUG}.md`;
+  const archived = `archive/${APP}/${today()}-${SLUG}.json`;
   const archiving = git(a.h, a.clone, 'log', '--format=%H', '--diff-filter=A', '--', archived);
   const changes = git(a.h, a.clone, 'show', '--no-renames', '--name-status', '--format=', archiving).split('\n');
   assert.ok(changes.includes(`D\t${copyOf('host-a')}`), `the commit that archives the task does not remove its copy:\n${changes.join('\n')}`);
@@ -861,8 +865,8 @@ test('ledger store sync commits nothing when git cannot look up HEAD while it pu
   const committed = headText(b, copyOf('host-a'));
   appendFileSync(path.join(b.clone, copyOf('host-a')), '- Edited on host B.\n');
   // A ledger of B's own to commit, so the commit takes whatever else the put back left staged.
-  mkdirSync(path.join(b.clone, 'backlog/app'), { recursive: true });
-  writeFileSync(path.join(b.clone, 'backlog/app/note-on-b.md'), ledgerText({ slug: 'note-on-b', main: b.app }));
+  mkdirSync(path.join(b.clone, 'backlog', APP), { recursive: true });
+  writeFileSync(path.join(b.clone, 'backlog', APP, 'note-on-b.md'), ledgerText({ slug: 'note-on-b', main: b.app }));
   stubGit(b, '*"rev-parse --verify --quiet HEAD"', 'echo "fatal: cannot read HEAD" >&2; exit 128');
   const [head, pushed] = [git(b.h, b.clone, 'rev-parse', 'HEAD'), remoteHead(bare)];
 
@@ -894,7 +898,7 @@ test('ledger store mirror --quiet exits 1 and prints nothing when its commit fai
 test('ledger tree add of a child under a parent on another machine refuses before it changes the child', (t) => {
   const { b } = twoMachines(t);
   ledgerOk(b, 'task', 'new', 'kid', '--goal', 'A child of the task on host A.');
-  const kid = path.join(b.clone, 'backlog/app/kid.md');
+  const kid = path.join(b.clone, 'backlog', APP, 'kid.json');
   const before = readFileSync(kid, 'utf8');
 
   const added = failed(run(b, ['tree', 'add', SLUG, 'kid']));
@@ -916,9 +920,10 @@ test('ledger tree remove of a child on another machine refuses before it changes
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
   setUpAs(b, 'host-b');
   ledgerOk(b, 'store', 'sync');
-  ledgerOk(b, 'task', 'new', 'umbrella', '--goal', 'The parent on host B.');
-  const umbrella = path.join(b.clone, 'backlog/app/umbrella.md');
-  appendFileSync(umbrella, `\n## Children\n- ${SLUG}\n`);
+  // Markdown from before task records, which the store still reads: a record cannot be appended to as text.
+  const umbrella = path.join(b.clone, 'backlog', APP, 'umbrella.md');
+  mkdirSync(path.dirname(umbrella), { recursive: true });
+  writeFileSync(umbrella, ledgerText({ slug: 'umbrella', goal: 'The parent on host B.', children: [`- ${SLUG}`] }));
   const before = readFileSync(umbrella, 'utf8');
 
   const removed = failed(run(b, ['tree', 'remove', 'umbrella', SLUG]));
@@ -975,7 +980,7 @@ test('ledger task retire that cannot remove the copy fails, says so, and commits
   assert.notEqual(retired.status, 0, retired.stdout);
   assert.match(retired.stderr, /copy/);
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), head, 'the retire made a commit');
-  assert.equal(existsSync(path.join(a.clone, `archive/app/${today()}-${SLUG}.md`)), false, 'an archive copy is left for a later commit');
+  assert.equal(existsSync(path.join(a.clone, `archive/${APP}/${today()}-${SLUG}.json`)), false, 'an archive copy is left for a later commit');
   assert.ok(existsSync(ledger), 'the worktree ledger was removed');
 });
 
@@ -1034,7 +1039,7 @@ test('with a "host" that is no label, ledger store sync still commits and pushes
 
   ledgerOk(a, 'store', 'sync');
 
-  assert.ok(remoteFiles(bare).includes('backlog/app/note.md'), 'the backlog ledger is not on the remote');
+  assert.ok(remoteFiles(bare).includes(`backlog/${APP}/note.json`), 'the backlog ledger is not on the remote');
 });
 
 test('with a "host" that is no label, the session start still pulls, and warns once, naming the host', (t) => {
@@ -1045,7 +1050,7 @@ test('with a "host" that is no label, the session start still pulls, and warns o
 
   const context = hookContext(b, b.app);
 
-  assert.ok(existsSync(path.join(b.clone, 'backlog/app/note.md')), 'the session start pulled nothing');
+  assert.ok(existsSync(path.join(b.clone, `backlog/${APP}/note.json`)), 'the session start pulled nothing');
   assert.equal(linesWith(context, 'Work Laptop').length, 1, context);
 });
 
@@ -1060,7 +1065,7 @@ test('with a "host" that is no label, a store write commits its ledger and leave
 
   ledgerOk(a, 'task', 'new', 'note', '--goal', 'Written while the host is wrong.');
 
-  assert.ok(inHead(a, 'backlog/app/note.md'), 'the backlog ledger is not committed');
+  assert.ok(inHead(a, `backlog/${APP}/note.json`), 'the backlog ledger is not committed');
   assert.equal(headText(a, copyOf('host-a')), committed);
   assert.equal(readFileSync(path.join(a.clone, copyOf('host-a')), 'utf8'), committed);
   assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
@@ -1207,7 +1212,7 @@ test('ledger task retire whose archive write fails puts the copy back, so neithe
   const ledger = startTask(a);
   ledgerOk(a, 'store', 'mirror');
   const copied = headText(a, copyOf('host-a'));
-  const archived = `archive/app/${today()}-${SLUG}.md`;
+  const archived = `archive/${APP}/${today()}-${SLUG}.json`;
 
   const retired = retireWithReadOnly(a, path.join(a.clone, 'archive'));
 
@@ -1238,7 +1243,7 @@ test('ledger task retire of a copy it cannot read fails with "Could not remove t
   assert.notEqual(retired.status, 0, retired.stdout);
   assert.match(retired.stderr, /Could not remove the copy of fix-login/);
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), head, 'the retire made a commit');
-  assert.equal(existsSync(path.join(a.clone, `archive/app/${today()}-${SLUG}.md`)), false, 'the retire archived the task');
+  assert.equal(existsSync(path.join(a.clone, `archive/${APP}/${today()}-${SLUG}.json`)), false, 'the retire archived the task');
   assert.ok(existsSync(copy), 'the copy was removed');
   assert.ok(existsSync(ledger), 'the worktree ledger was removed');
 });
@@ -1294,11 +1299,11 @@ test('after "host" changes, ledger show --repo from a folder outside the repo do
   appendFileSync(ledger, '- Written after the copy.\n');
   writeSettings(a, { storage: 'git', host: 'host-a-renamed' });
 
-  const inside = run(a, ['show', SLUG]);
-  const outside = run(a, ['show', SLUG, '--repo', 'app'], { cwd: a.h });
+  const outside = run(a, ['show', SLUG, '--repo', APP_KEY], { cwd: a.h });
 
   assert.doesNotMatch(`${outside.stdout}${outside.stderr}`, /read-only/);
-  assert.deepEqual(outside, inside);
+  // Outside a clone, show reads no worktree ledger, so it finds none to print.
+  assert.equal(outside.stdout, '');
 });
 
 test('with a "host" that is no label, the session start still ends by its deadline when git stalls', (t) => {
@@ -1339,7 +1344,7 @@ function ghostInReadOnlyFolder(m: Machine): () => void {
   return () => chmodSync(folder, 0o755);
 }
 
-const archivedName = `archive/app/${today()}-${SLUG}.md`;
+const archivedName = `archive/${APP}/${today()}-${SLUG}.json`;
 
 test('ledger store sync pulls past a held copy that HEAD tracks, and commits none of it', (t) => {
   const { a, b } = twoMachines(t);
@@ -1351,7 +1356,7 @@ test('ledger store sync pulls past a held copy that HEAD tracks, and commits non
   const synced = run(a, ['store', 'sync']);
 
   assert.equal(synced.status, 0, synced.stderr);
-  assert.ok(inHead(a, 'backlog/app/note.md'), 'the sync pulled nothing');
+  assert.ok(inHead(a, `backlog/${APP}/note.json`), 'the sync pulled nothing');
   assert.equal(headText(a, copyOf('host-a')), committed, 'the sync committed the held copy');
   // remoteText trims the text git prints.
   assert.equal(remoteText(a.bare, copyOf('host-a')), committed.trimEnd(), 'the sync pushed the held copy');
@@ -1427,7 +1432,7 @@ test('ledger task retire whose evidence copy fails after the archive write archi
   writeFileSync(path.join(worktreeOf(ledger), '.claude/evidence/red.txt'), 'failing\n');
   ledgerOk(a, 'store', 'mirror');
   const copied = headText(a, copyOf('host-a'));
-  const evidence = path.join(a.h, '.claude/ledger-evidence/app');
+  const evidence = path.join(a.h, '.claude/ledger-evidence', APP);
   mkdirSync(evidence, { recursive: true });
 
   const retired = retireWithReadOnly(a, evidence);
@@ -1511,7 +1516,7 @@ test('a held copy staged by hand is committed by no store write and no sync', (t
   ledgerOk(a, 'task', 'new', 'note', '--goal', 'Written while a held copy is staged.');
   ledgerOk(a, 'store', 'sync');
 
-  assert.ok(inHead(a, 'backlog/app/note.md'), 'the backlog ledger is not committed');
+  assert.ok(inHead(a, `backlog/${APP}/note.json`), 'the backlog ledger is not committed');
   assert.equal(headText(a, copyOf('host-a')), committed, 'a commit took the staged held copy');
 });
 
@@ -1548,11 +1553,11 @@ test('ledger show --repo from a folder outside the repo finds a worktree task he
   assert.ok(entries.some((entry) => entry.slug === SLUG && entry.main !== undefined), 'the registry has no entry with "main" to remove');
   writeFileSync(registry, JSON.stringify(entries.map(({ main: _main, ...entry }) => entry)));
 
-  const outside = run(a, ['show', SLUG, '--repo', 'app'], { cwd: a.h });
-  const inside = run(a, ['show', SLUG]);
+  const outside = run(a, ['show', SLUG, '--repo', APP_KEY], { cwd: a.h });
 
   assert.doesNotMatch(`${outside.stdout}${outside.stderr}`, /read-only/);
-  assert.deepEqual(outside, inside);
+  // Outside a clone, show reads no worktree ledger, so it finds none to print.
+  assert.equal(outside.stdout, '');
 });
 
 test('a reconcile that fails after one whose listing of the changed copies failed still leaves close to commit the copy left out', (t) => {
@@ -1694,7 +1699,7 @@ test('a copy that can neither be put back nor recorded as held back is committed
   asCli(t, a.h);
   const store = gitStore(ledgerPaths(a.h), { backgroundSync: false, quiet: true });
   const active = store.active ?? assert.fail('git storage keeps no copies');
-  const removed = active.remove('app', SLUG) ?? assert.fail('there was no copy to remove');
+  const removed = active.remove(APP_KEY, SLUG) ?? assert.fail('there was no copy to remove');
   // writeAtomic writes through <file>.tmp-<pid>: a folder there fails both writes, as a full disk would, also as root.
   const blocked = [path.join(a.clone, copyOf('host-a')), heldBackFile(a)].map((file) => `${file}.tmp-${process.pid}`);
   for (const folder of blocked) mkdirSync(folder);
@@ -1717,7 +1722,7 @@ test('with a held-back list that names no copy, ledger store sync commits no cop
   const committed = headText(a, copyOf('host-a'));
   appendFileSync(path.join(a.clone, copyOf('host-a')), '- Not from any worktree ledger.\n');
 
-  for (const list of [['bad-path'], ['backlog/app/note.md']]) {
+  for (const list of [['bad-path'], [`backlog/${APP}/note.json`]]) {
     writeFileSync(heldBackFile(a), `${JSON.stringify(list)}\n`);
     const synced = run(a, ['store', 'sync']);
 
@@ -1770,7 +1775,7 @@ test('a retire whose failed worktree removal deleted the ledger and evidence kee
   assert.notEqual(retired.status, 0, retired.stdout);
   assert.ok(retired.stderr.includes(`${worktree} remains`), retired.stderr);
   assert.ok(existsSync(path.join(a.clone, archivedName)), 'the archive copy is gone');
-  assert.equal(readFileSync(path.join(a.h, '.claude/ledger-evidence/app', `${today()}-${SLUG}`, 'red.txt'), 'utf8'), 'failing\n', 'the archived evidence is gone');
+  assert.equal(readFileSync(path.join(a.h, '.claude/ledger-evidence', APP, `${today()}-${SLUG}`, 'red.txt'), 'utf8'), 'failing\n', 'the archived evidence is gone');
   assert.ok(inHead(a, archivedName), 'HEAD holds no archive copy');
   assert.equal(inHead(a, copyOf('host-a')), false, 'HEAD still holds the copy');
 });
@@ -1814,7 +1819,7 @@ function blockCopyAndHeldList(m: Machine): () => void {
   };
 }
 
-const writeNote = (m: Machine, store: LedgerStore): void => store.backlog.write('app', 'note', ledgerText({ slug: 'note', main: m.app }));
+const writeNote = (m: Machine, store: LedgerStore): void => store.backlog.write(APP_KEY, 'note', ledgerText({ slug: 'note', main: m.app }));
 
 test('after a copy could neither be put back nor recorded as held back, a second store of the same process commits a backlog write without the removal of the copy', (t) => {
   const a = machine(t, remote(t));
@@ -1823,7 +1828,7 @@ test('after a copy could neither be put back nor recorded as held back, a second
   ledgerOk(a, 'store', 'mirror');
   asCli(t, a.h);
   const first = gitStore(ledgerPaths(a.h), { backgroundSync: false, quiet: true });
-  const removed = first.active?.remove('app', SLUG) ?? assert.fail('there was no copy to remove');
+  const removed = first.active?.remove(APP_KEY, SLUG) ?? assert.fail('there was no copy to remove');
   const unblock = blockCopyAndHeldList(a);
   try {
     assert.throws(() => removed.putBack(), /ledger store mirror before the next sync/);
@@ -1835,7 +1840,7 @@ test('after a copy could neither be put back nor recorded as held back, a second
   writeNote(a, second);
   second.close?.();
 
-  assert.ok(inHead(a, 'backlog/app/note.md'), 'the second store did not commit its backlog ledger');
+  assert.ok(inHead(a, `backlog/${APP}/note.json`), 'the second store did not commit its backlog ledger');
   assert.ok(inHead(a, copyOf('host-a')), 'the second store committed the removal of the copy');
 });
 
@@ -1852,7 +1857,7 @@ test('a mirror that can neither put back a copy nor record it as held back keeps
   let failure: unknown;
   try {
     active.reconcile(() => {
-      active.write('app', SLUG, `${committed}- Written by a mirror that fails.\n`);
+      active.write(APP_KEY, SLUG, `${committed}- Written by a mirror that fails.\n`);
       unblock = blockCopyAndHeldList(a);
       throw new Error('the mirror fails');
     });
@@ -1865,7 +1870,7 @@ test('a mirror that can neither put back a copy nor record it as held back keeps
   writeNote(a, store);
   store.close?.();
 
-  assert.ok(inHead(a, 'backlog/app/note.md'), 'the store did not commit its backlog ledger');
+  assert.ok(inHead(a, `backlog/${APP}/note.json`), 'the store did not commit its backlog ledger');
   assert.equal(headText(a, copyOf('host-a')), committed, 'a commit took the copy the mirror could not put back');
   assert.match(failure instanceof Error ? failure.message : String(failure), /ledger store mirror before the next sync/);
 });
@@ -1901,7 +1906,7 @@ function startTaskWithEvidence(m: Machine): { ledger: string; evidence: string }
 
 function assertArchivedWithEvidence(m: Machine): void {
   assert.ok(existsSync(path.join(m.clone, archivedName)), 'the archive copy is gone');
-  assert.equal(readFileSync(path.join(m.h, '.claude/ledger-evidence/app', `${today()}-${SLUG}`, 'red.txt'), 'utf8'), 'failing\n', 'the archived evidence is gone');
+  assert.equal(readFileSync(path.join(m.h, '.claude/ledger-evidence', APP, `${today()}-${SLUG}`, 'red.txt'), 'utf8'), 'failing\n', 'the archived evidence is gone');
   assert.ok(inHead(m, archivedName), 'HEAD holds no archive copy');
   assert.equal(inHead(m, copyOf('host-a')), false, 'HEAD still holds the copy');
 }
@@ -2216,20 +2221,14 @@ test('a forced retire of an unmerged branch whose failed worktree removal delete
   assert.match(error, new RegExp(`kept the branch ${SLUG}\\b[^\\n]*after the prune`), retired.stderr);
 });
 
-test('a retire whose failed worktree removal left a worktree ledger that decodes to the archive copy, but differs in its bytes, keeps it and warns', (t) => {
+test('a retire whose failed worktree removal left a worktree ledger whose stored text differs from the archive copy keeps it and warns', (t) => {
   const a = machine(t, remote(t));
   setUpAs(a, 'host-a');
   const { ledger, evidence } = startTaskWithEvidence(a);
-  appendFileSync(ledger, '- Replacement character: �\n');
-  ledgerOk(a, 'store', 'mirror');
-  const text = readFileSync(ledger);
-  const replacement = Buffer.from('�');
-  const at = text.indexOf(replacement);
-  // An invalid byte where the ledger has U+FFFD: decoded as UTF-8, the archive copy reads as the ledger does.
-  const invalid = Buffer.concat([text.subarray(0, at), Buffer.from([0xff]), text.subarray(at + replacement.length)]);
-  const invalidCopy = path.join(a.h, 'invalid-archive-copy.md');
-  writeFileSync(invalidCopy, invalid);
-  stubGit(a, '*"worktree remove"*', `rm -rf ${JSON.stringify(evidence)}; cp ${JSON.stringify(invalidCopy)} ${JSON.stringify(path.join(a.clone, archivedName))}; echo "fatal: refused by the test" >&2; exit 128`);
+  const text = readFileSync(ledger, 'utf8');
+  const otherRecord = path.join(a.h, 'other-archive-copy.json');
+  writeFileSync(otherRecord, recordJson(parseRecord(`${text}\n- Written into the archive copy only.\n`)));
+  stubGit(a, '*"worktree remove"*', `rm -rf ${JSON.stringify(evidence)}; cp ${JSON.stringify(otherRecord)} ${JSON.stringify(path.join(a.clone, archivedName))}; echo "fatal: refused by the test" >&2; exit 128`);
 
   let retired: Ran;
   try {
@@ -2239,19 +2238,16 @@ test('a retire whose failed worktree removal left a worktree ledger that decodes
   }
 
   assert.notEqual(retired.status, 0, retired.stdout);
-  assert.deepEqual(readFileSync(path.join(a.clone, archivedName)), invalid, 'the stub did not leave the archive copy with the invalid byte');
-  assert.ok(existsSync(ledger), 'the worktree ledger is gone');
-  assert.deepEqual(readFileSync(ledger), text);
+  assert.equal(readFileSync(ledger, 'utf8'), text);
   assert.equal(linesWith(retired.stderr, `warning: kept the worktree ledger ${ledger}`).length, 1, retired.stderr);
 });
 
-test('a retire whose failed worktree removal left a worktree ledger with an invalid byte, archived as its decoded text, keeps it and warns', (t) => {
+test('a retire whose failed worktree removal left a worktree ledger whose bytes differ from the archive copy, but whose stored text is the same, deletes it', (t) => {
   const a = machine(t, remote(t));
   setUpAs(a, 'host-a');
   const { ledger, evidence } = startTaskWithEvidence(a);
   appendFileSync(ledger, Buffer.concat([Buffer.from('- Invalid byte: '), Buffer.from([0xff]), Buffer.from('\n')]));
   ledgerOk(a, 'store', 'mirror');
-  const bytes = readFileSync(ledger);
   stubGit(a, '*"worktree remove"*', `rm -rf ${JSON.stringify(evidence)}; echo "fatal: refused by the test" >&2; exit 128`);
 
   let retired: Ran;
@@ -2262,9 +2258,32 @@ test('a retire whose failed worktree removal left a worktree ledger with an inva
   }
 
   assert.notEqual(retired.status, 0, retired.stdout);
-  assert.equal(readFileSync(path.join(a.clone, archivedName), 'utf8'), bytes.toString('utf8'), 'the archive copy is not the decoded text of the ledger');
-  assert.ok(existsSync(ledger), 'the worktree ledger is gone');
-  assert.deepEqual(readFileSync(ledger), bytes);
+  assert.equal(existsSync(ledger), false, 'the worktree ledger is still there');
+  assert.equal(linesWith(retired.stdout, `deleted  ${ledger}`).length, 1, retired.stdout);
+  assert.equal(linesWith(retired.stderr, 'warning: kept the worktree ledger').length, 0, retired.stderr);
+});
+
+test('a retire that deletes a leftover worktree ledger waits for a write that holds its lock, then keeps the ledger that write changed', (t) => {
+  const a = machine(t, remote(t));
+  setUpAs(a, 'host-a');
+  const { ledger, evidence } = startTaskWithEvidence(a);
+  const text = readFileSync(ledger, 'utf8');
+  const [lock, line] = [`${ledger}.lock`, '- Written under the lock of the ledger.'];
+  // The write runs in a process of its own, which holds the lock as ledger commands do: a file that names its pid.
+  const writer = `( sleep 1; echo ${JSON.stringify(line)} >> ${JSON.stringify(ledger)}; rm -f ${JSON.stringify(lock)} ) </dev/null >/dev/null 2>&1 & printf '{"pid":%d,"since":"%s"}' $! "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > ${JSON.stringify(lock)}`;
+  stubGit(a, '*"worktree remove"*', `rm -rf ${JSON.stringify(evidence)}; ${writer}; echo "fatal: refused by the test" >&2; exit 128`);
+
+  let retired: Ran;
+  try {
+    retired = run(a, ['task', 'retire', SLUG, '--force']);
+  } finally {
+    unstubGit(a);
+  }
+
+  assert.notEqual(retired.status, 0, retired.stdout);
+  assert.equal(existsSync(lock), false, 'the write still holds the lock');
+  assert.ok(existsSync(ledger), 'the retire deleted the worktree ledger the write held');
+  assert.equal(readFileSync(ledger, 'utf8'), `${text}${line}\n`, 'the retire deleted the ledger before the write appended to it');
   assert.equal(linesWith(retired.stderr, `warning: kept the worktree ledger ${ledger}`).length, 1, retired.stderr);
 });
 
@@ -2377,7 +2396,7 @@ test('ledger store sync in the same process after a mirror that could neither pu
     assert.throws(
       () =>
         active.reconcile(() => {
-          active.write('app', SLUG, `${committed}- Written by a mirror that fails.\n`);
+          active.write(APP_KEY, SLUG, `${committed}- Written by a mirror that fails.\n`);
           unblock = blockCopyAndHeldList(a);
           throw new Error('the mirror fails');
         }),
@@ -2390,6 +2409,66 @@ test('ledger store sync in the same process after a mirror that could neither pu
   syncHere(t, a);
 
   assert.equal(headText(a, copyOf('host-a')), committed, 'the sync committed the copy the mirror could not put back');
+});
+
+// ------------------------------------------------------------------------------------------------------- repo keys
+
+test('a clone of the same remote under another folder name sees the task of another machine as on host-a, by its repo key', (t) => {
+  const { b, ledger } = twoMachines(t);
+  const elsewhere = path.join(b.h, 'repos', 'login-service');
+  git(b.h, b.h, 'clone', '--quiet', APP_ORIGIN, elsewhere);
+
+  const tasks = (JSON.parse(ok(run(b, ['list', '--json'], { cwd: elsewhere }))) as { tasks: Listed[] }).tasks;
+  const shown = ok(run(b, ['show', SLUG], { cwd: elsewhere }));
+  const went = run(b, ['go', SLUG], { cwd: elsewhere });
+
+  assert.deepEqual(
+    tasks.filter(({ slug }) => slug === SLUG).map(({ place, host }) => ({ place, host })),
+    [{ place: 'remote', host: 'host-a' }],
+  );
+  assert.match(shown.split('\n')[0], /host-a.*read-only/);
+  assert.ok(shown.endsWith(readFileSync(ledger, 'utf8')), shown);
+  assert.notEqual(went.status, 0, went.stdout);
+  assert.match(went.stderr, /host-a/);
+  assert.equal(existsSync(path.join(elsewhere, '.claude/worktrees', SLUG)), false, 'a worktree was made');
+});
+
+test('a copy is the worktree ledger byte for byte, as Markdown in the folder of the repo key, and another machine prints it so', (t) => {
+  const { a, b, ledger } = twoMachines(t);
+  appendFileSync(ledger, '\n\n- A line that ends in spaces, then blank lines a task record drops.   \n\n\n');
+  const text = readFileSync(ledger, 'utf8');
+
+  ledgerOk(a, 'store', 'mirror');
+  ledgerOk(a, 'store', 'sync');
+  ledgerOk(b, 'store', 'sync');
+
+  assert.deepEqual(git(a.h, a.clone, 'ls-tree', '-r', '--name-only', 'HEAD', '--', 'active/').split('\n'), [`active/host-a/${APP}/${SLUG}.md`]);
+  assert.equal(headText(b, copyOf('host-a')), text);
+  assert.ok(ledgerOk(b, 'show', SLUG).endsWith(text), 'the copy is not printed byte for byte');
+});
+
+test('the allowlist takes a backlog or archive ledger as Markdown or a task record, and an active copy as Markdown only', () => {
+  for (const file of ['backlog/app/fix-login.md', 'backlog/app/fix-login.json', 'archive/app/2026-11-01-fix-login.json', 'active/host-a/app/fix-login.md']) {
+    assert.ok(isAllowed(file), file);
+  }
+  assert.equal(isAllowed('active/host-a/app/fix-login.json'), false);
+  assert.ok(!GITIGNORE.split('\n').some((line) => line.startsWith('!/active/') && line.endsWith('.json')), GITIGNORE);
+});
+
+test('ledger store mirror removes a copy of this machine under a folder name that matches no task, also while its worktree is there', (t) => {
+  const a = machine(t, remote(t));
+  setUpAs(a, 'host-a');
+  const ledger = startTask(a);
+  const old = `active/host-a/app/${SLUG}.md`;
+  mkdirSync(path.dirname(path.join(a.clone, old)), { recursive: true });
+  writeFileSync(path.join(a.clone, old), readFileSync(ledger, 'utf8'));
+  git(a.h, a.clone, 'add', '-f', '--', old);
+  git(a.h, a.clone, 'commit', '--quiet', '-m', 'A copy under the folder name of the repo, from before repo keys.');
+
+  ledgerOk(a, 'store', 'mirror');
+
+  assert.deepEqual(git(a.h, a.clone, 'ls-tree', '-r', '--name-only', 'HEAD', '--', 'active/').split('\n'), [copyOf('host-a')]);
+  assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
 });
 
 // -------------------------------------------------------------------------------------------------- other storages

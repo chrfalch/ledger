@@ -151,10 +151,11 @@ that is changed. Hooks read it from disk. `ledger store mirror`
 of this machine, filed under the repo key like every other ledger, so the clones
 of one repo on two machines name a task the same way. A copy is Markdown, the
 worktree ledger byte for byte, in a collection of its own: it is never read or
-written as a task record. A copy of this machine that matches no worktree task
-by repo key and slug, such as one under a folder name from before repo keys, is
-removed; one whose worktree git cannot confirm gone, or whose task the registry
-lists active, is kept. The host folder is `"host"` in
+written as a task record. A copy of this machine that matches no worktree task,
+and no task the registry lists active, by repo key and slug is removed when git
+confirms its worktree is gone, or when the mirror copied that worktree's ledger
+under another key, as for a copy under a folder name from before repo keys. A
+repo git cannot read keeps its copies. The host folder is `"host"` in
 `~/.claude/ledger-settings.json`, else the host name (`readHost` in
 `tools/ledger/settings.ts`). `findTasks` reads the copies of the other hosts as
 tasks of place `remote`: a remote task hides a backlog ledger of the same task

@@ -63,9 +63,11 @@ function copyableText(file: string): string | undefined {
 
 /**
  * `ledger store mirror`: brings this machine's copies in git storage in line with the ledgers of its git worktrees. It
- * writes each copy that differs, removes each whose worktree is gone and that the registry does not list active, and
- * commits that, all under the clone lock; closing the store pushes it. A worktree ledger that is a symbolic link, or
- * whose .claude folder is outside its worktree, is not copied. Undefined for a store that keeps no copies.
+ * writes each copy that differs, under the task's repo key and slug. It removes each copy that matches no worktree task
+ * and no task the registry lists active by repo key and slug, when its worktree is gone or the mirror just copied that
+ * worktree's ledger under another key. It commits that, all under the clone lock; closing the store pushes it. A
+ * worktree ledger that is a symbolic link, or whose .claude folder is outside its worktree, is not copied. Undefined for
+ * a store that keeps no copies.
  */
 export function mirrorLedgers(context: Context): Mirrored | undefined {
   const { active } = context.store;
@@ -80,18 +82,23 @@ export function mirrorLedgers(context: Context): Mirrored | undefined {
     const ledgers = found.flatMap((task) => {
       // One read gives both the slug and the text, so the copy is never named after another text than it holds.
       const text = copyableText(task.file);
-      return text === undefined ? [] : [{ repo: task.repo, slug: parseLedger(text).slug ?? task.name, text }];
+      return text === undefined ? [] : [{ repo: task.repo, slug: parseLedger(text).slug ?? task.name, text, worktree: path.dirname(path.dirname(task.file)) }];
     });
     discoveredForTests?.();
     const written = ledgers.filter(({ repo, slug, text }) => active.write(repo, slug, text)).length;
     const kept = (repo: string, slug: string): boolean =>
       [...found, ...ledgers, ...registered].some((task) => task.repo === repo && task.slug === slug);
+    // Such as a copy written under the folder name of its repo, from before repo keys.
+    const copiedUnderAnotherKey = (copy: StoredLedger): boolean => {
+      const { worktree } = parseLedger(copy.text).location;
+      return worktree !== undefined && ledgers.some((ledger) => ledger.repo !== copy.repo && samePath(ledger.worktree, worktree));
+    };
     const mains = [...(here === undefined ? [] : [here]), ...[...entries, ...found].flatMap(({ main }) => main ?? [])];
     const own = active.copiesOf(host);
     const stale = own
       .repos()
       .flatMap((repo) => own.list(repo))
-      .filter((copy) => !kept(copy.repo, copy.name) && worktreeGone(copy, (repo) => onlyMainIn(mains, repo)));
+      .filter((copy) => !kept(copy.repo, copy.name) && (copiedUnderAnotherKey(copy) || worktreeGone(copy, (repo) => onlyMainIn(mains, repo))));
     const removed = stale.filter((copy) => active.remove(copy.repo, copy.name) !== undefined).length;
     return { written, removed };
   });

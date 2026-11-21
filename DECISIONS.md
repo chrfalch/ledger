@@ -1306,7 +1306,7 @@ without the scan until the next `ledger store sync` writes the hook again.
 With git storage, a started task was invisible to the other machines: its
 ledger, `.claude/ledger.md` in its worktree, never left the machine. Another
 machine saw the task neither in its backlog nor as active. Git storage now
-keeps a copy of each worktree ledger, `active/<host>/<repo>/<slug>.md` in the
+keeps a copy of each worktree ledger, `active/<host>/<repo key>/<slug>.md` in the
 clone, with the same text.
 
 **A copy, not a move.** The worktree ledger stays the one that changes: hooks,
@@ -1351,7 +1351,7 @@ a remote task and change nothing. The registry leaves remote tasks out, as the
 plugin would take them for ledgers of this machine.
 
 **The same allowlist and scan.** The `.gitignore`, the commit allowlist and
-the pre-push hook allow `active/<host>/<repo>/<slug>.md`, with the same rule
+the pre-push hook allow `active/<host>/<repo key>/<slug>.md`, with the same rule
 for each folder name. A clone set up before has its `.gitignore` and hook
 written again at the next sync or session start. In-progress ledger text now
 reaches the private ledger repository, so the secret scan before each push
@@ -1362,7 +1362,7 @@ on its machine. A mirror whose commit fails leaves the copies written but not
 committed, records the problem for the next session start, and says so on
 stderr unless `--quiet`. The next mirror commits them, also when nothing
 changed since; so does the next sync. Two worktree ledgers of one machine with
-the same repo folder name and slug share one copy, and so do two machines
+the same repo key and slug share one copy, and so do two machines
 with the same host name.
 
 ## 2026-11-20 — A machine never commits another machine's copies
@@ -1400,3 +1400,17 @@ remove by hand, and its commit leaves that path out.
 **File and SQLite storage keep the archive copy.** These stores have no
 commit to protect, and no other machine reads them. A rerun finds the archive
 copy, reports it as archived already, and continues from there.
+
+## 2026-11-21 — Active copies follow repo keys and task records
+
+The copies now sit in the folder of the repo key, as backlog and archive
+ledgers do, so two clones of one repo with different folder names name a task
+the same way. A copy stays Markdown, byte for byte the worktree ledger, in a
+collection of its own: it is never read or written as a task record. A mirror
+removes a copy of this machine filed under a key no task has, such as a folder
+name from before repo keys, once it copied that worktree's ledger under its
+key. A retire deletes a leftover worktree ledger only when its stored text is
+the archive copy, the rule the rest of the retire uses, and holds the ledger's
+lock while it checks and deletes. The copies are interim: D8 in LLP 0001 keeps
+every task record, active ones included, in the store, and then no copy is
+needed.

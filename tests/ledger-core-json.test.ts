@@ -495,6 +495,13 @@ test('session --json names the main checkout of the repo that holds the folder, 
   assert.equal(done(json(h, app, 'session', h)).main, undefined);
 });
 
+test('session --json names the repo key of the repo that holds the folder, and none outside a repo', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'epic' });
+  assert.equal(done(json(h, app, 'session', worktreeOf(app, 'epic'))).repo, repoKeyOf(app));
+  assert.equal(done(json(h, app, 'session', h)).repo, undefined);
+});
+
 test('session, list and go --json give each main checkout as its real path, also when a ledger or --repo names it through a symbolic link', (t) => {
   const { h, app } = setup(t);
   const link = path.join(h, 'links/app');

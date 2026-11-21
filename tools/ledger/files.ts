@@ -170,9 +170,6 @@ export function readTimedText(file: string, links: Links = {}): TimedText | unde
   return found && { text: found.bytes.toString('utf8'), mtimeMs: found.stat.mtimeMs, birthtimeMs: found.stat.birthtimeMs > 0 ? found.stat.birthtimeMs : found.stat.mtimeMs };
 }
 
-/** The bytes of a regular file, read as readTimedText reads it; undefined for anything else or an unreadable file. */
-export const readBytes = (file: string, links: Links = {}): Buffer | undefined => readRegularFile(file, links)?.bytes;
-
 function readRegularFile(file: string, { followLinks = false }: Links): { bytes: Buffer; stat: Stats } | undefined {
   let descriptor: number;
   try {

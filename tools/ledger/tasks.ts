@@ -99,8 +99,10 @@ export function backlogTasks(store: LedgerStore): Task[] {
 }
 
 /** The copies of the worktree ledgers of other machines. This machine's own copies are skipped: its worktrees are read from disk. */
-export function remoteTasks({ active }: LedgerStore): Task[] {
+export function remoteTasks(store: LedgerStore): Task[] {
+  const { active } = store;
   if (active === undefined) return [];
+  const aliases = store.aliases.read();
   return active
     .hosts()
     .filter((host) => host !== active.host)
@@ -109,7 +111,7 @@ export function remoteTasks({ active }: LedgerStore): Task[] {
       return copies
         .repos()
         .flatMap((repo) => copies.list(repo))
-        .map((entry) => toTask({ file: entry.location, name: entry.name, place: 'remote', host, repo: entry.repo, fallbackSlug: entry.name, mainOf: () => undefined }, entry));
+        .map((entry) => toTask({ file: entry.location, name: entry.name, place: 'remote', host, repo: entry.repo, currentRepo: aliases.get(entry.repo), fallbackSlug: entry.name, mainOf: () => undefined }, entry));
     });
 }
 
@@ -167,8 +169,9 @@ const referencedMains = ({ ledger: { location, children } }: Task): string[] => 
  * Every task ledger: the backlog, the archive, the worktrees of the repos at `mains`, of the repos backlog ledgers name,
  * and of the repos any found ledger names as parent, child or, by path, dependency, and the copies of the worktree
  * ledgers of other machines. A task such a copy shows started is no longer in the backlog, even when this machine has
- * not pulled its removal yet. A copy with the repo folder and slug of a worktree task here is left out, as this
- * machine's own copy under a "host" it had before.
+ * not pulled its removal yet. A copy with the repo key and slug of a worktree task here is left out, as this machine's
+ * own copy under a "host" it had before. Repo keys are compared with an alias resolved, so a clone's folder name never
+ * matters.
  */
 export function findTasks(store: LedgerStore, mains: string[]): Task[] {
   const backlog = backlogTasks(store);
@@ -184,10 +187,13 @@ export function findTasks(store: LedgerStore, mains: string[]): Task[] {
     live.push(...found);
     queue.push(...found.flatMap(referencedMains));
   }
-  const remote = copies.filter((copy) => !live.some(({ repo, slug }) => repo === copy.repo && slug === copy.slug));
-  const waiting = backlog.filter((task) => !remote.some(({ repo, slug }) => repo === task.repo && slug === task.slug));
+  const remote = copies.filter((copy) => !live.some(({ slug, main }) => slug === copy.slug && main !== undefined && inRepo(copy, main)));
+  const waiting = backlog.filter((task) => !remote.some((copy) => copy.slug === task.slug && currentKey(copy) === currentKey(task)));
   return [...live, ...remote, ...waiting, ...archivedTasks(store)];
 }
+
+/** The key of the repo a ledger in the store is filed under, with an alias resolved. */
+const currentKey = (task: Task): string => task.currentRepo ?? task.repo;
 
 /**
  * Whether `task` is a task of the repo at `main`. A worktree's ledger is one of the checkout that holds the worktree only.
@@ -195,7 +201,7 @@ export function findTasks(store: LedgerStore, mains: string[]): Task[] {
  * it names: that path may be a clone of another origin now.
  */
 export const inRepo = (task: Task, main: string): boolean =>
-  task.place === 'worktree' ? task.main !== undefined && samePath(task.main, main) : (task.currentRepo ?? task.repo) === repoKey(main);
+  task.place === 'worktree' ? task.main !== undefined && samePath(task.main, main) : currentKey(task) === repoKey(main);
 
 const PRECEDENCE: Place[] = ['worktree', 'remote', 'backlog', 'archive'];
 

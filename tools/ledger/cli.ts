@@ -182,7 +182,7 @@ function parent(context: Context, name: string) {
 
 /**
  * The ledgers a session in `folder` works on, as `ledger hook session-start` finds them; none when the folder is gone.
- * `main` is the main checkout of the repo that holds the folder.
+ * `main` is the main checkout of the repo that holds the folder, and `repo` its repo key.
  */
 function session(folder: string) {
   if (!exists(folder)) return { folder, removed: true, own: false, ledgers: [] };
@@ -192,7 +192,7 @@ function session(folder: string) {
   return {
     folder,
     removed: false,
-    ...(main === undefined ? {} : { main }),
+    ...(main === undefined ? {} : { main, repo: repoKey(main) }),
     own: found.own,
     ...(title === undefined ? {} : { title }),
     ledgers: found.tasks.map((task) => ({

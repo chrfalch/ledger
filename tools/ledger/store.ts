@@ -126,8 +126,6 @@ export interface Archive extends LedgerCollection {
    * An evidence copy that does not match its folder afterwards throws too, and is left as it is.
    */
   write(repo: string, name: string, text: string, evidenceFrom?: string): void;
-  /** The bytes of the copy `name`, not decoded, as `read` would find it; undefined when it finds none. */
-  readBytes(repo: string, name: string): Buffer | undefined;
   /**
    * The evidence archived with `name` against the folder `from`: 'none' when neither holds any, 'same' when both hold
    * the same files, folders and symbolic links (links by their text), 'differs' otherwise. A missing or empty folder

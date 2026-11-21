@@ -175,7 +175,7 @@ test('a failed usage read leaves the turn end and the next prompt as they were',
   await $.turn.complete(turnEnd)
   await $.prompt.submit({ text: 'one' })
 
-  expect(w.argvs()).toEqual([['session', CWD, '--json'], ['worktrees', 'auto-prune', EPIC, '--json']])
+  expect(w.argvs()).toEqual([['session', CWD, '--json'], ['worktrees', 'auto-prune', EPIC, '--json'], ['store', 'mirror', '--quiet']])
   expect(w.events).toEqual(['rename: epic', 'submit: one'])
   expect(w.reminders).toEqual([])
 })

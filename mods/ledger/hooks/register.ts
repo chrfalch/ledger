@@ -215,12 +215,12 @@ async function parkOther($: EngineInterface, slug: string, reason: string): Prom
 type Listed = { tasks: { slug: string; repo: string; main?: string; place?: string }[] }
 
 /**
- * Whether the repo at `main` has a live task `slug`; with `remote`, also one in a worktree on another machine, which
- * `ledger list` names by its repo folder only. An error when `ledger list` failed.
+ * Whether the repo at `main` has a live task `slug`; with `remoteRepo`, the repo key of that repo, also one in a worktree
+ * on another machine, which `ledger list` names by its repo key only. An error when `ledger list` failed.
  */
-async function hasTask($: EngineInterface, slug: string, main: string, { remote = false } = {}): Promise<boolean | { error: string }> {
+async function hasTask($: EngineInterface, slug: string, main: string, { remoteRepo }: { remoteRepo?: string } = {}): Promise<boolean | { error: string }> {
   const listed = await ledgerJson<Listed>($, ['list'])
-  const inRepo = (task: Listed['tasks'][number]): boolean => task.main === main || (remote && task.place === 'remote' && task.repo === basename(main))
+  const inRepo = (task: Listed['tasks'][number]): boolean => task.main === main || (remoteRepo !== undefined && task.place === 'remote' && task.repo === remoteRepo)
   return listed.ok ? listed.tasks.some(task => task.slug === slug && inRepo(task)) : { error: listed.error }
 }
 
@@ -579,7 +579,7 @@ export const register: Register = (on, options) => {
     let reason = [first, ...rest].join(' ')
     if (own !== undefined && first === own.slug) reason = rest.join(' ')
     else if (session.main !== undefined) {
-      const found = await hasTask($, first, session.main, { remote: true })
+      const found = await hasTask($, first, session.main, { remoteRepo: session.repo })
       if (typeof found === 'object') return { text: lookupFailedMessage(found.error) }
       if (found) return { text: rest.length === 0 ? PARK_USAGE : await parkOther($, first, rest.join(' ')) }
     }

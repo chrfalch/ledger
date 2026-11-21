@@ -708,6 +708,42 @@ test('/ledger:park <slug of a task on another machine> <reason> answers that it 
   expect(w.events).not.toContain('clear')
 })
 
+const APP_KEY = 'github.com/me/app'
+const keyedSession = done({ folder: CWD, removed: false, main: MAIN, repo: APP_KEY, own: true, title: 'epic', ledgers: [{ ...task('epic'), repo: APP_KEY }] })
+
+test('/ledger:park <slug> <reason> finds a task on another machine by the repo key of the session, not by the folder name of its main checkout', async ($, on) => {
+  const w = world(
+    on,
+    {
+      [SESSION]: keyedSession,
+      'list --json': done({ tasks: [{ ...task('epic'), repo: APP_KEY }, { ...task('fix-login'), repo: APP_KEY, main: undefined, place: 'remote', host: 'host-a' }] }),
+      'task park fix-login --reason waits for review --json': refused(ON_HOST_A),
+    },
+    { cwd: CWD },
+  )
+
+  const { text } = await $.command.run({ command: 'ledger:park', args: 'fix-login waits for review' })
+
+  expect(text).toBe(`Could not park fix-login. ${ON_HOST_A}`)
+  expect(w.armed).toEqual([])
+})
+
+test('/ledger:park <slug> <reason> takes a task on another machine in a repo whose key is only the folder name of this main checkout as part of the reason', async ($, on) => {
+  const w = world(
+    on,
+    {
+      [SESSION]: keyedSession,
+      'list --json': done({ tasks: [{ ...task('epic'), repo: APP_KEY }, { ...task('fix-login'), repo: 'repo', main: undefined, place: 'remote', host: 'host-a' }] }),
+    },
+    { cwd: CWD },
+  )
+
+  await $.command.run({ command: 'ledger:park', args: 'fix-login waits for review' })
+
+  expect(w.markdown()?.args).toBe(`task: epic\nledger: ${EPIC}\nreason: fix-login waits for review`)
+  expect(w.argvs().some(([group, command]) => group === 'task' && command === 'park')).toBe(false)
+})
+
 test('/ledger:park <own slug> <reason> parks this task, with the reason after the slug', async ($, on) => {
   const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
 

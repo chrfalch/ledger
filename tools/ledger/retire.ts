@@ -1,8 +1,8 @@
-import { accessSync, constants, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
+import { accessSync, constants, lstatSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { markRetired, putChildReport, withoutClaim } from './edit.js';
 import { fail, Failure } from './failure.js';
-import { folderEntries, isTaken, treeEntries } from './files.js';
+import { folderEntries, isTaken, readText, treeEntries } from './files.js';
 import { isReadableSlug, parseLedger, type Child } from './format.js';
 import {
   branchPrs,
@@ -21,6 +21,7 @@ import {
   removeLinkedWorktree,
   worktrees,
 } from './git.js';
+import { withLock } from './lock.js';
 import { ledgerBin, samePath, worktreeLedger } from './paths.js';
 import { storedText } from './record.js';
 import { loadTasks } from './registry.js';
@@ -855,20 +856,24 @@ function deletedBeforeFailing(worktree: string, evidence: string[]): boolean {
 }
 
 /**
- * Deletes the ledger of a worktree that git removed only in part, when it is byte for byte the archive copy: left there,
- * the registry would list the task as active again, and the next mirror would copy it back. Returns the ledger when it
- * stays.
+ * Deletes the ledger of a worktree that git removed only in part, when the archive copy holds its text as the store
+ * keeps it, the rule of stopIfChanged: left there, the registry would list the task as active again, and the next mirror
+ * would copy it back. Under the lock of the ledger, so a write to it either lands before the check or waits for the
+ * deletion. Returns the ledger when it stays.
  */
 function deleteLeftoverLedger(store: LedgerStore, copy: ArchiveCopy, worktree: string, out: Output): string | undefined {
   const ledger = worktreeLedger(worktree);
   try {
     if (!isTaken(ledger)) return undefined;
-    const archived = store.archive.readBytes(copy.repo, copy.name);
-    if (archived === undefined || !readFileSync(ledger).equals(archived)) {
+    const kept = withLock(ledger, () => {
+      if (storedText(readText(ledger)) !== store.archive.read(copy.repo, copy.name)?.text) return true;
+      rmSync(ledger);
+      return false;
+    });
+    if (kept) {
       out.warn(`kept the worktree ledger ${ledger}: it is not the same as the archive copy ${copy.location}.`);
       return ledger;
     }
-    rmSync(ledger);
   } catch (error) {
     out.warn(`the worktree ledger ${ledger} may remain: ${message(error)}`);
     return ledger;
