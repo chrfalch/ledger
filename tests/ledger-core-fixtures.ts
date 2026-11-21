@@ -90,14 +90,18 @@ export function ledgerText(fields: Fields): string {
   ].join('\n');
 }
 
-/** The environment of a command run against the fake HOME `home`. */
-export const commandEnv = (home: string): NodeJS.ProcessEnv => ({
-  ...process.env,
-  HOME: home,
-  NO_COLOR: '1',
-  PATH: `${path.join(home, 'stub-bin')}${path.delimiter}${process.env.PATH ?? ''}`,
-  GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'),
-});
+/** The environment of a command run against the fake HOME `home`, in no session: `ledger go` claims for a known one. */
+export function commandEnv(home: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    NO_COLOR: '1',
+    PATH: `${path.join(home, 'stub-bin')}${path.delimiter}${process.env.PATH ?? ''}`,
+    GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'),
+  };
+  delete env.CLAUDE_CODE_SESSION_ID;
+  return env;
+}
 
 /** Runs git and gh in this process as the CLI runs them under the HOME `h`, with its stub gh first on PATH. */
 export function asCli(t: TestContext, h: string): void {

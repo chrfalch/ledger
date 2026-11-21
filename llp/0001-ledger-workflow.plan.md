@@ -266,10 +266,20 @@ Every widget also has **Close**.
    the record says none (D46).
 2. **Start.** `ledger go <slug>`. A backlog task gets its worktree and branch.
    A parent starts its next child (section 5.3). The start also (D18):
-   - installs the repo's packages in the new worktree, so the first test run
-     does not fail;
-   - claims the task for this session (D5);
-   - records the task's repo and worktree path in the store (D9).
+   - installs the repo's packages in the worktree, so the first test run
+     does not fail. A worktree with a lockfile at its root and no
+     `node_modules` runs the first match of `bun install --frozen-lockfile`
+     (`bun.lock`, `bun.lockb`), `pnpm install --frozen-lockfile`, `yarn
+     install --frozen-lockfile` or `npm ci` (`package-lock.json`,
+     `npm-shrinkwrap.json`). A failed install exits 5 and keeps the worktree,
+     the ledger and the claim, so the same `ledger go` installs again;
+   - claims the task for this session (D5), and with `--take-over` takes the
+     claim from the session that holds it. A task in another repository is
+     not claimed, because this session's release covers only its own repo. After the clear, the new session's
+     `go <slug>` claims it with `--from <old session>`, which takes over the
+     claim of that session only;
+   - records the task's repo and worktree path in the store (D9). This part
+     does not ship yet.
    
    The session moves into the worktree.
 3. **Plan.** The agent reads the task's design refs first. A lasting design
@@ -657,9 +667,9 @@ Decided 2026-11-19:
 | Design refs (D46) | `- design refs:` line in the Markdown ledger, picked by `/ledger:task` and `/ledger:go` | a field of the task record; converted once with the other ledgers |
 | LLP decisions (D47) | one line in the operating-model rule | plan stage reads the refs; reviewer checks that lasting decisions reached an LLP |
 | Task kinds (D14) | none; every task is treated as code | `--kind`; stages per kind |
-| Claims (D5, D17) | none | claim with expiry |
+| Claims (D5, D17) | `ledger task claim` with expiry; `ledger go` claims on start | none |
 | Clear points (D13) | rule text; operator types `/ledger:next` | offer after review and on size; agent starts `/ledger:next` after the widget choice |
-| Start step (D18) | worktree has no packages; first test run fails | `ledger go` installs packages, claims, records paths |
+| Start step (D18) | `ledger go` installs packages and claims the task | record repo and worktree paths in the store |
 | Session start list | can be out of date when another session changes tasks | read the tree from the store at session start (D8, D9) |
 | Failure handling (D22–D25) | rule text | review round count and escalation; failed subagent reported, no retry; merge conflict back to build; abandon as a confirmed retire with reason |
 | Command groups (D30) | flat command names | `task`, `notes`, `tree`, `store`, `worktrees` groups; every caller changes at once |

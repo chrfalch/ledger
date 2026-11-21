@@ -570,6 +570,49 @@ for (const [from, cwd, sessionReply] of [
   })
 }
 
+const handOver = (slug: string) => `task claim ${slug} --session session-2 --from session-1 --json`
+
+test('after an armed /ledger:go clears with its release failed, the new session takes the live claim over from the old one with no held question, once', async ($, on) => {
+  const heldByOld = ran(3, JSON.stringify({ ok: false, error: 'held: session session-1', held: { ...OTHER, session: 'session-1' } }))
+  const plainClaim = 'task claim kid --session session-2 --json'
+  const w = world(
+    on,
+    { [SESSION]: session(CWD, task('epic')), 'go kid --session session-1 --json': started('kid'), ...autoPrune, [RELEASE_ALL]: ran(1, '', 'release broke'), [handOver('kid')]: claimed('kid'), [plainClaim]: heldByOld },
+    { cwd: CWD },
+  )
+  w.clearsTo('session-2')
+
+  await $.command.run({ command: 'ledger:go', args: 'kid' })
+  await $.turn.complete(turnEnd)
+  expect(w.events).toEqual(['clear', 'submit: go kid'])
+  expect(w.reminders).toEqual([])
+
+  w.reply(plainClaim, claimed('kid'))
+  await $.prompt.submit({ text: 'go kid' })
+  expect(w.argvs().filter(argv => argv[1] === 'claim')).toEqual([
+    ['task', 'claim', 'kid', '--session', 'session-2', '--from', 'session-1', '--json'],
+    ['task', 'claim', 'kid', '--session', 'session-2', '--json'],
+  ])
+})
+
+test('a go <slug> prompt for another task than the armed one claims without --from, and ends the hand-over', async ($, on) => {
+  const w = world(on, { [SESSION]: session(CWD, task('epic')), 'go kid --session session-1 --json': started('kid'), ...autoPrune }, { cwd: CWD })
+  w.breakCall('clear', 1)
+
+  await $.command.run({ command: 'ledger:go', args: 'kid' })
+  await $.turn.complete(turnEnd)
+  w.newSession('session-2')
+  w.reply('task claim other --session session-2 --json', claimed('other'))
+  w.reply('task claim kid --session session-2 --json', claimed('kid'))
+  await $.prompt.submit({ text: 'go other' })
+  await $.prompt.submit({ text: 'go kid' })
+
+  expect(w.argvs().filter(argv => argv[1] === 'claim')).toEqual([
+    ['task', 'claim', 'other', '--session', 'session-2', '--json'],
+    ['task', 'claim', 'kid', '--session', 'session-2', '--json'],
+  ])
+})
+
 test('an armed /ledger:park releases every claim of the session after the park and before the clear', async ($, on) => {
   const w = world(
     on,

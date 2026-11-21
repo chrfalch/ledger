@@ -142,6 +142,31 @@ test('/ledger:go <slug> reads the session ledger, starts the task with one ledge
   expect(w.events).toEqual(['clear', 'submit: go kid'])
 })
 
+test('/ledger:go gives ledger go the longest timeout, as its package install can take minutes', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(EPIC)]: unchanged(EPIC) }, { cwd: CWD })
+
+  await $.command.run({ command: 'ledger:go', args: 'kid' })
+
+  expect(w.calls[1]?.timeoutMs).toBe(600_000)
+})
+
+test('a ledger go whose package install failed (exit 5) says the worktree and ledger are kept and how to retry, and does not clear', async ($, on) => {
+  const failed = refused('Could not install the packages of /repo/.claude/worktrees/kid: `npm ci` failed, as it exited 1.', 5)
+  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': failed }, { cwd: CWD })
+
+  const { text = '' } = await $.command.run({ command: 'ledger:go', args: 'kid' })
+  await $.turn.complete(turnEnd)
+
+  expect(text).toContain('packages did not install')
+  expect(text).toContain('worktree and ledger are kept')
+  expect(text).toContain('/ledger:go kid')
+  expect(text).toContain('`npm ci` failed, as it exited 1.')
+  expect(text).not.toContain(UNCHANGED)
+  expect(w.markdown()).toBeUndefined()
+  expect(w.armed).toEqual([])
+  expect(w.events.filter(event => event === 'clear')).toEqual([])
+})
+
 test('/ledger:go <parent> passes on the child it picked, the promotion, the unpark, the mark and each warning', async ($, on) => {
   const w = world(
     on,

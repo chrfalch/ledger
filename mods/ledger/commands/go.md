@@ -1,5 +1,5 @@
 ---
-description: Write the latest results to this task's ledger, clear the session, and continue in the task named <slug>. When no task has that name, it first makes a new task with a goal from this conversation. A backlog task of this repository first gets its own git worktree and branch. A parent task continues in its first child task not yet started. A child task in another repository is promoted there, and the session stays here.
+description: Write the latest results to this task's ledger, clear the session, and continue in the task named <slug>. When no task has that name, it first makes a new task with a goal from this conversation. A backlog task of this repository first gets its own git worktree and branch, with its packages installed. A parent task continues in its first child task not yet started. A child task in another repository is promoted there, and the session stays here.
 argument-hint: <slug>
 ---
 
@@ -82,12 +82,16 @@ ledger steps below still apply.
    when the result is a report or an answer, with no code change. Use `code`
    for anything else. The kind sets the stages the task goes through.
 5. Run the same `bin/ledger` as `bin/ledger go <slug>`, with nothing else. It
-   makes the worktree and branch. Do not move this session into the worktree:
-   the next session does.
+   makes the worktree and branch, installs the packages when the repo has a
+   lockfile, and claims the task for this session. Do not move this session
+   into the worktree: the next session does.
 6. If `ledger task new` fails, nothing was made. Reply with its error and stop:
    the session does not clear. If only `ledger go` fails, the backlog ledger
    exists, so the session still clears, and the next session tries to start
    it again. Then still do the ledger steps, and put the error in your reply.
+   If `ledger go` exits 5, only the package install failed: the worktree and
+   its ledger exist. Put the error in your reply, and say that running
+   `/ledger:go <slug>` again installs the packages.
 7. If `ledger:` is not `none` and `ledger task new` printed no `noted` line,
    add one line under that ledger's Decisions that names the new task,
    together with the ledger steps below. A `noted` line means the script already wrote
@@ -114,8 +118,8 @@ ledger steps:
    operator types nothing. Do not show `go <task>` or any other command for
    the operator to type. Do not ask the operator to run `/clear`. If there is a `new:` line, add one line
    before it: the task was made, and its worktree is at the path on the
-   `worktree` line that `ledger go` printed. If `ledger go` failed, say
-   instead that the task is in the backlog. If there is a `parked:` line, add
+   `worktree` line that `ledger go` printed. If `ledger go` failed with any
+   exit but 5, say instead that the task is in the backlog. If there is a `parked:` line, add
    one line before it: the task was parked on that date, the reason, and that it is no
    longer parked. If there is a `parent:` line, add one line before it that
    names the parent task. If there is a `children:` line, add one line before

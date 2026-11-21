@@ -344,21 +344,104 @@ test('go to a task another session holds live exits 3 with the holder, and chang
   assert.equal(readFileSync(file, 'utf8'), text, 'go changed the ledger');
 });
 
-test('go --take-over removes the claim of the other session and goes on as go does', (t) => {
+test('go --take-over replaces the claim of the other session with its own and goes on as go does', (t) => {
   const { h, app, file } = setup(t);
   writeFileSync(file, readFileSync(file, 'utf8').replace('## Next step\n', '## Next step\nParked: 2026-11-19 — waiting\n'));
   withClaim(file, claimLine('s1', T0, later(10)));
   exits(run(h, app, { now: later(20), session: 's2' }, 'go', 'fix-login', '--take-over'), 0);
-  assert.equal(claimOf(file), undefined);
+  assert.equal(claimOf(file), claimLine('s2', later(20), later(20)));
   assert.doesNotMatch(readFileSync(file, 'utf8'), /^Parked: /m);
 });
 
-test('go is unchanged for a claim of the same session and for an expired claim: the claim stays', (t) => {
+test('go --take-over says whose claim it took over, in its output and as "tookOverFrom" in --json', (t) => {
   const { h, app, file } = setup(t);
   withClaim(file, claimLine('s1', T0, later(10)));
+  const ran = exits(run(h, app, { now: later(20), session: 's2' }, 'go', 'fix-login', '--take-over'), 0);
+  assert.match(ran.stdout, /^claim {4}took over from session s1$/m);
+  writeFileSync(file, readFileSync(file, 'utf8').replace(CLAIM_LINE, claimLine('s1', T0, later(10))));
+  const json = JSON.parse(exits(run(h, app, { now: later(20), session: 's2' }, 'go', 'fix-login', '--take-over', '--json'), 0).stdout);
+  assert.deepEqual(json.tookOverFrom, { session: 's1', since: T0, active: later(10) });
+});
+
+test('go with a session claims nothing for a task of another repo than the one it runs in, and says so', (t) => {
+  const { h, app, file } = setup(t);
+  const other = repository(h, path.join(h, 'repos/other'));
+  backlogTask(h, app, { slug: 'next-up' });
+  const ran = exits(run(h, other, { now: T0, session: 's1' }, 'go', 'fix-login', '--repo', app), 0);
+  assert.equal(claimOf(file), undefined);
+  assert.match(ran.stdout, /^claim {4}not claimed: /m);
+  const json = JSON.parse(exits(run(h, h, { now: T0, session: 's1' }, 'go', 'next-up', '--repo', app, '--json'), 0).stdout);
+  assert.equal(claimOf(path.join(app, '.claude/worktrees/next-up/.claude/ledger.md')), undefined);
+  assert.match(json.unclaimed, /another repo/);
+  const here = JSON.parse(exits(run(h, app, { now: T0, session: 's1' }, 'go', 'fix-login', '--json'), 0).stdout);
+  assert.equal('unclaimed' in here, false);
+});
+
+test('go of a task of another repo still refuses while a session holds it live', (t) => {
+  const { h, app, file } = setup(t);
+  const other = repository(h, path.join(h, 'repos/other'));
+  withClaim(file, claimLine('s2', T0, later(10)));
+  exits(run(h, other, { now: later(20), session: 's1' }, 'go', 'fix-login', '--repo', app), 3);
+  assert.equal(claimOf(file), claimLine('s2', T0, later(10)));
+});
+
+test('go --take-over with no session known removes the other claim and claims nothing', (t) => {
+  const { h, app, file } = setup(t);
+  withClaim(file, claimLine('s1', T0, later(10)));
+  exits(run(h, app, { now: later(20) }, 'go', 'fix-login', '--take-over'), 0);
+  assert.equal(claimOf(file), undefined);
+});
+
+test('go claims a task with a worktree for its session: its own claim keeps since, and an expired claim of another session is replaced', (t) => {
+  const { h, app, file } = setup(t);
+  exits(run(h, app, { now: T0, session: 's1' }, 'go', 'fix-login'), 0);
+  assert.equal(claimOf(file), claimLine('s1', T0, T0));
   exits(run(h, app, { now: later(20), session: 's1' }, 'go', 'fix-login'), 0);
+  assert.equal(claimOf(file), claimLine('s1', T0, later(20)));
   exits(run(h, app, { now: later(200), session: 's2' }, 'go', 'fix-login'), 0);
-  assert.equal(claimOf(file), claimLine('s1', T0, later(10)));
+  assert.equal(claimOf(file), claimLine('s2', later(200), later(200)));
+});
+
+test('go with no session known claims nothing', (t) => {
+  const { h, app, file } = setup(t);
+  exits(run(h, app, { now: T0 }, 'go', 'fix-login'), 0);
+  assert.equal(claimOf(file), undefined);
+});
+
+test('go of a backlog task claims its new worktree ledger for the session, and claims nothing with no session known', (t) => {
+  const { h, app } = setup(t);
+  backlogTask(h, app, { slug: 'next-up' });
+  backlogTask(h, app, { slug: 'unclaimed' });
+  exits(run(h, app, { now: T0, session: 's1' }, 'go', 'next-up'), 0);
+  assert.equal(claimOf(path.join(app, '.claude/worktrees/next-up/.claude/ledger.md')), claimLine('s1', T0, T0));
+  exits(run(h, app, { now: T0 }, 'go', 'unclaimed'), 0);
+  assert.equal(claimOf(path.join(app, '.claude/worktrees/unclaimed/.claude/ledger.md')), undefined);
+});
+
+test('claim --from hands a claim of that session over to this one, live or expired, and prints claimed <slug>', (t) => {
+  const { h, app, file } = setup(t);
+  withClaim(file, claimLine('old', T0, later(10)));
+  const ran = exits(run(h, app, { now: later(20) }, 'task', 'claim', 'fix-login', '--session', 'new', '--from', 'old'), 0);
+  assert.equal(ran.stdout, 'claimed fix-login\n');
+  assert.equal(claimOf(file), claimLine('new', later(20), later(20)));
+  writeFileSync(file, readFileSync(file, 'utf8').replace(CLAIM_LINE, claimLine('old', T0, later(10))));
+  exits(run(h, app, { now: later(500) }, 'task', 'claim', 'fix-login', '--session', 'new', '--from', 'old'), 0);
+  assert.equal(claimOf(file), claimLine('new', later(500), later(500)));
+});
+
+test('claim --from refuses a live claim of a third session with exit 3, and writes nothing', (t) => {
+  const { h, app, file } = setup(t);
+  withClaim(file, claimLine('third', T0, later(10)));
+  const text = readFileSync(file, 'utf8');
+  const ran = exits(run(h, app, { now: later(20) }, 'task', 'claim', 'fix-login', '--session', 'new', '--from', 'old'), 3);
+  assert.match(ran.stdout + ran.stderr, new RegExp(`^held: session third since ${T0}, active ${later(10)}$`, 'm'));
+  assert.equal(readFileSync(file, 'utf8'), text);
+});
+
+test('claim --from with no claim claims the task as claim does', (t) => {
+  const { h, app, file } = setup(t);
+  exits(run(h, app, { now: T0 }, 'task', 'claim', 'fix-login', '--session', 'new', '--from', 'old'), 0);
+  assert.equal(claimOf(file), claimLine('new', T0, T0));
 });
 
 test('the hook input gives the session id', () => {
