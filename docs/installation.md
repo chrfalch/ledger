@@ -250,11 +250,11 @@ keys into them and leaves the rest alone:
 
 | Policy file | Merged into | Keys asserted |
 |---|---|---|
-| `settings.policy.json` | `~/.claude/settings.json` | `statusLine`, `hooks`, `tui`, `skipWorkflowUsageWarning` |
+| `settings.policy.json` | `~/.claude/settings.json` | `statusLine`, `hooks`, `tui`, `skipWorkflowUsageWarning`, `permissions.allow` |
 | `codex/policy.toml` | `~/.codex/config.toml` | `approval_policy`, `sandbox_mode` |
 
 Everything else in those files stays yours and stays local: Codex project trust
-levels, plugins, marketplaces, MCP servers, `permissions`, your model choice.
+levels, plugins, marketplaces, MCP servers, your own permissions, your model choice.
 None of it is stored here. Running `bin/deploy` never removes it, and deploy
 prints what it left alone so you can check.
 
@@ -262,6 +262,13 @@ Policy keys are merged one level down, and hooks follow their own rule. Deploy
 replaces the `PreCompact` and `SessionStart` hook events whole. For every other
 event, it replaces the repo's own entries and keeps yours as they are. An entry
 you edited counts as yours.
+
+Deploy adds allow rules for the everyday `ledger` commands, so they run
+without a permission prompt. These commands read tasks, write notes, and make,
+start, claim, park and archive tasks. Deploy keeps every allow rule you already
+have and adds its own after them. Commands that delete or restructure still
+ask: `ledger task retire`, `ledger worktrees`, `ledger store`, the `ledger tree`
+commands that change children, and `ledger deploy`.
 
 Re-running deploy is safe. It changes only keys that differ, and backs up any
 file it rewrites into `~/.claude/backups/deploy-<timestamp>/`, under that file's

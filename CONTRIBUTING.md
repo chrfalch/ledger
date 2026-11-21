@@ -39,7 +39,7 @@ of the following belongs here, in any file:
 - API keys, tokens, or anything read from an environment variable.
 - The contents of `~/.claude.json`: trusted project directories, your MCP
   servers, your plugins and marketplaces, your account identifiers.
-- Your `permissions.allow` list.
+- Your own `permissions.allow` entries.
 - Absolute paths that contain your username.
 - Repository names or ticket numbers from work that is not public.
 
