@@ -444,6 +444,14 @@ this hook. `ledger-list.sh prompt-submit` acts on a prompt that is exactly
 empty, or when it is the slug of an active or archived ledger. Any other
 title was given by the operator.
 
+**Since 2026-11-21, every `go <slug>` is a task change (D43).** The hook gives
+the title `<slug>` unless this session already claims that task. It finds the
+claim by the `session_id` of the hook input. With no session id, the task is
+a change. The task of the worktree the session is in does not count. After a
+clear into that worktree, the title of the previous task is still there. A
+title from the operator's `/rename` now gives way on a task change too. The
+guess that an unknown title came from `/rename` is gone.
+
 **Since 2026-11-07, the ledger mod also runs `/rename`.** In VS Code, a title
 from a hook changes only the local title. The Claude app (Remote Control)
 keeps the old one. `/rename` reaches both. At the end of each turn, the mod
@@ -455,6 +463,12 @@ The mod keeps the last named task in `$.state`, which lasts only as long as
 the host session. After a resume, the first turn renames once, even when the
 operator named the session for the same task. A rename that fails is tried
 again at the next turn end, with no message.
+Since 2026-11-21, the mod keeps the last named task per session id. A new
+session after a clear renames once, even when the session before it had the
+same name. The turn end prefers the task of the worktree the session is in.
+In a folder with no task of its own, it names the task this session last
+claimed with `go <slug>`. The mod keeps that claim in `$.state` when
+`ledger task claim` succeeds.
 
 **Since 2026-11-17: T3 Code follows `/rename` from version 0.1.10. No mod
 change.** T3 0.1.8 kept its own thread title: it ignored the

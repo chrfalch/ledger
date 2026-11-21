@@ -64,3 +64,15 @@ test('D43: a new session in a task\'s worktree is named after it even when an ea
 
   expect(renames(w.events)).toEqual(['rename: beta', 'rename: beta'])
 })
+
+test('D43: a new session that claims a task with go <slug> is named after it at the turn end, though its claim leaves the prompt hook no title to give', async ($, on) => {
+  const w = world(on, { [sessionAt(MAIN)]: session(MAIN, undefined, [task('beta')]), 'task claim beta --session session-1 --json': claimed('beta', 'session-1'), 'task claim beta --session session-2 --json': claimed('beta', 'session-2') }, { cwd: MAIN })
+
+  await $.prompt.submit({ text: 'go beta' })
+  await $.turn.complete(turnEnd)
+  w.newSession('session-2')
+  await $.prompt.submit({ text: 'go beta' })
+  await $.turn.complete(turnEnd)
+
+  expect(renames(w.events)).toEqual(['rename: beta', 'rename: beta'])
+})
