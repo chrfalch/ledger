@@ -60,7 +60,8 @@ export type Breakable = 'markdown' | 'skill' | 'clear' | 'rename' | 'submit' | '
  * reply, are refused, so a test fails on a call it did not expect. `missing` are folders fs.stat does not find.
  * `events` records, in order, each /clear, /rename, prompt submit and ui.log line that went through.
  */
-export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [] }: { cwd: string; missing?: string[] }) {
+export function world(on: On, replies: Record<string, Reply>, { cwd: startCwd, missing = [] }: { cwd: string; missing?: string[] }) {
+  let cwd = startCwd
   const calls: Call[] = []
   const callsBeforeClear: number[] = []
   const others: string[][] = []
@@ -188,6 +189,10 @@ export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [
     /** Makes each later /clear start the session `id`, as a real /clear starts a new one. */
     clearsTo: (id: string) => {
       sessionAfterClear = id
+    },
+    /** Makes `$.session.cwd()` answer `folder`, as EnterWorktree moves the session. */
+    enterWorktree: (folder: string) => {
+      cwd = folder
     },
     /** Makes `$.agent.list()` list one agent of each status. */
     listAgents: (...statuses: AgentStatus[]) => {

@@ -736,6 +736,49 @@ test('prompt-submit skips a worktree whose folder is gone', (t) => {
   assert.equal(promptSubmitTitle(h, { prompt: 'go alpha', cwd: main }), 'alpha');
 });
 
+// D43: the session name follows the task at every task change.
+
+test('D43: prompt-submit after a clear replaces the slug of the previous task, from the main checkout and from the new worktree', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  ledgerIn(worktree(h, main, path.join(main, '.claude/worktrees/alpha')));
+  const beta = worktree(h, main, path.join(main, '.claude/worktrees/beta'));
+  ledgerIn(beta);
+
+  assert.equal(promptSubmitTitle(h, { prompt: 'go beta', cwd: main, session_title: 'alpha' }), 'beta');
+  assert.equal(promptSubmitTitle(h, { prompt: 'go beta', cwd: beta, session_title: 'alpha' }), 'beta');
+});
+
+test('D43: prompt-submit replaces the slug of a previous task in another repository', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  ledgerIn(worktree(h, main, path.join(main, '.claude/worktrees/beta')));
+  const other = checkout(h, 'other');
+  ledgerIn(worktree(h, other, path.join(other, '.claude/worktrees/alpha')));
+
+  assert.equal(promptSubmitTitle(h, { prompt: 'go beta', cwd: main, session_title: 'alpha' }), 'beta');
+});
+
+test('D43: prompt-submit replaces the slug of a previous task that is in the backlog', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  ledgerIn(worktree(h, main, path.join(main, '.claude/worktrees/beta')));
+  backlogLedger(h, 'main', 'umbrella', main);
+
+  assert.equal(promptSubmitTitle(h, { prompt: 'go beta', cwd: main, session_title: 'umbrella' }), 'beta');
+});
+
+test('D43: session-start after a clear titles the session with the slug of the worktree it is in', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const beta = worktree(h, main, path.join(main, '.claude/worktrees/beta'));
+  ledgerIn(beta);
+
+  const output = JSON.parse(hook(h, 'session-start', { hook_event_name: 'SessionStart', source: 'clear', cwd: beta })) as SessionStartOutput;
+
+  assert.equal(output.hookSpecificOutput.sessionTitle, 'beta');
+});
+
 // PreToolUse: the ledger gate
 
 const BIN = LEDGER_BIN;
