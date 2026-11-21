@@ -134,8 +134,12 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
     remove: locked(place, files[place].remove, (removed) => removed),
     move: locked(place, files[place].move, (moved) => moved, fromAndTo),
   });
-  // A folder that holds a folder is one of the copies of worktree ledgers from before active records, not a repo.
-  const isRepoFolder = (repo: string): boolean => !folderEntries(files.active.repoLocation(repo)).some((entry) => entry.isDirectory());
+  // A folder that holds folders and no record is a host folder of the copies of worktree ledgers from before active
+  // records, not a repo; a repo folder may hold a folder someone put there.
+  const isRepoFolder = (repo: string): boolean => {
+    const entries = folderEntries(files.active.repoLocation(repo));
+    return entries.some((entry) => entry.isFile() && entry.name.endsWith('.json')) || !entries.some((entry) => entry.isDirectory());
+  };
   return {
     host,
     ownHosts: ownHosts(paths.home),

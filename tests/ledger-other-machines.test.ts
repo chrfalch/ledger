@@ -8,7 +8,11 @@ import test, { type TestContext } from 'node:test';
 import { GITIGNORE, isAllowed } from '../tools/ledger/clone.js';
 import { Failure } from '../tools/ledger/failure.js';
 import { readTimedText } from '../tools/ledger/files.js';
+import { gitStore } from '../tools/ledger/git-store.js';
+import { ledgerPaths } from '../tools/ledger/paths.js';
+import { retireTask } from '../tools/ledger/retire.js';
 import * as settings from '../tools/ledger/settings.js';
+import type { LedgerStore } from '../tools/ledger/store.js';
 import { REPO } from './helpers.js';
 import { git, home, ledgerText, ok, readLedgerFile, writeLedgerFile, type Fields } from './ledger-core-fixtures.js';
 import {
@@ -576,6 +580,59 @@ test('ledger store sync commits nothing when git cannot look up HEAD while it pu
   assert.equal(remoteText(bare, recordOf()), committed.trimEnd(), 'the record of host-a changed on the remote');
 });
 
+test('ledger store sync puts back a record of another machine that an edit left without its host, or as no JSON, and pushes neither', (t) => {
+  const { bare, b } = twoMachines(t);
+  const file = path.join(b.clone, recordOf());
+  const committed = headText(b, recordOf());
+  const edits: [string, () => void][] = [
+    ['no host', () => editRecord(file, (markdown) => markdown.replace(/^- host: host-a\n/m, ''))],
+    ['no JSON', () => writeFileSync(file, 'not a record\n')],
+  ];
+
+  for (const [edit, change] of edits) {
+    change();
+    ledgerOk(b, 'store', 'sync');
+    assert.equal(headText(b, recordOf()), committed, `${edit}: the edit is committed`);
+    assert.equal(remoteText(bare, recordOf()), committed.trimEnd(), `${edit}: the edit is pushed`);
+    assert.equal(readFileSync(file, 'utf8'), committed, `${edit}: the edit is left on disk`);
+  }
+});
+
+test('a forced retire of a task of another machine stays done when a sync runs between its removal of the record and its commit', (t) => {
+  const { b } = twoMachines(t);
+  const paths = ledgerPaths(b.h);
+  const store = gitStore(paths, { backgroundSync: false });
+  const syncedBetween: LedgerStore = {
+    ...store,
+    active: {
+      ...store.active,
+      remove: (repo, name, text) => {
+        const removed = store.active.remove(repo, name, text);
+        ledgerOk(b, 'store', 'sync');
+        return removed;
+      },
+    },
+  };
+
+  retireTask({ paths, cwd: b.app, store: syncedBetween }, SLUG, { dryRun: false, force: true }, { line: () => {}, warn: () => {} });
+  store.close?.();
+
+  assert.equal(existsSync(path.join(b.clone, recordOf())), false, 'the record is back on disk');
+  assert.equal(inHead(b, recordOf()), false, 'the record is back in HEAD');
+  assert.equal(git(b.h, b.clone, 'ls-files', '--', `archive/${APP}/*.json`).split('\n').filter(Boolean).length, 1);
+});
+
+test('in a worktree folder of another machine on a shared disk, bare ledger show prints the read-only line and ledger session names no own task', (t) => {
+  const { a, b } = twoMachines(t);
+  const named = ledgerOk(b, 'show', SLUG);
+  assert.match(named, /host-a/);
+
+  assert.equal(ok(run(b, ['show'], { cwd: worktreeOf(a) })), named);
+  const session = JSON.parse(ok(run(b, ['session', worktreeOf(a), '--json']))) as { own: boolean; title?: string };
+  assert.equal(session.own, false);
+  assert.equal(session.title, undefined);
+});
+
 /** Notes in a file when git looks for unfinished work in the clone of `m` while nothing holds the clone lock. */
 function noteLooksOutsideLock(m: Machine): string {
   const outside = path.join(m.h, 'looked-outside-the-lock');
@@ -745,6 +802,26 @@ test('a copy of a worktree ledger from before active records is ignored by reads
   assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
   ledgerOk(a, 'store', 'sync');
   assert.ok(!remoteFiles(bare).includes(copy), 'the removal of the copy is not pushed');
+});
+
+test('the first write removes only the copies of worktree ledgers from before active records, and keeps every other file and folder in active/', (t) => {
+  const bare = remote(t);
+  const a = machine(t, bare);
+  setUpAs(a, 'host-a');
+  startTask(a);
+  ledgerOk(a, 'store', 'sync');
+  const copy = withLegacyCopy(a, 'host-z');
+  const kept = [`active/host-z/${APP}/notes.txt`, `active/host-z/${APP}/old/draft.md`, `active/${APP}/backup/${SLUG}.json`].map((file) => path.join(a.clone, file));
+  for (const file of kept) {
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, 'kept by hand\n');
+  }
+
+  ledgerOk(a, 'task', 'new', 'note', '--goal', 'The first write.');
+
+  assert.equal(existsSync(path.join(a.clone, copy)), false, 'the write left the copy on disk');
+  for (const file of kept) assert.equal(existsSync(file) && readFileSync(file, 'utf8'), 'kept by hand\n', file);
+  assert.deepEqual(listed(a).filter(({ slug }) => slug === SLUG).map(({ place }) => place), ['active']);
 });
 
 // --------------------------------------------------------------------------------------------------------- secret scan
@@ -954,6 +1031,43 @@ test('a plain rerun of a retire whose worktree folder is gone keeps an unmerged 
   assert.doesNotMatch(git(a.h, a.app, 'worktree', 'list', '--porcelain'), /prunable/);
   assert.ok(branchExists(a, SLUG), 'the unmerged branch was deleted');
   assert.equal(linesWith(rerun.stdout, `kept     branch ${SLUG}, because it is not merged`).length, 1, rerun.stdout);
+});
+
+test('a plain rerun of a retire whose worktree folder is gone keeps the branch once another worktree has it checked out', (t) => {
+  const { a } = retiredHalfway(t);
+  git(a.h, a.app, 'worktree', 'prune');
+  const reused = path.join(a.h, 'reused');
+  git(a.h, a.app, 'worktree', 'add', '--quiet', reused, SLUG);
+
+  const rerun = run(a, ['task', 'retire', SLUG]);
+
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.ok(branchExists(a, SLUG), 'the branch checked out in another worktree was deleted');
+  assert.match(rerun.stdout, new RegExp(`^kept     branch ${SLUG}, because .*${reused}`, 'm'));
+  assert.equal(existsSync(path.join(a.clone, recordOf())), false, 'the record is left');
+});
+
+test('a plain rerun finishes the branch and the build folder of a retire that stopped as it deleted the branch', (t) => {
+  const a = machine(t, remote(t));
+  setUpAs(a, 'host-a');
+  startTask(a);
+  const buildFolder = path.join(fs.realpathSync(a.app), '.claude/worktrees/.build', SLUG);
+  mkdirSync(path.join(buildFolder, 'Debug-sim'), { recursive: true });
+  // The retire stops for good there, as when its process is killed.
+  stubGit(a, '*"update-ref -d"*', 'kill -9 $PPID');
+  try {
+    assert.notEqual(run(a, ['task', 'retire', SLUG]).status, 0, 'the first retire went through');
+  } finally {
+    unstubGit(a);
+  }
+  assert.ok(branchExists(a, SLUG), 'the first retire deleted the branch');
+
+  const rerun = run(a, ['task', 'retire', SLUG]);
+
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.equal(branchExists(a, SLUG), false, 'the merged branch is kept');
+  assert.ok(rerun.stdout.includes(`deleted  ${buildFolder}`), rerun.stdout);
+  assert.equal(existsSync(path.join(a.clone, recordOf())), false, 'the record is left');
 });
 
 test('a plain retire of a task of this machine whose worktree folder is gone still needs --force when the archive holds no copy of it', (t) => {

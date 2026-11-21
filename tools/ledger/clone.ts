@@ -420,18 +420,25 @@ export function restoreFromHead(clone: string, files: string[], deadline?: numbe
 
 /**
  * Removes each copy of a worktree ledger that git storage kept before active records, so the next commit removes it
- * too; true when it removed any. Only such a copy sits a folder deeper than a record. Call it under the clone lock.
+ * too, and then each folder that held one and is empty; true when it removed any. Any other file stays, as it may be
+ * one that is in no commit. Call it under the clone lock.
  */
 export function removeLegacyCopies(clone: string): boolean {
-  const active = path.join(clone, 'active');
   let removed = false;
-  for (const host of folderEntries(active)) {
-    if (!host.isDirectory()) continue;
-    const folder = path.join(active, host.name);
-    const repos = folderEntries(folder).filter((entry) => entry.isDirectory());
-    for (const repo of repos) rmSync(path.join(folder, repo.name), { recursive: true, force: true });
-    if (repos.length > 0 && folderEntries(folder).length === 0) rmdirSync(folder);
-    removed ||= repos.length > 0;
+  const subfolders = (folder: string): string[] => folderEntries(folder).flatMap((entry) => (entry.isDirectory() ? [entry.name] : []));
+  const active = path.join(clone, 'active');
+  for (const host of subfolders(active)) {
+    let emptied = false;
+    for (const repo of subfolders(path.join(active, host))) {
+      const folder = path.join(active, host, repo);
+      const copies = folderEntries(folder).filter((entry) => entry.isFile() && LEGACY_COPY.test(`active/${host}/${repo}/${entry.name}`));
+      for (const copy of copies) rmSync(path.join(folder, copy.name));
+      removed ||= copies.length > 0;
+      if (copies.length === 0 || folderEntries(folder).length > 0) continue;
+      rmdirSync(folder);
+      emptied = true;
+    }
+    if (emptied && folderEntries(path.join(active, host)).length === 0) rmdirSync(path.join(active, host));
   }
   return removed;
 }
