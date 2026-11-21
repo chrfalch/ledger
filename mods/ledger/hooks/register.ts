@@ -53,6 +53,7 @@ type PreviousTask = NonNullable<GoArm['previous']>
 
 const armed = { plugin: 'ledger', key: 'armed' } as const
 const titled = { plugin: 'ledger', key: 'titled' } as const
+const claimedTask = { plugin: 'ledger', key: 'claimedTask' } as const
 const clearApproved = { plugin: 'ledger', key: 'clearApproved' } as const
 const takeOverApproved = { plugin: 'ledger', key: 'takeOverApproved' } as const
 const clearPoint = { plugin: 'ledger', key: 'clearPoint' } as const
@@ -269,10 +270,12 @@ async function showRetireHint($: EngineInterface, previous: PreviousTask, namesN
  */
 async function titleSession($: EngineInterface, slug: string): Promise<void> {
   try {
+    const sessionId = await $.session.id()
     const { value: last } = await $.state.get(titled)
-    if (slug === last) return
+    // A title from before titles were kept per session is a plain string, and so names no session.
+    if (last?.sessionId === sessionId && last.slug === slug) return
     await $.command.run({ command: 'rename', args: slug })
-    await $.state.set(titled, slug)
+    await $.state.set(titled, { sessionId, slug })
   } catch {}
 }
 
@@ -325,11 +328,23 @@ async function claimAtGo($: EngineInterface, slug: string): Promise<ClaimLine | 
   const answer = await ledgerJson<Claimed>($, ['task', 'claim', slug, '--session', sessionId, ...from])
   if (answer.ok) {
     await $.state.set(heldTask, null).catch(() => undefined)
+    await $.state.set(claimedTask, { sessionId, slug: answer.slug }).catch(() => undefined)
     return undefined
   }
   if (answer.held === undefined) return { text: claimFailedMessage(slug, answer.error), held: false }
   await recordHeld($, sessionId, slug)
   return { text: heldMessage(slug, answer.held, ledgerBin($), sessionId), held: true }
+}
+
+/** The task this session last claimed with a `go <slug>` prompt; undefined when it claimed none, or the read failed. */
+async function claimedSlug($: EngineInterface): Promise<string | undefined> {
+  try {
+    const sessionId = await $.session.id()
+    const { value } = await $.state.get(claimedTask)
+    return value?.sessionId === sessionId ? value.slug : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -357,7 +372,10 @@ async function releaseClaims($: EngineInterface, sessionId?: string): Promise<vo
 async function finishTurn($: EngineInterface, clearPointTokens: number): Promise<void> {
   const session = await readSession($)
   if (!session.ok) return
-  if (session.title !== undefined) await titleSession($, session.title)
+  // A worktree's own task replaces the claim as the task the session works on, so the claim must not name it again later.
+  if (session.title !== undefined) await $.state.set(claimedTask, null).catch(() => undefined)
+  const title = session.title ?? (await claimedSlug($))
+  if (title !== undefined) await titleSession($, title)
   const own = ownTask(session)
   if (own === undefined) return
   const pruned = await ledgerJson<AutoPruned>($, ['worktrees', 'auto-prune', own.worktree])

@@ -633,7 +633,7 @@ test('pre-compact names several tasks by slug and worktree, most recently update
 
 // UserPromptSubmit
 
-type PromptSubmitInput = { prompt: string; cwd?: string; session_title?: string };
+type PromptSubmitInput = { prompt: string; cwd?: string; session_id?: string; session_title?: string };
 
 const promptSubmit = (h: string, input: PromptSubmitInput): string => hook(h, 'prompt-submit', { hook_event_name: 'UserPromptSubmit', ...input });
 
@@ -673,21 +673,32 @@ test('prompt-submit replaces a title that names an archived task', (t) => {
   assert.equal(promptSubmitTitle(h, { prompt: 'go alpha', cwd: main, session_title: 'finished-task' }), 'alpha');
 });
 
-test('prompt-submit ignores the archive of another repository', (t) => {
+test('prompt-submit replaces a title that names an archived task of another repository', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
   ledgerIn(h, worktree(h, main, path.join(h, 'alpha')));
   archive(h, 'other', 'finished-task');
 
-  assert.equal(promptSubmit(h, { prompt: 'go alpha', cwd: main, session_title: 'finished-task' }), '');
+  assert.equal(promptSubmitTitle(h, { prompt: 'go alpha', cwd: main, session_title: 'finished-task' }), 'alpha');
 });
 
-test('prompt-submit keeps a title the operator chose', (t) => {
+test('prompt-submit keeps a title the operator chose while the session stays on the task it claims', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  ledgerIn(h, worktree(h, main, path.join(h, 'alpha')));
+  ledgerIn(h, worktree(h, main, path.join(h, 'alpha')), familyLedger('alpha', ['- claim: session s1 since 2026-11-20T10:00:00Z, active 2026-11-20T10:00:00Z']));
 
-  assert.equal(promptSubmit(h, { prompt: 'go alpha', cwd: main, session_title: 'my custom name' }), '');
+  assert.equal(promptSubmit(h, { prompt: 'go alpha', cwd: main, session_id: 's1', session_title: 'my custom name' }), '');
+  assert.equal(promptSubmitTitle(h, { prompt: 'go alpha', cwd: main, session_id: 's2', session_title: 'my custom name' }), 'alpha');
+});
+
+test('prompt-submit keeps a title the operator chose when the session claims the task among other claims', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const claim = ['- claim: session s1 since 2026-11-20T10:00:00Z, active 2026-11-20T10:00:00Z'];
+  ledgerIn(h, worktree(h, main, path.join(h, 'alpha')), familyLedger('alpha', claim));
+  ledgerIn(h, worktree(h, main, path.join(h, 'beta')), familyLedger('beta', claim));
+
+  assert.equal(promptSubmit(h, { prompt: 'go beta', cwd: main, session_id: 's1', session_title: 'my custom name' }), '');
 });
 
 test('prompt-submit prints nothing when the title already names the task', (t) => {
@@ -734,6 +745,49 @@ test('prompt-submit skips a worktree whose folder is gone', (t) => {
   rmSync(worktree(h, main, path.join(h, 'gone')), { recursive: true, force: true });
 
   assert.equal(promptSubmitTitle(h, { prompt: 'go alpha', cwd: main }), 'alpha');
+});
+
+// D43: the session name follows the task at every task change.
+
+test('D43: prompt-submit after a clear replaces the slug of the previous task, from the main checkout and from the new worktree', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  ledgerIn(h, worktree(h, main, path.join(main, '.claude/worktrees/alpha')));
+  const beta = worktree(h, main, path.join(main, '.claude/worktrees/beta'));
+  ledgerIn(h, beta);
+
+  assert.equal(promptSubmitTitle(h, { prompt: 'go beta', cwd: main, session_title: 'alpha' }), 'beta');
+  assert.equal(promptSubmitTitle(h, { prompt: 'go beta', cwd: beta, session_title: 'alpha' }), 'beta');
+});
+
+test('D43: prompt-submit replaces the slug of a previous task in another repository', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  ledgerIn(h, worktree(h, main, path.join(main, '.claude/worktrees/beta')));
+  const other = checkout(h, 'other');
+  ledgerIn(h, worktree(h, other, path.join(other, '.claude/worktrees/alpha')));
+
+  assert.equal(promptSubmitTitle(h, { prompt: 'go beta', cwd: main, session_title: 'alpha' }), 'beta');
+});
+
+test('D43: prompt-submit replaces the slug of a previous task that is in the backlog', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  ledgerIn(h, worktree(h, main, path.join(main, '.claude/worktrees/beta')));
+  backlogLedger(h, 'main', 'umbrella', main);
+
+  assert.equal(promptSubmitTitle(h, { prompt: 'go beta', cwd: main, session_title: 'umbrella' }), 'beta');
+});
+
+test('D43: session-start after a clear titles the session with the slug of the worktree it is in', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const beta = worktree(h, main, path.join(main, '.claude/worktrees/beta'));
+  ledgerIn(h, beta);
+
+  const output = JSON.parse(hook(h, 'session-start', { hook_event_name: 'SessionStart', source: 'clear', cwd: beta })) as SessionStartOutput;
+
+  assert.equal(output.hookSpecificOutput.sessionTitle, 'beta');
 });
 
 // PreToolUse: the ledger gate

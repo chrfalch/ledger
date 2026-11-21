@@ -251,7 +251,8 @@ const GO = /^\s*go[ \t]+(\S+)\s*$/;
 
 /**
  * Titles the session for a prompt of exactly `go <slug>` that names an active ledger in a worktree of the repo, because
- * Claude Code ignores the SessionStart title after a clear. It replaces no title, a ledger slug or an archived slug.
+ * Claude Code ignores the SessionStart title after a clear. Any title gives way, one the operator typed too, unless this
+ * session already claims that task. The worktree's own task does not count: after a clear into it, the old title remains.
  */
 export function promptSubmit(input: HookInput, context: HookContext): PromptSubmitOutput | undefined {
   const target = GO.exec(input.prompt)?.[1];
@@ -260,11 +261,9 @@ export function promptSubmit(input: HookInput, context: HookContext): PromptSubm
   if (main === undefined) return undefined;
   const { store } = context;
   // From the records alone: the hook runs at every prompt, so it asks git nothing per task.
-  const active = keyAndAliases(store.aliases.read(), repoKey(main)).flatMap((repo) => store.active.list(repo).flatMap(({ text }) => parseLedger(text).slug ?? []));
-  const title = input.sessionTitle;
-  if (!active.includes(target) || title === target) return undefined;
-  // A title that names no task came from /rename; the operator keeps it.
-  if (title !== '' && !active.includes(title) && !archivedTasks(context.store, repoKey(main)).some(({ slug }) => slug === title)) return undefined;
+  const active = keyAndAliases(store.aliases.read(), repoKey(main)).flatMap((repo) => store.active.list(repo).map(({ text }) => parseLedger(text)));
+  if (!active.some(({ slug }) => slug === target) || input.sessionTitle === target) return undefined;
+  if (input.sessionId !== '' && active.some(({ slug, location }) => slug === target && location.claim?.session === input.sessionId)) return undefined;
   return { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', sessionTitle: target } };
 }
 

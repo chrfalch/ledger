@@ -676,6 +676,6 @@ Decided 2026-11-19:
 | Report size (D31) | none | one-line reports after review; `ledger notes check` size limit |
 | Deploy permissions (D32) | permission prompt on ledger writes | deploy allows the `ledger` commands |
 | Merge and goal gates (D4, D15) | rule text | *Merge now* gate after checks and review; *Goal met* gate for tasks with no PR |
-| Session name (D43) | operator renames by hand with `/rename` | session renamed to the task slug on every task change |
+| Session name (D43) | renamed to the task slug on every task change: the prompt hook titles each `go <slug>` the session does not already claim; the turn end renames to the worktree's task, else to the task the session claimed | none |
 | Worktree location (D6) | inside the main checkout | unchanged: the session-switch test failed (confirmation on every switch); D42 is the safeguard |
 | Build folders (D44, D45) | Xcode's DerivedData, named by worktree path hash | `.claude/worktrees/.build/<name>/<configuration>`; `cc-dd-path`, build rule and hook changed; old folders deleted once by hand; `derived-data` removed; `prune-orphans` matches folder names to worktrees |
