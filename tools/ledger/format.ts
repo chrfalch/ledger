@@ -5,11 +5,26 @@ const NEW_SLUG = /^[a-z0-9][a-z0-9-]*$/;
 /** A slug an existing ledger may carry. */
 export const isReadableSlug = (slug: string): boolean => READABLE_SLUG.test(slug);
 
+/** A host name or IPv6 address in brackets, and an optional port: no scheme, user or other colon. */
+const HOST = /^(?:[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*|\[[0-9A-Fa-f:.]+\])(?::\d+)?$/;
+
+/** A repo key in the shape repoKey gives it: `host[:port]/path`, or a main checkout's absolute path; no folder is empty, . or .., and none holds a \. */
+export function isRepoKeyShape(key: string): boolean {
+  const [host, ...folders] = key.split('/');
+  return folders.length > 0 && !key.includes('\\') && (host === '' || HOST.test(host)) && folders.every((folder) => folder !== '' && folder !== '.' && folder !== '..');
+}
+
 /** A slug a new task may take. */
 export const isNewSlug = (slug: string): boolean => NEW_SLUG.test(slug);
 
 /** A task by slug; `main` is its main checkout when the ledger names one. */
 export type TaskRef = { slug: string; main?: string };
+
+/**
+ * A task that must be done before another starts. `repo` is the key of its repo (D10), such as github.com/o/r; it is
+ * left out for a task in the repo of the task that waits for it.
+ */
+export type Dependency = { slug: string; repo?: string };
 
 /** `start` is the heading line; `end` is the next heading line, or the line count. */
 export type Section = { heading: string; start: number; end: number };
@@ -24,6 +39,9 @@ export type Location = {
   main?: string;
   parent?: TaskRef & { line: number };
   claim?: Claim;
+  state?: string;
+  order?: number;
+  dependencies?: Dependency[];
 };
 
 export type ChildMark = { kind: 'retired' | 'started'; date: string };
@@ -53,7 +71,10 @@ const TITLE = /^# Task ledger[ \t]*[—-][ \t]*(.*)$/;
 const HEADING = /^## (.*)$/;
 const FIELD = /^- ([a-z][a-z ]*):[ \t]*(.*)$/;
 const REF = /^([A-Za-z0-9._-]+)(?:[ \t]*@[ \t]*(\/\S*))?$/;
-const CHILD = /^- ([A-Za-z0-9._-]+)(?:[ \t]*@[ \t]*(\/\S*))?(?:[ \t]+(.*))?$/;
+const DEPENDENCY = /^([A-Za-z0-9._-]+)(?:[ \t]*@[ \t]*([^\s,]+))?$/;
+const ORDER = /^(0|[1-9]\d*)$/;
+// The text after a child's slug and main is a mark or note in parentheses; any other text makes the bullet prose.
+const CHILD = /^- ([A-Za-z0-9._-]+)(?:[ \t]*@[ \t]*(\/\S*))?(?:[ \t]+(\(.*))?$/;
 const MARK = /^\((retired|started) (\d{4}-\d\d-\d\d)\b/;
 const PARKED = /^Parked:[ \t]*(\d{4}-\d{2}-\d{2})[ \t]*[—-][ \t]*(.*)$/;
 const CLAIM = /^session (\S+) since (\S+), active (\S+)$/;
@@ -82,6 +103,22 @@ export function parseClaim(text: string): Claim | undefined {
 }
 
 export const claimText = ({ session, since, active }: Claim): string => `session ${session} since ${since}, active ${active}`;
+
+/** The value of an `- order:` bullet: a whole number. */
+export const parseOrder = (text: string): number | undefined => (ORDER.test(text) ? Number(text) : undefined);
+
+/** `a, b @ github.com/o/r`, as a `- depends on:` bullet names tasks; undefined when any item is no dependency. */
+export function parseDependencies(text: string): Dependency[] | undefined {
+  const dependencies: Dependency[] = [];
+  for (const item of text.split(',')) {
+    const [, slug, repo] = DEPENDENCY.exec(item.trim()) ?? [];
+    if (slug === undefined || !isReadableSlug(slug) || (repo !== undefined && !isRepoKeyShape(repo))) return undefined;
+    dependencies.push(repo === undefined ? { slug } : { slug, repo });
+  }
+  return dependencies;
+}
+
+export const showDependencies = (dependencies: readonly Dependency[]): string => dependencies.map(({ slug, repo }) => (repo === undefined ? slug : `${slug} @ ${repo}`)).join(', ');
 
 /** Whether `line` reads as the parked marker when it is the first text under ## Next step. */
 export const isParkedMarker = (line: string): boolean => PARKED.test(line.trim());
@@ -192,6 +229,14 @@ function parseLocation(plain: string[], range: number[]): Location {
       const [, slug, main] = REF.exec(value) ?? [];
       if (slug !== undefined) location.parent = { slug, ...(main === undefined ? {} : { main }), line: index };
     } else if (name === 'claim') location.claim ??= parseClaim(value);
+    else if (name === 'state') location.state ??= value;
+    else if (name === 'order' && location.order === undefined) {
+      const order = parseOrder(value);
+      if (order !== undefined) location.order = order;
+    } else if (name === 'depends on' && location.dependencies === undefined) {
+      const dependencies = parseDependencies(value);
+      if (dependencies !== undefined) location.dependencies = dependencies;
+    }
   }
   return location;
 }

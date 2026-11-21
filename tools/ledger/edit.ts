@@ -123,6 +123,33 @@ export function withoutClaim(text: string): string {
   return claims.length === 0 ? text : without(ledger, (index) => claims.includes(index));
 }
 
+/**
+ * `text` with the `- <name>:` bullet of ## Location set to `value`: in place of the first such bullet, else at the end
+ * of the section; undefined `value` drops each such bullet. Undefined when the ledger has no ## Location.
+ */
+export function setLocationBullet(text: string, name: string, value: string | undefined): string | undefined {
+  const ledger = parseLedger(text);
+  const location = findSection(ledger.sections, 'Location');
+  if (location === undefined) return undefined;
+  const named = ledger.lines.flatMap((line, index) => (index > location.start && index < location.end && plain(line).trim().startsWith(`- ${name}:`) ? [index] : []));
+  if (value === undefined) return without(ledger, (index) => named.includes(index));
+  if (named.length === 0) return insert(ledger, afterLastText(ledger, location), [`- ${name}: ${value}`]);
+  const lines = [...ledger.lines];
+  lines[named[0]] = replaced(lines[named[0]], `- ${name}: ${value}`);
+  return lines.join('\n');
+}
+
+/** `text` with the lines of `children` in the order given, in the places those lines take now; every other line stays. */
+export function placeChildren(text: string, children: readonly Child[]): string {
+  const ledger = parseLedger(text);
+  const places = children.map(({ line }) => line).sort((a, b) => a - b);
+  const lines = [...ledger.lines];
+  children.forEach((child, index) => {
+    lines[places[index]] = ledger.lines[child.line];
+  });
+  return lines.join('\n');
+}
+
 export function removeLine(text: string, index: number): string {
   return without(parseLedger(text), (at) => at === index);
 }
