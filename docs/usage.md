@@ -566,9 +566,10 @@ Retiring a task stays with you.
 A task becomes a parent task when its first child task is attached. There is
 no flag that starts a task as a child task.
 
-The parent ledger holds the overall goal, the split into child tasks, the
-decisions that cross tasks, and the order. Each child ledger holds its own plan
-and state. You do not update the parent ledger by hand. Retiring a child task
+The parent ledger holds the overall goal, the split into child tasks, and the
+decisions that cross tasks. Each child ledger holds its own plan and state, its
+place in the order, and the tasks it waits for. You do not update the parent
+ledger by hand. Retiring a child task
 marks it retired there and copies its report. See
 [Child reports](#child-reports).
 
@@ -576,11 +577,14 @@ marks it retired there and copies its report. See
 
 - The child ledger gets `- parent: <parent>` under `## Location`. This line is
   the source of truth.
+- The child ledger also gets `- order: <n>`, so the new child task comes last.
+  Sibling tasks that have no order yet get one first, in the order of their
+  lines, after those that have one.
 - The parent ledger gets `- <child>` under `## Children`.
 - The child's entry in `~/.claude/ledgers.json` gets a `parent` field.
   Each `/ledger:all` rebuilds it from the ledger text.
 
-`/ledger:parent <parent> remove <child>` undoes all three. The command refuses
+`/ledger:parent <parent> remove <child>` undoes all of these, the order too. The command refuses
 a relation that breaks one of these rules:
 
 - A task cannot be its own parent task, and the relation cannot make a cycle.
@@ -597,10 +601,11 @@ keeps it. When the mark cannot be written, the command says so and still
 continues in the child task.
 
 `/ledger:go <parent>` starts a child task instead of the parent task. It picks
-the first line under `## Children` that has no mark and whose task is in the
-backlog, in the order of the lines. When that child task has child tasks of its
-own, it picks one of those the same way. A child task with none left to start
-is passed over. The reply names the picked child task and the parent task.
+the first child task, in order, that is in the backlog and waits for no task
+that is not done yet. When that child task has child tasks of its own, it picks
+one of those the same way. A child task with none left to start is passed over.
+The reply names the picked child task and the parent task. See
+[Order and dependencies](#order-and-dependencies).
 
 When no child task is left to start, the command continues in the parent task
 if the parent task has a worktree. A parent task in the backlog stays there:
@@ -642,6 +647,65 @@ in the `parent of <n>` count.
 
 The parent task can be in a worktree or in the backlog of this repo. Either
 way, its line for the child task is marked retired.
+
+#### Order and dependencies
+
+Each child ledger holds its own place in the order, as `- order: <n>` under
+`## Location`. The lines under the parent's `## Children` follow that order,
+and so does `/ledger:parent <parent>`. A child task without an order comes
+after the others, in the order of its line. A line that names no task stays
+where it is.
+
+`ledger tree add` also leaves a line where it is when the task it names has
+another parent in its own ledger, or in its archive copy if it is retired.
+That task gets no order from this parent.
+
+To change the order, name every child task that is not retired, first to last:
+
+```
+ledger tree order <parent> <child> <child> ...
+```
+
+The command refuses a list that leaves out a child task, names a task that is
+not a child task, or names one twice. It says which, and changes nothing.
+
+A child task can wait for other tasks. It is not started until each of them
+is done:
+
+```
+ledger tree depends <child> <task> <task> ...
+```
+
+This replaces the list of tasks the child task waits for. With no task named,
+it clears the list. The child ledger gets
+`- depends on: <task>, <task> @ <repo>` under `## Location`. Name each task in
+one of three ways:
+
+- `<slug>`: a task in the same repository as the child task.
+- `<slug>@<path>`: a task in the repository that holds `<path>`.
+- `<slug>@<address>`: a task in the repository with that remote address, such
+  as `api@github.com/acme/api`. The address may also be a URL that git takes,
+  such as `api@https://github.com/acme/api.git` or
+  `api@git@github.com:acme/api.git`; the ledger stores it as
+  `github.com/acme/api`. The repository does not need a clone on this machine.
+  An address such as `host:2222/team/api`, with only digits between the colon
+  and the first slash, is read as a host and a port, not as git's scp form
+  `host:path`.
+
+The command refuses a task that waits for itself, and a list that would make a
+cycle, such as `a` waiting for `b` while `b` waits for `a`. It finds a cycle
+only through the ledgers it can read. It also refuses an address whose stored
+form would not read back as the same repository. For example, inside a repository
+with a folder `tools/ledger`, `api@https://tools/ledger.git` would be stored as
+`tools/ledger`, which names that folder, so this repository.
+
+A task is done when it is retired: its archive copy is in the store. A task
+that no ledger names counts as not done.
+
+When every child task in the backlog waits for a task that is not done,
+`ledger tree next <parent>` prints nothing and says which tasks each child task
+waits for. `/ledger:go <parent>` does the same for a parent task in the
+backlog.
 
 #### A child task in another repository
 

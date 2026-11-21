@@ -71,13 +71,18 @@ import {
   changeParent,
   createdText,
   createTask,
+  dependsText,
   goTask,
   goText,
+  orderChildren,
+  orderText,
   parentChangeText,
   parkTask,
   parkText,
+  setDependencies,
   unparkTask,
   unparkText,
+  waitingLines,
   type Context,
   type ParentAction,
   type TaskOptions,
@@ -467,7 +472,12 @@ export async function main(argv: string[]): Promise<number> {
   const childSlug = 'the child task, as <slug> or <slug>@<path>';
   const changeChildren = (slug: string, action: ParentAction, child?: string): void => {
     const change = changeParent(context, slug, action, child);
-    if (!json && change.action === 'next' && change.chain.length === 0) console.error(`No child task of ${change.parent.slug} is left in the backlog.`);
+    if (!json && change.action === 'next' && change.chain.length === 0) {
+      const { parent: from, blocked = [] } = change;
+      console.error(
+        blocked.length === 0 ? `No child task of ${from.slug} is left in the backlog.` : [`No child task of ${from.slug} can start yet:`, ...waitingLines(cwd, blocked).map((line) => `  ${line}`)].join('\n'),
+      );
+    }
     show(change, (done) => parentChangeText(context, done));
   };
   const treeGroup = program
@@ -484,7 +494,13 @@ export async function main(argv: string[]): Promise<number> {
         '  ledger tree add epic part@../lib      make part, in the repo at ../lib, a child of epic',
         '  ledger tree remove epic part@../lib',
         '  ledger tree start epic fix-login      mark fix-login (started <date>) under ## Children',
-        '  ledger tree next epic                 print the chain from epic to its first child still in the backlog',
+        '  ledger tree order epic api fix-login  start api first, then fix-login',
+        '  ledger tree depends fix-login api     fix-login starts only once api is retired',
+        '  ledger tree depends fix-login         fix-login waits for no task',
+        '  ledger tree next epic                 print the chain from epic to the child task that starts next',
+        '',
+        'A child task added with add goes after the others. The child that starts next is the first, in that order,',
+        'that is still in the backlog and waits for no task that is not retired yet.',
       ].join('\n'),
     );
   treeGroup
@@ -512,8 +528,24 @@ export async function main(argv: string[]): Promise<number> {
       .action((slug: string, child: string) => changeChildren(slug, action, child));
   }
   treeGroup
+    .command('order')
+    .description('Set the order the child tasks of <slug> start in: name each of them once, first to last.')
+    .argument('<slug>', parentSlug)
+    .argument('<child...>', 'each child task, as <slug> or <slug>@<path>; a retired child is left out')
+    .option('--json', JSON_HELP)
+    .action((slug: string, children: string[]) => show(orderChildren(context, slug, children), (done) => orderText(context, done)));
+  treeGroup
+    .command('depends')
+    .description('Set the tasks <child> waits for: it starts only once each of them is retired. Name none to clear the list.')
+    .argument('<child>', 'the task that waits, as <slug> or <slug>@<path>')
+    .argument('[task...]', 'a task in the repo of <child>, <slug>@<path> for the repo at <path>, or <slug>@<address> for a repo by its address, such as api@github.com/acme/api')
+    .option('--json', JSON_HELP)
+    .action((child: string, tasks: string[]) => show(setDependencies(context, child, tasks), (done) => dependsText(context, done)));
+  treeGroup
     .command('next')
-    .description('Print the chain from <slug> to its first child task still in the backlog, such as "epic part"; nothing when none is left.')
+    .description(
+      'Print the chain from <slug> to the child task that starts next, such as "epic part": the first, by order, still in the backlog and waiting for no task that is not retired. Nothing when none is left; when every such child waits, stderr says what each waits for.',
+    )
     .argument('<slug>', parentSlug)
     .option('--json', JSON_HELP)
     .action((slug: string) => changeChildren(slug, 'next'));

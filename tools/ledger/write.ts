@@ -1,8 +1,23 @@
 import path from 'node:path';
-import { addChild, addDecision, addLocationBullet, fillLedger, markStarted, park, removeChildren, removeLine, unpark, withChildMain, withDesignRefsBullet } from './edit.js';
+import { isDeepStrictEqual } from 'node:util';
+import {
+  addChild,
+  addDecision,
+  addLocationBullet,
+  fillLedger,
+  markStarted,
+  park,
+  placeChildren,
+  removeChildren,
+  removeLine,
+  setLocationBullet,
+  unpark,
+  withChildMain,
+  withDesignRefsBullet,
+} from './edit.js';
 import { fail } from './failure.js';
 import { exists, isFolder, readText, writeAtomic } from './files.js';
-import { isNewSlug, isReadableSlug, parseLedger, type Child, type ChildMark, type Location, type TaskRef } from './format.js';
+import { findSection, isNewSlug, isReadableSlug, isRepoKeyShape, parseDependencies, parseLedger, showDependencies, type Child, type ChildMark, type Dependency, type Location, type TaskRef } from './format.js';
 import {
   addWorktree,
   branchExists,
@@ -19,11 +34,31 @@ import {
 import { withLock } from './lock.js';
 import { samePath, taskWorktree, worktreeLedger, type LedgerPaths } from './paths.js';
 import { withHint } from './migrate-repo-ids.js';
-import { repoKey } from './repo-key.js';
+import { remoteKey, repoKey } from './repo-key.js';
 import { loadTasks } from './registry.js';
 import { keyAndAliases, type Change, type LedgerStore } from './store.js';
 import { pauseForTest } from './wait.js';
-import { childrenOf, findNamed, inRepo, locateChild, namedChildren, notASlug, sameTask, taskRef, theTask, wasChildOf, type ChildStatus, type Place, type Task } from './tasks.js';
+import {
+  childrenOf,
+  dependenciesOf,
+  dependencyTask,
+  findNamed,
+  inRepo,
+  isDone,
+  listedChildren,
+  locateChild,
+  namedChildren,
+  notASlug,
+  orderedChildren,
+  sameTask,
+  taskRef,
+  theTask,
+  wasChildOf,
+  type ChildStatus,
+  type ListedChild,
+  type Place,
+  type Task,
+} from './tasks.js';
 
 type Ref = Required<TaskRef>;
 export type Context = { paths: LedgerPaths; cwd: string; store: LedgerStore };
@@ -313,8 +348,15 @@ export function goTask(context: Context, slug: string, repo: string | undefined)
   const task = liveLedger(tasks, named);
   let chain: Ref[] = [];
   if (task !== undefined && namedChildren(task, tasks).length > 0) {
-    chain = firstToStart(tasks, { task, ref: named }) ?? [];
-    if (chain.length === 0 && task.place === 'backlog') fail(`No child task of ${slug} is left in the backlog, so there is nothing to start. ledger tree show ${slug} shows its children.`);
+    const blocked: Blocked[] = [];
+    chain = firstToStart(tasks, { task, ref: named }, blocked) ?? [];
+    if (chain.length === 0 && task.place === 'backlog') {
+      fail(
+        blocked.length > 0
+          ? `No child task of ${slug} can start yet: ${waitingLines(cwd, blocked).join(' ')}`
+          : `No child task of ${slug} is left in the backlog, so there is nothing to start. ledger tree show ${slug} shows its children.`,
+      );
+    }
   }
   const target = chain.at(-1) ?? named;
   if (!isReadableSlug(target.slug)) fail(notASlug(target.slug));
@@ -403,14 +445,31 @@ export const unparkText = ({ slug, parked }: UnparkResult): string =>
 
 export type ParentAction = 'add' | 'remove' | 'start' | 'next';
 
+/** A backlog child passed over because it waits for `dependencies`, which are not done. */
+export type Blocked = { child: Ref; dependencies: Required<Dependency>[] };
+
 /**
  * What `ledger tree <action> <parent>` did. A start that marks nothing says why: the line is `already-marked` with
- * `mark`, or the child is `retired`. A next names the chain from the parent down to the child to start, empty for none.
+ * `mark`, or the child is `retired`. A next names the chain from the parent down to the child to start, empty for none;
+ * with none, `blocked` names each child that waits for a task not done.
  */
 export type ParentChange =
   | { action: 'add' | 'remove'; parent: Ref; child: Ref }
   | { action: 'start'; parent: Ref; child: Ref; ledger: string; marked: boolean; reason?: 'already-marked' | 'retired'; mark?: ChildMark['kind'] }
-  | { action: 'next'; parent: Ref; chain: Ref[] };
+  | { action: 'next'; parent: Ref; chain: Ref[]; blocked?: Blocked[] };
+
+/** How messages name a dependency: `<slug>` in the repo of `cwd`, else `<slug>@<repo key>`. */
+function dependencyName(cwd: string) {
+  const main = mainCheckout(cwd);
+  const here = main === undefined ? undefined : repoKey(main);
+  return ({ slug, repo }: Required<Dependency>): string => (repo === here ? slug : `${slug}@${repo}`);
+}
+
+/** One `<child> waits for <task>, <task>.` line per blocked child. */
+export function waitingLines(cwd: string, blocked: Blocked[]): string[] {
+  const [name, dependency] = [nameFrom(cwd), dependencyName(cwd)];
+  return blocked.map(({ child, dependencies }) => `${name(child)} waits for ${dependencies.map(dependency).join(', ')}.`);
+}
 
 /** The line to print, empty for none. */
 export function parentChangeText({ cwd, paths }: Context, change: ParentChange): string {
@@ -434,7 +493,9 @@ export function changeParent(context: Context, parentName: string, action: Paren
   if (action === 'next') {
     if (childName !== undefined) fail('ledger tree next <parent> takes no child.');
     const { task, ref, tasks } = liveTask(context, parentName);
-    return { action, parent: ref, chain: firstToStart(tasks, { task, ref }) ?? [] };
+    const blocked: Blocked[] = [];
+    const chain = firstToStart(tasks, { task, ref }, blocked) ?? [];
+    return { action, parent: ref, chain, ...(chain.length === 0 && blocked.length > 0 ? { blocked } : {}) };
   }
   if (childName === undefined) return fail(`ledger tree ${action} <parent> needs a child: ledger tree ${action} ${parentName} <child>`);
   const parentRef = taskRef(context.cwd, parentName);
@@ -529,12 +590,67 @@ function addChildTask(context: Context, tasks: Task[], parent: Linked, childRef:
     fail(`The repo at ${childRef.main} has whitespace in its path, so none of its worktree tasks can be a child of a backlog task.`);
   }
 
-  // The child's line first: once it is written, running the same add again finishes the parent.
-  if (current === undefined) {
-    updateLedger(context, child, (text) => addLocationBullet(text, `- parent: ${linkFrom(childRef.main, parent.ref)}`) ?? fail(`${child.file} has no ## Location section.`));
+  if (findSection(child.ledger.sections, 'Location') === undefined) fail(`${child.file} has no ## Location section. Nothing was changed.`);
+
+  // A child already listed keeps its place, and so does one linked before with an order: adding it again changes no
+  // order. Any other goes after every sibling, so live siblings without an order are numbered first, in the order of
+  // their lines; without that they would sort after it.
+  const isListed = linesOf(parent, childRef, child.place).length > 0;
+  const keepsPlace = isListed || (current !== undefined && child.ledger.location.order !== undefined);
+  const numbered = keepsPlace ? undefined : numberSiblings(tasks, parent, child);
+  const orders = new Map(numbered ?? []);
+  const order = orders.get(child);
+  for (const [sibling, place] of orders) {
+    if (sibling !== child) updateLedger(context, sibling, (text) => setLocationBullet(text, 'order', String(place)));
   }
-  updateLedger(context, parent.task, (text) => (linesOf(parent, childRef, child.place, text).length > 0 ? undefined : addChild(text, childLine(parent, childRef, child.place))));
+  // The child's line first: once it is written, running the same add again finishes the parent.
+  updateLedger(context, child, (text) => {
+    let changed: string | undefined = text;
+    if (current === undefined) changed = addLocationBullet(changed, `- parent: ${linkFrom(childRef.main, parent.ref)}`);
+    if (order !== undefined && changed !== undefined) changed = setLocationBullet(changed, 'order', String(order));
+    if (changed === undefined) return fail(`${child.file} has no ## Location section.`);
+    return changed === text ? undefined : changed;
+  });
+  updateLedger(context, parent.task, (text) => {
+    const listed = linesOf(parent, childRef, child.place, text).length > 0 ? text : addChild(text, childLine(parent, childRef, child.place));
+    const sorted = sortChildLines(listed, parent, tasks, orders);
+    return sorted === text ? undefined : sorted;
+  });
   return { action: 'add', parent: parent.ref, child: childRef };
+}
+
+/**
+ * The orders to write so `child` comes after every other child of `parent`: each live sibling without an order, in the
+ * order of its line, gets the next number after the highest order, and `child` the one after those. A sibling whose own
+ * ledger names another parent is left out: its order places it among that parent's children.
+ */
+function numberSiblings(tasks: Task[], parent: Linked, child: Task): [Task, number][] {
+  const siblings = listedChildren(parent.task, parent.ref.main, tasks).flatMap((listed) =>
+    listed.task === undefined || listed.task === child || namesAnotherParent(tasks, parent, listed) ? [] : [listed.task],
+  );
+  const highest = Math.max(0, ...siblings.flatMap((task) => task.ledger.location.order ?? []));
+  const unordered = siblings.filter(
+    (task) => task.place !== 'archive' && task.ledger.location.order === undefined && findSection(task.ledger.sections, 'Location') !== undefined,
+  );
+  return [...unordered, child].map((task, index) => [task, highest + index + 1]);
+}
+
+/** Whether the listed child's ledger names a parent other than `parent`. A child with no ledger that counts for `parent` may have an archive copy, retired under another parent. */
+const namesAnotherParent = (tasks: Task[], parent: Linked, { ref, task }: ListedChild): boolean =>
+  (task === undefined ? findNamed(tasks, ref) : [task]).some((each) => {
+    const named = parentOf(each, ref.main);
+    return named !== undefined && !sameTask(named, parent.ref, parent.task.place);
+  });
+
+/**
+ * `text`, the ledger of `parent`, with the lines of its children by order. `orders` holds orders just written, which
+ * `tasks` predates. A line that names no task keeps its place, and so does one of a task whose ledger names another
+ * parent: its order places it among that parent's children.
+ */
+function sortChildLines(text: string, parent: Linked, tasks: Task[], orders: ReadonlyMap<Task, number>): string {
+  const now = { ...parent.task, ledger: parseLedger(text) };
+  const children = orderedChildren(now, parent.ref.main, tasks, (task) => orders.get(task) ?? task.ledger.location.order);
+  return placeChildren(text, children.flatMap((listed) => (namesAnotherParent(tasks, parent, listed) ? [] : [listed.line])));
 }
 
 function removeChildTask(context: Context, tasks: Task[], parent: Linked, childRef: Ref): ParentChange {
@@ -546,9 +662,10 @@ function removeChildTask(context: Context, tasks: Task[], parent: Linked, childR
     const listed = linesOf(parent, childRef, child.place, text);
     return listed.length === 0 ? undefined : removeChildren(text, listed.map(({ line }) => line));
   });
+  // The order only places a task among the children of its parent, so it goes with the parent line.
   updateLedger(context, child, (text) => {
     const bullet = parseLedger(text).location.parent;
-    return namesParent(bullet, childRef.main, parent) ? removeLine(text, bullet.line) : undefined;
+    return namesParent(bullet, childRef.main, parent) ? setLocationBullet(removeLine(text, bullet.line), 'order', undefined) : undefined;
   });
   return { action: 'remove', parent: parent.ref, child: childRef };
 }
@@ -560,7 +677,10 @@ function startChildTask(context: Context, tasks: Task[], parent: Linked, childRe
   const child = locateChild(tasks, childRef, parent.ref);
   const place = child?.place ?? 'backlog';
   const [line] = linesOf(parent, childRef, place);
-  if (line === undefined) notListed();
+  if (line === undefined) {
+    if (child === undefined) fail(`${name(childRef)} is not listed under ## Children of ${name(parent.ref)}, and no task ledger has the slug ${childRef.slug}.`);
+    notListed();
+  }
   if (!namedChildren(parent.task, tasks).includes(line)) fail(`${name(childRef)} names no task: its line under ## Children of ${name(parent.ref)} is a note, not a child.`);
   const started = { action: 'start', parent: parent.ref, child: childRef, ledger: parent.task.file } as const;
   if (line.mark !== undefined) return { ...started, marked: false, reason: 'already-marked', mark: line.mark.kind };
@@ -576,16 +696,182 @@ function startChildTask(context: Context, tasks: Task[], parent: Linked, childRe
 }
 
 /**
- * The chain from the parent down to its first child still in the backlog, by disk. A child with children of its own is
- * not started itself: its first such child is. A task already on the chain is a cycle and is skipped.
+ * The chain from the parent down to its first child, by order, that is still in the backlog, by disk, and waits for no
+ * task that is not done. A child with children of its own is not started itself: its first such child is. A task
+ * already on the chain is a cycle and is skipped. Each child passed over for what it waits for is added to `blocked`.
  */
-function firstToStart(tasks: Task[], parent: Linked, chain: Ref[] = [parent.ref]): Ref[] | undefined {
-  for (const line of namedChildren(parent.task, tasks)) {
-    const child = { slug: line.slug, main: line.main ?? parent.ref.main };
-    const found = locateChild(tasks, child, parent.ref);
+function firstToStart(tasks: Task[], parent: Linked, blocked: Blocked[], chain: Ref[] = [parent.ref]): Ref[] | undefined {
+  for (const { ref: child, task: found } of orderedChildren(parent.task, parent.ref.main, tasks)) {
     if (found?.place !== 'backlog' || chain.some((ref) => sameTask(ref, child, found.place))) continue;
-    const picked = namedChildren(found, tasks).length === 0 ? [...chain, child] : firstToStart(tasks, { task: found, ref: child }, [...chain, child]);
+    const waiting = dependenciesOf(found).filter((dependency) => !isDone(dependencyTask(tasks, dependency)));
+    if (waiting.length > 0) {
+      blocked.push({ child, dependencies: waiting });
+      continue;
+    }
+    const picked = namedChildren(found, tasks).length === 0 ? [...chain, child] : firstToStart(tasks, { task: found, ref: child }, blocked, [...chain, child]);
     if (picked) return picked;
   }
   return undefined;
+}
+
+/** What `ledger tree order` set: the children of `parent`, first to last. */
+export type OrderResult = { action: 'order'; parent: Ref; children: Ref[] };
+
+type LiveChild = ListedChild & { task: Task };
+const isLive = (child: ListedChild): child is LiveChild => child.task !== undefined && child.task.place !== 'archive';
+
+/**
+ * `ledger tree order <parent> <child>...`: gives the children the orders 1 to n, as named, and sorts the parent's lines.
+ * The names must be the children with a live ledger, each once; else it fails, naming each problem, and writes nothing.
+ */
+export function orderChildren(context: Context, parentName: string, childNames: string[]): OrderResult {
+  const { cwd } = context;
+  const parentRef = taskRef(cwd, parentName);
+  const named = childNames.map((childName) => taskRef(cwd, childName));
+  const tasks = loadTasks(context, [parentRef.main, ...named.map(({ main }) => main)]);
+  const parent = { task: theTask(tasks, parentRef, { live: true }), ref: parentRef };
+  const current = listedChildren(parent.task, parentRef.main, tasks).filter(isLive);
+  const name = nameFrom(cwd);
+  const elsewhere = current.flatMap(({ ref, task }) => {
+    const named = parentOf(task, ref.main);
+    return named === undefined || sameTask(named, parentRef, parent.task.place) ? [] : [`${name(ref)} (parent ${name(named)})`];
+  });
+  if (elsewhere.length > 0) {
+    fail(`Lines under ## Children of ${name(parentRef)} name tasks whose own ledger names another parent: ${elsewhere.join(', ')}. Remove those lines first. Nothing was changed.`);
+  }
+
+  const picked: LiveChild[] = [];
+  const strangers: Ref[] = [];
+  const repeated: LiveChild[] = [];
+  for (const ref of named) {
+    const child = current.find((each) => sameTask(ref, each.ref, each.task.place));
+    if (child === undefined) {
+      if (!strangers.some((known) => known.slug === ref.slug && samePath(known.main, ref.main))) strangers.push(ref);
+    }
+    else if (!picked.includes(child)) picked.push(child);
+    else if (!repeated.includes(child)) repeated.push(child);
+  }
+  const unnamed = current.filter((child) => !picked.includes(child));
+  if (unnamed.length + strangers.length + repeated.length > 0) {
+    const listed = (label: string, refs: Ref[]): string[] => (refs.length === 0 ? [] : [`${label}: ${refs.map(name).join(', ')}.`]);
+    fail(
+      [
+        `Name each child task of ${name(parentRef)} once, first to last.`,
+        ...listed('Not named', unnamed.map(({ ref }) => ref)),
+        ...listed(`Not a live child task of ${name(parentRef)}; a retired child keeps no order`, strangers),
+        ...listed('Named more than once', repeated.map(({ ref }) => ref)),
+      ].join(' '),
+    );
+  }
+  const unplaced = picked.find(({ task }) => findSection(task.ledger.sections, 'Location') === undefined);
+  if (unplaced !== undefined) fail(`${unplaced.task.file} has no ## Location section, so it cannot hold an order. Nothing was changed.`);
+
+  const orders = new Map(picked.map(({ task }, index) => [task, index + 1]));
+  for (const [task, order] of orders) updateLedger(context, task, (text) => setLocationBullet(text, 'order', String(order)) ?? fail(`${task.file} has no ## Location section.`));
+  updateLedger(context, parent.task, (text) => {
+    const sorted = sortChildLines(text, parent, tasks, orders);
+    return sorted === text ? undefined : sorted;
+  });
+  refreshRegistry(context, [parentRef.main, ...picked.map(({ ref }) => ref.main)]);
+  return { action: 'order', parent: parentRef, children: picked.map(({ ref }) => ref) };
+}
+
+export const orderText = ({ cwd }: Context, { parent, children }: OrderResult): string => {
+  const name = nameFrom(cwd);
+  return `The child tasks of ${name(parent)} are in this order now: ${children.map(name).join(', ')}.`;
+};
+
+/** What `ledger tree depends` set: the tasks `child` waits for, each with the key of its repo. */
+export type DependsResult = { action: 'depends'; child: Ref; dependencies: Required<Dependency>[] };
+
+/** A URL, or git's scp form `[user@]host:path`: a colon before any slash. */
+const REMOTE_URL = /^[^/]*:/;
+
+/**
+ * A task as `tree depends` names it: `<slug>`, in the repo `key`; `<slug>@<path>`, in the repo that holds the path; or
+ * `<slug>@<address>`, in the repo of that remote address, given as a repo key or as git takes a remote. `main` is the
+ * main checkout a path names.
+ */
+function dependencyFrom(cwd: string, key: string, name: string): Required<Dependency> & { main?: string } {
+  const at = name.indexOf('@');
+  const slug = at === -1 ? name : name.slice(0, at);
+  if (!isReadableSlug(slug)) fail(notASlug(slug));
+  if (at === -1) return { slug, repo: key };
+  const where = name.slice(at + 1);
+  if (where === '') fail(`${name} names no repo after the @. Name a folder or a repo address, such as ${slug}@github.com/owner/repo, or leave out the @ for a task in this repo.`);
+  const found = repoAfterAt(cwd, where);
+  if (found === undefined) {
+    const folder = path.resolve(cwd, where);
+    fail(exists(folder) ? `${folder} is not inside a git repository.` : `"${where}" in ${name} is neither a folder nor a repo address such as github.com/owner/repo.`);
+  }
+  if (found.main === undefined && !path.isAbsolute(found.repo) && repoAfterAt(cwd, found.repo)?.repo !== found.repo) {
+    fail(`"${where}" in ${name} would be stored as ${found.repo}, which would not read back as the same repo.`);
+  }
+  return { slug, ...found };
+}
+
+/** The repo `where`, the text after the @ of a dependency, names from `cwd`; undefined for none. `main` is the main checkout a folder names. */
+function repoAfterAt(cwd: string, where: string): { repo: string; main?: string } | undefined {
+  const folder = path.resolve(cwd, where);
+  if (exists(folder)) {
+    const main = mainCheckout(folder);
+    return main === undefined ? undefined : { repo: repoKey(main), main };
+  }
+  // A repo with no remote is keyed by its main checkout's path, which must stay usable after that checkout is gone.
+  if (path.isAbsolute(where) && isRepoKeyShape(where)) return { repo: where };
+  // Read in the shape of a key first, so a key this command stored, such as host:2222/r, names the same repo again.
+  const unslashed = where.replace(/\/+$/, '');
+  const address = isRepoKeyShape(unslashed) ? remoteKey(`https://${unslashed}`, cwd) : REMOTE_URL.test(where) ? remoteKey(where, cwd) : undefined;
+  return address !== undefined && isRepoKeyShape(address) ? { repo: address } : undefined;
+}
+
+/** The tasks from `start` on, each one a dependency of the one before, up to one `isEnd` holds for; undefined for none. */
+function dependencyPath(tasks: Task[], start: Required<Dependency>, isEnd: (dependency: Required<Dependency>) => boolean, seen = new Set<string>()): Required<Dependency>[] | undefined {
+  if (isEnd(start)) return [start];
+  const id = `${start.repo}\n${start.slug}`;
+  if (seen.has(id)) return undefined;
+  seen.add(id);
+  const task = dependencyTask(tasks, start);
+  for (const next of task === undefined ? [] : dependenciesOf(task)) {
+    const rest = dependencyPath(tasks, next, isEnd, seen);
+    if (rest !== undefined) return [start, ...rest];
+  }
+  return undefined;
+}
+
+/**
+ * `ledger tree depends <child> [<task>...]`: replaces the tasks `child` waits for; none clears them. It refuses a task
+ * that waits for itself, and any cycle through the dependencies of the ledgers it can read.
+ */
+export function setDependencies(context: Context, childName: string, names: string[]): DependsResult {
+  const { cwd } = context;
+  const childRef = taskRef(cwd, childName);
+  const key = repoKey(childRef.main);
+  const given = names.map((each) => dependencyFrom(cwd, key, each));
+  const dependencies = given.filter(({ slug, repo }, index) => given.findIndex((other) => other.slug === slug && other.repo === repo) === index).map(({ slug, repo }) => ({ slug, repo }));
+  const tasks = loadTasks(context, [childRef.main, ...given.flatMap(({ main }) => main ?? [])]);
+  const child = theTask(tasks, childRef, { live: true });
+  const name = dependencyName(cwd);
+  const self = { slug: childRef.slug, repo: key };
+  const isSelf = ({ slug, repo }: Required<Dependency>): boolean => slug === self.slug && repo === self.repo;
+  if (dependencies.some(isSelf)) fail(`${name(self)} cannot wait for itself.`);
+  for (const dependency of dependencies) {
+    const cycle = dependencyPath(tasks, dependency, isSelf);
+    if (cycle !== undefined) fail(`${name(self)} cannot wait for ${name(dependency)}: that would make a cycle: ${[self, ...cycle].map(name).join(' → ')}.`);
+  }
+  const stored = dependencies.map(({ slug, repo }) => (repo === key ? { slug } : { slug, repo }));
+  const unreadable = stored.find((dependency) => !isDeepStrictEqual(parseDependencies(showDependencies([dependency])), [dependency]));
+  if (unreadable !== undefined) {
+    fail(
+      `The repo of ${unreadable.slug} has the key "${unreadable.repo}", which a ledger cannot hold as a dependency. A key is a host and path, such as github.com/owner/repo, or the path of a main checkout, with no empty folder, whitespace or comma. Nothing was changed.`,
+    );
+  }
+  updateLedger(context, child, (text) => setLocationBullet(text, 'depends on', stored.length === 0 ? undefined : showDependencies(stored)) ?? fail(`${child.file} has no ## Location section.`));
+  refreshRegistry(context, [childRef.main]);
+  return { action: 'depends', child: childRef, dependencies };
+}
+
+export function dependsText({ cwd }: Context, { child, dependencies }: DependsResult): string {
+  const waits = dependencies.length === 0 ? 'no task' : dependencies.map(dependencyName(cwd)).join(', ');
+  return `${nameFrom(cwd)(child)} waits for ${waits}.`;
 }

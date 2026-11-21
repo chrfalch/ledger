@@ -29,7 +29,12 @@ steps 1 to 5 and without `--stack`. The parent task's goal from step 2 also
 states the split and the order: each part, in the order they ship. Then
 attach each child task in that order: run
 `bin/ledger tree add <parent> <child>` from the ledger repo, as in step 5.
-That records the order of the child tasks. Never promote the parent task.
+Each child task you add goes after the ones before it. To change the order
+later, run `bin/ledger tree order <parent> <child>...` and name every child
+task, first to last. When a child task cannot start until another task is
+retired, run `bin/ledger tree depends <child> <task>...`. A task in another
+repository is `<slug>@<path>`, or `<slug>@<address>` such as
+`api@github.com/acme/api`. Never promote the parent task.
 Steps 6 to 8 do not apply, except that a current ledger gets one line under
 its Decisions that names the parent task.
 Reply with `/ledger:go <parent>` as the start line: it starts the first child
