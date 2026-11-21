@@ -28,12 +28,14 @@ import {
   commitOf,
   commonDir,
   currentBranch,
+  gitDir,
   isBranchName,
   mainCheckout,
   originHead,
   removeWorktree,
   shortCommit,
 } from './git.js';
+import { withLock } from './lock.js';
 import { samePath, taskWorktree, type LedgerPaths } from './paths.js';
 import { withHint } from './migrate-repo-ids.js';
 import { isKind, KINDS, type Kind } from './kinds.js';
@@ -310,19 +312,22 @@ function hereTask(context: Context, given: string | undefined, goal: string | un
   const main = repoOf(cwd);
   const worktree = checkoutRoot(cwd) ?? fail(`${cwd} is not inside a git repository.`);
   if (samePath(worktree, main)) fail(`--here needs a linked worktree, and ${cwd} is in the main checkout. A ledger lives only in a linked worktree.`);
-  const own = store.active.byWorktree(worktree);
-  if (own !== undefined) fail(`This worktree already has a ledger: ${store.active.location(own.repo, own.slug)}`);
-  if (holdsUnmovedLedger(store, worktree)) {
-    fail(`This worktree already has a ledger in ${path.join(worktree, '.claude', 'ledger.md')}, not yet moved into the ledger store. Move it with ledger store migrate --active.`);
-  }
-  const branch = currentBranch(cwd);
-  const slug = given ?? (branch?.split('/').at(-1) || path.basename(worktree));
-  if (!isNewSlug(slug)) fail(`${slugRule(slug)} Name it: ledger task new --here <slug>`);
-  refuseBacklog(context, repoKey(main), slug);
-  const commit = commitOf(cwd, 'HEAD') ?? fail(`This worktree has no commit yet: ${worktree}`);
-  const location = { worktree, branch: branch ?? 'detached HEAD', base: `HEAD @ ${short(cwd, commit)}` };
-  const ledger = createActive(store, main, slug, onThisHost(store, fillLedger(readTemplate(paths, refs), { slug, goal, ...location, designRefs: designRefs(worktree, refs), kind })));
-  const started: Started = { ...location, ledger };
+  const admin = gitDir(worktree) ?? fail(`git names no git folder for ${worktree}.`);
+  // In the worktree's own git folder, so two commands that make a task for one worktree check and write one at a time.
+  const { slug, ...started } = withLock(path.join(admin, 'ledger-task'), (): Started & { slug: string } => {
+    const own = store.active.byWorktree(worktree);
+    if (own !== undefined) fail(`This worktree already has a ledger: ${store.active.location(own.repo, own.slug)}`);
+    if (holdsUnmovedLedger(store, worktree)) {
+      fail(`This worktree already has a ledger in ${path.join(worktree, '.claude', 'ledger.md')}, not yet moved into the ledger store. Move it with ledger store migrate --active.`);
+    }
+    const branch = currentBranch(cwd);
+    const slug = given ?? (branch?.split('/').at(-1) || path.basename(worktree));
+    if (!isNewSlug(slug)) fail(`${slugRule(slug)} Name it: ledger task new --here <slug>`);
+    refuseBacklog(context, repoKey(main), slug);
+    const commit = commitOf(cwd, 'HEAD') ?? fail(`This worktree has no commit yet: ${worktree}`);
+    const location = { worktree, branch: branch ?? 'detached HEAD', base: `HEAD @ ${short(cwd, commit)}` };
+    return { slug, ...location, ledger: createActive(store, main, slug, onThisHost(store, fillLedger(readTemplate(paths, refs), { slug, goal, ...location, designRefs: designRefs(worktree, refs), kind }))) };
+  });
   noteStamped(context);
   excludeEvidence(main);
   refreshRegistry(context);
