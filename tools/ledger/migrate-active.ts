@@ -4,6 +4,7 @@ import { fail, Failure } from './failure.js';
 import { readTimedText } from './files.js';
 import { parseLedger } from './format.js';
 import { checkoutRoot, inMainCheckout, mainCheckout, worktrees } from './git.js';
+import { withLock } from './lock.js';
 import { notedLines } from './migrate-records.js';
 import { realPath, samePath } from './paths.js';
 import { recordToWrite, renderRecord } from './record.js';
@@ -100,10 +101,21 @@ function moveLedger(store: LedgerStore | undefined, { file, folder, main }: Lega
   } catch (error) {
     return { left: `its active record ${location} is written, but the store could not commit it: ${error instanceof Error ? error.message : String(error)} The file was kept. Run this again.` };
   }
-  if (readTimedText(file, { followLinks: true })?.text !== found.text) {
+  // Under the lock an older ledger writes the file with, so no write of it lands between the check and the delete.
+  let unchanged: boolean;
+  try {
+    unchanged = withLock(file, () => {
+      if (readTimedText(file, { followLinks: true })?.text !== found.text) return false;
+      rmSync(file);
+      return true;
+    });
+  } catch (error) {
+    if (!(error instanceof Failure)) throw error;
+    return { left: `its active record ${location} is written, and the file was kept: ${error.message}` };
+  }
+  if (!unchanged) {
     return { left: `it changed after its active record ${location} was written, so it was kept. Merge the two by hand and remove the other, then run this again.` };
   }
-  rmSync(file);
   return { moved };
 }
 

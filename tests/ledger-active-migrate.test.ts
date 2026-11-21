@@ -4,6 +4,7 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { FORMAT } from '../tools/ledger/clone.js';
 import { fileStore } from '../tools/ledger/file-store.js';
+import { limitLockWaits } from '../tools/ledger/lock.js';
 import { migrateActive } from '../tools/ledger/migrate-active.js';
 import { openStore } from '../tools/ledger/open-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
@@ -237,6 +238,25 @@ test('migrate --active keeps a .claude/ledger.md that changed after its record w
   assert.equal(left, 1, out);
   assert.match(lineWith(out, file), /^left /);
   assert.equal(readFileSync(file, 'utf8'), edited);
+  assert.ok(read((store) => store.active.has(key, 'task')));
+});
+
+test('migrate --active keeps a .claude/ledger.md whose lock a writer holds after its record is committed, and says so', (t) => {
+  const { h, app, key, read } = setup(t, 'file');
+  const { file, markdown } = legacyWorktree(h, app, 'task');
+  // As an older ledger holds it from its read to its write of the file.
+  const heldByWriter = (): void => writeFileSync(`${file}.lock`, JSON.stringify({ pid: process.pid, since: new Date().toISOString() }));
+  limitLockWaits(Date.now() + 2_000);
+  t.after(() => limitLockWaits(Infinity));
+
+  const { left, out } = migrateWith(t, h, app, (store) => ({
+    ...store,
+    commit: () => heldByWriter(),
+  }));
+
+  assert.equal(left, 1, out);
+  assert.match(lineWith(out, file), /^left .*lock/);
+  assert.equal(readFileSync(file, 'utf8'), markdown);
   assert.ok(read((store) => store.active.has(key, 'task')));
 });
 
