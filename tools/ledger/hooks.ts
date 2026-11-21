@@ -91,8 +91,9 @@ export function sessionLedgers(store: LedgerStore, cwd: string): SessionLedgers 
   const main = mainCheckout(cwd);
   if (root === undefined || main === undefined) return { tasks: [], own: false };
   if (inMainCheckout(cwd)) return { tasks: activeTasks(store, repoKey(main)).filter(({ worktree }) => worktree === undefined || !samePath(worktree, main)), own: false };
-  const own = activeTask(store, root);
-  return { tasks: own === undefined ? [] : [own], own: own !== undefined };
+  const task = activeTask(store, root);
+  // Two machines can see one disk, so a record of another machine can name this folder; it is never the session's own.
+  return { tasks: task === undefined ? [] : [task], own: task !== undefined && !task.elsewhere };
 }
 
 /** The slug that titles the session: only when its one ledger is its folder's own. */

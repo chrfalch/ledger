@@ -46,7 +46,7 @@ function namedRepos(store: LedgerStore, named: string, main: string | undefined)
 /** The ledger `ledger show` prints without a slug: that of the active task of the worktree you are in. */
 export function ownLedger({ cwd, store }: Context): ShownLedger {
   const task = currentTask(store, cwd) ?? fail('No active task has the worktree you are in, so name one: ledger show <slug>');
-  return store.active.read(task.repo, task.name) ?? fail(`The ledger ${task.file} is gone.`);
+  return shownActive(store, store.active.read(task.repo, task.name) ?? fail(`The ledger ${task.file} is gone.`));
 }
 
 /** `host` names the machine whose worktree holds the ledger of an active task that is not on this one. */
