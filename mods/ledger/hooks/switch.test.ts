@@ -728,6 +728,26 @@ test('/ledger:park <slug> <reason> finds a task on another machine by the repo k
   expect(w.armed).toEqual([])
 })
 
+test('/ledger:park <slug> <reason> finds a task on another machine filed under an old repo key by the key it is an alias of', async ($, on) => {
+  const w = world(
+    on,
+    {
+      [SESSION]: keyedSession,
+      'list --json': done({
+        tasks: [{ ...task('epic'), repo: APP_KEY }, { ...task('fix-login'), repo: 'app', currentRepo: APP_KEY, main: undefined, place: 'remote', host: 'host-a' }],
+      }),
+      'task park fix-login --reason waits for review --json': refused(ON_HOST_A),
+    },
+    { cwd: CWD },
+  )
+
+  const { text } = await $.command.run({ command: 'ledger:park', args: 'fix-login waits for review' })
+
+  expect(text).toBe(`Could not park fix-login. ${ON_HOST_A}`)
+  expect(w.armed).toEqual([])
+  expect(w.markdown()).toBeUndefined()
+})
+
 test('/ledger:park <slug> <reason> takes a task on another machine in a repo whose key is only the folder name of this main checkout as part of the reason', async ($, on) => {
   const w = world(
     on,

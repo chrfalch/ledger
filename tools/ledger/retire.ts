@@ -586,13 +586,14 @@ function stopBefore(removal: string, changed: string[], copy: ArchiveCopy): neve
  * that, the task is gone, so a rerun could not finish what a stop would skip, and each later step only warns. A worktree
  * that git removed only in part counts as gone: the retire goes on, then fails naming the folder left over. A store
  * that commits does so once for all of it, so no sync or mirror meanwhile pushes the archive copy while the active copy
- * is still there; a stop undoes the retire there before that commit, so the task stays active with no archive copy.
- * Another store keeps the archive copy of a stop, and a rerun goes on from it.
+ * is still there; a stop of a worktree retire undoes the retire there before that commit, so the task stays active with
+ * no archive copy. A backlog retire has no active copy, so it keeps the archive copy of a stop, as every other store
+ * does, and a rerun goes on from it.
  */
 export function executeRetire(context: Context, plan: RetirePlan, out: Output = consoleOutput): void {
   const carryOut = (): void => {
     const copy = removeCopy(context.store, plan);
-    const undo: Undo = { archive: context.store.inOneCommit !== undefined, taskRemoved: false };
+    const undo: Undo = { archive: context.store.inOneCommit !== undefined && removesWorktree(plan), taskRemoved: false };
     try {
       carryOutRetire(context, plan, out, undo);
     } catch (error) {
@@ -604,12 +605,14 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
   else context.store.inOneCommit(carryOut);
 }
 
+const removesWorktree = (plan: RetirePlan): boolean => plan.actions.some((action) => action.kind === 'remove-worktree');
+
 /**
  * Removes this machine's copy of a worktree task first, while a failure still leaves everything as it was: the commit
  * must never hold the archive copy without this removal.
  */
 function removeCopy({ active }: LedgerStore, plan: RetirePlan): RemovedCopy | undefined {
-  if (active === undefined || !plan.actions.some((action) => action.kind === 'remove-worktree')) return undefined;
+  if (active === undefined || !removesWorktree(plan)) return undefined;
   try {
     return active.remove(plan.task.repo, plan.task.slug);
   } catch (error) {

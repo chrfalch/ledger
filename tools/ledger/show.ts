@@ -53,12 +53,15 @@ const isPlainName = (name: string): boolean => name !== '' && !/\.\.|[/\\]/.test
 export type ShownLedger = StoredLedger & { host?: string };
 
 /**
- * The repo `named` means, the key it is an alias of or the key itself, else the one key with that label, of the store or
- * of the clone `main`; with its old keys, so a ledger the conversion left under one is found too.
+ * The repo `named` means, the key it is an alias of or the key itself, else the one key with that label, of the store,
+ * its copies of the worktree ledgers of other machines included, or of the clone `main`; with its old keys, so a ledger
+ * the conversion left under one is found too.
  */
 function namedRepos(store: LedgerStore, named: string, main: string | undefined): string[] {
+  const { active } = store;
   const aliases = store.aliases.read();
-  const keys = [...new Set([...store.backlog.repos(), ...store.archive.repos(), ...aliases.values(), ...(main === undefined ? [] : [repoKey(main)])])];
+  const copied = active === undefined ? [] : active.hosts().filter((host) => host !== active.host).flatMap((host) => active.copiesOf(host).repos());
+  const keys = [...new Set([...store.backlog.repos(), ...store.archive.repos(), ...copied, ...aliases.values(), ...(main === undefined ? [] : [repoKey(main)])])];
   const labelled = (): string => {
     const found = keys.filter((key) => repoLabel(key) === named);
     if (found.length > 1) fail(`--repo ${named} names ${found.length} repos: ${found.join(', ')}. Pass the one you mean.`);

@@ -6,15 +6,21 @@ import { parseLedger } from './format.js';
 import { sessionLedgers } from './hooks.js';
 import { parseRecord, renderRecord, validateRecord, type Constraint, type Decision, type Question, type Step, type TaskRecord } from './record.js';
 import { loadTasks } from './registry.js';
-import type { Task } from './tasks.js';
+import { onAnotherMachine, type Task } from './tasks.js';
 import { liveTask, readLedger, today, updateLedger, type Context } from './write.js';
 
 export const TAGS = ['observed', 'confirmed', 'inferred'] as const;
 export type Tag = (typeof TAGS)[number];
 
-/** The task `name` gives, else the one whose worktree holds the folder the command runs in. Never an archive copy. */
+/**
+ * The task `name` gives, else the one whose worktree holds the folder the command runs in. Never an archive copy, and
+ * never the read-only copy of a worktree ledger of another machine: that fails before its text is read.
+ */
 function notesTask(context: Context, name: string | undefined): Task {
-  if (name !== undefined) return liveTask(context, name).task;
+  if (name !== undefined) {
+    const { task } = liveTask(context, name);
+    return task.place === 'remote' ? fail(onAnotherMachine(task)) : task;
+  }
   const { tasks, own } = sessionLedgers(context.cwd);
   return own && tasks.length === 1 ? tasks[0] : fail('No task in this folder. Pass --task <slug>.');
 }

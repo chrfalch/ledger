@@ -129,7 +129,7 @@ after it, so `--resolve` with an id read earlier can mark the wrong question.
 ### The store
 
 `tools/ledger/store.ts` defines the store as interfaces. A `LedgerStore` has
-four parts:
+five parts:
 
 - `backlog`: ledgers of tasks not started yet, named by slug.
 - `archive`: copies of retired ledgers, named `<YYYY-MM-DD>-<slug>`, with the
@@ -151,15 +151,16 @@ that is changed. Hooks read it from disk. `ledger store mirror`
 of this machine, filed under the repo key like every other ledger, so the clones
 of one repo on two machines name a task the same way. A copy is Markdown, the
 worktree ledger byte for byte, in a collection of its own: it is never read or
-written as a task record. A copy of this machine that matches no worktree task,
-and no task the registry lists active, by repo key and slug is removed when git
-confirms its worktree is gone, or when the mirror copied that worktree's ledger
-under another key, as for a copy under a folder name from before repo keys. A
-repo git cannot read keeps its copies. The host folder is `"host"` in
+written as a task record. A copy of this machine is removed when the mirror
+copied its worktree's ledger under another key or slug, as for a copy under a
+folder name from before repo keys or after a title change; the registry may
+still list the old slug. A copy that matches no worktree task, and no task the
+registry lists active, by repo key and slug is removed when git confirms its
+worktree is gone. A repo git cannot read keeps its copies. The host folder is `"host"` in
 `~/.claude/ledger-settings.json`, else the host name (`readHost` in
 `tools/ledger/settings.ts`). `findTasks` reads the copies of the other hosts as
 tasks of place `remote`: a remote task hides a backlog ledger of the same task
-(`sameTask`), and `ledger go`, park and retire refuse it. A machine skips its own
+(`sameTask`), and `ledger go`, park, retire and `ledger notes` refuse it. A machine skips its own
 host folder, as it reads its worktrees from disk. The copies are interim: D8 in
 LLP 0001 makes them unneeded.
 

@@ -1151,7 +1151,9 @@ test('after "host" changes, ledger show does not print the copy on the old host 
 
   const shown = run(a, ['show', SLUG]);
 
-  assert.doesNotMatch(`${shown.stdout}${shown.stderr}`, /read-only/);
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.equal(shown.stderr, '');
+  assert.equal(shown.stdout, readFileSync(ledger, 'utf8'), 'show did not print the worktree ledger as edited after the copy');
 });
 
 test('ledger store sync warns once for a copy of another machine whose removal was staged while it stayed on disk', (t) => {
@@ -1299,12 +1301,28 @@ test('after "host" changes, ledger show --repo from a folder outside the repo do
   appendFileSync(ledger, '- Written after the copy.\n');
   writeSettings(a, { storage: 'git', host: 'host-a-renamed' });
 
-  const outside = run(a, ['show', SLUG, '--repo', APP_KEY], { cwd: a.h });
-
-  assert.doesNotMatch(`${outside.stdout}${outside.stderr}`, /read-only/);
-  // Outside a clone, show reads no worktree ledger, so it finds none to print.
-  assert.equal(outside.stdout, '');
+  assertShowOutsideHidesOldHostCopy(a);
 });
+
+/**
+ * Asserts that ledger show --repo, from a folder outside the repo, does not print the copy that `a` left on its old host
+ * while its worktree task is there. Outside a clone, show reads no worktree ledger, so it finds none to print. As a
+ * control, the same show prints the copy once the registry names no worktree of the task.
+ */
+function assertShowOutsideHidesOldHostCopy(a: Machine): void {
+  const show = (): Ran => run(a, ['show', SLUG, '--repo', APP_KEY], { cwd: a.h });
+
+  const outside = show();
+  writeFileSync(path.join(a.h, '.claude/ledgers-git.json'), '[]');
+  const control = show();
+
+  assert.equal(outside.status, 1, outside.stdout);
+  assert.equal(outside.stdout, '');
+  assert.match(outside.stderr, /^No ledger named fix-login is in the backlog or the archive of the repo app\.\n$/);
+  assert.equal(control.status, 0, control.stderr);
+  assert.match(control.stdout.split('\n')[0], /host-a.*read-only/);
+  assert.ok(control.stdout.endsWith(headText(a, copyOf('host-a'))), control.stdout);
+}
 
 test('with a "host" that is no label, the session start still ends by its deadline when git stalls', (t) => {
   const a = machine(t, remote(t));
@@ -1541,7 +1559,7 @@ test('with a held-back list it cannot read, ledger store sync commits no copy of
   if (existsSync(heldBackFile(a))) assert.ok(Array.isArray(JSON.parse(readFileSync(heldBackFile(a), 'utf8'))), 'the mirror left the list unreadable');
 });
 
-test('ledger show --repo from a folder outside the repo finds a worktree task here through a registry entry without "main"', (t) => {
+test('after "host" changes, ledger show --repo from a folder outside the repo does not print the copy on the old host, also when the registry entry of the task has no "main"', (t) => {
   const a = machine(t, remote(t));
   setUpAs(a, 'host-a');
   const ledger = startTask(a);
@@ -1553,11 +1571,7 @@ test('ledger show --repo from a folder outside the repo finds a worktree task he
   assert.ok(entries.some((entry) => entry.slug === SLUG && entry.main !== undefined), 'the registry has no entry with "main" to remove');
   writeFileSync(registry, JSON.stringify(entries.map(({ main: _main, ...entry }) => entry)));
 
-  const outside = run(a, ['show', SLUG, '--repo', APP_KEY], { cwd: a.h });
-
-  assert.doesNotMatch(`${outside.stdout}${outside.stderr}`, /read-only/);
-  // Outside a clone, show reads no worktree ledger, so it finds none to print.
-  assert.equal(outside.stdout, '');
+  assertShowOutsideHidesOldHostCopy(a);
 });
 
 test('a reconcile that fails after one whose listing of the changed copies failed still leaves close to commit the copy left out', (t) => {
@@ -2469,6 +2483,113 @@ test('ledger store mirror removes a copy of this machine under a folder name tha
 
   assert.deepEqual(git(a.h, a.clone, 'ls-tree', '-r', '--name-only', 'HEAD', '--', 'active/').split('\n'), [copyOf('host-a')]);
   assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
+});
+
+test('ledger store mirror removes the copy of a task whose worktree ledger now has another slug, while its worktree is there', (t) => {
+  const a = machine(t, remote(t));
+  setUpAs(a, 'host-a');
+  const ledger = startTask(a);
+  ledgerOk(a, 'store', 'mirror');
+  const text = readFileSync(ledger, 'utf8');
+  const renamed = text.replace(`# Task ledger — ${SLUG}`, '# Task ledger — fix-signup');
+  assert.notEqual(renamed, text, 'the ledger has no title to rename');
+  writeFileSync(ledger, renamed);
+
+  ledgerOk(a, 'store', 'mirror');
+
+  assert.deepEqual(git(a.h, a.clone, 'ls-tree', '-r', '--name-only', 'HEAD', '--', 'active/').split('\n'), [copyOf('host-a', 'fix-signup')]);
+  assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
+});
+
+/** Where a machine kept its copies before repo keys: in the folder of the repo's folder name, which is an alias now. */
+const oldCopyOf = (host: string): string => `active/${host}/app/${SLUG}.md`;
+
+const writeAliases = (m: Machine, aliases: Record<string, string>): void => writeFileSync(path.join(m.h, '.claude/ledger-aliases-git.json'), JSON.stringify(aliases));
+
+/** twoMachines, with the copy of host-a filed under the old key app, which machine B knows as an alias of APP_KEY. */
+function copyUnderOldKey(t: TestContext) {
+  const machines = twoMachines(t);
+  const { a, b } = machines;
+  mkdirSync(path.join(a.clone, path.dirname(oldCopyOf('host-a'))), { recursive: true });
+  git(a.h, a.clone, 'mv', '--', copyOf('host-a'), oldCopyOf('host-a'));
+  git(a.h, a.clone, 'commit', '--quiet', '-m', 'A copy under the folder name of the repo, from before repo keys.');
+  ledgerOk(a, 'store', 'sync');
+  writeAliases(b, { app: APP_KEY });
+  ledgerOk(b, 'store', 'sync');
+  assert.ok(existsSync(path.join(b.clone, oldCopyOf('host-a'))), 'machine B has no copy under the old key');
+  return machines;
+}
+
+test('a copy of another machine filed under an old repo key is shown, and refused by go, in the repo of the key it is an alias of', (t) => {
+  const { b, ledger } = copyUnderOldKey(t);
+
+  const tasks = listed(b).filter(({ slug }) => slug === SLUG);
+  const shown = ledgerOk(b, 'show', SLUG);
+  const went = run(b, ['go', SLUG]);
+
+  assert.deepEqual(tasks.map(({ place, host }) => ({ place, host })), [{ place: 'remote', host: 'host-a' }]);
+  assert.match(shown.split('\n')[0], /host-a.*read-only/);
+  assert.ok(shown.endsWith(readFileSync(ledger, 'utf8')), shown);
+  assert.notEqual(went.status, 0, went.stdout);
+  assert.match(went.stderr, /host-a/);
+});
+
+test('ledger list --json gives a copy filed under an old repo key the key it is an alias of as currentRepo', (t) => {
+  const { b } = copyUnderOldKey(t);
+
+  const tasks = (JSON.parse(ledgerOk(b, 'list', '--json')) as { tasks: (Listed & { repo: string; currentRepo?: string })[] }).tasks;
+
+  assert.deepEqual(
+    tasks.filter(({ slug }) => slug === SLUG).map(({ repo, currentRepo }) => ({ repo, currentRepo })),
+    [{ repo: 'app', currentRepo: APP_KEY }],
+  );
+});
+
+test('after "host" changes, a worktree task here hides its copy on the old host that is filed under an old repo key', (t) => {
+  const a = machine(t, remote(t));
+  setUpAs(a, 'host-a');
+  const ledger = startTask(a);
+  ledgerOk(a, 'store', 'mirror');
+  mkdirSync(path.join(a.clone, path.dirname(oldCopyOf('host-a'))), { recursive: true });
+  git(a.h, a.clone, 'mv', '--', copyOf('host-a'), oldCopyOf('host-a'));
+  git(a.h, a.clone, 'commit', '--quiet', '-m', 'A copy under the folder name of the repo, from before repo keys.');
+  writeAliases(a, { app: APP_KEY });
+  appendFileSync(ledger, '- Written after the copy.\n');
+  writeSettings(a, { storage: 'git', host: 'host-a-renamed' });
+
+  const tasks = listed(a).filter(({ slug }) => slug === SLUG);
+  const shown = run(a, ['show', SLUG]);
+
+  assert.deepEqual(tasks.map(({ place }) => place), ['worktree']);
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.equal(shown.stdout, readFileSync(ledger, 'utf8'));
+});
+
+test('ledger show --repo <label> from a folder outside the repo finds a copy of another machine filed only under the key with that label', (t) => {
+  const { b, ledger } = twoMachines(t);
+
+  const shown = run(b, ['show', SLUG, '--repo', 'app'], { cwd: b.h });
+
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.match(shown.stdout.split('\n')[0], /host-a.*read-only/);
+  assert.ok(shown.stdout.endsWith(readFileSync(ledger, 'utf8')), shown.stdout);
+});
+
+test('ledger notes of a task on another machine refuses, names the host, says it is read-only, and changes nothing', (t) => {
+  const { b } = twoMachines(t);
+  const before = readFileSync(path.join(b.clone, copyOf('host-a')), 'utf8');
+
+  for (const args of [
+    ['notes', 'check', '--task', SLUG],
+    ['notes', 'note', 'A note.', '--task', SLUG],
+  ]) {
+    const ran = run(b, args);
+    assert.equal(ran.status, 1, `${args.join(' ')}: ${ran.stdout}${ran.stderr}`);
+    assert.equal(ran.stdout, '', args.join(' '));
+    assert.match(ran.stderr, /host-a.*read-only/, args.join(' '));
+  }
+  assert.equal(readFileSync(path.join(b.clone, copyOf('host-a')), 'utf8'), before);
+  assert.equal(git(b.h, b.clone, 'status', '--porcelain'), '');
 });
 
 // -------------------------------------------------------------------------------------------------- other storages

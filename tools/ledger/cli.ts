@@ -102,6 +102,7 @@ function listed(task: Task) {
   return {
     slug: task.slug,
     repo: task.repo,
+    ...(task.currentRepo === undefined ? {} : { currentRepo: task.currentRepo }),
     ...(task.main === undefined ? {} : { main: task.main }),
     status: task.status,
     place: task.place,

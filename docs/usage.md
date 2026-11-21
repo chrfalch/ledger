@@ -461,8 +461,8 @@ can read it:
   copies nothing; its changes go with the next answered turn.
   `ledger store mirror` does it by hand. A copy is removed only when git
   confirms that its worktree is gone, or when the same worktree's ledger was
-  just copied under another repo key, as for a copy under a repo folder name
-  from before repo keys. `ledger task retire` removes the copy
+  just copied under another repo key or slug, as for a copy under a repo
+  folder name from before repo keys, or after the ledger's title changed. `ledger task retire` removes the copy
   in the same commit that adds the archive copy.
 - A machine never commits the copies of another machine. A sync puts an
   edited or added file in another machine's folder back as git storage holds
@@ -470,7 +470,7 @@ can read it:
 - On another machine, `ledger list` shows the task as `active on <host>`, and
   it replaces a backlog ledger with the same repo and slug. `ledger show
   <slug>` prints one line that says the copy is read-only and names the host,
-  then the copy. `ledger go`, park and retire refuse the task there: continue
+  then the copy. `ledger go`, park, retire and `ledger notes` refuse the task there: continue
   it on its own machine.
 - So the text of your tasks in progress now leaves the machine too, to the
   private ledger repository. It goes through the same secret scan as every
@@ -478,8 +478,8 @@ can read it:
 
 | Pushed | Stays on this machine |
 |---|---|
-| Backlog ledgers, `backlog/<repo key>/<slug>.md` | Evidence, in `~/.claude/ledger-evidence/<repo key>/<name>/` |
-| Archive copies, `archive/<repo key>/<name>.md` | The task list `~/.claude/ledgers-git.json`, the repo aliases `~/.claude/ledger-aliases-git.json`, the pre-push hook, lock files and temporary files |
+| Backlog ledgers, `backlog/<repo key>/<slug>.json`, or `.md` from before task records | Evidence, in `~/.claude/ledger-evidence/<repo key>/<name>/` |
+| Archive copies, `archive/<repo key>/<name>.json`, or `.md` from before task records | The task list `~/.claude/ledgers-git.json`, the repo aliases `~/.claude/ledger-aliases-git.json`, the pre-push hook, lock files and temporary files |
 | Copies of worktree ledgers, `active/<host>/<repo key>/<slug>.md` | |
 | `.ledger-data`, `.gitignore` | |
 

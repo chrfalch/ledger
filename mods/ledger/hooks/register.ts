@@ -212,7 +212,8 @@ async function parkOther($: EngineInterface, slug: string, reason: string): Prom
   return parked.ok ? `Parked ${slug}. Parked: ${parked.parked.date} — ${parked.parked.reason}` : `Could not park ${slug}. ${parked.error}`
 }
 
-type Listed = { tasks: { slug: string; repo: string; main?: string; place?: string }[] }
+/** `currentRepo` is the key `repo` is an alias of, for a ledger still filed under an old key. */
+type Listed = { tasks: { slug: string; repo: string; currentRepo?: string; main?: string; place?: string }[] }
 
 /**
  * Whether the repo at `main` has a live task `slug`; with `remoteRepo`, the repo key of that repo, also one in a worktree
@@ -220,7 +221,8 @@ type Listed = { tasks: { slug: string; repo: string; main?: string; place?: stri
  */
 async function hasTask($: EngineInterface, slug: string, main: string, { remoteRepo }: { remoteRepo?: string } = {}): Promise<boolean | { error: string }> {
   const listed = await ledgerJson<Listed>($, ['list'])
-  const inRepo = (task: Listed['tasks'][number]): boolean => task.main === main || (remoteRepo !== undefined && task.place === 'remote' && task.repo === remoteRepo)
+  const inRepo = (task: Listed['tasks'][number]): boolean =>
+    task.main === main || (remoteRepo !== undefined && task.place === 'remote' && (task.currentRepo ?? task.repo) === remoteRepo)
   return listed.ok ? listed.tasks.some(task => task.slug === slug && inRepo(task)) : { error: listed.error }
 }
 

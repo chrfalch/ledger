@@ -63,9 +63,9 @@ function copyableText(file: string): string | undefined {
 
 /**
  * `ledger store mirror`: brings this machine's copies in git storage in line with the ledgers of its git worktrees. It
- * writes each copy that differs, under the task's repo key and slug. It removes each copy that matches no worktree task
- * and no task the registry lists active by repo key and slug, when its worktree is gone or the mirror just copied that
- * worktree's ledger under another key. It commits that, all under the clone lock; closing the store pushes it. A
+ * writes each copy that differs, under the task's repo key and slug. It removes each copy whose worktree's ledger it just
+ * copied under another repo key or slug, and each that matches no worktree task and no task the registry lists active by
+ * repo key and slug, when its worktree is gone. It commits that, all under the clone lock; closing the store pushes it. A
  * worktree ledger that is a symbolic link, or whose .claude folder is outside its worktree, is not copied. Undefined for
  * a store that keeps no copies.
  */
@@ -88,17 +88,19 @@ export function mirrorLedgers(context: Context): Mirrored | undefined {
     const written = ledgers.filter(({ repo, slug, text }) => active.write(repo, slug, text)).length;
     const kept = (repo: string, slug: string): boolean =>
       [...found, ...ledgers, ...registered].some((task) => task.repo === repo && task.slug === slug);
-    // Such as a copy written under the folder name of its repo, from before repo keys.
-    const copiedUnderAnotherKey = (copy: StoredLedger): boolean => {
+    // Such as a copy written under the folder name of its repo, from before repo keys, or under a slug its ledger has no longer.
+    const copiedUnderAnotherName = (copy: StoredLedger): boolean => {
       const { worktree } = parseLedger(copy.text).location;
-      return worktree !== undefined && ledgers.some((ledger) => ledger.repo !== copy.repo && samePath(ledger.worktree, worktree));
+      return worktree !== undefined && ledgers.some((ledger) => (ledger.repo !== copy.repo || ledger.slug !== copy.name) && samePath(ledger.worktree, worktree));
     };
     const mains = [...(here === undefined ? [] : [here]), ...[...entries, ...found].flatMap(({ main }) => main ?? [])];
     const own = active.copiesOf(host);
     const stale = own
       .repos()
       .flatMap((repo) => own.list(repo))
-      .filter((copy) => !kept(copy.repo, copy.name) && (copiedUnderAnotherKey(copy) || worktreeGone(copy, (repo) => onlyMainIn(mains, repo))));
+      // A copy whose worktree's ledger was just copied under another name goes even when the registry lists it: the
+      // registry still has the name the ledger had at the last command.
+      .filter((copy) => copiedUnderAnotherName(copy) || (!kept(copy.repo, copy.name) && worktreeGone(copy, (repo) => onlyMainIn(mains, repo))));
     const removed = stale.filter((copy) => active.remove(copy.repo, copy.name) !== undefined).length;
     return { written, removed };
   });

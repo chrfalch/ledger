@@ -339,6 +339,27 @@ test('task, park, parent add and retire under git storage each commit in the clo
   assert.equal(existsSync(a.status), false);
 });
 
+test('a retire under git storage that cannot delete the backlog ledger keeps its archive copy, says so, and a retry finishes', { skip: process.getuid?.() === 0 }, (t) => {
+  const a = machine(t, remote(t));
+  setUp(a);
+  ledgerOk(a, 'task', 'new', 'idea', '--goal', 'An idea.');
+  const backlog = path.join(a.clone, 'backlog', APP);
+  const archived = path.join(a.clone, 'archive', APP, `${today()}-idea.json`);
+  chmodSync(backlog, 0o555);
+  // A retire that goes through removes the folder with its last ledger.
+  t.after(() => existsSync(backlog) && chmodSync(backlog, 0o755));
+
+  const retire = run(a, ['task', 'retire', 'idea']);
+  chmodSync(backlog, 0o755);
+
+  assert.match(failed(retire), /Could not delete the backlog ledger .* Its archive copy is written\./);
+  assert.ok(existsSync(archived), 'the failed retire removed its archive copy');
+  assert.ok(existsSync(path.join(backlog, 'idea.json')), 'the backlog ledger is gone');
+  ledgerOk(a, 'task', 'retire', 'idea');
+  assert.equal(existsSync(path.join(backlog, 'idea.json')), false, 'the retry left the backlog ledger');
+  assert.ok(existsSync(archived), 'the retry left no archive copy');
+});
+
 test('a second machine sees the ledgers after ledger store sync, and again after its session-start hook pulls', (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
