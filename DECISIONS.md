@@ -1432,9 +1432,10 @@ is: agents write evidence there, and retire archives it. See LLP 0001, D8.
 the file. Until it runs, the session start says how many are left.
 
 **`ledger notes step` is interim.** The slash commands must set a step's status
-without an edit, and the `stage` command of LLP 0001, D30 is not built yet.
+without an edit. `ledger notes stage` of LLP 0001, D30 tracks the task's stage,
+not the status of one plan step.
 `ledger notes step <n> [--status <status>] [--note <text>]` sets the status, the note, or both,
-of one plan step until `stage` replaces it.
+of one plan step until stages replace the plan's steps.
 
 **It replaces the active copies.** The copies of 2026-11-19 to 2026-11-21 are
 gone: `ledger store mirror`, its runs at each answered turn and at session
