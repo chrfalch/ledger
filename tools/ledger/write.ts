@@ -638,7 +638,8 @@ function addChildTask(context: Context, tasks: Task[], parent: Linked, childRef:
 /**
  * The orders to write so `child` comes after every other child of `parent`: each live sibling without an order, in the
  * order of its line, gets the next number after the highest order, and `child` the one after those. A sibling whose own
- * ledger names another parent is left out: its order places it among that parent's children.
+ * ledger names another parent is left out: its order places it among that parent's children. A sibling on another
+ * machine cannot be written here, so it stays without an order.
  */
 function numberSiblings(tasks: Task[], parent: Linked, child: Task): [Task, number][] {
   const siblings = listedChildren(parent.task, parent.ref.main, tasks).flatMap((listed) =>
@@ -646,7 +647,11 @@ function numberSiblings(tasks: Task[], parent: Linked, child: Task): [Task, numb
   );
   const highest = Math.max(0, ...siblings.flatMap((task) => task.ledger.location.order ?? []));
   const unordered = siblings.filter(
-    (task) => task.place !== 'archive' && task.ledger.location.order === undefined && findSection(task.ledger.sections, 'Location') !== undefined,
+    (task) =>
+      task.place !== 'archive' &&
+      task.place !== 'remote' &&
+      task.ledger.location.order === undefined &&
+      findSection(task.ledger.sections, 'Location') !== undefined,
   );
   return [...unordered, child].map((task, index) => [task, highest + index + 1]);
 }

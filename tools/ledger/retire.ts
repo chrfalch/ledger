@@ -151,6 +151,12 @@ function parentActions({ task, ref, tasks }: RetireFacts, warnings: string[]): {
     return { actions: [], parentMain: parentRef.main };
   }
   const [parent] = live;
+  if (parent.place === 'remote') {
+    warnings.push(
+      `the parent ${shown} is in a worktree on ${parent.host}, and this machine has only a read-only copy of its ledger, so no ## Children line is marked and the report is not copied. Do both on ${parent.host}.`,
+    );
+    return { actions: [], parentMain: parentRef.main };
+  }
   const childName = linkFrom(parentRef.main, ref);
   const actions: RetireAction[] = [];
   const line = parent.ledger.children.find((child) => sameTask(lineRef(child, parentRef.main), ref, task.place));

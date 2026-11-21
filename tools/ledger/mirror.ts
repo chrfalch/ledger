@@ -1,5 +1,6 @@
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
+import { withoutClaim } from './edit.js';
 import { readTimedText } from './files.js';
 import { parseLedger } from './format.js';
 import { mainCheckout, worktrees, type Worktree } from './git.js';
@@ -82,7 +83,10 @@ export function mirrorLedgers(context: Context): Mirrored | undefined {
     const ledgers = found.flatMap((task) => {
       // One read gives both the slug and the text, so the copy is never named after another text than it holds.
       const text = copyableText(task.file);
-      return text === undefined ? [] : [{ repo: task.repo, slug: parseLedger(text).slug ?? task.name, text, worktree: path.dirname(path.dirname(task.file)) }];
+      // A claim changes at every touch and is stale on another machine: copied, it would make a commit each time.
+      return text === undefined
+        ? []
+        : [{ repo: task.repo, slug: parseLedger(text).slug ?? task.name, text: withoutClaim(text), worktree: path.dirname(path.dirname(task.file)) }];
     });
     discoveredForTests?.();
     const written = ledgers.filter(({ repo, slug, text }) => active.write(repo, slug, text)).length;

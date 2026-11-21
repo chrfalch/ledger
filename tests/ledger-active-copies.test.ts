@@ -18,7 +18,7 @@ import type { LedgerStore } from '../tools/ledger/store.js';
 import { allowRemoteForTests, syncLedgers } from '../tools/ledger/sync.js';
 import type { Context } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
-import { asCli, git, home, LEDGER_BIN, ledgerText, noSqlite, ok, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { asCli, git, home, LEDGER_BIN, ledgerText, noSqlite, ok, worktreeTask, type Fields, type Ran } from './ledger-core-fixtures.js';
 import {
   answerGh,
   APP,
@@ -931,6 +931,105 @@ test('ledger tree remove of a child on another machine refuses before it changes
   assert.match(removed, /host-a/);
   assert.match(removed, /read-only/);
   assert.equal(readFileSync(umbrella, 'utf8'), before, 'the parent lost its child line');
+});
+
+/** Writes a backlog ledger as Markdown from before task records, which the store still reads, to the clone of `m`. */
+function writeBacklogMarkdown(m: Machine, slug: string, fields: Omit<Fields, 'slug'>): void {
+  const file = path.join(m.clone, 'backlog', APP, `${slug}.md`);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, ledgerText({ slug, ...fields }));
+}
+
+test('ledger tree add numbers the local siblings without an order and leaves a sibling on another machine as it is', (t) => {
+  const bare = remote(t);
+  const a = machine(t, bare);
+  setUpAs(a, 'host-a');
+  const ledger = startTask(a);
+  writeFileSync(ledger, readFileSync(ledger, 'utf8').replace('## Location\n', '## Location\n- parent: umbrella\n'));
+  ledgerOk(a, 'store', 'mirror');
+  ledgerOk(a, 'store', 'sync');
+  const b = machine(t, bare);
+  answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
+  setUpAs(b, 'host-b');
+  ledgerOk(b, 'store', 'sync');
+  writeBacklogMarkdown(b, 'umbrella', { goal: 'The parent on host B.', children: ['- sib', `- ${SLUG}`] });
+  writeBacklogMarkdown(b, 'sib', { goal: 'A sibling on host B.', parent: 'umbrella' });
+  ledgerOk(b, 'task', 'new', 'kid', '--goal', 'The new child on host B.');
+  const copy = path.join(b.clone, copyOf('host-a'));
+  const before = readFileSync(copy, 'utf8');
+
+  ledgerOk(b, 'tree', 'add', 'umbrella', 'kid');
+
+  assert.match(ledgerOk(b, 'show', 'sib'), /^- order: 1$/m);
+  assert.match(ledgerOk(b, 'show', 'kid'), /^- order: 2$/m);
+  assert.equal(readFileSync(copy, 'utf8'), before, 'the copy of the task on host A changed');
+});
+
+test('ledger task claim of a task on another machine names the host and says it is read-only, not that it is retired', (t) => {
+  const { b } = twoMachines(t);
+
+  const claimed = failed(run(b, ['task', 'claim', SLUG, '--session', 's1']));
+
+  assert.match(claimed, /host-a/);
+  assert.match(claimed, /read-only/);
+  assert.doesNotMatch(claimed, /retired/);
+});
+
+const withoutClaimLines = (text: string): string =>
+  text
+    .split('\n')
+    .filter((line) => !line.startsWith('- claim:'))
+    .join('\n');
+
+test('ledger store mirror copies a worktree ledger without its claim line', (t) => {
+  const a = machine(t, remote(t));
+  setUpAs(a, 'host-a');
+  const ledger = startTask(a);
+  ledgerOk(a, 'task', 'claim', SLUG, '--session', 's1');
+  assert.equal(linesWith(readFileSync(ledger, 'utf8'), '- claim:').length, 1, 'the worktree ledger has no claim line');
+
+  ledgerOk(a, 'store', 'mirror');
+
+  assert.equal(headText(a, copyOf('host-a')), withoutClaimLines(readFileSync(ledger, 'utf8')));
+});
+
+test('ledger store mirror writes and commits nothing when only the claim line of a worktree ledger changed', (t) => {
+  const a = machine(t, remote(t));
+  setUpAs(a, 'host-a');
+  const ledger = startTask(a);
+  ledgerOk(a, 'task', 'claim', SLUG, '--session', 's1');
+  ledgerOk(a, 'store', 'mirror');
+  const claimed = readFileSync(ledger, 'utf8');
+  ledgerOk(a, 'task', 'claim', SLUG, '--session', 's2', '--take-over');
+  const taken = readFileSync(ledger, 'utf8');
+  assert.notEqual(taken, claimed, 'the take-over changed no claim line');
+  assert.equal(withoutClaimLines(taken), withoutClaimLines(claimed), 'the take-over changed more than the claim line');
+  const head = git(a.h, a.clone, 'rev-parse', 'HEAD');
+
+  const mirrored = ledgerOk(a, 'store', 'mirror');
+
+  assert.match(mirrored, /Nothing to copy/);
+  assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), head);
+  assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
+});
+
+test('ledger task retire of a child whose parent is on another machine warns with the host, names no copy in the clone, and leaves the copy as it is', (t) => {
+  const { a, b, ledger } = twoMachines(t);
+  appendFileSync(ledger, '\n## Children\n- kid\n');
+  ledgerOk(a, 'store', 'mirror');
+  ledgerOk(a, 'store', 'sync');
+  ledgerOk(b, 'store', 'sync');
+  writeBacklogMarkdown(b, 'kid', { goal: 'A child on host B.', parent: SLUG, report: ['- Done on host B.'] });
+  const copy = path.join(b.clone, copyOf('host-a'));
+  const before = readFileSync(copy, 'utf8');
+  assert.match(before, /^- kid$/m, 'the copy does not list the child');
+
+  const retired = run(b, ['task', 'retire', 'kid']);
+
+  const said = ok(retired) + retired.stderr;
+  assert.match(said, /host-a/);
+  assert.doesNotMatch(said, /active\/host-a/, 'the output names the copy in the clone');
+  assert.equal(readFileSync(copy, 'utf8'), before, 'the copy of the parent changed');
 });
 
 test('ledger store mirror keeps the copy of a moved worktree whose ledger cannot be read, however often it runs', (t) => {
