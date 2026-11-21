@@ -343,7 +343,7 @@ Then it does these steps:
 3. Marks the task retired in its parent's ledger and copies the child's
    report there.
 4. Deletes the merged branch and the worktree's Xcode build folders.
-5. Removes the active record. It goes last, so a retire that stops early
+5. Removes the active record. It comes after every other change to the task, so a retire that stops early
    leaves the task for a plain rerun to find and finish.
 6. Updates the task list.
 
