@@ -98,11 +98,17 @@ ledger where it lives today: the backlog ledger through
 it with `validateRecord` and writes `renderRecord` of it. When the new item or
 the record is wrong, the command exits 1 and writes nothing.
 
+Every write also shortens the report of each step whose status is `reviewed`
+or `done` to one line (D31 in LLP 0001). That line is the report's first
+non-empty line, trimmed and cut to 160 characters. The reports of other steps stay as they are.
+
 `ledger notes check` reads the ledger and changes nothing. It reports a
 record that does not read back the same from its Markdown, an empty goal, an
 open question that blocks a step not in the plan, and a step report for a step
-not in the plan. Every write runs the same rules on the record it wrote and
-prints what they find as warnings, with exit 0.
+not in the plan. It also reports a ledger over `LEDGER_SIZE_LIMIT`, 16,000
+characters of `renderRecord`, and names its three largest sections. Every
+write runs the same rules on the record it wrote and prints what they find as
+warnings, with exit 0.
 
 A question's id is its place in the list, from 1, and is not stored. A
 question that is removed or moved by hand changes the ids of the questions

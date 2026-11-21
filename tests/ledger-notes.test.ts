@@ -282,6 +282,94 @@ test('check reports a ledger whose record would not read back the same, and ever
   assert.equal(read(), before);
 });
 
+const STEP_REPORTS_PLACEHOLDER = '<paste the structured report for each step; replace with one line once the step is reviewed>';
+
+/** The fixture ledger with steps 1 and 2 at `statuses` and `reports` under ## Subagent reports. */
+function withReports(t: TestContext, statuses: [string, string], reports: string[]) {
+  const s = withWorktree(t);
+  writeFileSync(
+    s.file,
+    s
+      .read()
+      .replace('| 1 | write the tests | done |', `| 1 | write the tests | ${statuses[0]} |`)
+      .replace('| 2 | implement | todo |', `| 2 | implement | ${statuses[1]} |`)
+      .replace(STEP_REPORTS_PLACEHOLDER, reports.join('\n')),
+  );
+  return s;
+}
+
+const MULTI_LINE_REPORTS = ['- step 1: Ten tests written.', '  All ten fail as expected.', '', '  Evidence in red.txt.', '- step 2: Implemented.', '  Nine pass.'];
+
+test('a write shortens the report of a reviewed step to its first line, and keeps the report of a todo step', (t) => {
+  const { notes, read } = withReports(t, ['reviewed', 'todo'], MULTI_LINE_REPORTS);
+  passed(notes('note', 'x'));
+  assert.deepEqual(linesOf(read(), /^## Subagent reports$/), ['- step 1: Ten tests written.', '- step 2: Implemented.', '  Nine pass.']);
+  assert.equal(passed(notes('check')), 'ok');
+});
+
+test('a write shortens the report of a done step, in any case, and keeps the report of a green step', (t) => {
+  const { notes, read } = withReports(t, [' Done ', 'green'], MULTI_LINE_REPORTS);
+  passed(notes('next', 'Review step 2.'));
+  assert.deepEqual(linesOf(read(), /^## Subagent reports$/), ['- step 1: Ten tests written.', '- step 2: Implemented.', '  Nine pass.']);
+});
+
+test('a shortened report whose first line is over 160 characters is cut to 160, ending in an ellipsis', (t) => {
+  const long = 'a'.repeat(300);
+  const { notes, read } = withReports(t, ['reviewed', 'todo'], [`- step 1: ${long}`, '  more']);
+  passed(notes('note', 'x'));
+  const [report] = linesOf(read(), /^## Subagent reports$/);
+  const text = report.slice('- step 1: '.length);
+  assert.equal(text.length, 160);
+  assert.equal(text, `${'a'.repeat(159)}…`);
+});
+
+/** The fixture ledger made over 16,000 characters by its notes, decisions and constraints, largest first. */
+function withLargeLedger(t: TestContext) {
+  const s = withWorktree(t);
+  const many = (count: number, line: (index: number) => string): string => Array.from({ length: count }, (_, index) => line(index)).join('\n');
+  writeFileSync(
+    s.file,
+    s
+      .read()
+      .replace('- Keep the old format — because real ledgers use it [observed]', many(60, (i) => `- Decision ${i} ${'d'.repeat(60)} — because it helps [observed]`))
+      .replace('- <constraint> — found in <file/report> [observed]', many(30, (i) => `- Constraint ${i} ${'c'.repeat(60)} — found in a.ts [observed]`))
+      .concat('## Notes\n', many(100, (i) => `Note ${i} ${'n'.repeat(80)}`), '\n'),
+  );
+  return s;
+}
+
+/** The `## ` sections of `markdown` with their character counts, largest first. */
+function sectionSizes(markdown: string): [string, number][] {
+  const sections = markdown.split(/\n(?=## )/).filter((part) => part.startsWith('## '));
+  return sections.map((part): [string, number] => [part.split('\n')[0].slice(3).replace(/ \(.*\)$/, ''), part.length]).sort((a, b) => b[1] - a[1]);
+}
+
+const SIZE_PROBLEM = /^The ledger is [\d,]+ characters, over the limit of 16,000\. Shorten the largest sections: Notes \([\d,]+\), Decisions \([\d,]+\), Constraints discovered \([\d,]+\)\.$/;
+
+test('check fails on a ledger over 16,000 characters and names its three largest sections, and changes nothing', (t) => {
+  const { notes, read } = withLargeLedger(t);
+  const before = read();
+  const problems = refused(notes('check')).trim().split('\n');
+  assert.equal(problems.length, 1, problems.join('\n'));
+  assert.match(problems[0], SIZE_PROBLEM);
+  assert.equal(read(), before);
+});
+
+test('a write to a ledger over 16,000 characters succeeds and warns of its size, with the counts of the written ledger', (t) => {
+  const { notes, read } = withLargeLedger(t);
+  const ran = notes('note', 'One more.');
+  passed(ran);
+  const written = read();
+  assert.match(written, /^One more\.$/m);
+  const top = sectionSizes(written)
+    .slice(0, 3)
+    .map(([name, size]) => `${name} (${size.toLocaleString('en-US')})`)
+    .join(', ');
+  const expected = `The ledger is ${written.length.toLocaleString('en-US')} characters, over the limit of 16,000. Shorten the largest sections: ${top}.`;
+  assert.match(expected, SIZE_PROBLEM);
+  assert.equal(ran.stderr.trim(), `warning: ${expected}`);
+});
+
 test('writes to a worktree ledger at the same time all land, as each holds the lock on the ledger file', async (t) => {
   const { worktree, env, read } = withWorktree(t);
   const runs = await Promise.all(
