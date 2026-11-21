@@ -114,11 +114,12 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
     return [file, recordJson(parseRecord(text), keptCreated(path.join(clone, file)))];
   };
   const host = validHost(paths.home);
+  const hosts = ownHosts(paths.home);
   const commit = (expected: WrittenLedger[] = []): void => {
     if (!wrote && expected.length === 0) return;
     const texts = new Map(expected.map(keptRecord));
     const made = withCloneLock(clone, () => {
-      const made = commitChanges(clone, { host, own: written });
+      const made = commitChanges(clone, { host, ownHosts: hosts, own: written });
       checkCommitted(clone, [...written], texts);
       return made;
     });
@@ -142,7 +143,7 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
   };
   return {
     host,
-    ownHosts: ownHosts(paths.home),
+    ownHosts: hosts,
     backlog: { ...writable('backlog'), toRecord: locked('backlog', toRecordOf(files.backlog), (converted) => converted) },
     active: { ...writable('active'), repos: () => files.active.repos().filter(isRepoFolder), byWorktree: files.active.byWorktree },
     archive: {

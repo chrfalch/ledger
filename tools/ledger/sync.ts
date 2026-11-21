@@ -46,7 +46,7 @@ import { gh } from './git.js';
 import { withLockIfFree } from './lock.js';
 import { realPath, type LedgerPaths } from './paths.js';
 import { ADDED_LINES_LOG, CHANGED_PATHS_LOG, MESSAGES_LOG, messageLocations, secretLocations } from './secret-scan.js';
-import { readStorage, validHost } from './settings.js';
+import { ownHosts, readStorage, validHost } from './settings.js';
 import { plural } from './views.js';
 
 type Line = (text: string) => void;
@@ -352,7 +352,7 @@ export function syncLedgers(paths: LedgerPaths, line: Line, { daily = false, qui
     const remote = checkedRemote(clone);
     checkPrivate(paths, clone, remote.repo, daily);
     repairHook(clone);
-    syncClone({ clone, where: paths.tilde(clone), remote, line, host: validHost(paths.home), warn: quiet ? () => {} : undefined });
+    syncClone({ clone, where: paths.tilde(clone), remote, line, host: validHost(paths.home), ownHosts: ownHosts(paths.home), warn: quiet ? () => {} : undefined });
     clearStatus(paths, number);
   } catch (error) {
     if (error instanceof Failure) recordProblem(paths, error instanceof SyncProblem ? error : new SyncProblem('git', error.message), number);
@@ -390,10 +390,10 @@ export function syncInBackground(paths: LedgerPaths): void {
 }
 
 /**
- * `host` is this machine's host label: a sync commits no change of an active record that names another host. `warn`
- * says that such a change was put back; on stderr by default.
+ * `host` is this machine's host label, and `ownHosts` the labels it stamped before: a sync commits no change of an
+ * active record that names another host. `warn` says that such a change was put back; on stderr by default.
  */
-type Sync = { clone: string; where: string; remote: Remote; line: Line; host: string | undefined; warn?: Line };
+type Sync = { clone: string; where: string; remote: Remote; line: Line; host: string | undefined; ownHosts: ReadonlySet<string>; warn?: Line };
 
 /** Two syncs that start together push the same commits; one more try covers a remote that moved in between. */
 const PUSH_TRIES = 3;
@@ -408,13 +408,13 @@ function syncClone(sync: Sync): void {
   const branch = branchOf(clone);
   const upstream = `refs/remotes/origin/${branch}`;
   // Before the fetch, so the ledgers are committed here even when the remote cannot be reached.
-  withCloneLock(clone, () => commitChanges(clone, { host, warn }));
+  withCloneLock(clone, () => commitChanges(clone, { host, ownHosts: sync.ownHosts, warn }));
   for (let tries = 1; ; tries++) {
     // The fetch moves refs of the clone, so it holds the lock, and no other fetch moves them before the commit it found
     // is read. Only the push, which changes nothing here, runs outside it.
     const { base, head, count } = withCloneLock(clone, () => {
       const base = fetch(sync, upstream);
-      commitChanges(clone, { host, warn });
+      commitChanges(clone, { host, ownHosts: sync.ownHosts, warn });
       rebaseOnto(sync, { upstream, incoming: base });
       return { base, ...checkedOutgoing(sync, base, branch) };
     });
@@ -584,7 +584,7 @@ export function pullForSession(paths: LedgerPaths, deadline: number): void {
     const { clone } = clonePaths(paths);
     if (cloneProblem(clone, deadline) !== undefined) return;
     number = takeSyncNumber(paths, { waitMs: left() });
-    const sync: Sync = { clone, where: paths.tilde(clone), remote: checkedRemote(clone, deadline), line: () => {}, host: validHost(paths.home) };
+    const sync: Sync = { clone, where: paths.tilde(clone), remote: checkedRemote(clone, deadline), line: () => {}, host: validHost(paths.home), ownHosts: ownHosts(paths.home) };
     withCloneLock(
       clone,
       () => {
@@ -593,7 +593,7 @@ export function pullForSession(paths: LedgerPaths, deadline: number): void {
         installHook(clone, deadline);
         installGitignore(clone);
         const incoming = fetch(sync, upstream, deadline);
-        commitChanges(clone, { deadline, host: sync.host });
+        commitChanges(clone, { deadline, host: sync.host, ownHosts: sync.ownHosts });
         rebaseOnto(sync, { upstream, incoming }, deadline);
       },
       { waitMs: left() },

@@ -331,10 +331,12 @@ export type CommitOptions = {
   message?: string;
   deadline?: number;
   /**
-   * This machine's host label. A changed active record that names another host is that machine's to change, so it is
-   * put back as HEAD has it, never committed; without a host label, so is one that names any host.
+   * This machine's host label. A changed active record that HEAD has naming another host is that machine's to change,
+   * so it is put back as HEAD has it, never committed; without a host label, so is one that names any host.
    */
   host?: string;
+  /** The labels this machine stamped before "host" changed: a record that names one is this machine's too. */
+  ownHosts?: ReadonlySet<string>;
   /** Clone paths this command wrote itself, such as the removal of a record a forced retire made: committed whatever host they name. */
   own?: ReadonlySet<string>;
   /** Says that a record of another machine was put back; on stderr by default. */
@@ -345,12 +347,12 @@ export type CommitOptions = {
  * Commits the changes of the clone's working tree; true when it made a commit. Unfinished work, or any changed path
  * outside the allowlist, staged or not, stops it with nothing committed. Call it under the clone lock.
  */
-export function commitChanges(clone: string, { message = 'Update ledgers', deadline, host, own = new Set(), warn = (text) => console.error(`warning: ${text}`) }: CommitOptions = {}): boolean {
+export function commitChanges(clone: string, { message = 'Update ledgers', deadline, host, ownHosts = new Set(), own = new Set(), warn = (text) => console.error(`warning: ${text}`) }: CommitOptions = {}): boolean {
   let changed = checkedChanges(clone, deadline);
   // unique: a staged removal of a file that is still on disk is two entries.
   const theirs = unique(changed).flatMap((file) => {
-    const owner = own.has(file) ? undefined : recordHost(clone, file, deadline);
-    return owner === undefined || owner === host ? [] : [{ file, owner }];
+    const owner = own.has(file) ? undefined : recordOwner(clone, file, deadline);
+    return owner === undefined || owner === host || (host !== undefined && ownHosts.has(owner)) ? [] : [{ file, owner }];
   });
   if (theirs.length > 0) {
     restoreFromHead(clone, theirs.map(({ file }) => file), deadline);
@@ -382,15 +384,16 @@ function checkedChanges(clone: string, deadline?: number): string[] {
   return changed;
 }
 
-/** The host an active record at `file`, a clone path, names: as it is on disk, else as HEAD has it; undefined for none, or for no active record. */
-function recordHost(clone: string, file: string, deadline?: number): string | undefined {
+/**
+ * The host whose active record is at `file`, a clone path: the one the record names as HEAD has it, so no edit on disk
+ * makes a record of another machine this one's; as it is on disk only for a record HEAD lacks. Undefined for none, for
+ * a record that is no JSON, or for no active record.
+ */
+export function recordOwner(clone: string, file: string, deadline?: number): string | undefined {
   if (!/^active\/[^/]+\/[^/]+\.json$/.test(file)) return undefined;
   const onDisk = path.join(clone, file);
-  const inHead = (): string | undefined => {
-    const shown = cloneGit(clone, ['show', `HEAD:${file}`], { deadline });
-    return shown.ok ? shown.stdout : undefined;
-  };
-  const text = isReadableFile(onDisk) ? readText(onDisk) : inHead();
+  const committed = cloneGit(clone, ['show', `HEAD:${file}`], { deadline });
+  const text = committed.ok ? committed.stdout : isReadableFile(onDisk) ? readText(onDisk) : undefined;
   try {
     return text === undefined ? undefined : readRecordJson(text, file).host;
   } catch {
