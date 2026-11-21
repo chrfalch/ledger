@@ -87,6 +87,14 @@ const mergeHookEvent: MergeChild = (event, liveEntries, policyEntries) => {
   return [...kept, ...policyEntries];
 };
 
+const mergePermission: MergeChild = (key, liveRules, policyRules) => {
+  if (key !== 'allow' || !Array.isArray(liveRules) || !Array.isArray(policyRules)) return policyRules;
+  const added = policyRules.filter((rule) => !liveRules.some((liveRule) => isDeepStrictEqual(liveRule, rule)));
+  return [...liveRules, ...added];
+};
+
+const MERGE_CHILD: Record<string, MergeChild> = { hooks: mergeHookEvent, permissions: mergePermission };
+
 function mergeKey(
   liveValue: unknown,
   policyValue: unknown,
@@ -128,7 +136,7 @@ export function applyJson(
     const [newValue, subChanged, subKept] = mergeKey(
       Object.hasOwn(live, key) ? live[key] : undefined,
       value,
-      key === 'hooks' ? mergeHookEvent : takePolicy,
+      Object.hasOwn(MERGE_CHILD, key) ? MERGE_CHILD[key] : takePolicy,
     );
     merged.set(key, newValue);
     changed.push(...subChanged.map((subkey) => (subkey === '' ? key : `${key}.${subkey}`)));

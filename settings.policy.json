@@ -89,5 +89,26 @@
     "sessionUrl": false
   },
   "tui": "fullscreen",
-  "skipWorkflowUsageWarning": true
+  "skipWorkflowUsageWarning": true,
+  "permissions": {
+    "allow": [
+      "Bash(ledger notes:*)",
+      "Bash(ledger go:*)",
+      "Bash(ledger list:*)",
+      "Bash(ledger show:*)",
+      "Bash(ledger task new:*)",
+      "Bash(ledger task go:*)",
+      "Bash(ledger task claim:*)",
+      "Bash(ledger task touch:*)",
+      "Bash(ledger task release:*)",
+      "Bash(ledger task park:*)",
+      "Bash(ledger task unpark:*)",
+      "Bash(ledger task show:*)",
+      "Bash(ledger task list:*)",
+      "Bash(ledger task archive:*)",
+      "Bash(ledger task gate:*)",
+      "Bash(ledger tree show:*)",
+      "Bash(ledger tree next:*)"
+    ]
+  }
 }

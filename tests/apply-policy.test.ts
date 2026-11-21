@@ -60,7 +60,7 @@ test('policy merge preserves foreign hooks and local keys while applying owned k
   assert.deepEqual(hookEntries(out, 'SessionStart'), hookEntries(policy, 'SessionStart'), 'SessionStart not applied');
   assert.deepEqual(hookEntries(out, 'PreCompact'), hookEntries(policy, 'PreCompact'), 'PreCompact not added');
   assert.equal(out.model, 'sonnet', 'local model lost');
-  assert.deepEqual(out.permissions, LIVE.permissions, 'local permissions lost');
+  assert.deepEqual(out.permissions, { allow: [...LIVE.permissions.allow, ...policyAllow()] }, 'local permissions lost');
   assert.equal(out.tui, 'fullscreen', 'tui not applied');
   assert.ok(existsSync(path.join(home, 'backup/.claude/settings.json')), 'no backup written');
   assert.ok(policyReport(result.stdout).changed.includes('hooks.PreToolUse'), 'owned gates not reported as applied');
@@ -265,6 +265,64 @@ test('JSON dry run reports changes without writing or backing up', (t) => {
   assert.deepEqual(applyJson(policy, target, backupDirectory, true), [['changed'], []]);
   assert.equal(readFileSync(target, 'utf8'), '{"changed":1}\n');
   assert.equal(existsSync(backupDirectory), false);
+});
+
+function policyAllow(): unknown[] {
+  const permissions = readSettings(POLICY).permissions;
+  assert.ok(typeof permissions === 'object' && permissions !== null && !Array.isArray(permissions), 'policy permissions missing');
+  const allow: unknown = (permissions as Record<string, unknown>).allow;
+  assert.ok(Array.isArray(allow) && allow.length > 0, 'policy permissions.allow missing');
+  return allow;
+}
+
+const OWN_PERMISSIONS = {
+  allow: ['Bash(git status)', 'Bash(ledger notes:*)'],
+  deny: ['Bash(rm:*)'],
+  defaultMode: 'acceptEdits',
+};
+
+function applyToOwnPermissions(t: TestContext): string {
+  const directory = temporaryDirectory(t);
+  const target = path.join(directory, 'settings.json');
+  writeFileSync(target, JSON.stringify({ permissions: OWN_PERMISSIONS }, null, 2));
+  applyJson(POLICY, target, path.join(directory, 'backup'));
+  return target;
+}
+
+test('absent settings get the policy allow rules', (t) => {
+  const target = path.join(temporaryDirectory(t), 'settings.json');
+  applyJson(POLICY, target, path.join(path.dirname(target), 'backup'));
+  assert.deepEqual(readSettings(target).permissions, { allow: policyAllow() });
+});
+
+test('policy allow rules follow your own, once each, and your other permissions stay', (t) => {
+  const permissions = readSettings(applyToOwnPermissions(t)).permissions;
+  const added = policyAllow().filter((rule) => !OWN_PERMISSIONS.allow.includes(rule as string));
+  assert.deepEqual(permissions, { ...OWN_PERMISSIONS, allow: [...OWN_PERMISSIONS.allow, ...added] });
+});
+
+test('applying allow rules a second time changes nothing and keeps your own rules', (t) => {
+  const target = applyToOwnPermissions(t);
+  const before = readFileSync(target, 'utf8');
+  const [changed] = applyJson(POLICY, target, path.join(path.dirname(target), 'backup2'));
+  assert.deepEqual(changed, []);
+  assert.equal(readFileSync(target, 'utf8'), before);
+  const permissions = readSettings(target).permissions as Record<string, unknown>;
+  assert.deepEqual((permissions.allow as unknown[]).slice(0, 2), OWN_PERMISSIONS.allow);
+});
+
+// An exact list, so a new rule is a deliberate choice: retire, worktrees, store, tree changes and deploy must keep asking.
+test('policy allow rules are exactly the everyday ledger commands', () => {
+  const task = ['new', 'go', 'claim', 'touch', 'release', 'park', 'unpark', 'show', 'list', 'archive', 'gate'];
+  assert.deepEqual(policyAllow(), [
+    'Bash(ledger notes:*)',
+    'Bash(ledger go:*)',
+    'Bash(ledger list:*)',
+    'Bash(ledger show:*)',
+    ...task.map((command) => `Bash(ledger task ${command}:*)`),
+    'Bash(ledger tree show:*)',
+    'Bash(ledger tree next:*)',
+  ]);
 });
 
 test('TOML editing is line based, normalizes newlines, and preserves local tables', (t) => {
