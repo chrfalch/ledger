@@ -1,5 +1,6 @@
 import path from 'node:path';
-import { addChild, addDecision, addLocationBullet, fillLedger, markStarted, park, removeChildren, removeLine, unpark, withChildMain, withDesignRefsBullet } from './edit.js';
+import { refuseIfHeld } from './claims.js';
+import { addChild, addDecision, addLocationBullet, fillLedger, markStarted, park, removeChildren, removeLine, unpark, withChildMain, withDesignRefsBullet, withoutClaim } from './edit.js';
 import { fail } from './failure.js';
 import { exists, isFolder, readText, writeAtomic } from './files.js';
 import { isNewSlug, isReadableSlug, parseLedger, type Child, type ChildMark, type Location, type TaskRef } from './format.js';
@@ -303,9 +304,10 @@ const liveLedger = (tasks: Task[], ref: Ref): Task | undefined => {
  * Starts a task, as /ledger:go does: a parent with a child still in the backlog starts that child instead, a backlog
  * task gets its worktree, a task with a worktree is only gone to. Then its parked marker is removed and its parent marks
  * it started; a parent that cannot be marked is a warning, not a failure. A parent in the backlog with no child left
- * there fails, as there is nothing to start. The slug names a ledger that exists, so the reading rule applies.
+ * there fails, as there is nothing to start. The slug names a ledger that exists, so the reading rule applies. A task with
+ * a worktree that a session other than `session` holds live is refused, unless `takeOver`.
  */
-export function goTask(context: Context, slug: string, repo: string | undefined): GoResult {
+export function goTask(context: Context, slug: string, repo: string | undefined, { session, takeOver = false }: { session?: string; takeOver?: boolean } = {}): GoResult {
   const { cwd } = context;
   if (!isReadableSlug(slug)) fail(notASlug(slug));
   const named = { slug, main: repoOf(cwd, repo === undefined ? cwd : path.resolve(cwd, repo)) };
@@ -319,6 +321,7 @@ export function goTask(context: Context, slug: string, repo: string | undefined)
   const target = chain.at(-1) ?? named;
   if (!isReadableSlug(target.slug)) fail(notASlug(target.slug));
   const found = (chain.length === 0 ? task : liveLedger(tasks, target)) ?? refuseMissing(context.store, tasks, target);
+  if (found.place === 'worktree') refuseIfHeld(context, found, session, takeOver);
   const place =
     found.place === 'worktree'
       ? { ledger: found.file, worktree: path.dirname(path.dirname(found.file)), ...(found.branch === undefined ? {} : { branch: found.branch }), promoted: false }
@@ -380,7 +383,7 @@ export function parkTask(context: Context, name: string, reason: string): ParkRe
   if (oneLine(reason) === '') fail('A parked task needs a reason: ledger task park <slug> --reason <text>');
   const { task, ref } = liveTask(context, name);
   const parked = { date: today(), reason: oneLine(reason) };
-  updateLedger(context, task, (text) => park(text, parkMarker(parked)));
+  updateLedger(context, task, (text) => park(withoutClaim(text), parkMarker(parked)));
   refreshRegistry(context, [ref.main]);
   return { ...ref, ledger: task.file, parked };
 }

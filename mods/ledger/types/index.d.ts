@@ -20,13 +20,20 @@ declare module 'claude-code' {
      * `titled`: the slug the mod last named the session after with /rename. `clearApproved`: the operator's last answer in a
      * question box picked "Save, clear and continue", so the model may start /ledger:next once. `clearPoint`: for session
      * `sessionId`, the context size in tokens that marks the next clear-point offer, and `pending`, the size at a marked
-     * offer no prompt has carried yet. A StateRead gives undefined when the value was never written.
+     * offer no prompt has carried yet. `touched`: when, in ms of the engine clock, the turn end of session `sessionId` last
+     * marked its claims active. `heldTask`: the task another session held when a `go <slug>` prompt or /ledger:go of
+     * session `sessionId` last found one held. `takeOverApproved`: that task's slug, when the operator's last answer in a
+     * question box picked "Take over", so the model may start /ledger:go <slug> --take-over for it once. A StateRead gives
+     * undefined when the value was never written.
      */
     ledger: {
       armed: LedgerArmed | null
       titled: string | null
       clearApproved: boolean
+      heldTask: { sessionId: string; slug: string } | null
+      takeOverApproved: string | null
       clearPoint: { sessionId: string; threshold: number; pending: number | null }
+      touched: { sessionId: string; at: number }
     }
   }
 }

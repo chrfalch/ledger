@@ -1,6 +1,6 @@
 import type { EngineInterface } from 'claude-code'
 
-import type { ListedTask } from './ledger'
+import type { Claim, ListedTask } from './ledger'
 
 /** The longest `$.process.run` allows. A retire or prune of a big worktree outlasts the default, and a kill midway skips steps. */
 export const LONG_TIMEOUT_MS = 600_000
@@ -22,11 +22,14 @@ async function runFolder($: EngineInterface, cwd: string): Promise<string> {
 
 type Ran = { exitCode: number; stdout: string; stderr: string }
 
+export function ledgerBin($: EngineInterface): string {
+  return `${$.plugin.root}/../../bin/ledger`
+}
+
 async function run($: EngineInterface, args: string[], timeoutMs?: number): Promise<Ran | { error: string }> {
-  const bin = `${$.plugin.root}/../../bin/ledger`
   try {
     const cwd = await runFolder($, await $.session.cwd())
-    return await $.process.run([bin, ...args], { cwd, timeoutMs })
+    return await $.process.run([ledgerBin($), ...args], { cwd, timeoutMs })
   } catch (error) {
     return { error: `bin/ledger did not run: ${message(error)}` }
   }
@@ -41,8 +44,26 @@ export async function ledgerText($: EngineInterface, args: string[], timeoutMs?:
   return ran.exitCode === 0 ? 'Done.' : `bin/ledger failed (exit ${ran.exitCode}) and printed nothing.`
 }
 
-/** A `--json` answer: the fields of `{"ok":true,...}`, or the error of `{"ok":false,...}` with the exit code. */
-export type Answer<T> = ({ ok: true } & T) | { ok: false; error: string; exitCode?: number }
+export async function ledgerSucceeded($: EngineInterface, args: string[]): Promise<boolean> {
+  const ran = await run($, args)
+  return !('error' in ran) && ran.exitCode === 0
+}
+
+const isClaim = (value: unknown): value is Claim =>
+  typeof value === 'object' &&
+  value !== null &&
+  'session' in value &&
+  typeof value.session === 'string' &&
+  'since' in value &&
+  typeof value.since === 'string' &&
+  'active' in value &&
+  typeof value.active === 'string'
+
+/**
+ * A `--json` answer: the fields of `{"ok":true,...}`, or the error of `{"ok":false,...}` with the exit code. `held` is the
+ * live claim of another session that made the command refuse.
+ */
+export type Answer<T> = ({ ok: true } & T) | { ok: false; error: string; exitCode?: number; held?: Claim }
 
 /** Runs `ledger <args> --json`. Its fields are pinned by tests/ledger-core-json.test.ts, so they are read as `T` without a check. */
 export async function ledgerJson<T>($: EngineInterface, args: string[], timeoutMs?: number): Promise<Answer<T>> {
@@ -55,7 +76,9 @@ export async function ledgerJson<T>($: EngineInterface, args: string[], timeoutM
     return { ok: false, error: `bin/ledger ${args[0]} printed no JSON (exit ${ran.exitCode}). ${ran.stderr.trim()}`.trim(), exitCode: ran.exitCode }
   }
   if (typeof answer !== 'object' || answer === null || !('ok' in answer)) return { ok: false, error: `bin/ledger ${args[0]} printed no JSON object.`, exitCode: ran.exitCode }
-  return answer.ok === true ? (answer as Answer<T>) : { ok: false, error: 'error' in answer ? String(answer.error) : 'unknown error', exitCode: ran.exitCode }
+  if (answer.ok === true) return answer as Answer<T>
+  const error = 'error' in answer ? String(answer.error) : 'unknown error'
+  return { ok: false, error, exitCode: ran.exitCode, ...('held' in answer && isClaim(answer.held) ? { held: answer.held } : {}) }
 }
 
 type Ref = { slug: string; main: string }
@@ -92,3 +115,5 @@ export type RetirePlan = { worktree?: { merged: boolean; openPr?: number }; bloc
 export type NextChild = { chain: Ref[] }
 
 export type Parked = { parked: { date: string; reason: string } }
+
+export type Claimed = { slug: string; claim: Claim }

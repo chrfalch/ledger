@@ -1,4 +1,4 @@
-import { findSection, isPlaceholder, parseLedger, plainLine as plain, serializeLedger, type Child, type Ledger, type Section } from './format.js';
+import { claimText, findSection, isPlaceholder, parseLedger, plainLine as plain, serializeLedger, type Child, type Claim, type Ledger, type Section } from './format.js';
 
 /**
  * Line edits of a ledger. Each one returns the new text, changes only the lines it names, and gives every line it adds
@@ -98,6 +98,29 @@ export function addLocationBullet(text: string, bullet: string): string | undefi
   const ledger = parseLedger(text);
   const location = findSection(ledger.sections, 'Location');
   return location && insert(ledger, afterLastText(ledger, location), [bullet]);
+}
+
+const claimLines = (ledger: Ledger, location: Section | undefined): number[] =>
+  location === undefined ? [] : ledger.lines.flatMap((line, index) => (index > location.start && index < location.end && plain(line).startsWith('- claim:') ? [index] : []));
+
+/** `- claim: <claim>` in place of every claim bullet under ## Location, or at its end; undefined without the section. */
+export function withClaim(text: string, claim: Claim): string | undefined {
+  const ledger = parseLedger(text);
+  const location = findSection(ledger.sections, 'Location');
+  if (location === undefined) return undefined;
+  const [first, ...more] = claimLines(ledger, location);
+  const bullet = `- claim: ${claimText(claim)}`;
+  if (first === undefined) return insert(ledger, afterLastText(ledger, location), [bullet]);
+  const lines = [...ledger.lines];
+  lines[first] = replaced(lines[first], bullet);
+  return lines.filter((_, index) => !more.includes(index)).join('\n');
+}
+
+/** Drops every claim bullet under ## Location, whatever session it names and whether it reads as a claim. */
+export function withoutClaim(text: string): string {
+  const ledger = parseLedger(text);
+  const claims = claimLines(ledger, findSection(ledger.sections, 'Location'));
+  return claims.length === 0 ? text : without(ledger, (index) => claims.includes(index));
 }
 
 export function removeLine(text: string, index: number): string {

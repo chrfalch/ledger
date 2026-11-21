@@ -58,7 +58,7 @@ function bigFile(file: string): void {
 
 test('every command with --json prints one {"ok":false,"error"} object for an unknown option, and exits non-zero', (t) => {
   const { h, app } = setup(t);
-  for (const command of [['list'], ['task', 'archive'], ['tree', 'show', 'x'], ['go', 'x'], ['task', 'new', 'x'], ['task', 'park', 'x', '--reason', 'r'], ['task', 'unpark', 'x'], ['task', 'retire'], ['worktrees'], ['worktrees', 'prune'], ['worktrees', 'auto-prune'], ['session']]) {
+  for (const command of [['list'], ['task', 'archive'], ['tree', 'show', 'x'], ['go', 'x'], ['task', 'new', 'x'], ['task', 'park', 'x', '--reason', 'r'], ['task', 'unpark', 'x'], ['task', 'claim', 'x'], ['task', 'retire'], ['worktrees'], ['worktrees', 'prune'], ['worktrees', 'auto-prune'], ['session']]) {
     const ran = ledger(h, app, ...command, '--json', '--bogus');
     assert.notEqual(ran.status, 0, command.join(' '));
     refused(ran, /--bogus/, ran.status ?? 1);
