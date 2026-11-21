@@ -30,6 +30,8 @@ import {
   approvePlan,
   approvePlanText,
   checkTask,
+  count,
+  LEDGER_SIZE_LIMIT,
   positive,
   reportStep,
   reportStepText,
@@ -432,7 +434,7 @@ export async function main(argv: string[]): Promise<number> {
   notesCommand(
     notesGroup,
     'check',
-    'Check the ledger and change nothing: the record reads back the same from its Markdown, the goal is not empty, and each open question and step report names a step of the plan. Prints ok, or each problem on a line and exits 1.',
+    `Check the ledger and change nothing: the record reads back the same from its Markdown, the goal is not empty, each open question and step report names a step of the plan, and the ledger is at most ${count(LEDGER_SIZE_LIMIT)} characters. Prints ok, or each problem on a line and exits 1.`,
   ).action(({ task }: TaskOption) => {
     const checked = checkTask(context, task);
     const { problems } = checked;

@@ -2,6 +2,7 @@
 import path from 'node:path';
 import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
+import { parseLedger } from './format.js';
 import { sessionLedgers } from './hooks.js';
 import { parseRecord, renderRecord, validateRecord, type Constraint, type Decision, type Question, type Step, type TaskRecord } from './record.js';
 import { loadTasks } from './registry.js';
@@ -30,6 +31,23 @@ export function positive(text: string, option: string): number {
   return /^[1-9]\d*$/.test(trimmed) ? Number(trimmed) : fail(`${option} takes a whole number from 1, not "${text}".`);
 }
 
+/** The most characters of a rendered ledger: about 4k tokens, at 4 characters a token. */
+export const LEDGER_SIZE_LIMIT = 16_000;
+
+export const count = (n: number): string => n.toLocaleString('en-US');
+
+function sizeProblem(record: TaskRecord): string[] {
+  const markdown = renderRecord(record);
+  if (markdown.length <= LEDGER_SIZE_LIMIT) return [];
+  const { lines, sections } = parseLedger(markdown);
+  const largest = sections
+    .map(({ heading, start, end }) => ({ name: heading.replace(/ \(.*\)$/, ''), size: lines.slice(start, end).join('\n').length }))
+    .sort((a, b) => b.size - a.size)
+    .slice(0, 3)
+    .map(({ name, size }) => `${name} (${count(size)})`);
+  return [`The ledger is ${count(markdown.length)} characters, over the limit of ${count(LEDGER_SIZE_LIMIT)}. Shorten the largest sections: ${largest.join(', ')}.`];
+}
+
 /** What `ledger notes check` finds beyond the record's shape. A resolved question blocks nothing. */
 function problemsOf(record: TaskRecord): string[] {
   const steps = new Set(record.plan.steps.map(({ n }) => n));
@@ -39,7 +57,23 @@ function problemsOf(record: TaskRecord): string[] {
       blocks === undefined || resolved || steps.has(String(blocks)) ? [] : [`Question ${id} blocks step ${blocks}, which is not in the plan.`],
     ),
     ...record.stepReports.flatMap(({ step }) => (step === undefined || steps.has(step) ? [] : [`The report of step ${step} names a step that is not in the plan.`])),
+    ...sizeProblem(record),
   ];
+}
+
+const REPORT_LINE_LIMIT = 160;
+const isPastReview = (status: string): boolean => ['reviewed', 'done'].includes(status.trim().toLowerCase());
+
+/** Shortens the report of each reviewed or done step to its first line: the full report is needed only until the review. */
+function shortenReviewedReports({ plan, stepReports }: TaskRecord): void {
+  const pastReview = new Set(plan.steps.filter(({ status }) => isPastReview(status)).map(({ n }) => n));
+  for (const report of stepReports) {
+    if (report.step === undefined || !pastReview.has(report.step)) continue;
+    const first = report.text.split('\n').map((line) => line.trim()).find((line) => line !== '') ?? '';
+    // By code point, so the cut never splits a character such as an emoji.
+    const characters = [...first];
+    report.text = characters.length > REPORT_LINE_LIMIT ? `${characters.slice(0, REPORT_LINE_LIMIT - 1).join('')}…` : first;
+  }
 }
 
 type Written<T> = T & { slug: string; ledger: string; warnings: string[] };
@@ -54,6 +88,7 @@ function write<T extends object>(context: Context, name: string | undefined, app
   updateLedger(context, task, (markdown) => {
     const record = parseRecord(markdown);
     const details = apply(record, task);
+    shortenReviewedReports(record);
     try {
       validateRecord(record);
     } catch (error) {
