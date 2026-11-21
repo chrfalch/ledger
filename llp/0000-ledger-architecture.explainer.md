@@ -49,26 +49,42 @@ A task has one ledger at a time. Where the ledger is tells the task's status:
 ### The ledger command
 
 `tools/ledger/cli.ts` defines the commands with `commander`. `bin/ledger` runs
-it. The commands are:
+it. The commands are grouped by what they change (D30 in LLP 0001).
+`ledger --help` lists the groups, and `ledger <group> --help` the commands of
+each:
 
-- `list`, `archive`, `show`, `parent`: read tasks.
-- `task`: writes a backlog ledger from `~/.claude/ledger.template.md`.
-- `go`: starts a task. It makes the worktree and branch of a backlog task and
-  moves its ledger from the backlog to the active ledgers, naming that
-  worktree. For a parent task, it starts the first child task
-  that is still in the backlog.
-- `park`, `unpark`: add or remove the parked mark under `## Next step`.
-- `retire`: archives the ledger (see [Retire and archive](#retire-and-archive)).
-- `task gate`: prints the question for a gate, such as plan approval, as JSON
-  the question widget takes. `tools/ledger/gates.ts` defines each gate.
+- `task`: makes, starts, claims, parks, retires and reads tasks.
+  - `new`: writes a backlog ledger from `~/.claude/ledger.template.md`.
+  - `go`: starts a task. It makes the worktree and branch of a backlog task
+    and moves its ledger from the backlog to the active ledgers, naming that
+    worktree. For a parent task, it starts the first child task, in order,
+    that is still in the backlog and whose dependencies are all retired or
+    done (`firstToStart` in `tools/ledger/write.ts`).
+  - `claim`, `touch`, `release`: take, refresh and remove this session's
+    claim on a task (see Claims under [The plugin](#the-plugin)).
+  - `park`, `unpark`: add or remove the parked mark under `## Next step`.
+  - `retire`: archives the ledger (see [Retire and archive](#retire-and-archive)).
+  - `show`, `list`, `archive`: print a task's ledger, list the live tasks, or
+    list the archived ledgers.
+  - `gate`: prints the question for a gate, such as plan approval, as JSON
+    the question widget takes. `tools/ledger/gates.ts` defines each gate.
 - `notes`: writes one item of a task's ledger (see
   [The notes commands](#the-notes-commands)).
-- `store migrate`: moves the ledgers between file, SQLite and git storage.
-- `store sync`: pushes and pulls the ledgers of git storage.
-- `worktrees`: shows the linked worktrees and prunes their build folders.
-- `session`: prints the ledgers a session in a folder works on.
-- `hook`: answers a Claude Code hook (see [Hooks](#hooks)).
+- `tree`: `show` prints a parent task with the status of each child task.
+  `add`, `remove`, `start`, `order` and `depends` change its children, their
+  order and what each waits for. `next` prints the child task that starts
+  next.
+- `store`: `migrate` moves the ledgers between file, SQLite and git storage.
+  `sync` pushes and pulls the ledgers of git storage, and `sync init` makes
+  its clone.
+- `worktrees`: shows the linked worktrees. `prune` and `prune-orphans` delete
+  their build folders.
+- `go`, `list`, `show`: short forms of the `task` commands of the same names.
 - `deploy`: runs `bin/deploy`.
+
+Two commands are for Claude Code and stay out of the help. `session` prints
+the ledgers a session in a folder works on. `hook` answers a Claude Code hook
+(see [Hooks](#hooks)).
 
 Most commands take `--json`. The plugin reads that output.
 

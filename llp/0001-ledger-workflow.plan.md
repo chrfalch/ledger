@@ -5,9 +5,11 @@
 **Systems:** ledger CLI, ledger plugin, hooks, rules, subagents
 **Author:** Christian Falch / Claude
 **Date:** 2026-11-19
+**Revised:** 2026-11-21
 **Related:** LLP 0000
 
-Not implemented. Section 14 lists the decisions; none is open.
+Some decisions are built. Section 14 lists the decisions; none is open.
+Section 15 says, for each part, what is built and what is left.
 
 ## 1. Goal
 
@@ -278,8 +280,7 @@ Every widget also has **Close**.
      not claimed, because this session's release covers only its own repo. After the clear, the new session's
      `go <slug>` claims it with `--from <old session>`, which takes over the
      claim of that session only;
-   - records the task's repo and worktree path in the store (D9). This part
-     does not ship yet.
+   - records the task's repo and worktree path in the store (D9).
    
    The session moves into the worktree.
 3. **Plan.** The agent reads the task's design refs first. A lasting design
@@ -428,15 +429,15 @@ The agent changes a task only through `ledger` commands. **Decision D30
 | | `note "<text>"` | General notes (D29) |
 | | `next "<text>"` | Next step |
 | | `check` | Structure and size check |
-| `ledger tree` | `show [<slug>]`, `add`, `remove`, `order`, `depends` | Parents, children, order, dependencies (D16) |
+| `ledger tree` | `show [<slug>]`, `add`, `remove`, `start`, `order`, `depends`, `next` | Parents, children, order, dependencies (D16) |
 | `ledger store` | `migrate`, `repair`, `check`, `sync` | The store (D1, D9) |
 | `ledger worktrees` | as today | Worktree and build folders |
 
 `ledger go`, `ledger list` and `ledger show` stay as short forms of the `task`
 commands. `hook` and `session` are for Claude Code and stay out of the normal
-help. Today's `ledger task <slug>` becomes `ledger task new <slug>`, and
-`ledger parent` becomes `ledger tree`. Every caller (plugin prompts, rules,
-tests, hook settings) changes at once; no other old names are kept.
+help. The old `ledger task <slug>` is now `ledger task new <slug>`, and the old
+`ledger parent` is now `ledger tree`. Every caller (plugin prompts, rules,
+tests, hook settings) changed at once; no old names are kept.
 
 There is no ledger file to edit (D8). A PreToolUse hook catches an agent that
 tries to write `.claude/ledger.md` from habit and names the command to use.
@@ -489,7 +490,7 @@ version is gone: with no worktree copy, nothing can drift.)
 | Stages in order | — | `ledger notes stage` refuses to skip a stage without `--skip` | explains the loop |
 | Plan and PR approval (D33, D35) | — | gate actions as JSON: at most three plus Close, each with label and description | widget wording; walkthrough exception (D36) |
 | PR link before waiting (D39) | — | refuses to set a code task to waiting until `ledger task pr` recorded the link | — |
-| Report to parent before retire | — | `ledger retire` refuses | — |
+| Report to parent before retire | — | `ledger task retire` refuses | — |
 | Tree awareness (D26–D28) | session start, compaction, prompt submit | `ledger session --tree` | — |
 | Close always offered | — | every gate action list includes close | widget wording |
 
@@ -634,6 +635,8 @@ Decided 2026-11-19:
   and the build-path hook change with it, and retire deletes the task's
   folder. Old `cc-*` folders in Xcode's DerivedData are deleted once, by
   hand, after the change merges.
+  Result (2026-11-21): DerivedData on the operator's machine holds no `cc-*`
+  folders. Other machines were not checked.
 - **D45** With D44, `ledger worktrees derived-data` is removed with its docs
   and tests. `ledger worktrees prune-orphans` keeps its name but deletes the
   `.build/<name>` folders that no linked worktree matches, instead of
@@ -651,31 +654,31 @@ Decided 2026-11-19:
 |---|---|---|
 | States | backlog, active, parked, retired | add blocked, waiting, done; transitions in the tool |
 | Stages | free text in the plan table | `ledger notes stage`, ordered and checked |
-| Child order (D16) | free text in the parent goal | order and dependency fields; a dependency may name a task in another repo |
+| Child order (D16) | `ledger tree order` and `ledger tree depends` set the order and dependency fields; a dependency may name a task in another repo as `<slug>@<address>`; `ledger tree next` and `ledger go <parent>` pick the first child in order whose dependencies are retired or done (`firstToStart` in `tools/ledger/write.ts`) | none |
 | Ledger writes (D38) | hand edits | write commands + hook that blocks Edit/Write and shell writes to the store |
-| Gates and widgets (D3, D33–D37) | rule text | gate actions as JSON with label and description, at most three plus Close; multi-select Close rule; walkthrough exception in the rule |
+| Gates and widgets (D3, D33–D37) | `ledger task gate plan` and `pr` print the question as JSON: at most three actions, each with a label and a one-line description, the first ending in "(Recommended)", then Close (`buildGate` in `tools/ledger/gates.ts`); the plan-approval condition is in `rules/10-operating-model.md`, and the multi-select Close rule, the ❓ rule and the walkthrough exception are in `rules/20-writing.md` | none |
 | Awareness (D26–D28) | current ledgers at session start | ordered report under ~20 lines; outside-task prompt; store-only status line |
 | Finalize (D21) | rule text; retire updates parent | finalize action list; up-the-tree step |
 | PR waiting (D19, D20, D39) | not tracked | `ledger task pr`; waiting state refused without a PR link; GitHub check at session start |
-| Proof (D40–D42) | unit tests | scripted agent runs: full lifecycle, failed review, Close-then-resume; zero-test runs fail; run on demand and before release |
+| Proof (D40–D42) | unit tests; the rule in `rules/10-operating-model.md` that a run of zero tests is not a pass | scripted agent runs: full lifecycle, failed review, Close-then-resume; run on demand and before release |
 | State storage (D7) | location only; parked line | tool-written `- status:` line; GitHub check |
 | Task records (D8, D29) | Markdown files are the source; task list is a cache parsed from them; active ledger only in the worktree | one structured record per task in the store; Markdown rendered by `ledger show`; no worktree copy; one-time conversion |
-| Task list (D9) | cache rebuilt by scanning `~/repos`, `~/issues` | view of the store; `ledger store repair` |
-| Repo identity (D10) | folder name | remote address; one-time conversion |
+| Task list (D9) | a view of the store: `loadTasks` in `tools/ledger/registry.ts` reads every task from it and scans no folders; each active record names its repo and worktree | `ledger store repair` |
+| Repo identity (D10) | remote address, normalized by `remoteKey` in `tools/ledger/repo-key.ts`, else the main checkout's path; `ledger store migrate --repo-ids` converts old tasks once and keeps an alias map | a renamed remote's old address as an alias, with `ledger store repair` (D9) |
 | Hook failures (D11) | allowed, error not visible | failure log at session start |
-| LLP 0000 upkeep (D12) | none | CONTRIBUTING rule; reviewer check; `npm run llp` warning |
-| Design refs (D46) | `- design refs:` line in the Markdown ledger, picked by `/ledger:task` and `/ledger:go` | a field of the task record; converted once with the other ledgers |
-| LLP decisions (D47) | one line in the operating-model rule | plan stage reads the refs; reviewer checks that lasting decisions reached an LLP |
+| LLP 0000 upkeep (D12) | the rule in `CONTRIBUTING.md`; the reviewer check in `agents/reviewer.md`; the `npm run llp` warning (`llp0000Warnings` in `tools/llp-refs.ts`) | none |
+| Design refs (D46) | `designRefs`, a field of the task record (`tools/ledger/record.ts`), set by `ledger task new --design-refs` with the LLPs that `/ledger:task` and `/ledger:go` pick | none |
+| LLP decisions (D47) | one line in the operating-model rule puts lasting decisions in an LLP in the same PR; `agents/reviewer.md` checks that they reached one | plan stage reads the refs |
 | Task kinds (D14) | none; every task is treated as code | `--kind`; stages per kind |
 | Claims (D5, D17) | `ledger task claim` with expiry; `ledger go` claims on start | none |
 | Clear points (D13) | rule text; operator types `/ledger:next` | offer after review and on size; agent starts `/ledger:next` after the widget choice |
-| Start step (D18) | `ledger go` installs packages and claims the task | record repo and worktree paths in the store |
+| Start step (D18) | `ledger go` installs packages, claims the task, and files its active record under the repo's key, naming its worktree (`promote` in `tools/ledger/write.ts`) | none |
 | Session start list | can be out of date when another session changes tasks | read the tree from the store at session start (D8, D9) |
 | Failure handling (D22–D25) | rule text | review round count and escalation; failed subagent reported, no retry; merge conflict back to build; abandon as a confirmed retire with reason |
-| Command groups (D30) | flat command names | `task`, `notes`, `tree`, `store`, `worktrees` groups; every caller changes at once |
-| Report size (D31) | none | one-line reports after review; `ledger notes check` size limit |
-| Deploy permissions (D32) | permission prompt on ledger writes | deploy allows the `ledger` commands |
+| Command groups (D30) | `task`, `notes`, `tree`, `store`, `worktrees` groups, with `go`, `list` and `show` as short forms (`tools/ledger/cli.ts`); the old names exit as unknown commands | none |
+| Report size (D31) | every `ledger notes` write shortens the report of each reviewed or done step to one line; `ledger notes check` fails over 16,000 characters and names the three largest sections (`tools/ledger/notes.ts`) | none |
+| Deploy permissions (D32) | `settings.policy.json` allows `ledger notes`, `go`, `list`, `show`, `tree show`, `tree next` and every `task` command except `retire`; deploy merges the list into `~/.claude/settings.json` | none |
 | Merge and goal gates (D4, D15) | rule text | *Merge now* gate after checks and review; *Goal met* gate for tasks with no PR |
 | Session name (D43) | renamed to the task slug on every task change: the prompt hook titles each `go <slug>` the session does not already claim; the turn end renames to the worktree's task, else to the task the session claimed | none |
 | Worktree location (D6) | inside the main checkout | unchanged: the session-switch test failed (confirmation on every switch); D42 is the safeguard |
-| Build folders (D44, D45) | Xcode's DerivedData, named by worktree path hash | `.claude/worktrees/.build/<name>/<configuration>`; `cc-dd-path`, build rule and hook changed; old folders deleted once by hand; `derived-data` removed; `prune-orphans` matches folder names to worktrees |
+| Build folders (D44, D45) | `.claude/worktrees/.build/<name>/<configuration>`, from `bin/cc-dd-path`; `rules/90-builds.md` and `hooks/derived-data-gate.sh` use it; retire deletes the task's folder; `ledger worktrees derived-data` is gone; `prune-orphans` matches folder names to worktrees (`tools/ledger/worktrees.ts`) | none |
