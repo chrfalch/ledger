@@ -115,6 +115,11 @@ The backlog ledgers, the archive and the list of tasks are files under
   that uses the storage exits 1 and says to run `ledger store sync init`. The clone
   sets its own `core.hooksPath`, so hooks from a global `core.hooksPath` do not
   run in it. See [usage.md](usage.md) for what is pushed and what stays.
+- With git storage, `"host"` names this machine, such as
+  `{"storage": "git", "host": "work-laptop"}`: lowercase letters, digits and
+  hyphens. Git storage keeps the copies of this machine's worktree ledgers
+  under `active/<host>/`. Without it, the host name up to its first dot names
+  the machine.
 
 ## Environment variables
 

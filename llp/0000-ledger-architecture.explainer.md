@@ -129,13 +129,15 @@ after it, so `--resolve` with an id read earlier can mark the wrong question.
 ### The store
 
 `tools/ledger/store.ts` defines the store as interfaces. A `LedgerStore` has
-four parts:
+five parts:
 
 - `backlog`: ledgers of tasks not started yet, named by slug.
 - `archive`: copies of retired ledgers, named `<YYYY-MM-DD>-<slug>`, with the
   files of their evidence.
 - `registry`: the text of the task list.
 - `aliases`: old repo keys, each with the key that replaced it.
+- `active`: only in the git store. Read-only copies of the worktree ledgers of
+  each machine, `active/<host>/<repo key>/<slug>.md` in the clone.
 
 Each ledger is filed under its repo's key. `repoKey` in
 `tools/ledger/repo-key.ts` gives it: the address of the remote `origin`, else
@@ -143,7 +145,24 @@ of the only remote, such as `github.com/chrfalch/ledger`; else the absolute path
 of the main checkout. `repoLabel` gives the short form people see, such as
 `chrfalch/ledger`.
 
-A worktree's `.claude/ledger.md` is not in the store. Hooks read it from disk.
+A worktree's `.claude/ledger.md` is not in the store, and stays the ledger
+that is changed. Hooks read it from disk. `ledger store mirror`
+(`tools/ledger/mirror.ts`) writes the git store's copy of each worktree ledger
+of this machine, filed under the repo key like every other ledger, so the clones
+of one repo on two machines name a task the same way. A copy is Markdown, the
+worktree ledger byte for byte, in a collection of its own: it is never read or
+written as a task record. A copy of this machine is removed when the mirror
+copied its worktree's ledger under another key or slug, as for a copy under a
+folder name from before repo keys or after a title change; the registry may
+still list the old slug. A copy that matches no worktree task, and no task the
+registry lists active, by repo key and slug is removed when git confirms its
+worktree is gone. A repo git cannot read keeps its copies. The host folder is
+`"host"` in `~/.claude/ledger-settings.json`, else the host name (`readHost` in
+`tools/ledger/settings.ts`). `findTasks` reads the copies of the other hosts as
+tasks of place `remote`: a remote task hides a backlog ledger of the same task
+(`sameTask`), and `ledger go`, park, retire and `ledger notes` refuse it. A machine skips its own
+host folder, as it reads its worktrees from disk. The copies are interim: D8 in
+LLP 0001 makes them unneeded.
 
 Three stores implement the interfaces:
 
@@ -155,9 +174,9 @@ Three stores implement the interfaces:
   ledgers in `~/.claude/ledger-data`, a clone of a private GitHub repository.
   It is the file store with other folders. After a command writes, it commits
   once and starts `ledger store sync --quiet` in the background, so a command
-  never waits for the network. Only the ledgers, a `.ledger-data` marker and a
-  `.gitignore` are committed. Evidence, the registry and the repo aliases stay
-  on this machine.
+  never waits for the network. Only the ledgers, the active copies, a
+  `.ledger-data` marker and a `.gitignore` are committed. Evidence, the
+  registry and the repo aliases stay on this machine.
 
 `readStorage` in `tools/ledger/settings.ts` picks the store. It reads
 `"storage"` from `~/.claude/ledger-settings.json`. With no file and no key, the
@@ -213,7 +232,10 @@ still the text it read. Otherwise it starts again, up to 20 times.
   session start, command runs, `Skill` tool calls and turn end.
 
 The plugin does not keep task state. `mods/ledger/hooks/cli.ts` runs
-`bin/ledger` from this checkout and reads its `--json` output.
+`bin/ledger` from this checkout and reads its `--json` output. At the end of
+each answered turn of the main agent, with or without a ledger in the session,
+it runs `ledger store mirror --quiet`, so git storage keeps current copies of
+the worktree ledgers.
 
 **Clearing the session.** `/ledger:next`, `/ledger:close` and `/ledger:go` end
 a session. When one of them runs, `register.ts` arms a clear in the plugin's
@@ -246,9 +268,10 @@ because its turn end does not clear the session.
 `tools/ledger/hooks.ts` handles them:
 
 - `session-start`: injects the ledgers of the session's folder, with the
-  status of their parent and child tasks. With git storage it pulls first, and
-  a sync problem adds one line above the ledgers. The whole hook has one
-  five-second deadline.
+  status of their parent and child tasks. With git storage it pulls first,
+  then runs the mirror, and a sync problem adds one line above the ledgers. A
+  mirror that fails is logged as a hook failure, and the ledgers are still
+  injected. The whole hook has one five-second deadline.
 - `prompt-submit`: titles the session when the prompt is exactly
   `go <slug>`.
 - `pre-compact`: tells the compaction to keep the ledger path and its next
@@ -303,6 +326,12 @@ Then it does these steps:
 An archive copy is never replaced. `Archive.write` throws when the name is
 taken.
 
+A step can fail before step 2 is done. With git storage, `executeRetire` then
+undoes the retire in full before the store commits: it removes the archive
+ledger and the evidence that this retire wrote, and puts the active copy back.
+The commit then holds neither. File and SQLite storage keep the archive copy,
+so a rerun finds it and continues.
+
 ### Rules and agents
 
 `rules/*.md` are the orchestrator contract. `agents/*.md` are the subagents.
@@ -331,7 +360,7 @@ Close last.
 | Archive evidence | `~/.claude/ledger-archive/<repo key>/<YYYY-MM-DD>-<slug>/` | `~/.claude/ledgers.db`, as bytes | `~/.claude/ledger-evidence/<repo key>/<YYYY-MM-DD>-<slug>/`, never committed |
 | Registry | `~/.claude/ledgers.json` | `~/.claude/ledgers.db` | `~/.claude/ledgers-git.json`, never committed |
 | Repo aliases | `~/.claude/ledger-aliases.json` | `~/.claude/ledgers.db` | `~/.claude/ledger-aliases-git.json`, never committed |
-| Active ledger | `<worktree>/.claude/ledger.md` | the same file | the same file |
+| Active ledger | `<worktree>/.claude/ledger.md` | the same file | the same file, and a copy in `~/.claude/ledger-data/active/<host>/<repo key>/<slug>.md`, committed |
 | Store setting | `~/.claude/ledger-settings.json` | the same file | the same file |
 
 The git store also keeps a clone lock, `~/.claude/ledger-data.lock`, and the

@@ -7,10 +7,14 @@ import { mainOfTaskWorktree, parseArchiveName, samePath, worktreeLedger } from '
 import { repoKey } from './repo-key.js';
 import { keyAndAliases, type LedgerStore } from './store.js';
 
-export type Place = 'worktree' | 'backlog' | 'archive';
+/** `remote`: the read-only copy of a worktree ledger of another machine. */
+export type Place = 'worktree' | 'remote' | 'backlog' | 'archive';
 export type TaskStatus = 'active' | 'parked' | 'backlog' | 'retired';
 
-/** One task ledger. `main` is unknown for a backlog or archive ledger that does not name it. */
+/**
+ * One task ledger. `main` is unknown for a backlog or archive ledger that does not name it, and for a remote one, as
+ * its path is on another machine.
+ */
 export type Task = {
   slug: string;
   /** The key the ledger is filed under. */
@@ -18,11 +22,13 @@ export type Task = {
   /** The key `repo` is an alias of, for a ledger still filed under an old key. */
   currentRepo?: string;
   main?: string;
-  /** A worktree's .claude/ledger.md, or the store's location of a backlog ledger or archive copy. */
+  /** A worktree's .claude/ledger.md, or the store's location of a backlog ledger, archive copy or remote copy. */
   file: string;
-  /** The store's name of a backlog ledger or archive copy; for a worktree ledger, its folder's name. */
+  /** The store's name of a backlog ledger, archive copy or remote copy; for a worktree ledger, its folder's name. */
   name: string;
   place: Place;
+  /** The host folder of the machine whose worktree a remote task is in. */
+  host?: string;
   status: TaskStatus;
   /** A worktree's checked-out branch; for a backlog or archive ledger, its Location branch. */
   branch?: string;
@@ -43,6 +49,7 @@ type Found = {
   file: string;
   name: string;
   place: Place;
+  host?: string;
   repo: string;
   currentRepo?: string;
   fallbackSlug: string;
@@ -50,7 +57,7 @@ type Found = {
   branch?: string;
 };
 
-function toTask({ file, name, place, repo, currentRepo, fallbackSlug, mainOf, branch }: Found, { text, mtimeMs, birthtimeMs }: TimedText): Task {
+function toTask({ file, name, place, host, repo, currentRepo, fallbackSlug, mainOf, branch }: Found, { text, mtimeMs, birthtimeMs }: TimedText): Task {
   const ledger = parseLedger(text);
   const status: TaskStatus = place === 'archive' ? 'retired' : place === 'backlog' ? 'backlog' : ledger.parked ? 'parked' : 'active';
   const main = mainOf(ledger);
@@ -64,6 +71,7 @@ function toTask({ file, name, place, repo, currentRepo, fallbackSlug, mainOf, br
     file,
     name,
     place,
+    ...(host === undefined ? {} : { host }),
     status,
     ...(knownBranch === undefined ? {} : { branch: knownBranch }),
     ...(archived === undefined ? {} : { archived }),
@@ -89,6 +97,27 @@ export function backlogTasks(store: LedgerStore): Task[] {
       toTask({ file: entry.location, name: entry.name, place: 'backlog', repo: entry.repo, currentRepo: aliases.get(entry.repo), fallbackSlug: entry.name, mainOf: ({ location }) => location.main }, entry),
     );
 }
+
+/** The copies of the worktree ledgers of other machines. This machine's own copies are skipped: its worktrees are read from disk. */
+export function remoteTasks(store: LedgerStore): Task[] {
+  const { active } = store;
+  if (active === undefined) return [];
+  const aliases = store.aliases.read();
+  return active
+    .hosts()
+    .filter((host) => host !== active.host)
+    .flatMap((host) => {
+      const copies = active.copiesOf(host);
+      return copies
+        .repos()
+        .flatMap((repo) => copies.list(repo))
+        .map((entry) => toTask({ file: entry.location, name: entry.name, place: 'remote', host, repo: entry.repo, currentRepo: aliases.get(entry.repo), fallbackSlug: entry.name, mainOf: () => undefined }, entry));
+    });
+}
+
+/** That `task`, a remote one, can only be read here. */
+export const onAnotherMachine = ({ slug, host }: Task): string =>
+  `${slug} is in a worktree on ${host}, and this machine has only a read-only copy of its ledger. Continue the task on ${host}.`;
 
 /** Archived ledgers, of one repo, those under its aliases included, or of all. The slug is the title's; old copies were named after the branch. */
 export function archivedTasks(store: LedgerStore, repo?: string): Task[] {
@@ -137,11 +166,16 @@ const referencedMains = ({ ledger: { location, children } }: Task): string[] => 
 ];
 
 /**
- * Every task ledger: the backlog, the archive, and the worktrees of the repos at `mains`, of the repos backlog ledgers
- * name, and of the repos any found ledger names as parent, child or, by path, dependency.
+ * Every task ledger: the backlog, the archive, the worktrees of the repos at `mains`, of the repos backlog ledgers name,
+ * and of the repos any found ledger names as parent, child or, by path, dependency, and the copies of the worktree
+ * ledgers of other machines. A task such a copy shows started is no longer in the backlog, even when this machine has
+ * not pulled its removal yet. A copy with the repo key and slug of a worktree task here is left out, as this machine's
+ * own copy under a "host" it had before. Repo keys are compared with an alias resolved, so a clone's folder name never
+ * matters.
  */
 export function findTasks(store: LedgerStore, mains: string[]): Task[] {
   const backlog = backlogTasks(store);
+  const copies = remoteTasks(store);
   const live: Task[] = [];
   const seen = new Set<string>();
   const queue = [...mains, ...backlog.flatMap((task) => [...(task.main === undefined ? [] : [task.main]), ...referencedMains(task)])];
@@ -153,8 +187,13 @@ export function findTasks(store: LedgerStore, mains: string[]): Task[] {
     live.push(...found);
     queue.push(...found.flatMap(referencedMains));
   }
-  return [...live, ...backlog, ...archivedTasks(store)];
+  const remote = copies.filter((copy) => !live.some(({ slug, main }) => slug === copy.slug && main !== undefined && inRepo(copy, main)));
+  const waiting = backlog.filter((task) => !remote.some((copy) => copy.slug === task.slug && currentKey(copy) === currentKey(task)));
+  return [...live, ...remote, ...waiting, ...archivedTasks(store)];
 }
+
+/** The key of the repo a ledger in the store is filed under, with an alias resolved. */
+const currentKey = (task: Task): string => task.currentRepo ?? task.repo;
 
 /**
  * Whether `task` is a task of the repo at `main`. A worktree's ledger is one of the checkout that holds the worktree only.
@@ -162,9 +201,9 @@ export function findTasks(store: LedgerStore, mains: string[]): Task[] {
  * it names: that path may be a clone of another origin now.
  */
 export const inRepo = (task: Task, main: string): boolean =>
-  task.place === 'worktree' ? task.main !== undefined && samePath(task.main, main) : (task.currentRepo ?? task.repo) === repoKey(main);
+  task.place === 'worktree' ? task.main !== undefined && samePath(task.main, main) : currentKey(task) === repoKey(main);
 
-const PRECEDENCE: Place[] = ['worktree', 'backlog', 'archive'];
+const PRECEDENCE: Place[] = ['worktree', 'remote', 'backlog', 'archive'];
 
 /** A parent line without a main names a parent in the task's own repo. */
 function namesParent(task: Task, parent: Required<TaskRef>): boolean {
@@ -174,8 +213,9 @@ function namesParent(task: Task, parent: Required<TaskRef>): boolean {
 }
 
 /**
- * The child `child` of `parent`, by disk: a worktree beats a backlog ledger, which beats an archive copy, the same rule
- * `ledger list` follows. A slug can be reused, so an archive copy counts only when it names this parent or no parent.
+ * The child `child` of `parent`, by disk: a worktree beats a remote copy, then a backlog ledger, then an archive copy,
+ * the same rule `ledger list` follows. A slug can be reused, so an archive copy counts only when it names this parent or
+ * no parent.
  */
 export function locateChild(tasks: Task[], child: Required<TaskRef>, parent: Required<TaskRef>): Task | undefined {
   const named = tasks.filter((task) => task.slug === child.slug && inRepo(task, child.main));

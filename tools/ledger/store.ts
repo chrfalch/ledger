@@ -237,17 +237,71 @@ export function needsAlias(entries: Iterable<readonly [string, unknown]>, old: s
   return current === undefined;
 }
 
-/** Where backlog ledgers, archive copies and the registry are kept. A worktree's .claude/ledger.md is not in it. */
+/** A copy that ActiveCopies.remove removed. */
+export type RemovedCopy = {
+  /**
+   * Writes the copy back as it was, left out of every commit again if it was before. One it cannot write back is left
+   * out of every commit, so none removes it, and this fails.
+   */
+  putBack(): void;
+};
+
+/**
+ * Copies of the worktree ledgers of each machine, so that the other machines can read them. A machine writes only the
+ * copies in its own host folder; the name is the slug.
+ */
+export interface ActiveCopies {
+  /**
+   * The host folder of this machine; undefined when the "host" setting is no host label. Then only the copies of this
+   * machine are out of reach: `write`, `remove` and `reconcile` fail and say why.
+   */
+  readonly host: string | undefined;
+  /** The host folders, by name. */
+  hosts(): string[];
+  copiesOf(host: string): LedgerCollection;
+  /**
+   * Writes this machine's copy of a worktree ledger; false when the copy holds `text` already. A copy that is there but
+   * cannot be read fails, with nothing written.
+   */
+  write(repo: string, slug: string, text: string): boolean;
+  /**
+   * Removes this machine's copy, so that the next commit removes it too; undefined when there is none. A copy that is
+   * there but cannot be read fails, with nothing removed. One already gone whose removal no commit took, as it was held
+   * back, counts as removed now.
+   */
+  remove(repo: string, slug: string): RemovedCopy | undefined;
+  /**
+   * Runs `work` with this machine's host folder, then commits every change of this machine's copies, also one an earlier
+   * commit left out; all of it as one step, so no other command writes or commits the store in between. Unfinished work
+   * in the store, such as a merge, fails it before `work` runs. When `work` throws, the copies it changed are put back as
+   * they were before it, so none of its changes is committed; one it cannot put back is left out of every commit until a
+   * reconcile that goes through writes it, finds it as written or removes it. A commit that fails is left to `close`; so
+   * is the commit when git cannot list the changed copies, which fails it.
+   */
+  reconcile<T>(work: (host: string) => T): T;
+}
+
+/**
+ * Where backlog ledgers, archive copies and the registry are kept. A worktree's .claude/ledger.md is not in it; git
+ * storage keeps a copy of it in `active`.
+ */
 export interface LedgerStore {
   backlog: Backlog;
   archive: Archive;
   registry: Registry;
   aliases: Aliases;
+  active?: ActiveCopies;
   /**
    * Records what the store wrote where it must be recorded, as git storage commits it; throws when it cannot, and when
    * it recorded a ledger of `expected` with any other text.
    */
   commit?(expected?: WrittenLedger[]): void;
+  /**
+   * Runs `work`, then records what it wrote, as one step: no other command writes or records the store in between, so
+   * none sees half of it. A store without such a step, as one that records each write at once, has no `inOneCommit`. A
+   * commit that fails is left to `close`.
+   */
+  inOneCommit?<T>(work: () => T): T;
   /** Lets go of what the store holds open, such as a database; the store is not used after it. */
   close?(): void;
 }

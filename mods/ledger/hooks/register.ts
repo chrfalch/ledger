@@ -212,12 +212,18 @@ async function parkOther($: EngineInterface, slug: string, reason: string): Prom
   return parked.ok ? `Parked ${slug}. Parked: ${parked.parked.date} — ${parked.parked.reason}` : `Could not park ${slug}. ${parked.error}`
 }
 
-type Listed = { tasks: { slug: string; main?: string }[] }
+/** `currentRepo` is the key `repo` is an alias of, for a ledger still filed under an old key. */
+type Listed = { tasks: { slug: string; repo: string; currentRepo?: string; main?: string; place?: string }[] }
 
-/** Whether the repo at `main` has a live task `slug`; an error when `ledger list` failed. */
-async function hasTask($: EngineInterface, slug: string, main: string): Promise<boolean | { error: string }> {
+/**
+ * Whether the repo at `main` has a live task `slug`; with `remoteRepo`, the repo key of that repo, also one in a worktree
+ * on another machine, which `ledger list` names by its repo key only. An error when `ledger list` failed.
+ */
+async function hasTask($: EngineInterface, slug: string, main: string, { remoteRepo }: { remoteRepo?: string } = {}): Promise<boolean | { error: string }> {
   const listed = await ledgerJson<Listed>($, ['list'])
-  return listed.ok ? listed.tasks.some(task => task.slug === slug && task.main === main) : { error: listed.error }
+  const inRepo = (task: Listed['tasks'][number]): boolean =>
+    task.main === main || (remoteRepo !== undefined && task.place === 'remote' && (task.currentRepo ?? task.repo) === remoteRepo)
+  return listed.ok ? listed.tasks.some(task => task.slug === slug && inRepo(task)) : { error: listed.error }
 }
 
 /** What `ledger task retire --dry-run` tells of the branch of a finished task; a failed dry run only makes the hint plainer. */
@@ -336,6 +342,16 @@ async function releaseClaims($: EngineInterface, sessionId?: string): Promise<vo
 
 /** At a turn end that does not clear: the model may have just finished or reopened the task, which auto-prune acts on once. */
 async function finishTurn($: EngineInterface, clearPointTokens: number): Promise<void> {
+  await titleAndPrune($, clearPointTokens)
+  await mirrorLedgers($)
+}
+
+/** Any session may have changed a worktree ledger of this machine. A failed copy is no news for the operator: the next turn tries again. */
+async function mirrorLedgers($: EngineInterface): Promise<void> {
+  await ledgerText($, ['store', 'mirror', '--quiet'])
+}
+
+async function titleAndPrune($: EngineInterface, clearPointTokens: number): Promise<void> {
   const session = await readSession($)
   if (!session.ok) return
   if (session.title !== undefined) await titleSession($, session.title)
@@ -565,7 +581,7 @@ export const register: Register = (on, options) => {
     let reason = [first, ...rest].join(' ')
     if (own !== undefined && first === own.slug) reason = rest.join(' ')
     else if (session.main !== undefined) {
-      const found = await hasTask($, first, session.main)
+      const found = await hasTask($, first, session.main, { remoteRepo: session.repo })
       if (typeof found === 'object') return { text: lookupFailedMessage(found.error) }
       if (found) return { text: rest.length === 0 ? PARK_USAGE : await parkOther($, first, rest.join(' ')) }
     }
@@ -613,19 +629,19 @@ export const register: Register = (on, options) => {
     }
     await $.state.set(armed, null)
     if (e.reason !== 'answer') return next(e)
+    // After the model's turn, so its own edits to the ledger cannot move or drop the marker.
+    const parked = value.mode === 'park' ? await ledgerJson<Parked>($, ['task', 'park', value.slug, '--reason', value.reason]) : undefined
+    // Before the switch and after the marker, so the copy holds what this turn wrote whatever the switch does next.
+    await mirrorLedgers($)
+    if (parked !== undefined && !parked.ok) {
+      await $.ui.log(parkFailedMessage(value.slug, parked.error))
+      return next(e)
+    }
     // go.md creates the task only when the conversation shows what it is; without a ledger, `go <slug>` would find nothing.
     if (value.mode === 'go' && 'isNew' in value) {
       const made = await hasTask($, value.slug, value.main)
       if (made !== true) {
         await $.ui.log(made === false ? notCreatedMessage(value.slug) : notCheckedMessage(value.slug, made.error))
-        return next(e)
-      }
-    }
-    // After the model's turn, so its own edits to the ledger cannot move or drop the marker.
-    if (value.mode === 'park') {
-      const parked = await ledgerJson<Parked>($, ['task', 'park', value.slug, '--reason', value.reason])
-      if (!parked.ok) {
-        await $.ui.log(parkFailedMessage(value.slug, parked.error))
         return next(e)
       }
     }

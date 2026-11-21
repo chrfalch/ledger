@@ -3,9 +3,10 @@ import { readTimedText } from './files.js';
 import { mainCheckout } from './git.js';
 import { parseArchiveName } from './paths.js';
 import { withHint } from './migrate-repo-ids.js';
+import { entryMain, parseRegistry } from './registry.js';
 import { isRepoKey, repoKey, repoLabel } from './repo-key.js';
 import { keyAndAliases, type Archive, type LedgerStore, type StoredLedger } from './store.js';
-import { worktreeTasks } from './tasks.js';
+import { findTasks, worktreeTasks } from './tasks.js';
 import type { Context } from './write.js';
 
 const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -24,16 +25,43 @@ function newestCopy(archive: Archive, repos: string[], slug: string): StoredLedg
   return copies[0]?.ledger;
 }
 
+/**
+ * The copy of the worktree ledger `slug` of another machine, filed under one of the repo keys `repos`, with that
+ * machine's host folder. As in findTasks, a worktree task here with one of those keys and that slug makes the copy this
+ * machine's own, under a "host" it had before; that worktree is looked for in the repo of cwd and in each main checkout
+ * the registry lists under those keys.
+ */
+function remoteCopy({ store, cwd }: Context, repos: string[], slug: string): ShownLedger | undefined {
+  const { active } = store;
+  if (active === undefined) return undefined;
+  const copies = active
+    .hosts()
+    .filter((host) => host !== active.host)
+    .flatMap((host) => repos.flatMap((repo) => active.copiesOf(host).read(repo, slug) ?? []).map((copy) => ({ ...copy, host })));
+  if (copies.length === 0) return undefined;
+  const here = mainCheckout(cwd);
+  const registered = (parseRegistry(store.registry.read() ?? '') ?? []).filter((entry) => repos.includes(entry.repo)).flatMap((entry) => entryMain(entry) ?? []);
+  const mains = [...(here === undefined ? [] : [here]), ...registered];
+  const ownWorktree = findTasks(store, mains).some((task) => task.place === 'worktree' && task.slug === slug && repos.includes(task.repo));
+  return ownWorktree ? undefined : copies[0];
+}
+
 /** A name that stays one entry of the store: a file store joins it into a path. */
 const isPlainName = (name: string): boolean => name !== '' && !/\.\.|[/\\]/.test(name);
 
+/** `host` names the machine whose worktree holds the ledger of a read-only copy. */
+export type ShownLedger = StoredLedger & { host?: string };
+
 /**
- * The repo `named` means, the key it is an alias of or the key itself, else the one key with that label, of the store or
- * of the clone `main`; with its old keys, so a ledger the conversion left under one is found too.
+ * The repo `named` means, the key it is an alias of or the key itself, else the one key with that label, of the store,
+ * its copies of the worktree ledgers of other machines included, or of the clone `main`; with its old keys, so a ledger
+ * the conversion left under one is found too.
  */
 function namedRepos(store: LedgerStore, named: string, main: string | undefined): string[] {
+  const { active } = store;
   const aliases = store.aliases.read();
-  const keys = [...new Set([...store.backlog.repos(), ...store.archive.repos(), ...aliases.values(), ...(main === undefined ? [] : [repoKey(main)])])];
+  const copied = active === undefined ? [] : active.hosts().filter((host) => host !== active.host).flatMap((host) => active.copiesOf(host).repos());
+  const keys = [...new Set([...store.backlog.repos(), ...store.archive.repos(), ...copied, ...aliases.values(), ...(main === undefined ? [] : [repoKey(main)])])];
   const labelled = (): string => {
     const found = keys.filter((key) => repoLabel(key) === named);
     if (found.length > 1) fail(`--repo ${named} names ${found.length} repos: ${found.join(', ')}. Pass the one you mean.`);
@@ -53,10 +81,12 @@ function ledgerInWorktree(main: string, slug: string): StoredLedger | undefined 
 /**
  * The ledger `ledger show <slug>` prints from the repo `repo`, or by default the repo that holds the folder you are in:
  * the archive copy named `slug`, else the worktree ledger of `slug` in the clone you are in, if it is of that repo, else
- * the backlog ledger of `slug`, else the newest archive copy of `slug`. The store is searched under the repo's key and
- * its old keys together. With `archived`, the worktree and the backlog are skipped.
+ * the copy of the worktree ledger of `slug` on another machine, else the backlog ledger of `slug`, else the newest
+ * archive copy of `slug`. The store is searched under the repo's key and its old keys together. With `archived`, the
+ * worktree, the copies and the backlog are skipped.
  */
-export function shownLedger({ cwd, store }: Context, slug: string, { repo: named, archived = false }: { repo?: string; archived?: boolean }): StoredLedger {
+export function shownLedger(context: Context, slug: string, { repo: named, archived = false }: { repo?: string; archived?: boolean }): ShownLedger {
+  const { cwd, store } = context;
   if (!isPlainName(slug)) fail(`"${slug}" cannot name a ledger. A name is not empty and holds no .., / or \\.`);
   if (named !== undefined && !isRepoKey(named)) fail(`--repo "${named}" cannot name a repo. A repo is not empty, holds no \\, and has no . or .. between slashes.`);
   const main = mainCheckout(cwd);
@@ -69,7 +99,7 @@ export function shownLedger({ cwd, store }: Context, slug: string, { repo: named
   const found =
     (parseArchiveName(slug) === undefined ? undefined : firstIn((repo) => store.archive.read(repo, slug))) ??
     (archived || clone === undefined ? undefined : ledgerInWorktree(clone, slug)) ??
-    (archived ? undefined : firstIn((repo) => store.backlog.read(repo, slug))) ??
+    (archived ? undefined : (remoteCopy(context, repos, slug) ?? firstIn((repo) => store.backlog.read(repo, slug)))) ??
     newestCopy(store.archive, repos, slug);
   if (found !== undefined) return found;
   const [repo] = repos;

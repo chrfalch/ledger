@@ -8,7 +8,7 @@ import { withLock } from './lock.js';
 import { samePath, worktreeLedger } from './paths.js';
 import { loadTasks } from './registry.js';
 import { readClaimExpiryMinutes } from './settings.js';
-import { findNamed, taskRef, theTask, worktreeTasks, type Task } from './tasks.js';
+import { findNamed, onAnotherMachine, taskRef, theTask, worktreeTasks, type Task } from './tasks.js';
 import type { Context } from './write.js';
 
 /** How old the activity of a claim must be before touch writes it again, so a hook that touches at every turn rarely writes. */
@@ -68,6 +68,7 @@ function activeTask(context: Context, name: string | undefined): Task {
   const tasks = loadTasks(context, [ref.main]);
   const task = findNamed(tasks, ref).find(({ place }) => place === 'worktree') ?? theTask(tasks, ref);
   if (task.place === 'worktree') return task;
+  if (task.place === 'remote') fail(onAnotherMachine(task));
   return fail(`${task.slug} is not active: ${task.place === 'backlog' ? `it is in the backlog. ledger go ${task.slug} starts it.` : 'it is retired.'}`, 2);
 }
 

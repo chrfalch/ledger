@@ -79,7 +79,8 @@ export function listView(tasks: Task[]): string {
   if (tasks.length === 0) return 'No live tasks. Retired tasks are listed by: ledger task archive';
   const count = (status: string): number => tasks.filter((task) => task.status === status).length;
   const counts = [`${count('active')} active`, `${count('parked')} parked`, `${count('backlog')} backlog`];
-  const rows = familyOrder(tasks).map(({ task, depth }) => [repoLabel(task.repo), nestedName(task.slug, depth), task.status, parentCell(task), localDate(task.mtimeMs), truncate(task.ledger.next)]);
+  const status = (task: Task): string => (task.host === undefined ? task.status : `${task.status} on ${task.host}`);
+  const rows = familyOrder(tasks).map(({ task, depth }) => [repoLabel(task.repo), nestedName(task.slug, depth), status(task), parentCell(task), localDate(task.mtimeMs), truncate(task.ledger.next)]);
   return [heading('Task ledgers', `${plural(tasks.length, 'task')}: ${counts.join(', ')}`), '', ...table(['repo', 'task', 'status', 'parent', 'updated', 'next'], rows)].join('\n');
 }
 

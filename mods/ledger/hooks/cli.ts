@@ -83,8 +83,8 @@ export async function ledgerJson<T>($: EngineInterface, args: string[], timeoutM
 
 type Ref = { slug: string; main: string }
 
-/** `main` is the main checkout of the repo that holds the folder. */
-export type Session = { folder: string; removed: boolean; main?: string; own: boolean; title?: string; ledgers: ListedTask[] }
+/** `main` is the main checkout of the repo that holds the folder, and `repo` its repo key. */
+export type Session = { folder: string; removed: boolean; main?: string; repo?: string; own: boolean; title?: string; ledgers: ListedTask[] }
 
 /** The ledgers this session works on. The folder is an argument, so a removed one is reported rather than a failed start. */
 export async function readSession($: EngineInterface): Promise<Answer<Session>> {

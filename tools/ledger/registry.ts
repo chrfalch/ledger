@@ -58,7 +58,7 @@ function toEntry(task: Task, previous: RegistryEntry | undefined): RegistryEntry
 }
 
 /** The repo of an entry: its stored main, else for an active entry the folder its worktree sits in. */
-function entryMain(entry: RegistryEntry): string | undefined {
+export function entryMain(entry: RegistryEntry): string | undefined {
   if (entry.main !== undefined || entry.status !== 'active') return entry.main;
   const worktree = path.dirname(path.dirname(entry.path));
   return mainOfTaskWorktree(worktree) ?? worktree;
@@ -82,7 +82,9 @@ function rebuild({ store, paths }: Context, extraMains: string[], current: strin
     const main = entryMain(entry);
     return entry.status === 'active' && main !== undefined && mainCheckout(main) === undefined && !tasks.some(({ file }) => file === entry.path);
   });
-  const entries = [...tasks.map((task) => toEntry(task, stored?.find(sameLedger(task)))), ...unreadable].sort((a, b) => b.updated.localeCompare(a.updated));
+  // A remote task's ledger is on another machine; the ledger plugin would take its entry for one of this machine.
+  const local = tasks.filter(({ place }) => place !== 'remote');
+  const entries = [...local.map((task) => toEntry(task, stored?.find(sameLedger(task)))), ...unreadable].sort((a, b) => b.updated.localeCompare(a.updated));
   return { tasks, text: `${JSON.stringify(entries, null, 2)}\n` };
 }
 
