@@ -49,6 +49,16 @@ that name, or when the address's folder is on another disk. It lists each one
 and exits 1. Move those by hand, then run the command again to check that
 nothing is left.
 
+Active ledgers used to be files inside each task's worktree. They now live in
+the ledger store, like the backlog. Each deploy runs
+`ledger store migrate --active` once: it moves each active ledger that is still
+a file in a worktree into the store, and deletes the file. The
+`.claude/evidence/` folder stays in the worktree. Deploy prints each ledger it
+moved or left. A ledger it left stays a file and the deploy still finishes. Fix
+what it names, then run `ledger store migrate --active` yourself, from any repo;
+`--dry-run` lists what it would move. Until every ledger is moved, each session
+start in a repo with such a worktree says how many are left.
+
 Run the dry run first. It tells you which files would be linked, which policy
 keys would change, and whether any file of your own would be replaced.
 
@@ -107,7 +117,8 @@ The backlog ledgers, the archive and the list of tasks are files under
 - The database also holds the evidence of each archive copy. Read a ledger
   or its evidence with `ledger show <slug>` and `ledger show <slug> --evidence`.
 - Changing the setting does not copy the ledgers to the other storage.
-- The active ledger stays `.claude/ledger.md` in the task's worktree.
+- The active ledgers move with the storage, as the backlog does. The
+  `.claude/evidence/` folder of a task stays in its worktree.
 - `"storage": "git"` keeps the backlog and the archive in a clone of a private
   GitHub repository, `~/.claude/ledger-data`, so several machines share them.
   It needs `git` and `gh`, logged in. Set it up with `ledger store sync init <url>`,
@@ -115,11 +126,11 @@ The backlog ledgers, the archive and the list of tasks are files under
   that uses the storage exits 1 and says to run `ledger store sync init`. The clone
   sets its own `core.hooksPath`, so hooks from a global `core.hooksPath` do not
   run in it. See [usage.md](usage.md) for what is pushed and what stays.
-- With git storage, `"host"` names this machine, such as
+- `"host"` names this machine, such as
   `{"storage": "git", "host": "work-laptop"}`: lowercase letters, digits and
-  hyphens. Git storage keeps the copies of this machine's worktree ledgers
-  under `active/<host>/`. Without it, the host name up to its first dot names
-  the machine.
+  hyphens. Each task this machine starts names it, so with git storage your
+  other machines show the task as on this host. Without it, the host name up
+  to its first dot names the machine.
 
 ## Environment variables
 

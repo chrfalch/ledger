@@ -439,7 +439,7 @@ for (const from of ['file', 'sqlite'] as const) {
     assert.deepEqual(entries(left.registry).map(({ slug }) => slug), ['fix-login']);
     assert.deepEqual(withStore(h, to, contents).backlog, source.backlog);
     const removedEntries = entries(source.registry).length - 1;
-    assert.ok(lines.at(-1)?.includes(`removed 1 backlog ledger, 1 archive copy and ${removedEntries} registry entries.`), lines.join('\n'));
+    assert.ok(lines.at(-1)?.includes(`removed 1 backlog ledger, 0 active ledgers, 1 archive copy and ${removedEntries} registry entries.`), lines.join('\n'));
   });
 
   test(`migrate ${from} → ${to} exits 1 when a backlog name is taken in the target after the check, keeps that ledger, and removes its own copies`, { skip }, (t) => {
@@ -512,7 +512,7 @@ for (const from of ['file', 'sqlite'] as const) {
     }
     const left = withStore(h, from, (store) => ({ backlog: store.backlog.hiddenMarkdown?.(app), archive: store.archive.hiddenMarkdown?.(app), lib: store.backlog.list(keyOf(h, 'lib')) }));
     assert.deepEqual(left, { backlog: ['fix-login'], archive: [archived], lib: [] });
-    assert.ok(lines.at(-1)?.includes('removed 1 backlog ledger, 0 archive copies'), lines.join('\n'));
+    assert.ok(lines.at(-1)?.includes('removed 1 backlog ledger, 0 active ledgers, 0 archive copies'), lines.join('\n'));
   });
 
   test(`migrate ${from} → ${to} rolls back but keeps a copy whose record hides Markdown in the target, and says so`, { skip }, (t) => {

@@ -11,9 +11,9 @@
 
 This document describes the ledger system as the code builds it today. A
 ledger is the notes of one task: its goal, plan, decisions and next step. One
-command, `ledger`, reads and writes all ledgers. A store keeps the ledgers that
-are not in a worktree, as files, in one SQLite database, or in a private git
-repository that several machines share. A Claude Code plugin
+command, `ledger`, reads and writes all ledgers. A store keeps every ledger,
+as files, in one SQLite database, or in a private git repository that several
+machines share. A Claude Code plugin
 exposes the command as `/ledger:` commands. Hooks show the current ledger at
 session start and block unsafe writes. Rules tell the agent when to use all of
 this.
@@ -26,7 +26,8 @@ document describes only what exists.
 The system has five parts:
 
 1. The `ledger` command, in `tools/ledger/` and started by `bin/ledger`.
-2. The store, which keeps backlog ledgers, archive copies and the registry.
+2. The store, which keeps active and backlog ledgers, archive copies and the
+   registry.
 3. The plugin, in `mods/ledger/`, which gives Claude Code the `/ledger:`
    commands.
 4. The hooks, which Claude Code runs through `ledger hook <event>`.
@@ -38,7 +39,7 @@ A task has one ledger at a time. Where the ledger is tells the task's status:
 | Where the ledger is | Status |
 |---|---|
 | Backlog, in the store | `backlog` |
-| `<worktree>/.claude/ledger.md` | `active`, or `parked` with a parked mark |
+| Active, in the store, naming its worktree | `active`, or `parked` with a parked mark |
 | Archive, in the store | `retired` |
 
 `toTask` in `tools/ledger/tasks.ts` sets the status this way.
@@ -53,7 +54,8 @@ it. The commands are:
 - `list`, `archive`, `show`, `parent`: read tasks.
 - `task`: writes a backlog ledger from `~/.claude/ledger.template.md`.
 - `go`: starts a task. It makes the worktree and branch of a backlog task and
-  moves the ledger there. For a parent task, it starts the first child task
+  moves its ledger from the backlog to the active ledgers, naming that
+  worktree. For a parent task, it starts the first child task
   that is still in the backlog.
 - `park`, `unpark`: add or remove the parked mark under `## Next step`.
 - `retire`: archives the ledger (see [Retire and archive](#retire-and-archive)).
@@ -79,6 +81,7 @@ changes one item of the task record (D29 in LLP 0001):
 |---|---|
 | `plan add "<step>" --owner <agent> [--note <text>]` | adds a `todo` step, numbered after the highest |
 | `plan approve` | sets the plan's approval date to today |
+| `step <n> [--status <status>] [--note <text>]` | sets the status or the note of a step, or both; `--note ""` clears the note |
 | `decide "<text>" --because <reason> --tag <tag>` | adds a decision dated today |
 | `constraint "<text>" --source <where> [--tag <tag>]` | adds a constraint |
 | `question "<text>" [--blocks <n>]`, `question --resolve <id>` | adds an open question, or marks one resolved |
@@ -104,10 +107,9 @@ status of plan step n: `red` after red, `green` after build, `reviewed` after
 review, `done` after any other stage.
 
 Each command acts on the task `--task` names, or else on the task of the
-worktree the command runs in. An archived task is refused. A write reads the
-ledger where it lives today: the backlog ledger through
-`store.backlog.update`, or the worktree's `.claude/ledger.md` under
-`withLock`. It parses the ledger with `parseRecord`, changes the record, checks
+worktree the command runs in. An archived task is refused. A write changes the
+record in the store, through `store.backlog.update` or `store.active.update`,
+which hold the record's lock. It parses the ledger with `parseRecord`, changes the record, checks
 it with `validateRecord` and writes `renderRecord` of it. When the new item or
 the record is wrong, the command exits 1 and writes nothing.
 
@@ -134,12 +136,12 @@ after it, so `--resolve` with an id read earlier can mark the wrong question.
 five parts:
 
 - `backlog`: ledgers of tasks not started yet, named by slug.
+- `active`: ledgers of started tasks, named by slug. Each names its worktree,
+  and `byWorktree` finds the task of a worktree folder.
 - `archive`: copies of retired ledgers, named `<YYYY-MM-DD>-<slug>`, with the
   files of their evidence.
 - `registry`: the text of the task list.
 - `aliases`: old repo keys, each with the key that replaced it.
-- `active`: only in the git store. Read-only copies of the worktree ledgers of
-  each machine, `active/<host>/<repo key>/<slug>.md` in the clone.
 
 Each ledger is filed under its repo's key. `repoKey` in
 `tools/ledger/repo-key.ts` gives it: the address of the remote `origin`, else
@@ -147,24 +149,27 @@ of the only remote, such as `github.com/chrfalch/ledger`; else the absolute path
 of the main checkout. `repoLabel` gives the short form people see, such as
 `chrfalch/ledger`.
 
-A worktree's `.claude/ledger.md` is not in the store, and stays the ledger
-that is changed. Hooks read it from disk. `ledger store mirror`
-(`tools/ledger/mirror.ts`) writes the git store's copy of each worktree ledger
-of this machine, filed under the repo key like every other ledger, so the clones
-of one repo on two machines name a task the same way. A copy is Markdown, the
-worktree ledger byte for byte, in a collection of its own: it is never read or
-written as a task record. A copy of this machine is removed when the mirror
-copied its worktree's ledger under another key or slug, as for a copy under a
-folder name from before repo keys or after a title change; the registry may
-still list the old slug. A copy that matches no worktree task, and no task the
-registry lists active, by repo key and slug is removed when git confirms its
-worktree is gone. A repo git cannot read keeps its copies. The host folder is
-`"host"` in `~/.claude/ledger-settings.json`, else the host name (`readHost` in
-`tools/ledger/settings.ts`). `findTasks` reads the copies of the other hosts as
-tasks of place `remote`: a remote task hides a backlog ledger of the same task
-(`sameTask`), and `ledger go`, park, retire and `ledger notes` refuse it. A machine skips its own
-host folder, as it reads its worktrees from disk. The copies are interim: D8 in
-LLP 0001 makes them unneeded.
+Hooks, commands and the plugin read an active ledger from the store too. The
+worktree keeps only its `.claude/evidence/`. An active record names the machine
+that started it in `- host:`: `"host"` in `~/.claude/ledger-settings.json`, else
+the host name (`readHost` in `tools/ledger/settings.ts`). `activeOf` in
+`tools/ledger/tasks.ts` makes a task `elsewhere`, with that host, when its
+record names another host, and when git lists no worktree of it here. An
+elsewhere task is read-only: `ledger go`, park, claim, retire's parent step,
+`ledger notes` and `ledger tree add` and `remove` refuse it or leave it alone,
+and name its host. A changed record of another host is put back, never
+committed (`commitChanges` in `tools/ledger/clone.ts`). The owner of a record
+is read from its committed copy in HEAD, so an edit on disk cannot make another
+machine's record this one's. Only a record HEAD lacks is read from disk
+(`recordOwner` in `tools/ledger/clone.ts`).
+
+"Another host" means a label that is not among `ownHosts`. Each label a machine
+stamps on a record goes into `~/.claude/ledger-hosts.json`, a list that stays
+on that machine and is never synced (`noteOwnHost` in
+`tools/ledger/settings.ts`). Each store gives that list, with the current label,
+as `ownHosts`. So after `"host"` changes, the records a machine stamped earlier
+are still its own. `updateActive` in `tools/ledger/write.ts` stamps the current
+label on such a record at its next write.
 
 Three stores implement the interfaces:
 
@@ -172,11 +177,11 @@ Three stores implement the interfaces:
 - `sqliteStore` in `tools/ledger/sqlite-store.ts` keeps everything in
   `~/.claude/ledgers.db`. It loads `node:sqlite` only when it is used, so the
   file store also runs on a Node without it.
-- `gitStore` in `tools/ledger/git-store.ts` keeps the backlog and the archive
-  ledgers in `~/.claude/ledger-data`, a clone of a private GitHub repository.
+- `gitStore` in `tools/ledger/git-store.ts` keeps the active, backlog and
+  archive ledgers in `~/.claude/ledger-data`, a clone of a private GitHub repository.
   It is the file store with other folders. After a command writes, it commits
   once and starts `ledger store sync --quiet` in the background, so a command
-  never waits for the network. Only the ledgers, the active copies, a
+  never waits for the network. Only the ledgers, a
   `.ledger-data` marker and a `.gitignore` are committed. Evidence, the
   registry and the repo aliases stay on this machine.
 
@@ -208,16 +213,22 @@ where it is, and a person moves it by hand. In git storage the moves are
 committed and pushed like any other write; each machine records its aliases
 itself.
 
+`migrateActive` in `tools/ledger/migrate-active.ts` runs once for ledgers from
+before active records. It moves the `.claude/ledger.md` of each linked worktree
+into an active record that names the worktree, and deletes the file;
+`.claude/evidence/` stays. A ledger whose slug or worktree is taken stays as it
+is, for a person to merge. Until it runs, `session-start` says how many are
+left.
+
 ### The registry
 
 `tools/ledger/registry.ts` keeps the registry, a JSON list of every task. The
 plugin reads the same shape. The registry is a cache: `loadTasks` can always
 rebuild it from the ledgers.
 
-The registry tells `loadTasks` which repos to look in. When the registry is
-missing or unreadable, `loadTasks` scans `~/repos` and `~/issues` for
-`.claude/ledger.md` files instead. The scan roots are in
-`tools/ledger/paths.ts`.
+`loadTasks` reads every task from the store, so the registry does not tell it
+where to look. It drops an entry whose ledger the store no longer holds, such
+as a task retired on another machine.
 
 A rebuild runs git and can take seconds. So `loadTasks` does not hold the
 registry while it rebuilds. It writes the result only when the registry is
@@ -234,10 +245,7 @@ still the text it read. Otherwise it starts again, up to 20 times.
   session start, command runs, `Skill` tool calls and turn end.
 
 The plugin does not keep task state. `mods/ledger/hooks/cli.ts` runs
-`bin/ledger` from this checkout and reads its `--json` output. At the end of
-each answered turn of the main agent, with or without a ledger in the session,
-it runs `ledger store mirror --quiet`, so git storage keeps current copies of
-the worktree ledgers.
+`bin/ledger` from this checkout and reads its `--json` output.
 
 **Clearing the session.** `/ledger:next`, `/ledger:close` and `/ledger:go` end
 a session. When one of them runs, `register.ts` arms a clear in the plugin's
@@ -282,19 +290,19 @@ because its turn end does not clear the session.
 `ledger hook <event>` answers four Claude Code events. `answerHook` in
 `tools/ledger/hooks.ts` handles them:
 
-- `session-start`: injects the ledgers of the session's folder, with the
-  status of their parent and child tasks. With git storage it pulls first,
-  then runs the mirror, and a sync problem adds one line above the ledgers. A
-  mirror that fails is logged as a hook failure, and the ledgers are still
-  injected. The whole hook has one five-second deadline.
+- `session-start`: injects the ledgers of the session's folder, read from the
+  store, with the status of their parent and child tasks. With git storage it pulls first, and
+  a sync problem adds one line above the ledgers. The whole hook has one
+  five-second deadline.
 - `prompt-submit`: titles the session when the prompt is exactly
   `go <slug>`.
-- `pre-compact`: tells the compaction to keep the ledger path and its next
-  step.
+- `pre-compact`: tells the compaction to keep the task's slug, worktree path
+  and next step.
 - `pre-tool-use`: denies two kinds of tool calls. The first removes a worktree
-  folder whose ledger is not archived. The second writes `.claude/ledger.md` in
-  a main checkout, or writes ledger text that cites a file in a session
-  folder.
+  folder whose ledger is not archived. The second writes a `.claude/ledger.md`
+  anywhere, as no ledger lives in a worktree, or writes ledger text that cites
+  a file in a session folder. Its message names `ledger show` and
+  `ledger notes`.
 
 When a hook fails, `tools/ledger/cli.ts` prints the error to stderr and exits
 0. Claude Code then allows the tool call. A hook never blocks work by accident.
@@ -313,7 +321,6 @@ the first, above the ledgers.
 `tools/ledger/paths.ts` sets the layout:
 
 - A task's worktree is `<main>/.claude/worktrees/<folder>`.
-- Its ledger is `<worktree>/.claude/ledger.md`.
 - Its evidence is `<worktree>/.claude/evidence/`.
 - The file store, and the git store in its clone, name each repo folder by its
   repo key, URI-encoded, such as `github.com%2Fchrfalch%2Fledger`. A folder from
@@ -335,17 +342,13 @@ Then it does these steps:
 2. Removes the worktree, or the backlog ledger.
 3. Marks the task retired in its parent's ledger and copies the child's
    report there.
-4. Updates the task list.
-5. Deletes the merged branch and the worktree's Xcode build folders.
+4. Deletes the merged branch and the worktree's Xcode build folders.
+5. Removes the active record. It comes after every other change to the task, so a retire that stops early
+   leaves the task for a plain rerun to find and finish.
+6. Updates the task list.
 
 An archive copy is never replaced. `Archive.write` throws when the name is
 taken.
-
-A step can fail before step 2 is done. With git storage, `executeRetire` then
-undoes the retire in full before the store commits: it removes the archive
-ledger and the evidence that this retire wrote, and puts the active copy back.
-The commit then holds neither. File and SQLite storage keep the archive copy,
-so a rerun finds it and continues.
 
 ### Rules and agents
 
@@ -375,20 +378,18 @@ Close last.
 | Archive evidence | `~/.claude/ledger-archive/<repo key>/<YYYY-MM-DD>-<slug>/` | `~/.claude/ledgers.db`, as bytes | `~/.claude/ledger-evidence/<repo key>/<YYYY-MM-DD>-<slug>/`, never committed |
 | Registry | `~/.claude/ledgers.json` | `~/.claude/ledgers.db` | `~/.claude/ledgers-git.json`, never committed |
 | Repo aliases | `~/.claude/ledger-aliases.json` | `~/.claude/ledgers.db` | `~/.claude/ledger-aliases-git.json`, never committed |
-| Active ledger | `<worktree>/.claude/ledger.md` | the same file | the same file, and a copy in `~/.claude/ledger-data/active/<host>/<repo key>/<slug>.md`, committed |
+| Active ledger | `~/.claude/ledger-active/<repo key>/<slug>.json` | `~/.claude/ledgers.db`, table `records` | `~/.claude/ledger-data/active/<repo key>/<slug>.json`, committed |
 | Store setting | `~/.claude/ledger-settings.json` | the same file | the same file |
 
 The git store also keeps a clone lock, `~/.claude/ledger-data.lock`, and the
 last sync problem, `~/.claude/ledger-data.status.json`, outside the clone.
 
-The file store writes backlog ledgers and the registry atomically. It holds a
+The file store writes backlog and active ledgers and the registry atomically. It holds a
 lock file, `<target>.lock`, during each such write. `withLock` in `tools/ledger/lock.ts` waits
 up to five seconds for a lock. It takes over a lock whose process is gone or
 that is older than one minute.
 
-A worktree ledger is Markdown. `tools/ledger/format.ts` parses and writes it.
-
-A backlog ledger or archive copy is a task record: JSON with one field or list
+Every ledger in the store is a task record: JSON with one field or list
 per part of the ledger (LLP 0001 D29). `tools/ledger/record.ts` defines it.
 `parseRecord` reads Markdown into a record, and `renderRecord` writes the
 record back as Markdown in the template's layout. A wrapped or indented line
@@ -447,14 +448,14 @@ Known limits of task records:
 
 1. `ledger task new` writes a backlog ledger from the template.
 2. `ledger go <slug>` makes the worktree and branch, and moves the ledger
-   into the worktree. The branch starts at the ledger's `- base:` line, or at
+   from the backlog to the active ledgers. The branch starts at the ledger's `- base:` line, or at
    the default branch. It claims the task for the session, when the task is in
    the repo the command runs in, and installs the
    packages of a worktree with a lockfile and no `node_modules`
    (`tools/ledger/install.ts`); a failed install exits 5 and keeps the
    worktree.
-3. The agent edits `.claude/ledger.md` by hand during the work. The rules say
-   when.
+3. The agent writes the ledger with `ledger notes` during the work, one item
+   per command. The rules say when.
 4. `ledger task park` and `ledger task unpark` mark a task that waits.
 5. `ledger task retire` archives the ledger and removes the worktree.
 
@@ -465,7 +466,7 @@ A parent task stays in the backlog. Its ledger lists its child tasks.
 
 `ledger notes stage` tracks a task's stage, claims track the session that
 works on a task, and `ledger tree order` keeps a parent's child order. The
-code does not track PR state. The agent
-writes the ledger by hand, and only rules guard most steps. [LLP 0001
+code does not track PR state. `ledger notes step` sets a step's status as free
+text, and only rules guard most steps. [LLP 0001
 section 15](0001-ledger-workflow.plan.md#15-from-today-to-this-spec) lists each
 gap and the planned work.

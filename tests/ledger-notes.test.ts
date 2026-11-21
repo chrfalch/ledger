@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawn as spawnAsync, spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import type { Storage } from '../tools/ledger/settings.js';
 import { today } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
-import { archivedTask, commandEnv, git, home, LEDGER_BIN, noSqlite, repository, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { FORMAT } from '../tools/ledger/clone.js';
+import { archivedTask, backlogTask, commandEnv, git, home, LEDGER_BIN, noSqlite, readLedgerFile, repository, worktreeOf, worktreeTask, writeLedgerFile, type Ran } from './ledger-core-fixtures.js';
 
 const TODAY = today();
 
@@ -18,7 +19,7 @@ function setup(t: TestContext, storage: Storage = 'file'): Setup {
   if (storage === 'git') {
     const clone = path.join(h, '.claude/ledger-data');
     spawnSync('git', ['init', '--quiet', clone]);
-    writeFileSync(path.join(clone, '.ledger-data'), '{"format":1}\n');
+    writeFileSync(path.join(clone, '.ledger-data'), `${JSON.stringify({ format: FORMAT })}\n`);
   }
   if (storage !== 'file') writeFileSync(path.join(h, '.claude/ledger-settings.json'), JSON.stringify({ storage }));
   const app = repository(h, path.join(h, 'repos', 'app'));
@@ -46,8 +47,8 @@ function refused(ran: Ran): string {
 function withWorktree(t: TestContext, fields: { goal?: string } = {}) {
   const s = setup(t);
   const file = worktreeTask(s.h, s.app, { slug: 'wt', main: s.app, ...fields });
-  const worktree = path.dirname(path.dirname(file));
-  const read = (): string => readFileSync(file, 'utf8');
+  const worktree = worktreeOf(s.app, 'wt');
+  const read = (): string => readLedgerFile(file);
   const notes = (...args: string[]): Ran => s.run(worktree, 'notes', ...args);
   return { ...s, file, worktree, read, notes };
 }
@@ -93,6 +94,34 @@ test('plan approve sets the approval date to today, in place of an earlier one',
   passed(notes('plan', 'approve'));
   assert.match(read(), new RegExp(`^## Plan \\(approved ${TODAY}\\)$`, 'm'));
   assert.doesNotMatch(read(), /2026-11-01/);
+});
+
+test('step sets the status of a step, replaces its note, or both, and prints the step', (t) => {
+  const { notes, read } = withWorktree(t);
+  assert.equal(passed(notes('step', '2', '--status', 'in review')), 'Updated step 2 of wt.');
+  assert.equal(linesOf(read(), /^## Plan/).at(-1), '| 2 | implement | in review | opus-implementer | |');
+  passed(notes('step', '1', '--note', 'reviewed: tests seen failing'));
+  assert.equal(linesOf(read(), /^## Plan/).at(-2), '| 1 | write the tests | done | opus-implementer | reviewed: tests seen failing |');
+  const result = JSON.parse(passed(notes('step', '2', '--status', 'done', '--note', 'merged', '--json')));
+  assert.deepEqual(result.step, { n: '2', step: 'implement', status: 'done', owner: 'opus-implementer', note: 'merged' });
+  assert.equal(linesOf(read(), /^## Plan/).at(-1), '| 2 | implement | done | opus-implementer | merged |');
+});
+
+test('step --note "" clears the note and keeps the status', (t) => {
+  const { notes, read } = withWorktree(t);
+  passed(notes('step', '1', '--note', ''));
+  assert.equal(linesOf(read(), /^## Plan/).at(-2), '| 1 | write the tests | done | opus-implementer | |');
+});
+
+test('step refuses no --status and no --note, an empty status, an unknown step, and a note that would not read back, and writes nothing', (t) => {
+  const { notes, read } = withWorktree(t);
+  const before = read();
+  assert.match(refused(notes('step', '2')), /--status/);
+  refused(notes('step', '2', '--status', ' '));
+  assert.match(refused(notes('step', '9', '--status', 'done')), /wt has no step 9/);
+  refused(notes('step', 'two', '--status', 'done'));
+  refused(notes('step', '2', '--note', 'a | b'));
+  assert.equal(read(), before);
 });
 
 test('decide appends a dated, tagged decision with its reason', (t) => {
@@ -202,6 +231,51 @@ test('report refuses a step not in the plan, a missing file, and --step and --fi
   assert.equal(read(), before);
 });
 
+const SCRATCHPAD_ADVICE = /Move the file to \.claude\/evidence\/ in the task's worktree and cite that path/;
+
+test('report --file refuses a file in a session scratchpad, by its path or by where a link to it lands, and writes nothing', (t) => {
+  const { h, worktree, notes, read } = withWorktree(t);
+  const session = path.join(h, 'tmp/claude-501/proj/0b7c2a8e-6f1d-4c3b-9a2e-5d4f3e2a1b0c');
+  mkdirSync(path.join(session, 'scratchpad'), { recursive: true });
+  const scratch = path.join(session, 'scratchpad/x.txt');
+  writeFileSync(scratch, 'the red run\n');
+  mkdirSync(path.join(worktree, '.claude/evidence'), { recursive: true });
+  writeFileSync(path.join(worktree, '.claude/evidence/x.txt'), 'the red run\n');
+  const before = read();
+
+  assert.match(refused(notes('report', '--step', '1', '--file', scratch)), SCRATCHPAD_ADVICE);
+  symlinkSync(path.join(session, 'scratchpad'), path.join(worktree, 'out'));
+  assert.match(refused(notes('report', '--step', '1', '--file', 'out/x.txt')), SCRATCHPAD_ADVICE);
+  assert.equal(read(), before);
+
+  passed(notes('report', '--step', '1', '--file', '.claude/evidence/x.txt'));
+  assert.deepEqual(linesOf(read(), /^## Subagent reports$/), ['- step 1: .claude/evidence/x.txt']);
+});
+
+test('every notes text that cites a session scratchpad is refused, and nothing is written', (t) => {
+  const { notes, read } = withWorktree(t);
+  const before = read();
+  const citing = [
+    ['decide', 'see scratchpad/x.txt', '--because', 'it failed', '--tag', 'observed'],
+    ['decide', 'Use SQLite', '--because', 'see /tmp/claude-501/proj/0b7c2a8e-6f1d-4c3b-9a2e-5d4f3e2a1b0c/red.log', '--tag', 'observed'],
+    ['constraint', 'Node 22', '--source', '<scratchpad>/node.txt'],
+    ['plan', 'add', 'read scratchpad/notes.md', '--owner', 'me'],
+    ['step', '1', '--note', 'in scratchpad/red.txt'],
+    ['question', 'Is scratchpad/x.txt right?'],
+    ['report', '--parent', 'Done; see scratchpad/x.txt.'],
+    ['note', 'see scratchpad/x.txt'],
+    ['next', 'Read scratchpad/x.txt.'],
+  ];
+  for (const args of citing) {
+    const refusal = refused(notes(...args));
+    assert.match(refusal, SCRATCHPAD_ADVICE, args.join(' '));
+    assert.doesNotMatch(refusal, /two separate commands/, args.join(' '));
+  }
+  assert.equal(read(), before);
+
+  passed(notes('decide', 'Keep the red run', '--because', 'see .claude/evidence/x.txt', '--tag', 'observed'));
+});
+
 test('report --parent sets ## Report to the text, line by line, in place of an earlier one', (t) => {
   const { notes, read } = withWorktree(t);
   passed(notes('report', '--parent', 'First try.'));
@@ -226,7 +300,7 @@ test('note appends to the general notes; next replaces the next step', (t) => {
 test('--task names the task from anywhere in its repo', (t) => {
   const { app, run, file } = withWorktree(t);
   assert.equal(passed(run(app, 'notes', 'note', 'From the main checkout.', '--task', 'wt')), 'Added a note to wt.');
-  assert.match(readFileSync(file, 'utf8'), /^From the main checkout\.$/m);
+  assert.match(readLedgerFile(file), /^From the main checkout\.$/m);
 });
 
 test('a folder with no task of its own needs --task', (t) => {
@@ -254,7 +328,7 @@ test('check prints ok for a sound ledger', (t) => {
 
 test('check lists an empty goal, a question that blocks a step not in the plan, and a report of a step not in the plan, and changes nothing', (t) => {
   const { file, notes, read } = withWorktree(t, { goal: '' });
-  writeFileSync(
+  writeLedgerFile(
     file,
     read()
       .replace('- <question> — blocks step <#>?', '- Which API? — blocks step 9')
@@ -274,12 +348,14 @@ test('check lists an empty goal, a question that blocks a step not in the plan, 
 });
 
 test('check reports a ledger whose record would not read back the same, and every write to it is refused', (t) => {
-  const { file, notes, read } = withWorktree(t);
-  writeFileSync(file, ['# Task ledger — wt', '', '## Goal', 'Ship it.', '', '## Odd', '```', 'fenced', '```', '', '## Decisions', '- a', '```', ''].join('\n'));
-  const before = read();
-  assert.match(refused(notes('check')), /read back/);
-  refused(notes('note', 'Lost?'));
-  assert.equal(read(), before);
+  // Only Markdown from before task records can be such a ledger: a backlog ledger kept as Markdown.
+  const { h, app, run } = setup(t);
+  const file = backlogTask(h, app, { slug: 'odd' });
+  writeFileSync(file, ['# Task ledger — odd', '', '## Goal', 'Ship it.', '', '## Odd', '```', 'fenced', '```', '', '## Decisions', '- a', '```', ''].join('\n'));
+  const before = readFileSync(file, 'utf8');
+  assert.match(refused(run(app, 'notes', 'check', '--task', 'odd')), /read back/);
+  refused(run(app, 'notes', 'note', 'Lost?', '--task', 'odd'));
+  assert.equal(readFileSync(file, 'utf8'), before);
 });
 
 const STEP_REPORTS_PLACEHOLDER = '<paste the structured report for each step; replace with one line once the step is reviewed>';
@@ -287,7 +363,7 @@ const STEP_REPORTS_PLACEHOLDER = '<paste the structured report for each step; re
 /** The fixture ledger with steps 1 and 2 at `statuses` and `reports` under ## Subagent reports. */
 function withReports(t: TestContext, statuses: [string, string], reports: string[]) {
   const s = withWorktree(t);
-  writeFileSync(
+  writeLedgerFile(
     s.file,
     s
       .read()
@@ -327,7 +403,7 @@ test('a shortened report whose first line is over 160 characters is cut to 160, 
 function withLargeLedger(t: TestContext) {
   const s = withWorktree(t);
   const many = (count: number, line: (index: number) => string): string => Array.from({ length: count }, (_, index) => line(index)).join('\n');
-  writeFileSync(
+  writeLedgerFile(
     s.file,
     s
       .read()
@@ -370,7 +446,7 @@ test('a write to a ledger over 16,000 characters succeeds and warns of its size,
   assert.equal(ran.stderr.trim(), `warning: ${expected}`);
 });
 
-test('writes to a worktree ledger at the same time all land, as each holds the lock on the ledger file', async (t) => {
+test('writes to an active ledger at the same time all land, as each holds the lock of its record', async (t) => {
   const { worktree, env, read } = withWorktree(t);
   const runs = await Promise.all(
     Array.from(
@@ -408,6 +484,7 @@ for (const { storage, skip } of STORES) {
 
     assert.equal(passed(notes('plan', 'add', 'write the tests', '--owner', 'opus-implementer')), 'Added step 1 to fix-login.');
     passed(notes('plan', 'approve'));
+    passed(notes('step', '1', '--status', 'in progress', '--note', 'started'));
     passed(notes('decide', 'Use tokens', '--because', 'sessions expire', '--tag', 'observed'));
     passed(notes('constraint', 'No new dependencies', '--source', 'the operator'));
     passed(notes('question', 'Which provider?', '--blocks', '1'));
@@ -421,7 +498,7 @@ for (const { storage, skip } of STORES) {
 
     const shown = show();
     assert.match(shown, new RegExp(`^## Plan \\(approved ${TODAY}\\)$`, 'm'));
-    assert.deepEqual(linesOf(shown, /^## Plan/).slice(2), ['| 1 | write the tests | todo | opus-implementer | |']);
+    assert.deepEqual(linesOf(shown, /^## Plan/).slice(2), ['| 1 | write the tests | in progress | opus-implementer | started |']);
     assert.deepEqual(linesOf(shown, /^## Decisions$/), [`- ${TODAY}: Use tokens — because sessions expire [observed]`]);
     assert.deepEqual(linesOf(shown, /^## Constraints discovered$/), ['- No new dependencies — found in the operator']);
     assert.deepEqual(linesOf(shown, /^## Open questions$/), ['- Which provider? — blocks step 1', '- (resolved) Which port?']);
@@ -432,6 +509,7 @@ for (const { storage, skip } of STORES) {
 
     refused(notes('question', '--resolve', '2'));
     refused(notes('report', '--step', '2', '--file', evidence));
+    refused(notes('step', '2', '--status', 'done'));
     refused(notes('plan', 'add', 'a | b', '--owner', 'reviewer'));
     assert.equal(show(), shown);
     refused(run(app, 'notes', 'note', 'No task here.'));
@@ -446,7 +524,7 @@ const CODE_STAGES = 'plan, red, build, verify, review, pr';
 function withStage(t: TestContext, location: { kind?: string; stage?: string } = {}) {
   const task = withWorktree(t);
   const bullets = Object.entries(location).map(([key, value]) => `- ${key}: ${value}`);
-  writeFileSync(task.file, task.read().replace('- design refs: none\n', ['- design refs: none', ...bullets, ''].join('\n')));
+  writeLedgerFile(task.file, task.read().replace('- design refs: none\n', ['- design refs: none', ...bullets, ''].join('\n')));
   const stage = (): string | undefined => task.read().match(/^- stage: (.*)$/m)?.[1];
   const stageNotes = (): string[] => linesOf(task.read(), /^## Notes$/).filter((line) => line.includes(' stage '));
   return { ...task, stage, stageNotes };

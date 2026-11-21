@@ -2,10 +2,10 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fail } from './failure.js';
-import { exists, folderEntries, isFolder, readTimedText, writeAtomic } from './files.js';
+import { exists, folderEntries, isFolder, writeAtomic } from './files.js';
 import { parseLedger, planProgress } from './format.js';
 import { branchPrs, changedFiles, checkoutRoot, gitDir, ignoredPaths, inMainCheckout, lastCommitDate, mainCheckout, worktrees, type PullRequest, type Worktree } from './git.js';
-import { samePath, worktreeLedger, type LedgerPaths } from './paths.js';
+import { samePath, type LedgerPaths } from './paths.js';
 import { findTasks, locateChild, namedChildren, type Task } from './tasks.js';
 import { heading, plural, table } from './views.js';
 import { today, type Context } from './write.js';
@@ -50,9 +50,16 @@ export type XcodeFolder = { path: string; keptBecause?: string; refused?: boolea
 export function xcodeFolderOf(folder: string): XcodeFolder | undefined {
   const main = mainCheckout(folder);
   const top = checkoutRoot(folder);
-  const root = main === undefined ? undefined : real(main);
-  if (main === undefined || root === undefined || top === undefined) return undefined;
-  const own = path.join(buildRootOf(root), inMainCheckout(folder) ? MAIN_BUILD_FOLDER : path.basename(top));
+  return main === undefined || top === undefined ? undefined : buildFolderOf(main, top, inMainCheckout(folder));
+}
+
+/** xcodeFolderOf for the linked worktree `folder` of the repo at `main` once git removed its folder, which git can no longer ask. */
+export const removedWorktreeXcodeFolder = (main: string, folder: string): XcodeFolder | undefined => buildFolderOf(main, folder, false);
+
+function buildFolderOf(main: string, top: string, isMain: boolean): XcodeFolder | undefined {
+  const root = real(main);
+  if (root === undefined) return undefined;
+  const own = path.join(buildRootOf(root), isMain ? MAIN_BUILD_FOLDER : path.basename(top));
   if (!isFolder(own)) return undefined;
   const link = linkAboveBuildFolders(path.dirname(own));
   if (link !== undefined) return { path: own, keptBecause: `${link} is a symbolic link`, refused: true };
@@ -176,12 +183,12 @@ function ledgerCell(ledger: WorktreeLedger | null): string {
 /** `ledger worktrees`: each linked worktree with its size, last commit, uncommitted files, ledger and PR, largest first. */
 export function listWorktrees({ store, cwd }: Context): WorktreesList {
   const { main, linked } = repoOf(cwd);
-  const tasks = linked.length === 0 ? [] : findTasks(store, [main]);
+  const tasks = linked.length === 0 ? [] : findTasks(store);
   let prError: string | undefined;
   const rows = linked.map((worktree): WorktreeRow => {
     const prs = worktree.branch === undefined ? [] : branchPrs(worktree.path, worktree.branch);
     if ('error' in prs) prError ??= prs.error;
-    const task = tasks.find(({ place, file }) => place === 'worktree' && samePath(file, worktreeLedger(worktree.path)));
+    const task = tasks.find((each) => each.worktree !== undefined && samePath(each.worktree, worktree.path));
     const size = sizeGb(worktree.path);
     const lastCommit = lastCommitDate(worktree.path);
     const dirty = changedFiles(worktree.path)?.length;
@@ -402,13 +409,13 @@ function trashParent(folder: string, worktreeGitDir: string | undefined): string
 }
 
 /**
- * Prunes the build folders of the linked worktree of `ledger` once each time its plan is finished, and marks it with
- * PRUNED_MARKER; reopening the task drops the mark. A failed prune is marked too, so it is reported once.
+ * Prunes the build folders of the linked worktree `worktree` once each time the plan of its active task is finished, and
+ * marks it with PRUNED_MARKER; reopening the task drops the mark. A failed prune is marked too, so it is reported once.
  */
-export function autoPrune({ paths }: Context, ledger: string): AutoPruneResult {
-  const text = readTimedText(ledger, { followLinks: true })?.text ?? fail(`No ledger to read at ${ledger}.`);
+export function autoPrune({ paths, store }: Context, worktree: string): AutoPruneResult {
+  const key = store.active.byWorktree(worktree) ?? fail(`No active task has the worktree ${worktree}.`);
+  const { text, location: ledger } = store.active.read(key.repo, key.slug) ?? fail(`No ledger to read at ${store.active.location(key.repo, key.slug)}.`);
   const { finished } = planProgress(parseLedger(text));
-  const worktree = path.dirname(path.dirname(ledger));
   const name = path.basename(worktree);
   const marker = path.join(worktree, '.claude', PRUNED_MARKER);
   const facts = { ledger, worktree, marker, finished };

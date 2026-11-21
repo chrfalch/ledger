@@ -7,7 +7,7 @@ const CWD = worktreeOf('epic')
 const EPIC = ledgerOf('epic')
 const OWN_EPIC = {
   [`session ${CWD} --json`]: session(CWD, task('epic')),
-  [`worktrees auto-prune ${EPIC} --json`]: done({ ledger: EPIC, worktree: CWD, marker: '', finished: false, outcome: 'unchanged' }),
+  [`worktrees auto-prune ${CWD} --json`]: done({ ledger: EPIC, worktree: CWD, marker: '', finished: false, outcome: 'unchanged' }),
 }
 const EVERY_100 = { options: { clearPointTokens: 100 } }
 
@@ -33,7 +33,7 @@ test('by default, the next prompt after a turn that reaches 150,000 tokens carri
 })
 
 test('a turn end that finds the task finished marks no offer: after the last verdict there is no clear point', EVERY_100, async ($, on) => {
-  const finished = { [`worktrees auto-prune ${EPIC} --json`]: done({ ledger: EPIC, worktree: CWD, marker: '', finished: true, outcome: 'unchanged' }) }
+  const finished = { [`worktrees auto-prune ${CWD} --json`]: done({ ledger: EPIC, worktree: CWD, marker: '', finished: true, outcome: 'unchanged' }) }
   const w = world(on, { ...OWN_EPIC, ...finished }, { cwd: CWD })
 
   w.useContext(120)
@@ -175,7 +175,7 @@ test('a failed usage read leaves the turn end and the next prompt as they were',
   await $.turn.complete(turnEnd)
   await $.prompt.submit({ text: 'one' })
 
-  expect(w.argvs()).toEqual([['session', CWD, '--json'], ['worktrees', 'auto-prune', EPIC, '--json'], ['store', 'mirror', '--quiet']])
+  expect(w.argvs()).toEqual([['session', CWD, '--json'], ['worktrees', 'auto-prune', CWD, '--json']])
   expect(w.events).toEqual(['rename: epic', 'submit: one'])
   expect(w.reminders).toEqual([])
 })

@@ -18,11 +18,6 @@ export function limitGitCalls(ms: number, until = Infinity): void {
   deadline = until;
 }
 
-/** Asks git again in each folder whose call the limit of limitGitCalls stopped: for the steps after one with a shorter limit. */
-export function forgetStoppedGitCalls(): void {
-  unanswered.clear();
-}
-
 /** Whether a git call in `folder` or a folder that holds it was stopped by the limit of limitGitCalls. */
 export function gitTimedOut(folder: string): boolean {
   for (let current = path.resolve(folder); ; current = path.dirname(current)) {
@@ -117,12 +112,11 @@ export function removeWorktree(main: string, folder: string, branch: string): vo
 export type Worktree = { path: string; branch?: string };
 
 /** Every checkout of the repo at `main`, the main checkout first. Empty when `main` is not a repo. */
-export const worktrees = (main: string): Worktree[] => readWorktreeList(main) ?? [];
-
-/** Every checkout of the repo at `main`, the main checkout first; undefined when git cannot list them. */
-export function readWorktreeList(main: string): Worktree[] | undefined {
-  return git(main, 'worktree', 'list', '--porcelain')
-    ?.split('\n\n')
+export function worktrees(main: string): Worktree[] {
+  const listed = git(main, 'worktree', 'list', '--porcelain');
+  if (listed === undefined) return [];
+  return listed
+    .split('\n\n')
     .map((block) => block.split('\n'))
     .flatMap((lines) => {
       const folder = lines.find((line) => line.startsWith('worktree '))?.slice('worktree '.length);
@@ -138,9 +132,9 @@ export function fetchBranch(main: string, remote: string, branch: string): strin
   return result.ok ? undefined : result.stderr || 'git fetch failed';
 }
 
-/** The commits HEAD has that `base` has not; undefined when git cannot count them. */
-export function commitsAhead(folder: string, base: string): number | undefined {
-  const count = line(folder, 'rev-list', '--count', `${base}..HEAD`);
+/** The commits `head` has that `base` has not; undefined when git cannot count them. */
+export function commitsAhead(folder: string, base: string, head = 'HEAD'): number | undefined {
+  const count = line(folder, 'rev-list', '--count', `${base}..${head}`);
   return count !== undefined && /^\d+$/.test(count) ? Number(count) : undefined;
 }
 
@@ -164,11 +158,20 @@ export function removeLinkedWorktree(main: string, folder: string, force: boolea
   return result.ok ? undefined : result.stderr || 'git worktree remove failed';
 }
 
+/** Drops what git keeps of each worktree whose folder is gone; undefined when it did, else git's error text. */
+export function pruneWorktrees(main: string): string | undefined {
+  const result = run(main, ['worktree', 'prune']);
+  return result.ok ? undefined : result.stderr || 'git worktree prune failed';
+}
+
 /**
  * Deletes the branch only while it still points at `commit`, without git's merge check, which a squash-merged branch
- * never passes. `moved` when it points elsewhere now; otherwise git's error text.
+ * never passes. `moved` when it points elsewhere now, `checkedOut` the worktree that has it checked out, which git's
+ * update-ref would not protect; otherwise git's error text.
  */
-export function deleteBranchAt(main: string, branch: string, commit: string): 'deleted' | 'moved' | { error: string } {
+export function deleteBranchAt(main: string, branch: string, commit: string): 'deleted' | 'moved' | { checkedOut: string } | { error: string } {
+  const holder = worktrees(main).find((worktree) => worktree.branch === branch);
+  if (holder !== undefined) return { checkedOut: holder.path };
   const result = run(main, ['update-ref', '-d', `refs/heads/${branch}`, commit]);
   if (result.ok) {
     // update-ref leaves the branch's config section behind, which `git branch -D` would remove.

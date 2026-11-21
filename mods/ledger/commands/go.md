@@ -11,7 +11,8 @@ $ARGUMENTS
 
 - `task:` is the slug of the task to switch to. Do not start that
   task in this session: the next session does.
-- `ledger:` is the absolute path of this session's task ledger, or `none`.
+- `ledger:` is this session's task as `ledger notes --task` takes it, or
+  `none`.
 - `held:`, when present, means another session holds a live claim on that
   task: `session <id> since <time>, active <time>`. Nothing was started, and
   the session does not clear.
@@ -27,8 +28,8 @@ $ARGUMENTS
 - `picked:`, when present, means the argument named a parent task. The hook
   picked its first child task not yet started; the line runs from that parent
   task down to the `task:` value.
-- `marked:`, when present, is the ledger in which the hook just marked the task
-  started under `## Children`.
+- `marked:`, when present, names the ledger in which the hook just marked the
+  task started under `## Children`.
 - Each `warning:` line says what the hook could not do.
 
 If there is a `held:` line, change no files and skip the rest of this command.
@@ -93,24 +94,33 @@ ledger steps below still apply.
    its ledger exist. Put the error in your reply, and say that running
    `/ledger:go <slug>` again installs the packages.
 7. If `ledger:` is not `none` and `ledger task new` printed no `noted` line,
-   add one line under that ledger's Decisions that names the new task,
-   together with the ledger steps below. A `noted` line means the script already wrote
-   that line.
+   add one decision that names the new task to that ledger, with
+   `ledger notes decide`, together with the ledger steps below. A `noted`
+   line means the script already wrote that decision.
 
 If `ledger:` is `none`, this session has no task ledger. Write nothing, do not
-create one, and only do ledger step 4. Otherwise, update the file at that
-exact path, even when it is not in the current working directory, with these
-ledger steps:
+create one, and only do ledger step 4. Otherwise, update the ledger of that
+task with these ledger steps. `<task>` in them is the `ledger:` value:
 
-1. Use Edit. Never rewrite the whole file. If `marked:` is the same path as
-   `ledger:`, read the file again first: the hook changed it.
+1. Read the ledger with `ledger show` in this session's folder. Change it with
+   `ledger notes <command> --task <task>`, one item per command;
+   `ledger notes --help` lists the commands. Never edit the files of the
+   ledger store. The examples below leave out
+   `--task <task>`; add it to each.
 2. Write facts, not narrative:
-   - the status of each plan step;
-   - each subagent's structured report, not its transcript;
-   - each decision, with its reason;
-   - the exact next step. A later session starts from it, so make it
-     something a fresh session can act on without this conversation.
-3. Roll each finished step into one line. Keep the ledger under about 4k
+   - the status of each plan step: `ledger notes step <n> --status <status>`;
+   - each subagent's structured report, not its transcript: save it under
+     `.claude/evidence/` in the worktree, then
+     `ledger notes report --step <n> --file <path>`;
+   - each decision, with its reason:
+     `ledger notes decide "<decision>" --because "<reason>" --tag <tag>`;
+   - the exact next step: `ledger notes next "<one action>"`. A later
+     session starts from it, so make it something a fresh session can act
+     on without this conversation.
+   Add plan steps, constraints, questions and notes with
+   `ledger notes plan add`, `constraint`, `question` and `note`.
+3. Roll each finished step into one line:
+   `ledger notes step <n> --note "<one line>"`. Keep the ledger under about 4k
    tokens.
 4. End your reply with one line saying whether the ledger is updated (or that there is none), that the
    session clears automatically after this turn, and that the new session

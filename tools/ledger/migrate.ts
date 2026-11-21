@@ -4,6 +4,7 @@ import path from 'node:path';
 import { redacted } from './clone.js';
 import { fail } from './failure.js';
 import { exists, holdsAnything } from './files.js';
+import { parseLedger } from './format.js';
 import { openStore } from './open-store.js';
 import type { LedgerPaths } from './paths.js';
 import { parseRegistry, type RegistryEntry } from './registry.js';
@@ -44,6 +45,16 @@ const everyLedger = (collection: LedgerCollection | undefined): StoredLedger[] =
 
 const shortName = ({ repo, name }: StoredLedger): string => `${repo}/${name}`;
 
+/** A line for each worktree that more than one of the active records `records` names, by its path as written. */
+function sharedWorktrees(records: StoredLedger[]): string[] {
+  const byWorktree = new Map<string, Set<string>>();
+  for (const record of records) {
+    const { worktree } = parseLedger(record.text).location;
+    if (worktree !== undefined) byWorktree.set(worktree, (byWorktree.get(worktree) ?? new Set()).add(shortName(record)));
+  }
+  return [...byWorktree].filter(([, names]) => names.size > 1).map(([worktree, names]) => redacted(`  ${worktree}  ${[...names].join(', ')}`));
+}
+
 /** The ledger an entry stands for, as loadTasks matches entries to ledgers; undefined for an archived entry that names none. */
 const entryKey = (entry: RegistryEntry): string | undefined => (entry.status === 'archived' ? entry.archivePath : entry.path);
 
@@ -65,7 +76,7 @@ const newestFirst = (a: RegistryEntry, b: RegistryEntry): number => updatedOf(b)
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /**
- * `ledger store migrate --to <storage> [--from <storage>] [--remove-source] [--dry-run]`: copies the backlog ledgers, the
+ * `ledger store migrate --to <storage> [--from <storage>] [--remove-source] [--dry-run]`: copies backlog and active ledgers, the
  * archive copies with their evidence, and the registry from one storage to another, reads every copy back, and only then
  * switches the setting and, with `removeSource`, removes what was copied. Exits 1 with nothing changed when the target
  * has a name to copy, and when a copy fails or reads back different: then it removes every copy it made first. Prints
@@ -119,7 +130,9 @@ type Migration = MigrateOptions & {
 
 function migrate({ paths, from, to, setting, source, target, evidenceRoot, line, removeSource, dryRun }: Migration): void {
   const backlog = everyLedger(source?.backlog);
+  const active = everyLedger(source?.active);
   const archive = everyLedger(source?.archive);
+  const ledgers = { backlog, active, archive };
   const evidenceCount = archive.reduce((count, { repo, name }) => count + (source?.archive.evidenceFiles(repo, name).length ?? 0), 0);
   const unread = source?.aliases.problem();
   if (unread !== undefined) fail(`ledger store migrate stopped, and nothing changed: not every alias of the ${STORAGE_NAME[from]} can be read. ${unread}`);
@@ -127,13 +140,20 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
   if (target !== undefined) {
     const conflict = (place: string, collection: LedgerCollection) => (ledger: StoredLedger) =>
       redacted(`  ${place} ${shortName(ledger)}  ${paths.tilde(collection.location(ledger.repo, ledger.name))}`);
+    // A slug is one task per repo, live in the backlog or active, so a slug of one is taken by the other too.
     const conflicts = [
-      ...backlog.filter(({ repo, name }) => target.backlog.has(repo, name)).map(conflict('backlog', target.backlog)),
+      ...slugPlaces.flatMap((place) =>
+        slugPlaces.flatMap((taken) => ledgers[place].filter(({ repo, name }) => target[taken].has(repo, name)).map(conflict(place, target[taken]))),
+      ),
       ...archive.filter(({ repo, name }) => target.archive.nameTaken(repo, name)).map(conflict('archive', target.archive)),
     ];
     if (conflicts.length > 0) {
       const summary = `ledger store migrate stopped, and nothing changed: the ${STORAGE_NAME[to]} already has ${plural(conflicts.length, 'name')} to copy. A ledger with identical text counts too.`;
       fail([summary, ...conflicts].join('\n'));
+    }
+    const shared = sharedWorktrees([...active, ...everyLedger(target.active)]);
+    if (shared.length > 0) {
+      fail([`ledger store migrate stopped, and nothing changed: in the ${STORAGE_NAME[to]}, more than one active task would name a worktree. Retire or fix all but one of each.`, ...shared].join('\n'));
     }
     const kept = target.aliases.read();
     const otherKeys = [...(source?.aliases.read() ?? [])].flatMap(([old, key]) => {
@@ -148,10 +168,7 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
   const moved = new Map(
     target === undefined
       ? []
-      : [
-          ...backlog.map((ledger) => [ledger.location, target.backlog.location(ledger.repo, ledger.name)] as const),
-          ...archive.map((ledger) => [ledger.location, target.archive.location(ledger.repo, ledger.name)] as const),
-        ],
+      : places.flatMap((place) => ledgers[place].map((ledger) => [ledger.location, target[place].location(ledger.repo, ledger.name)] as const)),
   );
   const sourceRegistry = source?.registry.read();
   const sourceAll = parsed(sourceRegistry);
@@ -179,9 +196,10 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
       `ledger store migrate stopped: ${reason} ${undone} The setting stays "${setting}", and nothing was removed from the ${STORAGE_NAME[from]}.`;
     const kept = target.aliases.read();
     const aliases = [...source.aliases.read()].filter(([old]) => !kept.has(old));
-    copyChecked(source, target, { backlog, archive, aliases, evidenceRoot, entries: sourceEntries, mergeRegistry, targetName: STORAGE_NAME[to] }, stopped);
+    copyChecked(source, target, { ...ledgers, aliases, evidenceRoot, entries: sourceEntries, mergeRegistry, targetName: STORAGE_NAME[to] }, stopped);
   }
   line(`${act('copied', 'copy')} ${plural(backlog.length, 'backlog ledger')}`);
+  line(`${act('copied', 'copy')} ${plural(active.length, 'active ledger')}`);
   line(`${act('copied', 'copy')} ${plural(archive.length, 'archive copy', 'archive copies')} with ${plural(evidenceCount, 'evidence file')}`);
   const merge = [`${added.length} added`, `${sourceEntries.length - added.length} kept as the ${STORAGE_NAME[to]} has them`];
   if (skipped > 0) merge.push(`${skipped} skipped as archived with no archive path`);
@@ -201,14 +219,15 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
     const hadRegistry = sourceRegistry !== undefined;
     removed = removedText(
       writing
-        ? remove(source, { backlog, archive, evidenceRoot, entries: hadRegistry ? sourceAll : undefined }, line)
-        : { backlog: backlog.length, archive: archive.length, registry: hadRegistry ? sourceEntries.length : undefined },
+        ? remove(source, { ...ledgers, evidenceRoot, entries: hadRegistry ? sourceAll : undefined }, line)
+        : { backlog: backlog.length, active: active.length, archive: archive.length, registry: hadRegistry ? sourceEntries.length : undefined },
     );
     line(`${act('removed', 'remove')} ${removed} from the ${STORAGE_NAME[from]}`);
   }
 
   const copied = joined([
     plural(backlog.length, 'backlog ledger'),
+    plural(active.length, 'active ledger'),
     plural(archive.length, 'archive copy', 'archive copies'),
     plural(evidenceCount, 'evidence file'),
     plural(added.length, 'registry entry', 'registry entries'),
@@ -216,7 +235,9 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
   line(`${dryRun ? 'Would copy' : 'Copied'} ${copied}; ${dryRun ? 'would remove' : 'removed'} ${removed}.`);
 }
 
-type Copied = { backlog: StoredLedger[]; archive: StoredLedger[] };
+const slugPlaces = ['backlog', 'active'] as const;
+const places = [...slugPlaces, 'archive'] as const;
+type Copied = Record<WrittenLedger['place'], StoredLedger[]>;
 
 /** What a copy wrote to the target, so a copy that stops can take it back: aliases, by old key and key, too. */
 type Written = Copied & { aliases: [string, string][] };
@@ -239,7 +260,7 @@ function copyChecked(
   planned: Planned & { entries: RegistryEntry[]; mergeRegistry: Change<string | undefined>; targetName: string },
   stopped: (reason: string, undone: string) => string,
 ): void {
-  const written: Written = { backlog: [], archive: [], aliases: [] };
+  const written: Written = { backlog: [], active: [], archive: [], aliases: [] };
   const registry: RegistryWrite = {};
   let differs: string[];
   try {
@@ -253,7 +274,7 @@ function copyChecked(
     // Before the setting switches or --remove-source removes anything, so a commit git storage refuses changes neither.
     // It must hold the text read from the source, not only some text: another command may change a copy after the check.
     const expected = (place: WrittenLedger['place']) => ({ repo, name, text }: StoredLedger): WrittenLedger => ({ place, repo, name, text });
-    if (differs.length === 0) target.commit?.([...planned.backlog.map(expected('backlog')), ...planned.archive.map(expected('archive'))]);
+    if (differs.length === 0) target.commit?.(places.flatMap((place) => planned[place].map(expected(place))));
   } catch (error) {
     return fail(redacted(stopped(`copying to the ${planned.targetName} failed: ${messageOf(error)}.`, undo(target, written, registry, planned.targetName))));
   }
@@ -267,21 +288,23 @@ function copyChecked(
  * A ledger is noted in `written` once its write succeeded, so a name another command took since the check is never
  * removed. An archive write that fails is noted only when this process made the copy, as it may have written half.
  */
-function copy(source: LedgerStore, target: LedgerStore, { backlog, archive, aliases, evidenceRoot }: Planned, written: Written): void {
+function copy(source: LedgerStore, target: LedgerStore, planned: Planned, written: Written): void {
   // Before the ledgers, so a copy is never in the target without the alias that finds it under an old key.
-  for (const [old, key] of aliases) {
+  for (const [old, key] of planned.aliases) {
     target.aliases.add(old, key);
     written.aliases.push([old, key]);
   }
-  for (const ledger of backlog) {
-    const { repo, name, text, mtimeMs } = ledger;
-    if (!target.backlog.create(repo, name, text)) fail(`another command wrote backlog ${shortName(ledger)} after the check for names already taken`);
-    written.backlog.push(ledger);
-    target.backlog.setModified?.(repo, name, mtimeMs);
+  for (const place of slugPlaces) {
+    for (const ledger of planned[place]) {
+      const { repo, name, text, mtimeMs } = ledger;
+      if (!target[place].create(repo, name, text)) fail(`another command wrote ${place} ${shortName(ledger)} after the check for names already taken`);
+      written[place].push(ledger);
+      target[place].setModified?.(repo, name, mtimeMs);
+    }
   }
-  archive.forEach((ledger, index) => {
+  planned.archive.forEach((ledger, index) => {
     const { repo, name, text, mtimeMs } = ledger;
-    const folder = evidenceFolder(evidenceRoot, index);
+    const folder = evidenceFolder(planned.evidenceRoot, index);
     source.archive.copyEvidence(repo, name, folder);
     const wasFree = !target.archive.nameTaken(repo, name);
     try {
@@ -311,13 +334,15 @@ const KEPT_BECAUSE: Record<Exclude<Removal, 'removed'>, string> = { changed: 'it
 
 /**
  * Removes from `target` each ledger and alias in `written`, and puts back the registry it had while it is still what this
- * run wrote. A backlog ledger another command changed since the copy stays, and so does a copy whose record hides
+ * run wrote. A backlog or active ledger another command changed since the copy stays, and so does a copy whose record hides
  * Markdown. Says what it did, as a sentence.
  */
 function undo(target: LedgerStore, written: Written, registry: RegistryWrite, targetName: string): string {
   try {
     const outcomes = [
-      ...written.backlog.filter(({ repo, name }) => target.backlog.has(repo, name)).map((ledger) => [`backlog ${shortName(ledger)}`, removal(() => target.backlog.remove(ledger.repo, ledger.name, ledger.text))] as const),
+      ...slugPlaces.flatMap((place) =>
+        written[place].filter(({ repo, name }) => target[place].has(repo, name)).map((ledger) => [`${place} ${shortName(ledger)}`, removal(() => target[place].remove(ledger.repo, ledger.name, ledger.text))] as const),
+      ),
       ...written.archive.filter(({ repo, name }) => target.archive.has(repo, name)).map((ledger) => [`archive ${shortName(ledger)}`, removal(() => target.archive.remove(ledger.repo, ledger.name))] as const),
     ];
     const kept = (outcome: Removal): string[] => outcomes.flatMap(([what, done]) => (done === outcome ? [what] : []));
@@ -341,9 +366,12 @@ function undo(target: LedgerStore, written: Written, registry: RegistryWrite, ta
 }
 
 /** What reads back from `target` unlike the source: a ledger's text, an evidence tree or file, or a registry entry. */
-function check(source: LedgerStore, target: LedgerStore, { backlog, archive, evidenceRoot, entries }: Planned & { entries: RegistryEntry[] }): string[] {
+function check(source: LedgerStore, target: LedgerStore, planned: Planned & { entries: RegistryEntry[] }): string[] {
   const differs: string[] = [];
-  for (const ledger of backlog) if (target.backlog.read(ledger.repo, ledger.name)?.text !== ledger.text) differs.push(`backlog ${shortName(ledger)}`);
+  const { archive, evidenceRoot, entries } = planned;
+  for (const place of slugPlaces) {
+    for (const ledger of planned[place]) if (target[place].read(ledger.repo, ledger.name)?.text !== ledger.text) differs.push(`${place} ${shortName(ledger)}`);
+  }
   archive.forEach((ledger, index) => {
     const { repo, name } = ledger;
     const folder = evidenceFolder(evidenceRoot, index);
@@ -367,44 +395,46 @@ function check(source: LedgerStore, target: LedgerStore, { backlog, archive, evi
 }
 
 /** `registry` is undefined when the source had none. */
-type Removed = { backlog: number; archive: number; registry: number | undefined };
+type Removed = { backlog: number; active: number; archive: number; registry: number | undefined };
 
 /**
- * Removes from `source` what was copied and checked. A backlog ledger or archive copy that changed since the copy stays,
+ * Removes from `source` what was copied and checked. A ledger or archive copy that changed since the copy stays,
  * evidence included, and so does its registry entry, with each entry that was not copied.
  */
 function remove(
   source: LedgerStore,
-  { backlog, archive, evidenceRoot, entries }: Copied & { evidenceRoot: string; entries: RegistryEntry[] | undefined },
+  planned: Copied & { evidenceRoot: string; entries: RegistryEntry[] | undefined },
   line: (text: string) => void,
 ): Removed {
   const kept = new Set<string>();
-  for (const ledger of backlog) {
-    // Another session may have written to it since the copy; that text is in no copy, so it stays.
-    if (!source.backlog.has(ledger.repo, ledger.name)) {
-      line(`backlog ${shortName(ledger)} is already gone from the source`);
-      kept.add(ledger.location);
-      continue;
-    }
-    const done = removal(() => source.backlog.remove(ledger.repo, ledger.name, ledger.text));
-    if (done !== 'removed') {
-      line(`kept backlog ${shortName(ledger)} in the source: ${KEPT_BECAUSE[done]}`);
-      kept.add(ledger.location);
+  const { archive, evidenceRoot, entries } = planned;
+  const removed = { backlog: 0, active: 0, archive: 0 };
+  for (const place of slugPlaces) {
+    for (const ledger of planned[place]) {
+      // Another session may have written to it since the copy; that text is in no copy, so it stays.
+      if (!source[place].has(ledger.repo, ledger.name)) {
+        line(`${place} ${shortName(ledger)} is already gone from the source`);
+        kept.add(ledger.location);
+        continue;
+      }
+      const done = removal(() => source[place].remove(ledger.repo, ledger.name, ledger.text));
+      if (done === 'removed') removed[place]++;
+      else {
+        line(`kept ${place} ${shortName(ledger)} in the source: ${KEPT_BECAUSE[done]}`);
+        kept.add(ledger.location);
+      }
     }
   }
-  const backlogRemoved = backlog.length - kept.size;
-  let archiveRemoved = 0;
   archive.forEach((copy, index) => {
     if (!source.archive.nameTaken(copy.repo, copy.name)) return line(`archive ${shortName(copy)} is already gone from the source`);
     // Checked against what was copied, as another command may have changed the copy or its evidence since.
     const done = removal(() => source.archive.remove(copy.repo, copy.name, { text: copy.text, evidence: evidenceFolder(evidenceRoot, index) }));
-    if (done === 'removed') archiveRemoved++;
+    if (done === 'removed') removed.archive++;
     else {
       line(`kept archive ${shortName(copy)} in the source: ${KEPT_BECAUSE[done]}`);
       kept.add(copy.location);
     }
   });
-  const removed = { backlog: backlogRemoved, archive: archiveRemoved };
   if (entries === undefined) return { ...removed, registry: undefined };
   const copied = new Set(entries.flatMap((entry) => entryKey(entry) ?? []).filter((key) => !kept.has(key)));
   let before = 0;
@@ -424,9 +454,10 @@ function remove(
   return { ...removed, registry: before - stays.length };
 }
 
-const removedText = ({ backlog, archive, registry }: Removed): string =>
+const removedText = ({ backlog, active, archive, registry }: Removed): string =>
   joined([
     plural(backlog, 'backlog ledger'),
+    plural(active, 'active ledger'),
     plural(archive, 'archive copy', 'archive copies'),
     ...(registry === undefined ? [] : [plural(registry, 'registry entry', 'registry entries')]),
   ]);

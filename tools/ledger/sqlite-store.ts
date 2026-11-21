@@ -4,13 +4,28 @@ import path from 'node:path';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { fail } from './failure.js';
 import { holdsAnything, treeEntries } from './files.js';
-import { shownSettingsFile } from './settings.js';
+import { ownHosts, shownSettingsFile, validHost } from './settings.js';
 import { parseRecord, readRecordJson, recordJson, recordToWrite, renderRecord, type TaskRecord } from './record.js';
-import { byCodeUnit, checkedAliases, isAsChecked, NameTaken, needsAlias, noteCreated, readable, refuseHiddenMarkdown, type Archive, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
+import { byCodeUnit, checkedAliases, findWorktree, isAsChecked, NameTaken, needsAlias, noteCreated, readable, refuseHiddenMarkdown, resolvedWorktree, type Archive, type Backlog, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
 import { pauseForTest } from './wait.js';
 
 // The text of a ledger from before records is UTF-8 in a BLOB: node:sqlite on Node 22 cuts a TEXT value short at a NUL
 // byte. A record is TEXT, as JSON writes a NUL byte as \u0000.
+const RECORDS = `
+  CREATE TABLE IF NOT EXISTS records (
+    place TEXT NOT NULL CHECK (place IN ('backlog', 'active', 'archive')),
+    repo TEXT NOT NULL,
+    name TEXT NOT NULL,
+    record TEXT NOT NULL,
+    mtime REAL NOT NULL,
+    birthtime REAL NOT NULL,
+    parent TEXT GENERATED ALWAYS AS (json_extract(record, '$.parent.slug')) VIRTUAL,
+    worktree TEXT GENERATED ALWAYS AS (json_extract(record, '$.worktree')) VIRTUAL,
+    state TEXT GENERATED ALWAYS AS (json_extract(record, '$.state')) VIRTUAL,
+    PRIMARY KEY (place, repo, name)
+  ) STRICT;
+`;
+
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS ledgers (
     place TEXT NOT NULL CHECK (place IN ('backlog', 'archive')),
@@ -21,17 +36,7 @@ const SCHEMA = `
     modified_ms REAL NOT NULL,
     PRIMARY KEY (place, repo, name)
   ) STRICT;
-  CREATE TABLE IF NOT EXISTS records (
-    place TEXT NOT NULL CHECK (place IN ('backlog', 'archive')),
-    repo TEXT NOT NULL,
-    name TEXT NOT NULL,
-    record TEXT NOT NULL,
-    mtime REAL NOT NULL,
-    birthtime REAL NOT NULL,
-    parent TEXT GENERATED ALWAYS AS (json_extract(record, '$.parent.slug')) VIRTUAL,
-    state TEXT GENERATED ALWAYS AS (json_extract(record, '$.state')) VIRTUAL,
-    PRIMARY KEY (place, repo, name)
-  ) STRICT;
+  ${RECORDS}
   CREATE TABLE IF NOT EXISTS evidence (
     repo TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -58,7 +63,7 @@ const SQLITE_BUSY = 5;
 
 const SQLITE_WARNING = 'SQLite is an experimental feature and might change at any time';
 
-type Place = 'backlog' | 'archive';
+type Place = 'backlog' | 'active' | 'archive';
 /** One entry of an evidence folder: a file with its bytes, a folder, or a symbolic link with its text as bytes. */
 type EvidenceEntry = { path: string; kind: 'file' | 'folder' | 'link'; data: Uint8Array };
 
@@ -151,7 +156,7 @@ function realFolderIn(root: string, relative: string, outside: () => never): str
 }
 
 /**
- * The ledger store as one SQLite database, <home>/.claude/ledgers.db: backlog ledgers, archive copies with the bytes of
+ * The ledger store as one SQLite database, <home>/.claude/ledgers.db: backlog and active records, archive copies with the bytes of
  * their evidence, and the registry. A location is the database file and a place in it, such as
  * ~/.claude/ledgers.db:archive/app/2026-11-01-fix-login, and names no file of its own.
  */
@@ -191,8 +196,32 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
     }
   }
 
+  const schema = (): string | undefined => one<{ sql: string }>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'records'")?.sql;
+  const supportsActive = (sql: string | undefined): boolean => /CHECK\s*\(\s*place\s+IN\s*\([^)]*['"]active['"]/i.test(sql ?? '');
+  const recordsSchema = schema();
+  const indexWorktree = 'CREATE INDEX IF NOT EXISTS records_worktree ON records (place, worktree)';
+  if (!readOnly) {
+    try {
+      if (supportsActive(recordsSchema)) db.exec(indexWorktree);
+      else transaction(() => {
+        if (supportsActive(schema())) return;
+        db.exec(`
+          ALTER TABLE records RENAME TO records_old;
+          ${RECORDS}
+          INSERT INTO records (place, repo, name, record, mtime, birthtime)
+            SELECT place, repo, name, record, mtime, birthtime FROM records_old;
+          DROP TABLE records_old;
+          ${indexWorktree};
+        `);
+      });
+    } catch (error) {
+      db.close();
+      throw error;
+    }
+  }
+
   // A record, else a row of ledgers from before records. A database opened read-only from before records has only ledgers.
-  const recordsTable = one(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'records'`) !== undefined;
+  const recordsTable = recordsSchema !== undefined;
   const STORED = !recordsTable
     ? '(SELECT place, repo, name, NULL AS record, text, created_ms, modified_ms FROM ledgers)'
     : `(SELECT place, repo, name, record, NULL AS text, birthtime AS created_ms, mtime AS modified_ms FROM records
@@ -262,7 +291,6 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
     };
   }
 
-  const backlog = collection('backlog');
   const archive = collection('archive');
   const evidenceLocation = (repo: string, name: string): string => `${file}:evidence/${repo}/${name}`;
   const archived = (repo: string, name: string): EvidenceEntry[] => all<EvidenceEntry>('SELECT path, kind, data FROM evidence WHERE repo = ? AND name = ?', repo, name);
@@ -330,7 +358,7 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
   const move = (place: Place, repo: string, name: string, to: string): boolean =>
     transaction(() => {
       const planned = plannedMove(place, repo, name, to);
-      if (planned !== 'evidence' && !hasLedger(place, repo, name)) fail(`${(place === 'backlog' ? backlog : archive).location(repo, name)} does not exist.`);
+      if (planned !== 'evidence' && !hasLedger(place, repo, name)) fail(`${collection(place).location(repo, name)} does not exist.`);
       if (planned === undefined) return false;
       if (planned === 'ledger') for (const table of ['records', 'ledgers']) run(`UPDATE ${table} SET repo = ? WHERE place = ? AND repo = ? AND name = ?`, to, place, repo, name);
       if (place === 'archive') run('UPDATE evidence SET repo = ? WHERE repo = ? AND name = ?', to, repo, name);
@@ -343,19 +371,20 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
       ? []
       : all<{ old: string; repo: string }>('SELECT old, repo FROM aliases').map(({ old, repo }) => [old, repo]);
 
-  const existing = (repo: string, slug: string): string => (backlog.read(repo, slug) ?? fail(`${backlog.location(repo, slug)} does not exist.`)).text;
-  const putBacklog = (repo: string, slug: string, text: string): void => putRecord('backlog', repo, slug, recordToWrite(text, backlog.location(repo, slug)));
   const readRegistry = (): string | undefined => one<{ text: string }>('SELECT text FROM registry WHERE id = 1')?.text;
   const writeRegistry = (text: string): void => void run('INSERT INTO registry VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET text = excluded.text', text);
 
-  return {
-    backlog: {
-      ...backlog,
-      write: (repo, slug, text) => transaction(() => putBacklog(repo, slug, text)),
+  function writable(place: 'backlog' | 'active'): Backlog {
+    const ledgers = collection(place);
+    const existing = (repo: string, slug: string): string => (ledgers.read(repo, slug) ?? fail(`${ledgers.location(repo, slug)} does not exist.`)).text;
+    const put = (repo: string, slug: string, text: string): void => putRecord(place, repo, slug, recordToWrite(text, ledgers.location(repo, slug)));
+    return {
+      ...ledgers,
+      write: (repo, slug, text) => transaction(() => put(repo, slug, text)),
       create: (repo, slug, text) =>
         transaction(() => {
-          if (hasLedger('backlog', repo, slug)) return false;
-          putBacklog(repo, slug, text);
+          if (hasLedger(place, repo, slug)) return false;
+          put(repo, slug, text);
           return true;
         }),
       update: (repo, slug, change) =>
@@ -363,17 +392,33 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
           const current = existing(repo, slug);
           pauseForTest();
           const text = change(current);
-          if (text !== undefined) putBacklog(repo, slug, text);
+          if (text !== undefined) put(repo, slug, text);
           return text !== undefined;
         }),
       remove: (repo, slug, expected) =>
         transaction(() => {
           const current = existing(repo, slug);
-          if (hidesMarkdown('backlog', repo, slug)) refuseHiddenMarkdown(backlog.location(repo, slug));
-          return current === expected && deleteLedger('backlog', repo, slug);
+          if (hidesMarkdown(place, repo, slug)) refuseHiddenMarkdown(ledgers.location(repo, slug));
+          return current === expected && deleteLedger(place, repo, slug);
         }),
-      move: (repo, slug, to) => move('backlog', repo, slug, to),
-      canMove: (repo, slug, to) => plannedMove('backlog', repo, slug, to) !== undefined,
+      move: (repo, slug, to) => move(place, repo, slug, to),
+      canMove: (repo, slug, to) => plannedMove(place, repo, slug, to) !== undefined,
+    };
+  }
+  return {
+    host: validHost(home),
+    ownHosts: ownHosts(home),
+    backlog: writable('backlog'),
+    active: {
+      ...writable('active'),
+      byWorktree: (folder) => {
+        if (readOnly && !supportsActive(recordsSchema)) return undefined;
+        const resolved = resolvedWorktree(folder);
+        const select = "SELECT repo, name AS slug, worktree FROM records WHERE place = 'active' AND worktree";
+        type Candidate = { repo: string; slug: string; worktree: string };
+        const candidates = resolved === undefined ? all<Candidate>(select + ' = ?', folder) : all<Candidate>(select + ' IS NOT NULL');
+        return findWorktree(folder, resolved, candidates);
+      },
     },
     archive: {
       ...archive,

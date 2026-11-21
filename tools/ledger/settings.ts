@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fail, Failure } from './failure.js';
 import { exists, writeAtomic } from './files.js';
+import { withLock } from './lock.js';
 import { ledgerPaths } from './paths.js';
 
 export const STORAGES = ['file', 'sqlite', 'git'] as const;
@@ -55,8 +56,9 @@ export function readClaimExpiryMinutes(home: string): number {
 }
 
 /**
- * A host label, the name of a machine's folder in git storage, as a pattern that is both a JavaScript regular expression
- * and a POSIX extended one: the allowlist and the pre-push hook take a host folder by it.
+ * A host label, the name of a machine that an active record names, as a pattern that is both a JavaScript regular
+ * expression and a POSIX extended one: the allowlist and the pre-push hook take the host folder of a copy from before
+ * active records by it.
  */
 export const HOST_LABEL = '[a-z0-9-]+';
 
@@ -73,16 +75,15 @@ export const hostLabel = (raw: string): string =>
 const SET_HOST = 'lowercase letters, digits and hyphens, such as "work-laptop"';
 
 /**
- * The name of this machine in git storage, the folder of its active copies: "host" in ~/.claude/ledger-settings.json,
- * else the label of its host name. A "host" that is no label fails, as it becomes part of a path, and so does a host
- * name that gives an empty label.
+ * The name of this machine, which each active record it starts names: "host" in ~/.claude/ledger-settings.json, else
+ * the label of its host name. A "host" that is no label fails, and so does a host name that gives an empty label.
  */
 export function readHost(home: string): string {
   const { host } = readSettings(home, 'Fix it, or delete it to use the default settings.') ?? {};
   const shown = shownSettingsFile(home);
   if (host === undefined) {
     const label = hostLabel(os.hostname());
-    return label !== '' ? label : fail(`The host name ${JSON.stringify(os.hostname())} gives no folder name for git storage. Set "host" in ${shown} to ${SET_HOST}.`);
+    return label !== '' ? label : fail(`The host name ${JSON.stringify(os.hostname())} gives no host label for this machine. Set "host" in ${shown} to ${SET_HOST}.`);
   }
   if (typeof host === 'string' && isHostLabel(host)) return host;
   return fail(`"host" in ${shown} is ${JSON.stringify(host)}. Set "host" there to ${SET_HOST}.`);
@@ -99,8 +100,46 @@ export function hostProblem(home: string): string | undefined {
   }
 }
 
-/** readHost, or undefined where it fails: then no host folder under active/ is this machine's. */
+/** readHost, or undefined where it fails: then no active record counts as this machine's by its host. */
 export const validHost = (home: string): string | undefined => (hostProblem(home) === undefined ? readHost(home) : undefined);
+
+/**
+ * Every host label this machine stamped on an active record, as a JSON array. It stays on this machine, outside the
+ * store, so that after "host" changes the records of its earlier label are still its own.
+ */
+export const ownHostsFile = (home: string): string => path.join(home, '.claude', 'ledger-hosts.json');
+
+function stampedHosts(home: string): string[] {
+  try {
+    const hosts: unknown = JSON.parse(readFileSync(ownHostsFile(home), 'utf8'));
+    return Array.isArray(hosts) ? hosts.filter((host): host is string => typeof host === 'string' && isHostLabel(host)) : [];
+  } catch {
+    // A list that is missing or broken costs only the earlier labels: their records count as another machine's.
+    return [];
+  }
+}
+
+/** This machine's host labels: validHost, and each label in the hosts file; none where neither gives one. */
+export function ownHosts(home: string): ReadonlySet<string> {
+  const host = validHost(home);
+  return new Set([...stampedHosts(home), ...(host === undefined ? [] : [host])]);
+}
+
+/** Adds `host`, a label just stamped on an active record, to the hosts file, unless it is there. */
+export function noteOwnHost(home: string, host: string): void {
+  if (stampedHosts(home).includes(host)) return;
+  const file = ownHostsFile(home);
+  try {
+    // Read again under the lock, so a label another command adds meanwhile is kept.
+    withLock(file, () => {
+      const hosts = stampedHosts(home);
+      if (!hosts.includes(host)) writeAtomic(file, `${JSON.stringify([...hosts, host])}\n`);
+    });
+  } catch (error) {
+    // The record is written; only a later change of "host" would miss this label.
+    console.error(`warning: could not add the host ${host} to ${ledgerPaths(home).tilde(ownHostsFile(home))}: ${(error as Error).message}`);
+  }
+}
 
 /** Sets "storage" in the settings file and keeps every other key. Call readStorage first: it refuses a broken file. */
 export function writeStorage(home: string, storage: Storage): void {

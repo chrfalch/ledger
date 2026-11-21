@@ -99,8 +99,8 @@ Both tests write only to a temporary directory.
 
 `ledger.template.md` is copied to a new ledger when a task is named:
 `/ledger:task` runs `ledger task new`, which writes the ledger to the backlog
-before any plan. `/ledger:go <slug>` later moves it to `.claude/ledger.md` in
-the task's new worktree. The approved plan is written into it later. Keep it
+before any plan. `/ledger:go <slug>` later makes it the active ledger of the
+task's new worktree. The approved plan is written into it later. Keep it
 short: the ledger has a budget of about 4k tokens, and every section you add is
 read at the start of every session for the life of the task.
 
@@ -124,8 +124,8 @@ remove a whole event, the old entries stay in upgraded settings beside the new
 ones. Remove them by hand.
 
 The `SessionStart` hook is what makes the `/clear` then `go` loop work. If you
-change it, test that a session started in a worktree still finds
-`.claude/ledger.md`, and that a directory with several ledgers still produces a
+change it, test that a session started in a worktree still gets
+its ledger from the store, and that a directory with several ledgers still produces a
 summary rather than a full dump.
 
 ## Sending a change back

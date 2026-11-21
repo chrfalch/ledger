@@ -1,4 +1,5 @@
 // @ref LLP 0000#the-store — what each store keeps, and how the storage setting picks one.
+import { realpathSync } from 'node:fs';
 import { fail, Failure } from './failure.js';
 import { holdsAnything } from './files.js';
 import { isRepoKey } from './repo-key.js';
@@ -23,7 +24,7 @@ export type StoredLedger = {
  * leaves it out, as it leaves out a file it cannot read, so one broken ledger does not stop every command. Reading it by
  * name still fails and names it.
  */
-export function readable(read: () => StoredLedger | undefined): StoredLedger | undefined {
+export function readable<T>(read: () => T | undefined): T | undefined {
   try {
     return read();
   } catch (error) {
@@ -100,6 +101,31 @@ export interface Backlog extends LedgerCollection {
   move(repo: string, slug: string, to: string): boolean;
   /** Whether `move` would move the ledger now, by the checks it makes, without moving anything. */
   canMove(repo: string, slug: string, to: string): boolean;
+}
+
+type ActiveKey = { repo: string; slug: string };
+
+export interface Active extends Backlog {
+  /** The active task in `folder`, resolving existing paths on this machine. Fails when two tasks name it. */
+  byWorktree(folder: string): ActiveKey | undefined;
+}
+
+export function resolvedWorktree(folder: string): string | undefined {
+  try {
+    return realpathSync.native(folder);
+  } catch {
+    return undefined;
+  }
+}
+
+export function findWorktree(folder: string, resolved: string | undefined, candidates: Iterable<ActiveKey & { worktree: string }>): ActiveKey | undefined {
+  let found: ActiveKey | undefined;
+  for (const { repo, slug, worktree } of candidates) {
+    if (worktree !== folder && (resolved === undefined || resolvedWorktree(worktree) !== resolved)) continue;
+    if (found) fail(`Both ${found.repo}/${found.slug} and ${repo}/${slug} name the worktree ${folder}.`);
+    found = { repo, slug };
+  }
+  return found;
 }
 
 export type EvidenceState = 'none' | 'same' | 'differs';
@@ -185,7 +211,7 @@ export interface Registry {
 }
 
 /** A ledger with the text a caller wrote to it. */
-export type WrittenLedger = { place: 'backlog' | 'archive'; repo: string; name: string; text: string };
+export type WrittenLedger = { place: 'backlog' | 'active' | 'archive'; repo: string; name: string; text: string };
 
 /** Old repo keys, such as the folder names keys were before D10, each with the key that replaced it. Unlike the registry, no rebuild can recreate it. */
 export interface Aliases {
@@ -237,71 +263,28 @@ export function needsAlias(entries: Iterable<readonly [string, unknown]>, old: s
   return current === undefined;
 }
 
-/** A copy that ActiveCopies.remove removed. */
-export type RemovedCopy = {
-  /**
-   * Writes the copy back as it was, left out of every commit again if it was before. One it cannot write back is left
-   * out of every commit, so none removes it, and this fails.
-   */
-  putBack(): void;
-};
-
-/**
- * Copies of the worktree ledgers of each machine, so that the other machines can read them. A machine writes only the
- * copies in its own host folder; the name is the slug.
- */
-export interface ActiveCopies {
-  /**
-   * The host folder of this machine; undefined when the "host" setting is no host label. Then only the copies of this
-   * machine are out of reach: `write`, `remove` and `reconcile` fail and say why.
-   */
-  readonly host: string | undefined;
-  /** The host folders, by name. */
-  hosts(): string[];
-  copiesOf(host: string): LedgerCollection;
-  /**
-   * Writes this machine's copy of a worktree ledger; false when the copy holds `text` already. A copy that is there but
-   * cannot be read fails, with nothing written.
-   */
-  write(repo: string, slug: string, text: string): boolean;
-  /**
-   * Removes this machine's copy, so that the next commit removes it too; undefined when there is none. A copy that is
-   * there but cannot be read fails, with nothing removed. One already gone whose removal no commit took, as it was held
-   * back, counts as removed now.
-   */
-  remove(repo: string, slug: string): RemovedCopy | undefined;
-  /**
-   * Runs `work` with this machine's host folder, then commits every change of this machine's copies, also one an earlier
-   * commit left out; all of it as one step, so no other command writes or commits the store in between. Unfinished work
-   * in the store, such as a merge, fails it before `work` runs. When `work` throws, the copies it changed are put back as
-   * they were before it, so none of its changes is committed; one it cannot put back is left out of every commit until a
-   * reconcile that goes through writes it, finds it as written or removes it. A commit that fails is left to `close`; so
-   * is the commit when git cannot list the changed copies, which fails it.
-   */
-  reconcile<T>(work: (host: string) => T): T;
-}
-
-/**
- * Where backlog ledgers, archive copies and the registry are kept. A worktree's .claude/ledger.md is not in it; git
- * storage keeps a copy of it in `active`.
- */
+/** Stores backlog and active records, archive copies, the registry and aliases. */
 export interface LedgerStore {
   backlog: Backlog;
+  active: Active;
   archive: Archive;
   registry: Registry;
   aliases: Aliases;
-  active?: ActiveCopies;
+  /**
+   * This machine's host label, which each active record it starts names; undefined for a "host" setting that names no
+   * label, and for a store opened without a home. Then no record counts as another machine's by its host alone.
+   */
+  readonly host?: string;
+  /**
+   * Each host label of this machine: `host`, and each label it stamped on a record before "host" changed. A record that
+   * names one of them is this machine's.
+   */
+  readonly ownHosts?: ReadonlySet<string>;
   /**
    * Records what the store wrote where it must be recorded, as git storage commits it; throws when it cannot, and when
    * it recorded a ledger of `expected` with any other text.
    */
   commit?(expected?: WrittenLedger[]): void;
-  /**
-   * Runs `work`, then records what it wrote, as one step: no other command writes or records the store in between, so
-   * none sees half of it. A store without such a step, as one that records each write at once, has no `inOneCommit`. A
-   * commit that fails is left to `close`.
-   */
-  inOneCommit?<T>(work: () => T): T;
   /** Lets go of what the store holds open, such as a database; the store is not used after it. */
   close?(): void;
 }

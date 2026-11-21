@@ -1,15 +1,13 @@
 // @ref LLP 0001#54-claims — D5, D17: a session claims the active task it works on; a claim with no activity expires.
 import { withClaim, withoutClaim } from './edit.js';
 import { fail, Failure } from './failure.js';
-import { readText, writeAtomic } from './files.js';
 import { claimText, parseLedger, type Claim } from './format.js';
 import { checkoutRoot, mainCheckout } from './git.js';
-import { withLock } from './lock.js';
-import { samePath, worktreeLedger } from './paths.js';
 import { loadTasks } from './registry.js';
+import { repoKey } from './repo-key.js';
 import { readClaimExpiryMinutes } from './settings.js';
-import { findNamed, onAnotherMachine, taskRef, theTask, worktreeTasks, type Task } from './tasks.js';
-import type { Context } from './write.js';
+import { activeTasks, activeTask as worktreeTask, findNamed, notOnThisMachine, taskRef, theTask, type Task } from './tasks.js';
+import { updateActive, type Context } from './write.js';
 
 /** How old the activity of a claim must be before touch writes it again, so a hook that touches at every turn rarely writes. */
 const TOUCH_MINUTES = 15;
@@ -54,57 +52,64 @@ export function requiredSession(option: string | undefined): string {
   return /^\S+$/.test(session) ? session : fail(`"${session}" is no session id: a session id is one word, with no spaces.`, 2);
 }
 
-function ownTask(cwd: string): Task | undefined {
+function ownTask({ store, cwd }: Context): Task | undefined {
   const root = checkoutRoot(cwd);
-  const main = root === undefined ? undefined : mainCheckout(root);
-  if (root === undefined || main === undefined) return undefined;
-  return worktreeTasks(main).find(({ file }) => samePath(file, worktreeLedger(root)));
+  return root === undefined ? undefined : worktreeTask(store, root);
 }
 
-/** The task `name` names, or that of the worktree the command runs in; only an active task, one with a worktree. */
+/** The task `name` names, or that of the worktree the command runs in; only an active task whose worktree is on this machine. */
 function activeTask(context: Context, name: string | undefined): Task {
-  if (name === undefined) return ownTask(context.cwd) ?? fail(`No task ledger in or above ${context.cwd}. Give the slug of an active task.`);
+  const task = name === undefined ? (ownTask(context) ?? fail(`No task ledger in or above ${context.cwd}. Give the slug of an active task.`)) : namedTask(context, name);
+  if (task.elsewhere) fail(notOnThisMachine(task));
+  return task;
+}
+
+function namedTask(context: Context, name: string): Task {
   const ref = taskRef(context.cwd, name);
-  const tasks = loadTasks(context, [ref.main]);
-  const task = findNamed(tasks, ref).find(({ place }) => place === 'worktree') ?? theTask(tasks, ref);
-  if (task.place === 'worktree') return task;
-  if (task.place === 'remote') fail(onAnotherMachine(task));
+  const tasks = loadTasks(context);
+  const task = findNamed(tasks, ref).find(({ place }) => place === 'active') ?? theTask(tasks, ref);
+  if (task.place === 'active') return task;
   return fail(`${task.slug} is not active: ${task.place === 'backlog' ? `it is in the backlog. ledger go ${task.slug} starts it.` : 'it is retired.'}`, 2);
 }
 
-/** What a claim reads and writes of a task: its ledger file, and its slug for the result. */
-type ClaimedLedger = Pick<Task, 'slug' | 'file'>;
+/** What a claim reads and writes of a task: its active record, and its slug and ledger for the result. */
+type ClaimedLedger = Pick<Task, 'slug' | 'file' | 'repo' | 'name'>;
 
 type ClaimState = { task: ClaimedLedger; text: string; stored?: Claim; live?: Claim; now: Date };
 
-/** Runs `work` on the ledger of `task` and its live claim, read and written under the ledger's lock. */
-function lockedClaim<T>(task: ClaimedLedger, clock: ClaimClock, work: (state: ClaimState) => T): T {
-  return withLock(task.file, () => {
-    const text = readText(task.file);
+/** What a claim change returns, and the ledger text to write; none leaves the ledger as it is. */
+type ClaimChange<T> = { result: T; text?: string };
+
+/** Runs `work` on the ledger of `task` and its live claim, read and written as one change of its record. */
+function lockedClaim<T>(context: Context, task: ClaimedLedger, clock: ClaimClock, work: (state: ClaimState) => ClaimChange<T>): T {
+  let done: ClaimChange<T> | undefined;
+  updateActive(context, task, (text) => {
     const stored = parseLedger(text).location.claim;
     const live = liveClaim(stored, clock);
-    return work({ task, text, now: clock.now, ...(stored === undefined ? {} : { stored }), ...(live === undefined ? {} : { live }) });
+    done = work({ task, text, now: clock.now, ...(stored === undefined ? {} : { stored }), ...(live === undefined ? {} : { live }) });
+    return done.text;
   });
+  return done === undefined ? fail(`The ledger ${task.file} is gone.`) : done.result;
 }
 
-function underLock<T>(context: Context, name: string | undefined, work: (state: ClaimState) => T): T {
-  return lockedClaim(activeTask(context, name), claimClock(context.paths.home), work);
+function underLock<T>(context: Context, name: string | undefined, work: (state: ClaimState) => ClaimChange<T>): T {
+  return lockedClaim(context, activeTask(context, name), claimClock(context.paths.home), work);
 }
 
 /** What a `--all` touch or release did: the slugs whose claim it changed, and a line for each task it could not do. */
 export type AllResult = { changed: string[]; failures: string[] };
 
 /**
- * Runs `work` on each active task of the repo the command runs in, under each ledger's own lock. A task that fails does
- * not stop the others, so one broken ledger leaves no other claim behind.
+ * Runs `work` on each active task of the repo the command runs in whose worktree is on this machine, one record change
+ * each. A task that fails does not stop the others, so one broken ledger leaves no other claim behind.
  */
-function changedInRepo(context: Context, verb: string, work: (state: ClaimState) => boolean): AllResult {
+function changedInRepo(context: Context, verb: string, work: (state: ClaimState) => ClaimChange<boolean>): AllResult {
   const main = mainCheckout(context.cwd) ?? fail(`${context.cwd} is not inside a git repository.`);
   const clock = claimClock(context.paths.home);
   const result: AllResult = { changed: [], failures: [] };
-  for (const task of worktreeTasks(main)) {
+  for (const task of activeTasks(context.store, repoKey(main)).filter(({ elsewhere }) => !elsewhere)) {
     try {
-      if (lockedClaim(task, clock, work)) result.changed.push(task.slug);
+      if (lockedClaim(context, task, clock, work)) result.changed.push(task.slug);
     } catch (error) {
       result.failures.push(`Could not ${verb} the claim on ${task.slug}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -112,9 +117,7 @@ function changedInRepo(context: Context, verb: string, work: (state: ClaimState)
   return result;
 }
 
-function writeClaim(task: ClaimedLedger, text: string, claim: Claim): void {
-  writeAtomic(task.file, withClaim(text, claim) ?? fail(`${task.file} has no ## Location section to hold the claim.`));
-}
+const claimed = (task: ClaimedLedger, text: string, claim: Claim): string => withClaim(text, claim) ?? fail(`${task.file} has no ## Location section to hold the claim.`);
 
 export type ClaimResult = { slug: string; ledger: string; claim: Claim; tookOverFrom?: Claim };
 
@@ -123,13 +126,12 @@ export type ClaimOptions = { takeOver: boolean; from?: string };
 
 /** Claims `task` for `session`; refuses with Held while a session other than `session` or `from` holds it live, unless `takeOver`. */
 export function claimLedger(context: Context, task: ClaimedLedger, session: string, { takeOver, from }: ClaimOptions): ClaimResult {
-  return lockedClaim(task, claimClock(context.paths.home), ({ text, live, now: at }) => {
+  return lockedClaim(context, task, claimClock(context.paths.home), ({ text, live, now: at }) => {
     const other = live === undefined || live.session === session || live.session === from ? undefined : live;
     if (other !== undefined && !takeOver) throw new Held(other);
     const time = stamp(at);
     const claim = { session, since: live?.session === session ? live.since : time, active: time };
-    writeClaim(task, text, claim);
-    return { slug: task.slug, ledger: task.file, claim, ...(other === undefined ? {} : { tookOverFrom: other }) };
+    return { result: { slug: task.slug, ledger: task.file, claim, ...(other === undefined ? {} : { tookOverFrom: other }) }, text: claimed(task, text, claim) };
   });
 }
 
@@ -140,31 +142,32 @@ export const claimTask = (context: Context, name: string | undefined, session: s
 export const claimResultText = ({ slug, tookOverFrom }: ClaimResult): string => (tookOverFrom === undefined ? `claimed ${slug}` : `took over ${slug} from session ${tookOverFrom.session}`);
 
 /** Marks the live claim of `session` active now, once its activity is TOUCH_MINUTES old; any other claim, or none, stays. */
-function touchClaim(session: string): (state: ClaimState) => boolean {
+function touchClaim(session: string): (state: ClaimState) => ClaimChange<boolean> {
   return ({ task, text, live, now: at }) => {
-    if (live?.session !== session || minutesSince(live.active, at) < TOUCH_MINUTES) return false;
-    writeClaim(task, text, { ...live, active: stamp(at) });
-    return true;
+    if (live?.session !== session || minutesSince(live.active, at) < TOUCH_MINUTES) return { result: false };
+    return { result: true, text: claimed(task, text, { ...live, active: stamp(at) }) };
   };
 }
 
 /** Removes the claim of `session`, live or expired; any other claim, or none, stays. */
-function releaseClaim(session: string): (state: ClaimState) => boolean {
-  return ({ task, text, stored }) => {
-    if (stored?.session !== session) return false;
-    writeAtomic(task.file, withoutClaim(text));
-    return true;
-  };
+function releaseClaim(session: string): (state: ClaimState) => ClaimChange<boolean> {
+  return ({ text, stored }) => (stored?.session === session ? { result: true, text: withoutClaim(text) } : { result: false });
 }
 
 export function touchTask(context: Context, name: string | undefined, session: string): { slug: string; touched: boolean } {
-  return underLock(context, name, (state) => ({ slug: state.task.slug, touched: touchClaim(session)(state) }));
+  return underLock(context, name, (state) => {
+    const { result: touched, text } = touchClaim(session)(state);
+    return { result: { slug: state.task.slug, touched }, text };
+  });
 }
 
 export const touchAll = (context: Context, session: string): AllResult => changedInRepo(context, 'touch', touchClaim(session));
 
 export function releaseTask(context: Context, name: string | undefined, session: string): { slug: string; released: boolean } {
-  return underLock(context, name, (state) => ({ slug: state.task.slug, released: releaseClaim(session)(state) }));
+  return underLock(context, name, (state) => {
+    const { result: released, text } = releaseClaim(session)(state);
+    return { result: { slug: state.task.slug, released }, text };
+  });
 }
 
 export const releaseAll = (context: Context, session: string): AllResult => changedInRepo(context, 'release', releaseClaim(session));
@@ -178,5 +181,5 @@ export function refuseIfHeld(context: Context, task: Task, takeOver: boolean): v
   const other = claim === undefined ? undefined : otherClaim(claim, undefined, claimClock(context.paths.home));
   if (other === undefined) return;
   if (!takeOver) throw new Held(other);
-  withLock(task.file, () => writeAtomic(task.file, withoutClaim(readText(task.file))));
+  updateActive(context, task, withoutClaim);
 }

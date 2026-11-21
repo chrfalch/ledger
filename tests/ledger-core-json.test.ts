@@ -3,7 +3,9 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, sy
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { REPO } from './helpers.js';
-import { archivedTask, backlogTask, git, home, ledger, ledgerText, lineWith, readLedgerFile, recordFile, repoKeyOf, repository, storeFolder, worktreeTask, type Fields, type Ran } from './ledger-core-fixtures.js';
+import { fileStore } from '../tools/ledger/file-store.js';
+import { ledgerPaths } from '../tools/ledger/paths.js';
+import { activeFile, archivedTask, backlogTask, git, home, ledger, ledgerText, lineWith, readLedgerFile, recordFile, repoKeyOf, repository, storeFolder, worktreeOf, worktreeTask, writeLedgerFile, type Fields, type Ran } from './ledger-core-fixtures.js';
 
 /** A HOME with the template and ~/repos/app, whose build/ and .claude/ folders git ignores. */
 function setup(t: TestContext) {
@@ -41,8 +43,6 @@ function refused(ran: Ran, pattern: RegExp, status = 1): void {
 
 const json = (h: string, cwd: string, ...args: string[]): Ran => ledger(h, cwd, ...args, '--json');
 const read = readLedgerFile;
-const worktreeOf = (main: string, slug: string): string => path.join(main, '.claude/worktrees', slug);
-const ledgerOf = (worktree: string): string => path.join(worktree, '.claude/ledger.md');
 const today = (): string => {
   const date = new Date();
   return [date.getFullYear(), date.getMonth() + 1, date.getDate()].map((part) => String(part).padStart(2, '0')).join('-');
@@ -69,7 +69,7 @@ test('list --json gives the tasks with plan progress and parked state; --archive
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'epic', next: 'Parked: 2026-11-10 — waiting for review\nThen merge.' });
   const finished = worktreeTask(h, app, { slug: 'shipped' });
-  writeFileSync(finished, finishedText({ slug: 'shipped', worktree: worktreeOf(app, 'shipped'), branch: 'me/shipped' }));
+  writeLedgerFile(finished, finishedText({ slug: 'shipped', worktree: worktreeOf(app, 'shipped'), branch: 'me/shipped' }));
   archivedTask(h, app, '2026-10-01', { slug: 'old' });
 
   const tasks = done(json(h, app, 'list')).tasks as Record<string, unknown>[];
@@ -88,7 +88,8 @@ test('list --json gives the tasks with plan progress and parked state; --archive
   const old = all.find(({ slug }) => slug === 'old');
   assert.equal(old?.status, 'retired');
   assert.equal(old?.archived, '2026-10-01');
-  assert.equal(old?.path, path.join(storeFolder(h, 'ledger-archive', app), '2026-10-01-old.md'));
+  assert.equal(old?.worktree, undefined);
+  assert.equal(old?.path, undefined);
 });
 
 test('archive --json lists the archived ledgers with date, branch, goal and the matching line; outside a repo it fails', (t) => {
@@ -116,7 +117,7 @@ test('parent --json shows the parent; add, remove, start and next each report wh
   worktreeTask(h, app, { slug: 'epic', goal: 'The epic.', children: ['- first'] });
   backlogTask(h, app, { slug: 'first', parent: 'epic' });
   backlogTask(h, app, { slug: 'second' });
-  const epicLedger = ledgerOf(worktreeOf(app, 'epic'));
+  const epicLedger = activeFile(h, app, 'epic');
 
   const shown = done(json(h, app, 'tree', 'show', 'epic'));
   assert.deepEqual([shown.slug, shown.main, shown.goal], ['epic', app, 'The epic.']);
@@ -185,7 +186,7 @@ test('go --json promotes a backlog task and reports its worktree, branch, base a
   assert.equal(started.worktree, worktree);
   assert.equal(started.branch, 'fix-login');
   assert.match(String(started.base), /^origin\/main @ [0-9a-f]{7,}$/);
-  assert.equal(started.ledger, ledgerOf(worktree));
+  assert.equal(started.ledger, activeFile(h, app, 'fix-login'));
   assert.equal(started.promoted, true);
   assert.deepEqual(started.chain, []);
   assert.deepEqual(started.warnings, []);
@@ -206,7 +207,7 @@ test('go --json of a parent starts its first backlog child, marks it started and
   const epicBacklog = path.join(storeFolder(h, 'ledger-backlog', app), 'epic.md');
   assert.deepEqual(started.marked, { parent: { slug: 'epic', main: app }, ledger: recordFile(epicBacklog) });
   assert.equal(lineWith(read(epicBacklog), '- part-a @'), `- part-a @ ${app} (started ${today()})`);
-  assert.doesNotMatch(read(ledgerOf(worktreeOf(app, 'part-a'))), /^Parked:/m);
+  assert.doesNotMatch(read(activeFile(h, app, 'part-a')), /^Parked:/m);
 });
 
 test('go --json of a task that already has a worktree goes there without promoting; an unknown slug fails with exit 2', (t) => {
@@ -216,7 +217,7 @@ test('go --json of a task that already has a worktree goes there without promoti
   assert.equal(gone.promoted, false);
   assert.equal(gone.worktree, worktreeOf(app, 'busy'));
   assert.equal(gone.branch, 'me/busy');
-  assert.equal(gone.ledger, ledgerOf(worktreeOf(app, 'busy')));
+  assert.equal(gone.ledger, activeFile(h, app, 'busy'));
   refused(json(h, app, 'go', 'nothing'), /nothing/, 2);
 });
 
@@ -278,11 +279,11 @@ test('go --json of a parent whose next child is in another repo promotes the chi
   assert.equal(started.slug, 'lib-part');
   assert.equal(started.main, lib);
   assert.equal(started.worktree, worktree);
-  assert.equal(started.ledger, ledgerOf(worktree));
+  assert.equal(started.ledger, activeFile(h, lib, 'lib-part'));
   assert.equal(started.promoted, true);
   assert.deepEqual(started.chain, [{ slug: 'epic', main: app }, { slug: 'lib-part', main: lib }]);
   assert.deepEqual(started.marked, { parent: { slug: 'epic', main: app }, ledger: epic });
-  assert.equal(existsSync(ledgerOf(worktree)), true);
+  assert.equal(existsSync(activeFile(h, lib, 'lib-part')), true);
   assert.equal(existsSync(worktreeOf(app, 'lib-part')), false);
 });
 
@@ -305,10 +306,10 @@ test('task --json reports a backlog task and its start command, a stacked task w
   assert.equal(stacked.worktree, worktreeOf(app, 'sub'));
   assert.equal(stacked.branch, 'sub');
   assert.match(String(stacked.base), /^me\/epic @ /);
-  assert.equal(stacked.ledger, ledgerOf(worktreeOf(app, 'sub')));
-  assert.equal(stacked.noted, ledgerOf(epic));
+  assert.equal(stacked.ledger, activeFile(h, app, 'sub'));
+  assert.equal(stacked.noted, activeFile(h, app, 'epic'));
 
-  rmSync(ledgerOf(epic));
+  rmSync(activeFile(h, app, 'epic'));
   const here = done(json(h, epic, 'task', 'new', '--here', 'epic-again'));
   assert.equal(here.slug, 'epic-again');
   assert.equal(here.worktree, epic);
@@ -337,7 +338,7 @@ test('retire --dry-run --json gives the plan and its blockers; retire --json lis
 
   const plan = done(json(h, app, 'task', 'retire', 'epic', '--dry-run'));
   assert.equal(plan.dryRun, true);
-  assert.equal(plan.place, 'worktree');
+  assert.equal(plan.place, 'active');
   assert.equal(plan.blocked, true);
   assert.equal(plan.needsForce, true);
   assert.deepEqual(
@@ -371,8 +372,8 @@ test('worktrees --json gives each linked worktree with its ledger; prune --json 
   assert.equal(table.main, app);
   assert.match(String(table.prError), /gh/);
   const rows = new Map((table.worktrees as { name: string }[]).map((row) => [row.name, row as Record<string, unknown>]));
-  assert.deepEqual(rows.get('epic')?.ledger, { slug: 'epic', path: ledgerOf(epic), activeChildren: 1 });
-  assert.deepEqual(rows.get('part')?.ledger, { slug: 'part', path: ledgerOf(worktreeOf(app, 'part')), parent: 'epic' });
+  assert.deepEqual(rows.get('epic')?.ledger, { slug: 'epic', path: activeFile(h, app, 'epic'), activeChildren: 1 });
+  assert.deepEqual(rows.get('part')?.ledger, { slug: 'part', path: activeFile(h, app, 'part'), parent: 'epic' });
   assert.equal(rows.get('epic')?.branch, 'me/epic');
   assert.equal(rows.get('epic')?.dirty, 0);
   assert.ok(Number(rows.get('epic')?.sizeGb) >= 0.05);
@@ -401,8 +402,8 @@ test('auto-prune --json prunes a finished task once, marks it, and drops the mar
   assert.equal(existsSync(path.join(worktree, 'build')), true);
 
   const opened = read(file);
-  writeFileSync(file, finishedText({ slug: 'epic', worktree, branch: 'me/epic' }));
-  const pruned = done(json(h, app, 'worktrees', 'auto-prune', file));
+  writeLedgerFile(file, finishedText({ slug: 'epic', worktree, branch: 'me/epic' }));
+  const pruned = done(json(h, app, 'worktrees', 'auto-prune', worktreeOf(app, 'epic')));
   assert.equal(pruned.outcome, 'pruned');
   assert.equal(pruned.finished, true);
   assert.deepEqual((pruned.folders as { path: string }[]).map(({ path: folder }) => folder), [path.join(worktree, 'build')]);
@@ -411,7 +412,7 @@ test('auto-prune --json prunes a finished task once, marks it, and drops the mar
   assert.equal(existsSync(marker), true);
   assert.equal(done(json(h, worktree, 'worktrees', 'auto-prune')).outcome, 'unchanged');
 
-  writeFileSync(file, opened);
+  writeLedgerFile(file, opened);
   assert.equal(done(json(h, worktree, 'worktrees', 'auto-prune')).outcome, 'unmarked');
   assert.equal(existsSync(marker), false);
   refused(json(h, app, 'worktrees', 'auto-prune', path.join(app, 'nope.md')), /nope\.md/);
@@ -425,7 +426,7 @@ test('auto-prune puts its trash in the worktree git dir, so no trash folder show
   // An rm that does nothing keeps the trash, so the test can see where it went.
   writeFileSync(path.join(h, 'stub-bin/rm'), '#!/bin/sh\nexit 0\n');
   chmodSync(path.join(h, 'stub-bin/rm'), 0o755);
-  writeFileSync(file, finishedText({ slug: 'epic', worktree, branch: 'me/epic' }));
+  writeLedgerFile(file, finishedText({ slug: 'epic', worktree, branch: 'me/epic' }));
 
   assert.equal(done(json(h, worktree, 'worktrees', 'auto-prune')).outcome, 'pruned');
   const trashIn = (folder: string): string[] => readdirSync(folder).filter((name) => name.startsWith('.cc-trash-'));
@@ -452,17 +453,16 @@ test('auto-prune with no ledger argument in a folder without its own ledger is o
 test('auto-prune --json leaves a finished ledger that is not in a linked worktree alone', (t) => {
   const { h, app } = setup(t);
   const folder = path.join(h, 'plain');
-  const file = ledgerOf(folder);
-  mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, finishedText({ slug: 'plain' }));
-  const result = done(json(h, app, 'worktrees', 'auto-prune', file));
+  mkdirSync(folder);
+  fileStore(ledgerPaths(h)).active.write(repoKeyOf(app), 'plain', finishedText({ slug: 'plain', worktree: folder }));
+  const result = done(json(h, app, 'worktrees', 'auto-prune', folder));
   assert.equal(result.outcome, 'not-linked');
   assert.equal(existsSync(path.join(folder, '.claude/build-folders-pruned')), false);
 });
 
 test('session --json gives the ledger of a linked worktree as its own, those of the main checkout, and none for a removed folder', (t) => {
   const { h, app } = setup(t);
-  const file = worktreeTask(h, app, { slug: 'epic', parent: 'umbrella', children: ['- part (started 2026-11-02)'] });
+  worktreeTask(h, app, { slug: 'epic', parent: 'umbrella', children: ['- part (started 2026-11-02)'] });
   worktreeTask(h, app, { slug: 'other' });
   const worktree = worktreeOf(app, 'epic');
 
@@ -471,7 +471,8 @@ test('session --json gives the ledger of a linked worktree as its own, those of 
   assert.equal(own.title, 'epic');
   assert.equal(own.removed, false);
   const [task] = own.ledgers as Record<string, unknown>[];
-  assert.equal(task.path, file);
+  assert.equal(task.worktree, worktree);
+  assert.equal(task.path, undefined);
   assert.equal(task.goal, 'Goal of epic.');
   assert.equal(task.next, 'Next step of epic.');
   assert.deepEqual(task.current, { number: '2', step: 'implement', status: 'todo' });
@@ -535,9 +536,9 @@ test("auto-prune deletes the worktree's own build folder beside the worktrees, a
   const worktree = worktreeOf(app, 'epic');
   const buildRoot = path.join(app, '.claude/worktrees/.build');
   for (const name of ['epic', '.main']) bigFile(path.join(buildRoot, name, 'Debug-sim/Build/app.o'));
-  writeFileSync(file, finishedText({ slug: 'epic', worktree, branch: 'me/epic' }));
+  writeLedgerFile(file, finishedText({ slug: 'epic', worktree, branch: 'me/epic' }));
 
-  const pruned = done(json(h, app, 'worktrees', 'auto-prune', file));
+  const pruned = done(json(h, app, 'worktrees', 'auto-prune', worktreeOf(app, 'epic')));
   assert.equal(pruned.outcome, 'pruned');
   assert.deepEqual((pruned.folders as { path: string }[]).map(({ path: folder }) => folder), [path.join(buildRoot, 'epic')]);
   assert.equal(existsSync(path.join(buildRoot, 'epic')), false);
@@ -550,9 +551,9 @@ test('auto-prune deletes no build folder, and says so, when .claude/worktrees/.b
   const target = path.join(h, 'elsewhere');
   bigFile(path.join(target, 'epic/Debug-sim/Build/app.o'));
   symlinkSync(target, path.join(app, '.claude/worktrees/.build'));
-  writeFileSync(file, finishedText({ slug: 'epic', worktree: worktreeOf(app, 'epic'), branch: 'me/epic' }));
+  writeLedgerFile(file, finishedText({ slug: 'epic', worktree: worktreeOf(app, 'epic'), branch: 'me/epic' }));
 
-  const pruned = done(json(h, app, 'worktrees', 'auto-prune', file));
+  const pruned = done(json(h, app, 'worktrees', 'auto-prune', worktreeOf(app, 'epic')));
   assert.ok(existsSync(path.join(target, 'epic/Debug-sim/Build/app.o')));
   assert.match(String(pruned.message), /not deleted/);
   assert.ok((pruned.failures as string[]).some((line) => line.includes('is a symbolic link')), JSON.stringify(pruned));
@@ -564,9 +565,9 @@ test('auto-prune keeps the build folder of a worktree whose name another worktre
   git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/other', path.join(h, 'elsewhere/EPIC'), 'main');
   const object = path.join(app, '.claude/worktrees/.build/epic/Debug-sim/Build/app.o');
   bigFile(object);
-  writeFileSync(file, finishedText({ slug: 'epic', worktree: worktreeOf(app, 'epic'), branch: 'me/epic' }));
+  writeLedgerFile(file, finishedText({ slug: 'epic', worktree: worktreeOf(app, 'epic'), branch: 'me/epic' }));
 
-  const pruned = done(json(h, app, 'worktrees', 'auto-prune', file));
+  const pruned = done(json(h, app, 'worktrees', 'auto-prune', worktreeOf(app, 'epic')));
   assert.ok(existsSync(object));
   assert.match(String(pruned.message), /not deleted/);
   assert.ok((pruned.failures as string[]).some((line) => line.includes('EPIC')), JSON.stringify(pruned));
@@ -579,13 +580,13 @@ test('auto-prune deletes all the build folders of a worktree with one background
   writeFileSync(path.join(app, '.git/info/exclude'), '.claude/\nbuild/\n.build/\n');
   bigFile(path.join(worktree, 'build/out.bin'));
   bigFile(path.join(worktree, '.build/out.bin'));
-  writeFileSync(file, finishedText({ slug: 'epic', worktree, branch: 'me/epic' }));
+  writeLedgerFile(file, finishedText({ slug: 'epic', worktree, branch: 'me/epic' }));
   const calls = path.join(h, 'rm-calls');
   const rm = path.join(h, 'stub-bin/rm');
   writeFileSync(rm, `#!/bin/sh\necho "$@" >> ${JSON.stringify(calls)}\nexec /bin/rm "$@"\n`);
   chmodSync(rm, 0o755);
 
-  assert.equal(done(json(h, app, 'worktrees', 'auto-prune', file)).outcome, 'pruned');
+  assert.equal(done(json(h, app, 'worktrees', 'auto-prune', worktree)).outcome, 'pruned');
   for (let waited = 0; !existsSync(calls) && waited < 5000; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
   await new Promise((resolve) => setTimeout(resolve, 200));
   const lines = read(calls).trim().split('\n');

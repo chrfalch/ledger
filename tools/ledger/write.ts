@@ -28,6 +28,7 @@ import {
   commitOf,
   commonDir,
   currentBranch,
+  gitDir,
   isBranchName,
   mainCheckout,
   originHead,
@@ -35,14 +36,17 @@ import {
   shortCommit,
 } from './git.js';
 import { withLock } from './lock.js';
-import { samePath, taskWorktree, worktreeLedger, type LedgerPaths } from './paths.js';
+import { samePath, taskWorktree, type LedgerPaths } from './paths.js';
 import { withHint } from './migrate-repo-ids.js';
 import { isKind, KINDS, type Kind } from './kinds.js';
+import { storedText } from './record.js';
 import { remoteKey, repoKey } from './repo-key.js';
-import { loadTasks } from './registry.js';
+import { holdsUnmovedLedger, loadTasks } from './registry.js';
+import { hostProblem, noteOwnHost } from './settings.js';
 import { keyAndAliases, type Change, type LedgerStore } from './store.js';
 import { pauseForTest } from './wait.js';
 import {
+  activeTask,
   childrenOf,
   dependenciesOf,
   dependencyTask,
@@ -53,7 +57,7 @@ import {
   locateChild,
   namedChildren,
   notASlug,
-  onAnotherMachine,
+  notOnThisMachine,
   orderedChildren,
   sameTask,
   taskRef,
@@ -68,26 +72,46 @@ import {
 type Ref = Required<TaskRef>;
 export type Context = { paths: LedgerPaths; cwd: string; store: LedgerStore };
 
-/** A backlog ledger is in the store; a worktree ledger is the plain file that hooks read. */
 export function readLedger({ store }: Context, task: Task): string {
-  if (task.place === 'worktree') return readText(task.file);
-  const collection =
-    task.place === 'backlog' ? store.backlog : task.place === 'archive' ? store.archive : task.host === undefined ? undefined : store.active?.copiesOf(task.host);
-  return (collection?.read(task.repo, task.name) ?? fail(`The ledger ${task.file} is gone.`)).text;
+  return (store[task.place].read(task.repo, task.name) ?? fail(`The ledger ${task.file} is gone.`)).text;
 }
 
 /** Rewrites a live ledger with `change` of its text as it is now, which may differ from the text in `task`. True when it was written. */
-export function updateLedger({ store }: Context, task: Task, change: Change<string>): boolean {
+export function updateLedger(context: Context, task: Task, change: Change<string>): boolean {
   if (task.place === 'archive') throw new Error(`An archive copy is never changed: ${task.file}`);
-  if (task.place === 'remote') fail(onAnotherMachine(task));
-  if (task.place === 'backlog') return store.backlog.update(task.repo, task.name, change);
-  return withLock(task.file, () => {
-    const text = change(readText(task.file));
-    pauseForTest();
-    if (text !== undefined) writeAtomic(task.file, text);
-    return text !== undefined;
-  });
+  if (task.elsewhere) fail(notOnThisMachine(task));
+  return task.place === 'active' ? updateActive(context, task, change) : context.store.backlog.update(task.repo, task.name, change);
 }
+
+/** Adds the host label this machine stamps on records to its own, so they stay its own after "host" changes. */
+function noteStamped({ store, paths }: Context): void {
+  if (store.host !== undefined) noteOwnHost(paths.home, store.host);
+}
+
+/**
+ * Rewrites the active record `name` of `repo` with `change`, as Active.update does. A record that names a label this
+ * machine stamped before "host" changed names its host now, so other machines see whose task it is. A record that
+ * names another machine is refused as the record lock reads it, as a pull may have put one there since it was looked up.
+ */
+export function updateActive(context: Context, { repo, name }: { repo: string; name: string }, change: Change<string>): boolean {
+  const { host, ownHosts } = context.store;
+  let restamped = false;
+  const written = context.store.active.update(repo, name, (text) => {
+    const { host: owner, worktree } = parseLedger(text).location;
+    if (owner !== undefined && host !== undefined && owner !== host && !(ownHosts?.has(owner) ?? false)) fail(notOnThisMachine({ slug: name, worktree, host: owner }));
+    const changed = change(text);
+    if (changed === undefined || host === undefined) return changed;
+    const named = parseLedger(changed).location.host;
+    restamped = named !== undefined && named !== host && (ownHosts?.has(named) ?? false);
+    return restamped ? (setLocationBullet(changed, 'host', host) ?? changed) : changed;
+  });
+  if (restamped) noteStamped(context);
+  return written;
+}
+
+/** Why a slug an active task has names no other task: a slug is one task in every clone of a repo, as in the backlog. */
+export const takenText = (slug: string, worktree: string | undefined, location: string): string =>
+  `The task ${slug} is active already, in the worktree ${worktree ?? 'its ledger names'}, so no other task can take its name: ${location}`;
 
 /** The local date, as the old scripts wrote it. */
 export function today(): string {
@@ -116,17 +140,16 @@ function nameFrom(cwd: string) {
 /** How the ledger of a task in `fromMain` names `ref` in a line: `<slug>`, or `<slug> @ <main>` in another repo. */
 const linkFrom = (fromMain: string, ref: Ref): string => (samePath(fromMain, ref.main) ? ref.slug : `${ref.slug} @ ${ref.main}`);
 
-/** The ledger this command runs in: the one of the linked worktree that holds `cwd`. A main checkout has none. */
-function currentLedger(cwd: string): string | undefined {
+/** The active task this command runs in: the one of the linked worktree that holds `cwd`. A main checkout has none. */
+export function currentTask(store: LedgerStore, cwd: string): Task | undefined {
   const root = checkoutRoot(cwd);
   const main = mainCheckout(cwd);
   if (root === undefined || main === undefined || samePath(root, main)) return undefined;
-  const file = worktreeLedger(root);
-  return exists(file) ? file : undefined;
+  return activeTask(store, root);
 }
 
 /** The registry is a cache of the disk; rebuilding it after a write keeps it in line. */
-const refreshRegistry = (context: Context, mains: string[]): void => void loadTasks(context, mains);
+const refreshRegistry = (context: Context): void => void loadTasks(context);
 
 /** The ledger template; with `refs`, it holds a `- design refs:` bullet for fillLedger to fill. */
 function readTemplate(paths: LedgerPaths, refs: string | undefined): string {
@@ -181,24 +204,73 @@ export function createdText({ status, ledger, worktree, branch, base, noted, sta
   return lines.join('\n');
 }
 
+/** Fails when an active task of the repo at `main` has `slug`, under the repo's key or an old one, naming its worktree. */
+function refuseActive(store: LedgerStore, main: string, slug: string, repos = keyAndAliases(store.aliases.read(), repoKey(main))): void {
+  for (const repo of repos) {
+    const found = store.active.read(repo, slug);
+    if (found !== undefined) fail(takenText(slug, parseLedger(found.text).location.worktree, found.location));
+  }
+}
+
+/** Fails when the backlog of the repo key `key` has `slug`, under that key or an old one. */
+function refuseBacklog({ store, paths }: Context, key: string, slug: string): void {
+  const filedUnder = keyAndAliases(store.aliases.read(), key).find((repo) => store.backlog.has(repo, slug));
+  if (filedUnder !== undefined) fail(`A backlog task ${slug} already exists: ${paths.tilde(store.backlog.location(filedUnder, slug))}`);
+}
+
+/** `markdown`, a new active ledger, naming this machine's host, which tells other machines whose task it is. */
+const onThisHost = ({ host }: LedgerStore, markdown: string): string => (host === undefined ? markdown : (setLocationBullet(markdown, 'host', host) ?? markdown));
+
 /**
- * A new branch at `base` in the worktree <main>/.claude/worktrees/<slug>, with the ledger `ledgerText` makes from the
- * Location values. `moved` runs once the ledger is written. Any failure removes the worktree and branch again.
+ * Writes the active record of a new task, filed under the key of the repo at `main`. It fails, writing nothing, when the
+ * slug is taken, and when `text` names no host or no worktree: lookup finds a record by its worktree, and other machines
+ * tell whose task it is by its host.
  */
-function startWorktree(main: string, slug: string, branch: string, base: string, ledgerText: (started: Started) => string, moved = (): void => {}): Started {
+function createActive({ store, paths }: Context, main: string, slug: string, text: string): string {
+  const ledger = parseLedger(text);
+  const { host, worktree } = ledger.location;
+  if (findSection(ledger.sections, 'Location') === undefined) fail(`The ledger of ${slug} has no ## Location section to name its host and worktree, so ${slug} was not made. Add a ## Location section to the template for a new task, then try again.`);
+  if (host === undefined) fail(`${hostProblem(paths.home) ?? 'This machine has no host label.'} An active record must name its host, so ${slug} was not made.`);
+  if (worktree === undefined) fail(`The ledger of ${slug} has no "- worktree:" line under ## Location to name its worktree, so ${slug} was not made. Add "- worktree: <path>" there, or to the template for a new task, then try again.`);
+  const repo = repoKey(main);
+  refuseActive(store, main, slug);
+  const location = store.active.location(repo, slug);
+  if (!store.active.create(repo, slug, text)) {
+    // Another command took the slug since the check.
+    refuseActive(store, main, slug, [repo]);
+    fail(`Another command wrote ${location} while ${slug} was being made. Nothing was made. Try again.`);
+  }
+  return location;
+}
+
+/**
+ * A new branch at `base` in the worktree <main>/.claude/worktrees/<slug>, with the active record `ledgerText` makes from
+ * the Location values. `moved` runs once the record is written; a throw there removes the record again. Any failure
+ * removes the worktree and branch again.
+ */
+function startWorktree(context: Context, main: string, slug: string, branch: string, base: string, ledgerText: (started: Omit<Started, 'ledger'>) => string, moved = (): void => {}): Started {
+  const { store } = context;
   const commit = commitOf(main, base) ?? fail(`${base} names no commit in ${main}.`);
   checkTarget(main, slug, branch);
   const worktree = taskWorktree(main, slug);
   const error = addWorktree(main, worktree, branch, commit);
   if (error !== undefined) fail(`Could not make the worktree ${worktree}: ${error}`);
-  const started = { worktree, branch, base: `${base} @ ${short(main, commit)}`, ledger: worktreeLedger(worktree) };
+  const location = { worktree, branch, base: `${base} @ ${short(main, commit)}` };
+  let started: Started;
   try {
-    writeAtomic(started.ledger, ledgerText(started));
-    moved();
+    const text = onThisHost(store, ledgerText(location));
+    started = { ...location, ledger: createActive(context, main, slug, text) };
+    try {
+      moved();
+    } catch (error) {
+      store.active.remove(repoKey(main), slug, storedText(text));
+      throw error;
+    }
   } catch (error) {
     removeWorktree(main, worktree, branch);
     throw error;
   }
+  noteStamped(context);
   excludeEvidence(main);
   return started;
 }
@@ -221,15 +293,15 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
   const template = readTemplate(paths, refs);
   const key = repoKey(main);
   const backlog = store.backlog.location(key, slug);
-  const taken = (location = backlog): never => fail(`A backlog task ${slug} already exists: ${paths.tilde(location)}`);
-  const filedUnder = keyAndAliases(store.aliases.read(), key).find((repo) => store.backlog.has(repo, slug));
-  if (filedUnder !== undefined) taken(store.backlog.location(filedUnder, slug));
-  const current = currentLedger(cwd);
+  const taken = (): never => fail(`A backlog task ${slug} already exists: ${paths.tilde(backlog)}`);
+  refuseBacklog(context, key, slug);
+  refuseActive(store, main, slug);
+  const current = currentTask(store, cwd);
   let created: CreatedTask;
   if (stack) {
     const base = currentBranch(cwd) ?? fail(`--stack needs a branch, but HEAD is detached in ${cwd}.`);
     const root = checkoutRoot(cwd) ?? cwd;
-    const started = startWorktree(main, slug, slug, base, (filled) => fillLedger(template, { slug, goal, ...filled, designRefs: designRefs(root, refs), kind }));
+    const started = startWorktree(context, main, slug, slug, base, (filled) => fillLedger(template, { slug, goal, ...filled, designRefs: designRefs(root, refs), kind }));
     created = { slug, main, status: 'active', ...started };
   } else {
     checkTarget(main, slug, slug);
@@ -240,28 +312,37 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
   const cwdMain = mainCheckout(cwd);
   const [named, start] = cwdMain !== undefined && samePath(cwdMain, main) ? [slug, `/ledger:go ${slug}`] : [`${slug} in ${main}`, `ledger go ${slug} --repo ${shellWord(main)}`];
   if (current !== undefined) {
-    writeAtomic(current, addDecision(readText(current), `- New task ${named}: separate work, not part of this goal. ${start} starts it.`));
-    created.noted = current;
+    updateLedger(context, current, (text) => addDecision(text, `- New task ${named}: separate work, not part of this goal. ${start} starts it.`));
+    created.noted = current.file;
   }
-  refreshRegistry(context, [main]);
+  refreshRegistry(context);
   return { ...created, start };
 }
 
 function hereTask(context: Context, given: string | undefined, goal: string | undefined, refs: string | undefined, kind: Kind): CreatedTask {
-  const { paths, cwd } = context;
+  const { paths, cwd, store } = context;
   const main = repoOf(cwd);
   const worktree = checkoutRoot(cwd) ?? fail(`${cwd} is not inside a git repository.`);
   if (samePath(worktree, main)) fail(`--here needs a linked worktree, and ${cwd} is in the main checkout. A ledger lives only in a linked worktree.`);
-  const ledger = worktreeLedger(worktree);
-  if (exists(ledger)) fail(`This worktree already has a ledger: ${ledger}`);
-  const branch = currentBranch(cwd);
-  const slug = given ?? (branch?.split('/').at(-1) || path.basename(worktree));
-  if (!isNewSlug(slug)) fail(`${slugRule(slug)} Name it: ledger task new --here <slug>`);
-  const commit = commitOf(cwd, 'HEAD') ?? fail(`This worktree has no commit yet: ${worktree}`);
-  const started: Started = { worktree, branch: branch ?? 'detached HEAD', base: `HEAD @ ${short(cwd, commit)}`, ledger };
-  writeAtomic(ledger, fillLedger(readTemplate(paths, refs), { slug, goal, ...started, designRefs: designRefs(worktree, refs), kind }));
+  const admin = gitDir(worktree) ?? fail(`git names no git folder for ${worktree}.`);
+  // In the worktree's own git folder, so two commands that make a task for one worktree check and write one at a time.
+  const { slug, ...started } = withLock(path.join(admin, 'ledger-task'), (): Started & { slug: string } => {
+    const own = store.active.byWorktree(worktree);
+    if (own !== undefined) fail(`This worktree already has a ledger: ${store.active.location(own.repo, own.slug)}`);
+    if (holdsUnmovedLedger(store, worktree)) {
+      fail(`This worktree already has a ledger in ${path.join(worktree, '.claude', 'ledger.md')}, not yet moved into the ledger store. Move it with ledger store migrate --active.`);
+    }
+    const branch = currentBranch(cwd);
+    const slug = given ?? (branch?.split('/').at(-1) || path.basename(worktree));
+    if (!isNewSlug(slug)) fail(`${slugRule(slug)} Name it: ledger task new --here <slug>`);
+    refuseBacklog(context, repoKey(main), slug);
+    const commit = commitOf(cwd, 'HEAD') ?? fail(`This worktree has no commit yet: ${worktree}`);
+    const location = { worktree, branch: branch ?? 'detached HEAD', base: `HEAD @ ${short(cwd, commit)}` };
+    return { slug, ...location, ledger: createActive(context, main, slug, onThisHost(store, fillLedger(readTemplate(paths, refs), { slug, goal, ...location, designRefs: designRefs(worktree, refs), kind }))) };
+  });
+  noteStamped(context);
   excludeEvidence(main);
-  refreshRegistry(context, [main]);
+  refreshRegistry(context);
   return { slug, main, status: 'active', ...started };
 }
 
@@ -278,19 +359,20 @@ function promote(context: Context, slug: string, main: string, repo: string): St
   location.main ?? fail(`The backlog ledger ${backlog.location} has no "- main:" line, so its repo is unknown.`, 4);
   const base = location.base?.ref ?? originHead(main) ?? currentBranch(main) ?? fail(`${main} has no origin/HEAD and a detached HEAD, so there is no branch to start from.`);
   const started = startWorktree(
+    context,
     main,
     slug,
     location.branch ?? slug,
     base,
     ({ worktree, branch, base: from }) => fillLedger(text, { slug, worktree, branch, base: from }),
     () => {
-      // A throw here makes startWorktree remove the new worktree and branch, so the task stays one backlog ledger.
+      // A throw here makes startWorktree remove the new active record, worktree and branch, so the task stays one backlog ledger.
       if (!store.backlog.remove(backlog.repo, backlog.name, text)) {
         fail(`Another command changed the backlog ledger ${backlog.location} while ${slug} was being started. Nothing was started. Run ledger go ${slug} again.`);
       }
     },
   );
-  refreshRegistry(context, [main]);
+  refreshRegistry(context);
   return started;
 }
 
@@ -340,10 +422,10 @@ function refuseMissing(store: LedgerStore, tasks: Task[], { slug, main }: Ref): 
   return fail(withHint(store, `No backlog task ${slug} for the repo at ${main}.`), 2);
 }
 
-/** The live ledger of `ref`: one in a worktree beats one in the backlog. */
+/** The live ledger of `ref`: an active task beats a backlog ledger. */
 const liveLedger = (tasks: Task[], ref: Ref): Task | undefined => {
   const live = findNamed(tasks, ref).filter(({ place }) => place !== 'archive');
-  return live.find(({ place }) => place === 'worktree') ?? live[0];
+  return live.find(({ place }) => place === 'active') ?? live[0];
 };
 
 /**
@@ -360,9 +442,9 @@ export function goTask(context: Context, slug: string, repo: string | undefined,
   const { cwd } = context;
   if (!isReadableSlug(slug)) fail(notASlug(slug));
   const named = { slug, main: repoOf(cwd, repo === undefined ? cwd : path.resolve(cwd, repo)) };
-  const tasks = loadTasks(context, [named.main]);
+  const tasks = loadTasks(context);
   const task = liveLedger(tasks, named);
-  if (task?.place === 'remote') fail(onAnotherMachine(task));
+  if (task?.elsewhere) fail(notOnThisMachine(task));
   let chain: Ref[] = [];
   if (task !== undefined && namedChildren(task, tasks).length > 0) {
     const blocked: Blocked[] = [];
@@ -378,22 +460,24 @@ export function goTask(context: Context, slug: string, repo: string | undefined,
   const target = chain.at(-1) ?? named;
   if (!isReadableSlug(target.slug)) fail(notASlug(target.slug));
   const found = (chain.length === 0 ? task : liveLedger(tasks, target)) ?? refuseMissing(context.store, tasks, target);
-  if (found.place === 'remote') fail(onAnotherMachine(found));
+  if (found.elsewhere) fail(notOnThisMachine(found));
+  if (found.place === 'active' && (found.main === undefined || !samePath(found.main, target.main))) fail(takenText(target.slug, found.worktree, found.file));
   const place =
-    found.place === 'worktree'
-      ? { ledger: found.file, worktree: path.dirname(path.dirname(found.file)), ...(found.branch === undefined ? {} : { branch: found.branch }), promoted: false }
+    found.place === 'active' && found.worktree !== undefined
+      ? { ledger: found.file, worktree: found.worktree, ...(found.branch === undefined ? {} : { branch: found.branch }), promoted: false }
       : { ...promote(context, target.slug, target.main, found.repo), promoted: true };
   const cwdMain = mainCheckout(cwd);
   const inCwdRepo = cwdMain !== undefined && samePath(cwdMain, target.main);
   // A session stays in its own repo, and its touch and release reach only that repo, so a claim elsewhere would hold until it expires.
   const claimFor = inCwdRepo ? session : undefined;
-  const { tookOverFrom } = claimFor === undefined ? {} : claimLedger(context, { slug: target.slug, file: place.ledger }, claimFor, { takeOver });
-  if (claimFor === undefined && found.place === 'worktree') refuseIfHeld(context, found, takeOver);
+  const record = place.promoted ? { repo: repoKey(target.main), name: target.slug } : found;
+  const { tookOverFrom } = claimFor === undefined ? {} : claimLedger(context, { slug: target.slug, file: place.ledger, repo: record.repo, name: record.name }, claimFor, { takeOver });
+  if (claimFor === undefined && found.place === 'active') refuseIfHeld(context, found, takeOver);
   const unclaimed = session !== undefined && !inCwdRepo ? `the task is in another repo, so a session in ${target.main} claims it with ledger go ${target.slug}` : undefined;
 
-  const text = readText(place.ledger);
-  const { parked, location } = parseLedger(text);
-  if (parked !== undefined) writeAtomic(place.ledger, unpark(text));
+  const { active } = context.store;
+  const { parked, location } = parseLedger(active.read(record.repo, record.name)?.text ?? fail(`The ledger ${place.ledger} is gone.`));
+  if (parked !== undefined) updateActive(context, record, unpark);
   const warnings: string[] = [];
   let marked: GoResult['marked'];
   const parent = location.parent && { slug: location.parent.slug, main: location.parent.main ?? target.main };
@@ -406,7 +490,7 @@ export function goTask(context: Context, slug: string, repo: string | undefined,
       warnings.push(`${target.slug} is not marked started in ${parent.slug}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  refreshRegistry(context, [target.main]);
+  refreshRegistry(context);
   const children = childrenOf(found, target.main, tasks).map(({ slug: child, main, status }) => ({ slug: child, main, status }));
   const again = inCwdRepo ? `ledger go ${target.slug}` : `ledger go ${target.slug} --repo ${shellWord(target.main)}`;
   const installed = installPackages(place.worktree, again);
@@ -440,7 +524,7 @@ export function goText(context: Context, { ledger, worktree, branch, base, chain
 
 export function liveTask(context: Context, name: string): Linked & { tasks: Task[] } {
   const ref = taskRef(context.cwd, name);
-  const tasks = loadTasks(context, [ref.main]);
+  const tasks = loadTasks(context);
   return { task: theTask(tasks, ref, { live: true }), ref, tasks };
 }
 
@@ -456,7 +540,7 @@ export function parkTask(context: Context, name: string, reason: string): ParkRe
   const { task, ref } = liveTask(context, name);
   const parked = { date: today(), reason: oneLine(reason) };
   updateLedger(context, task, (text) => park(withoutClaim(text), parkMarker(parked)));
-  refreshRegistry(context, [ref.main]);
+  refreshRegistry(context);
   return { ...ref, ledger: task.file, parked };
 }
 
@@ -469,7 +553,7 @@ export function unparkTask(context: Context, name: string): UnparkResult {
   const { parked } = task.ledger;
   if (parked === undefined) return { ...ref, ledger: task.file, unparked: false };
   updateLedger(context, task, unpark);
-  refreshRegistry(context, [ref.main]);
+  refreshRegistry(context);
   return { ...ref, ledger: task.file, unparked: true, parked: { date: parked.date, reason: parked.reason } };
 }
 
@@ -533,26 +617,26 @@ export function changeParent(context: Context, parentName: string, action: Paren
   if (childName === undefined) return fail(`ledger tree ${action} <parent> needs a child: ledger tree ${action} ${parentName} <child>`);
   const parentRef = taskRef(context.cwd, parentName);
   const childRef = taskRef(context.cwd, childName);
-  const tasks = loadTasks(context, [parentRef.main, childRef.main]);
+  const tasks = loadTasks(context);
   const parent = theTask(tasks, parentRef, { live: true });
   const change = { add: addChildTask, remove: removeChildTask, start: startChildTask }[action];
   const output = change(context, tasks, { task: parent, ref: parentRef }, childRef);
-  refreshRegistry(context, [parentRef.main, childRef.main]);
+  refreshRegistry(context);
   return output;
 }
 
 type Linked = { task: Task; ref: Ref };
 type ParentLine = NonNullable<Location['parent']>;
 
-/** The lines under the parent's ## Children that name `child`, a task of `place`: in the parent as it was read, or else in `text`. */
-const linesOf = ({ task, ref }: Linked, child: Ref, place: Place, text?: string): Child[] =>
-  (text === undefined ? task.ledger : parseLedger(text)).children.filter((line) => sameTask({ slug: line.slug, main: line.main ?? ref.main }, child, place));
+/** The lines under the parent's ## Children that name `child`: in the parent as it was read, or else in `text`. */
+const linesOf = ({ task, ref }: Linked, child: Ref, text?: string): Child[] =>
+  (text === undefined ? task.ledger : parseLedger(text)).children.filter((line) => sameTask({ slug: line.slug, main: line.main ?? ref.main }, child));
 
 /**
  * Every clone of a repo shares a backlog parent, and a worktree child is in one of them only, so the child's line in
  * such a parent names that clone's main checkout.
  */
-const namesClone = (parent: Task, place: Place): boolean => parent.place === 'backlog' && place === 'worktree';
+const namesClone = (parent: Task, place: Place): boolean => parent.place === 'backlog' && place === 'active';
 
 /**
  * After `go` put the backlog child `child` in a worktree, its line in a backlog parent names the clone it is in. A line
@@ -561,16 +645,16 @@ const namesClone = (parent: Task, place: Place): boolean => parent.place === 'ba
  */
 function nameChildClone(context: Context, parentRef: Ref, child: Ref): void {
   if (/\s/.test(child.main)) return;
-  const tasks = loadTasks(context, [parentRef.main]);
+  const tasks = loadTasks(context);
   const parent = liveLedger(tasks, parentRef);
-  if (parent === undefined || !namesClone(parent, 'worktree')) return;
-  const hasWorktreeTask = (main: string): boolean => tasks.some((task) => task.place === 'worktree' && task.slug === child.slug && task.main !== undefined && samePath(task.main, main));
+  if (parent === undefined || !namesClone(parent, 'active')) return;
+  const hasWorktreeTask = (main: string): boolean => tasks.some((task) => task.place === 'active' && task.slug === child.slug && task.main !== undefined && samePath(task.main, main));
   const isGone = (main: string): boolean => {
     const checkout = mainCheckout(main);
     return checkout === undefined || !samePath(checkout, main);
   };
   const namesChild = ({ slug, main }: Child): boolean =>
-    main === undefined ? sameTask({ slug, main: parentRef.main }, child, 'backlog') : slug === child.slug && (isGone(main) || (sameTask({ slug, main }, child, 'backlog') && !hasWorktreeTask(main)));
+    main === undefined ? sameTask({ slug, main: parentRef.main }, child) : slug === child.slug && (isGone(main) || (sameTask({ slug, main }, child) && !hasWorktreeTask(main)));
   updateLedger(context, parent, (text) => {
     const line = parseLedger(text).children.find(namesChild);
     return line && withChildMain(text, line, child.main);
@@ -583,7 +667,7 @@ const childLine = (parent: Linked, child: Ref, place: Place): string =>
 
 /** Whether the `- parent:` line of a child in `childMain` names `parent`. */
 const namesParent = (bullet: ParentLine | undefined, childMain: string, parent: Linked): bullet is ParentLine =>
-  bullet !== undefined && sameTask({ slug: bullet.slug, main: bullet.main ?? childMain }, parent.ref, parent.task.place);
+  bullet !== undefined && sameTask({ slug: bullet.slug, main: bullet.main ?? childMain }, parent.ref);
 
 /** The parent a ledger's Location names, in the task's own repo unless the line names another. */
 function parentOf(task: Task, main: string): Ref | undefined {
@@ -598,29 +682,23 @@ function ancestors(tasks: Task[], { task, ref }: Linked): Ref[] {
   while (next !== undefined) {
     const ancestor = next;
     const found = findNamed(tasks, ancestor).find(({ place }) => place !== 'archive');
-    if (seen.some((known) => sameTask(known, ancestor, found?.place ?? 'backlog'))) break;
+    if (seen.some((known) => sameTask(known, ancestor))) break;
     seen.push(ancestor);
     next = found && parentOf(found, ancestor.main);
   }
   return seen;
 }
 
-/** A change of a parent and child writes both ledgers, so a read-only copy of either refuses it before the other is written. */
-function refuseRemote(...tasks: Task[]): void {
-  const remote = tasks.find(({ place }) => place === 'remote');
-  if (remote !== undefined) fail(onAnotherMachine(remote));
-}
-
 function addChildTask(context: Context, tasks: Task[], parent: Linked, childRef: Ref): ParentChange {
   const name = nameFrom(context.cwd);
-  if (sameTask(parent.ref, childRef, parent.task.place)) fail(`${name(childRef)} cannot be its own parent.`);
+  if (sameTask(parent.ref, childRef)) fail(`${name(childRef)} cannot be its own parent.`);
   const child = theTask(tasks, childRef, { live: true });
   if (wasChildOf(tasks, childRef, parent.ref)) fail(`${name(childRef)} is a retired child of ${name(parent.ref)}. Give the new task another slug.`);
   const current = parentOf(child, childRef.main);
-  if (current !== undefined && !sameTask(current, parent.ref, parent.task.place)) {
+  if (current !== undefined && !sameTask(current, parent.ref)) {
     fail(`${name(childRef)} already has the parent ${name(current)}. First run: ledger tree remove ${name(current)} ${name(childRef)}`);
   }
-  if (ancestors(tasks, parent).some((ancestor) => sameTask(ancestor, childRef, child.place))) {
+  if (ancestors(tasks, parent).some((ancestor) => sameTask(ancestor, childRef))) {
     fail(`${name(childRef)} is already a parent of ${name(parent.ref)}, or of one of its parents. Making it a child of ${name(parent.ref)} would make a cycle.`);
   }
   const spaced = samePath(parent.ref.main, childRef.main) ? undefined : [parent.ref.main, childRef.main].find((main) => /\s/.test(main));
@@ -628,14 +706,12 @@ function addChildTask(context: Context, tasks: Task[], parent: Linked, childRef:
   if (namesClone(parent.task, child.place) && /\s/.test(childRef.main)) {
     fail(`The repo at ${childRef.main} has whitespace in its path, so none of its worktree tasks can be a child of a backlog task.`);
   }
-  refuseRemote(parent.task, child);
-
-  if (findSection(child.ledger.sections, 'Location') === undefined) fail(`${child.file} has no ## Location section. Nothing was changed.`);
+  refuseElsewhere(parent.task, child);
 
   // A child already listed keeps its place, and so does one linked before with an order: adding it again changes no
   // order. Any other goes after every sibling, so live siblings without an order are numbered first, in the order of
   // their lines; without that they would sort after it.
-  const isListed = linesOf(parent, childRef, child.place).length > 0;
+  const isListed = linesOf(parent, childRef).length > 0;
   const keepsPlace = isListed || (current !== undefined && child.ledger.location.order !== undefined);
   const numbered = keepsPlace ? undefined : numberSiblings(tasks, parent, child);
   const orders = new Map(numbered ?? []);
@@ -652,31 +728,31 @@ function addChildTask(context: Context, tasks: Task[], parent: Linked, childRef:
     return changed === text ? undefined : changed;
   });
   updateLedger(context, parent.task, (text) => {
-    const listed = linesOf(parent, childRef, child.place, text).length > 0 ? text : addChild(text, childLine(parent, childRef, child.place));
+    const listed = linesOf(parent, childRef, text).length > 0 ? text : addChild(text, childLine(parent, childRef, child.place));
     const sorted = sortChildLines(listed, parent, tasks, orders);
     return sorted === text ? undefined : sorted;
   });
   return { action: 'add', parent: parent.ref, child: childRef };
 }
 
+/** A change of a parent and child writes both ledgers, so either one being elsewhere refuses it before the other is written. */
+function refuseElsewhere(...tasks: Task[]): void {
+  const far = tasks.find(({ elsewhere }) => elsewhere);
+  if (far !== undefined) fail(notOnThisMachine(far));
+}
+
 /**
  * The orders to write so `child` comes after every other child of `parent`: each live sibling without an order, in the
  * order of its line, gets the next number after the highest order, and `child` the one after those. A sibling whose own
- * ledger names another parent is left out: its order places it among that parent's children. A sibling on another
- * machine cannot be written here, so it stays without an order.
+ * ledger names another parent is left out: its order places it among that parent's children. A sibling elsewhere
+ * cannot be written here, so it stays without an order.
  */
 function numberSiblings(tasks: Task[], parent: Linked, child: Task): [Task, number][] {
   const siblings = listedChildren(parent.task, parent.ref.main, tasks).flatMap((listed) =>
     listed.task === undefined || listed.task === child || namesAnotherParent(tasks, parent, listed) ? [] : [listed.task],
   );
   const highest = Math.max(0, ...siblings.flatMap((task) => task.ledger.location.order ?? []));
-  const unordered = siblings.filter(
-    (task) =>
-      task.place !== 'archive' &&
-      task.place !== 'remote' &&
-      task.ledger.location.order === undefined &&
-      findSection(task.ledger.sections, 'Location') !== undefined,
-  );
+  const unordered = siblings.filter((task) => task.place !== 'archive' && !task.elsewhere && task.ledger.location.order === undefined);
   return [...unordered, child].map((task, index) => [task, highest + index + 1]);
 }
 
@@ -684,7 +760,7 @@ function numberSiblings(tasks: Task[], parent: Linked, child: Task): [Task, numb
 const namesAnotherParent = (tasks: Task[], parent: Linked, { ref, task }: ListedChild): boolean =>
   (task === undefined ? findNamed(tasks, ref) : [task]).some((each) => {
     const named = parentOf(each, ref.main);
-    return named !== undefined && !sameTask(named, parent.ref, parent.task.place);
+    return named !== undefined && !sameTask(named, parent.ref);
   });
 
 /**
@@ -702,10 +778,10 @@ function removeChildTask(context: Context, tasks: Task[], parent: Linked, childR
   const name = nameFrom(context.cwd);
   const child = theTask(tasks, childRef, { live: true });
   if (!namesParent(child.ledger.location.parent, childRef.main, parent)) fail(`${name(childRef)} is not a child of ${name(parent.ref)}.`);
-  refuseRemote(parent.task, child);
+  refuseElsewhere(parent.task, child);
   // The parent first: until the child's line is gone, running the same remove again still finds the pair.
   updateLedger(context, parent.task, (text) => {
-    const listed = linesOf(parent, childRef, child.place, text);
+    const listed = linesOf(parent, childRef, text);
     return listed.length === 0 ? undefined : removeChildren(text, listed.map(({ line }) => line));
   });
   // The order only places a task among the children of its parent, so it goes with the parent line.
@@ -721,8 +797,7 @@ function startChildTask(context: Context, tasks: Task[], parent: Linked, childRe
   const name = nameFrom(context.cwd);
   const notListed = (): never => fail(`${name(childRef)} is not listed under ## Children of ${name(parent.ref)}. Add it with: ledger tree add ${name(parent.ref)} ${name(childRef)}`);
   const child = locateChild(tasks, childRef, parent.ref);
-  const place = child?.place ?? 'backlog';
-  const [line] = linesOf(parent, childRef, place);
+  const [line] = linesOf(parent, childRef);
   if (line === undefined) {
     if (child === undefined) fail(`${name(childRef)} is not listed under ## Children of ${name(parent.ref)}, and no task ledger has the slug ${childRef.slug}.`);
     notListed();
@@ -733,7 +808,7 @@ function startChildTask(context: Context, tasks: Task[], parent: Linked, childRe
   if (child?.status === 'retired') return { ...started, marked: false, reason: 'retired' };
   let mark: ChildMark['kind'] | undefined;
   updateLedger(context, parent.task, (text) => {
-    const [now] = linesOf(parent, childRef, place, text);
+    const [now] = linesOf(parent, childRef, text);
     if (now === undefined) return notListed();
     mark = now.mark?.kind;
     return mark === undefined ? markStarted(text, now, today()) : undefined;
@@ -748,7 +823,7 @@ function startChildTask(context: Context, tasks: Task[], parent: Linked, childRe
  */
 function firstToStart(tasks: Task[], parent: Linked, blocked: Blocked[], chain: Ref[] = [parent.ref]): Ref[] | undefined {
   for (const { ref: child, task: found } of orderedChildren(parent.task, parent.ref.main, tasks)) {
-    if (found?.place !== 'backlog' || chain.some((ref) => sameTask(ref, child, found.place))) continue;
+    if (found?.place !== 'backlog' || chain.some((ref) => sameTask(ref, child))) continue;
     const waiting = dependenciesOf(found).filter((dependency) => !isDone(dependencyTask(tasks, dependency)));
     if (waiting.length > 0) {
       blocked.push({ child, dependencies: waiting });
@@ -774,13 +849,13 @@ export function orderChildren(context: Context, parentName: string, childNames: 
   const { cwd } = context;
   const parentRef = taskRef(cwd, parentName);
   const named = childNames.map((childName) => taskRef(cwd, childName));
-  const tasks = loadTasks(context, [parentRef.main, ...named.map(({ main }) => main)]);
+  const tasks = loadTasks(context);
   const parent = { task: theTask(tasks, parentRef, { live: true }), ref: parentRef };
   const current = listedChildren(parent.task, parentRef.main, tasks).filter(isLive);
   const name = nameFrom(cwd);
   const elsewhere = current.flatMap(({ ref, task }) => {
     const named = parentOf(task, ref.main);
-    return named === undefined || sameTask(named, parentRef, parent.task.place) ? [] : [`${name(ref)} (parent ${name(named)})`];
+    return named === undefined || sameTask(named, parentRef) ? [] : [`${name(ref)} (parent ${name(named)})`];
   });
   if (elsewhere.length > 0) {
     fail(`Lines under ## Children of ${name(parentRef)} name tasks whose own ledger names another parent: ${elsewhere.join(', ')}. Remove those lines first. Nothing was changed.`);
@@ -790,7 +865,7 @@ export function orderChildren(context: Context, parentName: string, childNames: 
   const strangers: Ref[] = [];
   const repeated: LiveChild[] = [];
   for (const ref of named) {
-    const child = current.find((each) => sameTask(ref, each.ref, each.task.place));
+    const child = current.find((each) => sameTask(ref, each.ref));
     if (child === undefined) {
       if (!strangers.some((known) => known.slug === ref.slug && samePath(known.main, ref.main))) strangers.push(ref);
     }
@@ -809,16 +884,20 @@ export function orderChildren(context: Context, parentName: string, childNames: 
       ].join(' '),
     );
   }
-  const unplaced = picked.find(({ task }) => findSection(task.ledger.sections, 'Location') === undefined);
-  if (unplaced !== undefined) fail(`${unplaced.task.file} has no ## Location section, so it cannot hold an order. Nothing was changed.`);
-
+  const readOnly = [parent.task, ...picked.map(({ task }) => task)].filter(({ elsewhere }) => elsewhere);
+  if (readOnly.length > 0) fail(`${readOnly.map(notOnThisMachine).join(' ')} Nothing was changed.`);
+  const unlocated = picked.filter(({ task }) => findSection(task.ledger.sections, 'Location') === undefined);
+  if (unlocated.length > 0) {
+    const named = unlocated.map(({ ref, task }) => `${name(ref)} (${task.file})`).join(', ');
+    fail(`${named} ${unlocated.length === 1 ? 'has' : 'have'} no ## Location section to hold an order. Nothing was changed.`);
+  }
   const orders = new Map(picked.map(({ task }, index) => [task, index + 1]));
   for (const [task, order] of orders) updateLedger(context, task, (text) => setLocationBullet(text, 'order', String(order)) ?? fail(`${task.file} has no ## Location section.`));
   updateLedger(context, parent.task, (text) => {
     const sorted = sortChildLines(text, parent, tasks, orders);
     return sorted === text ? undefined : sorted;
   });
-  refreshRegistry(context, [parentRef.main, ...picked.map(({ ref }) => ref.main)]);
+  refreshRegistry(context);
   return { action: 'order', parent: parentRef, children: picked.map(({ ref }) => ref) };
 }
 
@@ -835,10 +914,9 @@ const REMOTE_URL = /^[^/]*:/;
 
 /**
  * A task as `tree depends` names it: `<slug>`, in the repo `key`; `<slug>@<path>`, in the repo that holds the path; or
- * `<slug>@<address>`, in the repo of that remote address, given as a repo key or as git takes a remote. `main` is the
- * main checkout a path names.
+ * `<slug>@<address>`, in the repo of that remote address, given as a repo key or as git takes a remote.
  */
-function dependencyFrom(cwd: string, key: string, name: string): Required<Dependency> & { main?: string } {
+function dependencyFrom(cwd: string, key: string, name: string): Required<Dependency> {
   const at = name.indexOf('@');
   const slug = at === -1 ? name : name.slice(0, at);
   if (!isReadableSlug(slug)) fail(notASlug(slug));
@@ -853,7 +931,7 @@ function dependencyFrom(cwd: string, key: string, name: string): Required<Depend
   if (found.main === undefined && !path.isAbsolute(found.repo) && repoAfterAt(cwd, found.repo)?.repo !== found.repo) {
     fail(`"${where}" in ${name} would be stored as ${found.repo}, which would not read back as the same repo.`);
   }
-  return { slug, ...found };
+  return { slug, repo: found.repo };
 }
 
 /** The repo `where`, the text after the @ of a dependency, names from `cwd`; undefined for none. `main` is the main checkout a folder names. */
@@ -895,7 +973,7 @@ export function setDependencies(context: Context, childName: string, names: stri
   const key = repoKey(childRef.main);
   const given = names.map((each) => dependencyFrom(cwd, key, each));
   const dependencies = given.filter(({ slug, repo }, index) => given.findIndex((other) => other.slug === slug && other.repo === repo) === index).map(({ slug, repo }) => ({ slug, repo }));
-  const tasks = loadTasks(context, [childRef.main, ...given.flatMap(({ main }) => main ?? [])]);
+  const tasks = loadTasks(context);
   const child = theTask(tasks, childRef, { live: true });
   const name = dependencyName(cwd);
   const self = { slug: childRef.slug, repo: key };
@@ -913,7 +991,7 @@ export function setDependencies(context: Context, childName: string, names: stri
     );
   }
   updateLedger(context, child, (text) => setLocationBullet(text, 'depends on', stored.length === 0 ? undefined : showDependencies(stored)) ?? fail(`${child.file} has no ## Location section.`));
-  refreshRegistry(context, [childRef.main]);
+  refreshRegistry(context);
   return { action: 'depends', child: childRef, dependencies };
 }
 

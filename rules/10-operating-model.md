@@ -81,9 +81,9 @@ The **task ledger** records the task. See `ledger --help`.
 
 - Every non-trivial task has a ledger: goal, plan, step status, decisions,
   reasons, constraints, worktree, branch, reports, questions, next step.
-- The ledger lives in the task's worktree at `.claude/ledger.md`, never in the
-  main checkout. Keep cited files small, in its `.claude/evidence/`, never in
-  the session scratchpad.
+- The ledger lives in the ledger store. Read it with `ledger show`. Write it
+  with `ledger notes`, one item per command. Keep cited files small, in the
+  worktree's `.claude/evidence/`, never in the session scratchpad.
 - Work outside the ledger's goal is a new task
   (`/ledger:task <what the task is>`). If unclear, ask in one line.
 - Update the ledger with `/ledger:update` at every pipeline boundary. The

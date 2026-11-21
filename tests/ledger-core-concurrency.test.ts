@@ -130,7 +130,7 @@ for (const storage of ['file', 'sqlite'] as const) {
           if (!interfered) {
             interfered = true;
             assert.ok(real.backlog.create(key, 'other', ledgerText({ slug: 'other', main: app, branch: 'other' })));
-            loadTasks({ ...context, store: real }, [app]);
+            loadTasks({ ...context, store: real });
           }
           updating = true;
           try {
@@ -141,7 +141,7 @@ for (const storage of ['file', 'sqlite'] as const) {
         },
       },
     };
-    const tasks = loadTasks({ ...context, store }, [app]);
+    const tasks = loadTasks({ ...context, store });
     assert.ok(interfered, 'the registry was updated');
     assert.deepEqual(listedWhileUpdating, [], 'no rebuild ran inside the registry update');
     assert.deepEqual(tasks.map(({ name }) => name).sort(), ['first', 'mine', 'other']);
@@ -165,7 +165,7 @@ for (const storage of ['file', 'sqlite'] as const) {
       },
     };
     assert.throws(
-      () => loadTasks({ ...context, store }, [app]),
+      () => loadTasks({ ...context, store }),
       (error) => {
         assert.ok(error instanceof Failure, String(error));
         assert.match(error.message, new RegExp(`changed the task registry ${tries} times`));
@@ -190,7 +190,7 @@ for (const storage of ['file', 'sqlite'] as const) {
         },
       },
     };
-    const worktreeLedger = path.join(app, '.claude/worktrees/epic/.claude/ledger.md');
+    const worktree = path.join(app, '.claude/worktrees/epic');
     const backlogLocation = real.backlog.location(key, 'epic');
     assert.throws(
       () => goTask({ ...context, store }, 'epic', undefined),
@@ -202,7 +202,8 @@ for (const storage of ['file', 'sqlite'] as const) {
       },
     );
     assert.ok(real.backlog.read(key, 'epic')?.text.includes(late), 'the backlog ledger keeps the late change');
-    assert.ok(!existsSync(path.dirname(path.dirname(worktreeLedger))), 'the new worktree is removed');
+    assert.ok(!existsSync(worktree), 'the new worktree is removed');
+    assert.equal(real.active.has(key, 'epic'), false, 'the new active ledger is removed');
     assert.equal(spawnSync('git', ['-C', app, 'branch', '--list', 'epic'], { encoding: 'utf8' }).stdout.trim(), '', 'the new branch is deleted');
   });
 }

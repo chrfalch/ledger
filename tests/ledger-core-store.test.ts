@@ -5,6 +5,7 @@ import { createRequire, syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import { FORMAT } from '../tools/ledger/clone.js';
 import { park } from '../tools/ledger/edit.js';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
@@ -16,7 +17,7 @@ import { loadTasks } from '../tools/ledger/registry.js';
 import { parseRecord, recordJson, renderRecord } from '../tools/ledger/record.js';
 import { loadSqlite, sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
-import { createTask, goTask, parkTask, type Context } from '../tools/ledger/write.js';
+import { createTask, goTask, orderChildren, parkTask, type Context } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
 import { archivedTask, home, ledgerText, noSqlite, repoKeyOf, repository } from './ledger-core-fixtures.js';
 
@@ -600,7 +601,7 @@ function fileHome(t: TestContext) {
 const openGitStore = (h: string): LedgerStore => {
   const clone = path.join(h, '.claude/ledger-data');
   spawnSync('git', ['init', '--quiet', clone]);
-  writeFileSync(path.join(clone, '.ledger-data'), '{"format":1}\n');
+  writeFileSync(path.join(clone, '.ledger-data'), `${JSON.stringify({ format: FORMAT })}\n`);
   return gitStore(ledgerPaths(h), { backgroundSync: false });
 };
 
@@ -1315,6 +1316,9 @@ function recording(inner: LedgerStore): { store: LedgerStore; calls: string[] } 
   const calls: string[] = [];
   const note = (...call: string[]): void => void calls.push(call.join(' '));
   const store: LedgerStore = {
+    host: inner.host,
+    ownHosts: inner.ownHosts,
+    active: inner.active,
     backlog: {
       location: (repo, name) => inner.backlog.location(repo, name),
       repoLocation: (repo) => inner.backlog.repoLocation(repo),
@@ -1392,13 +1396,41 @@ test('the core reads and writes backlog ledgers and the registry through the sto
   goTask(context, 'add-cache', undefined);
   includesAll(calls, [`backlog.read ${key} add-cache`, `backlog.remove ${key} add-cache`]);
   assert.equal(store.backlog.has(key, 'add-cache'), false);
-  assert.ok(existsSync(path.join(app, '.claude/worktrees/add-cache/.claude/ledger.md')));
+  assert.ok(store.active.has(key, 'add-cache'));
 
   calls.length = 0;
-  const tasks = loadTasks(context, [app]);
+  const tasks = loadTasks(context);
   includesAll(calls, ['registry.read', 'backlog.repos', `backlog.list ${key}`, 'archive.repos', `archive.list ${key}`]);
   assert.deepEqual(
     tasks.map(({ slug, place }) => `${slug} ${place}`),
-    ['add-cache worktree', 'fix-login backlog', 'old-task archive'],
+    ['add-cache active', 'fix-login backlog', 'old-task archive'],
   );
+});
+
+test('tree order checks every child for a ## Location section before it gives any child an order', (t) => {
+  const h = home(t);
+  const app = repository(h, path.join(h, 'repos/app'));
+  const paths = ledgerPaths(h);
+  const inner = fileStore(paths);
+  const key = repoKeyOf(app);
+  inner.backlog.write(key, 'epic', ledgerText({ slug: 'epic', main: app, children: ['- a', '- b'] }));
+  inner.backlog.write(key, 'a', ledgerText({ slug: 'a', main: app, parent: 'epic' }));
+  inner.backlog.write(key, 'b', ledgerText({ slug: 'b', main: app, parent: 'epic' }));
+  // Every store renders a ## Location section, so only a store that hides it gives a child without one.
+  const hidden = (name: string, text: string): string => (name === 'b' ? text.replace(/\n## Location\n[\s\S]*?\n\n/, '\n') : text);
+  const store: LedgerStore = {
+    ...inner,
+    backlog: {
+      ...inner.backlog,
+      list: (repo) => inner.backlog.list(repo).map((entry) => ({ ...entry, text: hidden(entry.name, entry.text) })),
+      read: (repo, name) => {
+        const entry = inner.backlog.read(repo, name);
+        return entry && { ...entry, text: hidden(name, entry.text) };
+      },
+      update: (repo, name, change) => inner.backlog.update(repo, name, (text) => change(hidden(name, text))),
+    },
+  };
+  const before = inner.backlog.read(key, 'a')?.text;
+  assert.throws(() => orderChildren({ paths, cwd: app, store }, 'epic', ['a', 'b']), (error) => error instanceof Failure && /\bb\b.*## Location/.test(error.message));
+  assert.equal(inner.backlog.read(key, 'a')?.text, before);
 });

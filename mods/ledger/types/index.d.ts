@@ -1,5 +1,5 @@
 /** The session's task before a switch, as `ledger session` gave it when the command ran. */
-export type PreviousTask = { slug: string; ledger: string; main?: string; parent?: { slug: string; main?: string } }
+export type PreviousTask = { slug: string; worktree: string; main?: string; parent?: { slug: string; main?: string } }
 
 /**
  * A /ledger:close, /ledger:next, /ledger:go or /ledger:park that ran in this turn: the session clears when the turn ends.

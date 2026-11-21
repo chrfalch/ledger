@@ -5,13 +5,13 @@ import { test, type TestContext } from 'node:test';
 
 import { HELP } from '../mods/ledger/hooks/ledger.js';
 import { REPO } from './helpers.js';
-import { git, hasLedgerFile, home, ledger, ok, readLedgerFile, repository, storeFolder, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { activeFile, git, hasLedgerFile, home, ledger, ok, readLedgerFile, repository, storeFolder, worktreeTask, type Ran } from './ledger-core-fixtures.js';
 
 const read = (file: string) => readFileSync(path.join(REPO, file), 'utf8').replace(/\s+/g, ' ');
 
 test('/ledger:task continues in this session when there is no current ledger', () => {
   const task = read('mods/ledger/commands/task.md');
-  assert.match(task, /`\.claude\/ledger\.md` in the working directory/);
+  assert.match(task, /`ledger show` succeeds in the working directory/);
   const step8 = task.match(/ 8\. If there is no current ledger.*/)?.[0] ?? '';
   assert.match(step8, /there is no old task to clear/);
   assert.match(step8, /move this session into the new worktree with the EnterWorktree tool/i);
@@ -20,8 +20,8 @@ test('/ledger:task continues in this session when there is no current ledger', (
 
 test('/ledger:task without a current ledger reads the new ledger and follows the plan gate', () => {
   const step8 = read('mods/ledger/commands/task.md').match(/ 8\. If there is no current ledger.*/)?.[0] ?? '';
-  assert.match(step8, /EnterWorktree.*Read `\.claude\/ledger\.md` in the new worktree/);
-  assert.match(step8, /When the task changes more than one file or involves a design choice, get the plan approved with the widget question that `ledger task gate plan` prints\. Then write the plan into the ledger\./);
+  assert.match(step8, /EnterWorktree.*Read its ledger with `ledger show` in the new worktree/);
+  assert.match(step8, /When the task changes more than one file or involves a design choice, get the plan approved with the widget question that `ledger task gate plan` prints\. Then write the plan into the ledger with `ledger notes plan add`/);
 });
 
 test('/ledger:task without a current ledger starts the backlog task with ledger go, then enters the worktree it printed', () => {
@@ -130,7 +130,7 @@ test('/ledger:update with no ledger creates nothing and points to /ledger:task',
   assert.doesNotMatch(update, /cc-task-new/);
   assert.doesNotMatch(update, /`start:` line/);
   assert.doesNotMatch(update, /start a task/i);
-  assert.match(update, /If `\.claude\/ledger\.md` does not exist, create nothing\. Tell the operator to use `\/ledger:task <what the task is>`/);
+  assert.match(update, /If `ledger show` fails, there is no ledger: create nothing\. Tell the operator to use `\/ledger:task <what the task is>`/);
 });
 
 test('/ledger:help no longer says /ledger:update starts a task', () => {
@@ -335,7 +335,7 @@ function kindSetup(t: TestContext) {
   writeFileSync(path.join(app, '.git/info/exclude'), '.claude/\n');
   const backlogFile = (slug: string): string => path.join(storeFolder(h, 'ledger-backlog', app), `${slug}.json`);
   const worktreeOf = (slug: string): string => path.join(app, '.claude/worktrees', slug);
-  const ledgerOf = (worktree: string): string => path.join(worktree, '.claude/ledger.md');
+  const ledgerOf = (slug: string): string => activeFile(h, app, slug);
   return { h, app, backlogFile, worktreeOf, ledgerOf };
 }
 
@@ -376,11 +376,11 @@ test('ledger task new --stack and --here write the kind given', (t) => {
   const { h, app, worktreeOf, ledgerOf } = kindSetup(t);
   worktreeTask(h, app, { slug: 'epic' });
   ok(ledger(h, worktreeOf('epic'), 'task', 'new', 'sub', '--stack', '--kind', 'investigation'));
-  assert.deepEqual(kindsIn(readFileSync(ledgerOf(worktreeOf('sub')), 'utf8')), ['- kind: investigation']);
+  assert.deepEqual(kindsIn(readLedgerFile(ledgerOf('sub'))), ['- kind: investigation']);
   const side = worktreeOf('side');
   git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/side', side, 'main');
   ok(ledger(h, side, 'task', 'new', '--here', '--kind', 'docs'));
-  assert.deepEqual(kindsIn(readFileSync(ledgerOf(side), 'utf8')), ['- kind: docs']);
+  assert.deepEqual(kindsIn(readLedgerFile(ledgerOf('side'))), ['- kind: docs']);
 });
 
 test('ledger task new with an unknown --kind fails, names the kinds, and makes no ledger, worktree or branch', (t) => {
@@ -398,14 +398,14 @@ test('ledger task new with an unknown --kind fails, names the kinds, and makes n
   const side = worktreeOf('side');
   git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/side', side, 'main');
   refused(ledger(h, side, 'task', 'new', '--here', '--kind', 'nonsense'));
-  assert.equal(existsSync(ledgerOf(side)), false);
+  assert.equal(hasLedgerFile(ledgerOf('side')), false);
 });
 
 test('ledger go keeps the kind of a backlog task in its worktree ledger', (t) => {
   const { h, app, worktreeOf, ledgerOf } = kindSetup(t);
   ok(ledger(h, app, 'task', 'new', 'docs-task', '--kind', 'docs'));
   ok(ledger(h, app, 'go', 'docs-task'));
-  assert.deepEqual(kindsIn(readFileSync(ledgerOf(worktreeOf('docs-task')), 'utf8')), ['- kind: docs']);
+  assert.deepEqual(kindsIn(readLedgerFile(ledgerOf('docs-task'))), ['- kind: docs']);
 });
 
 test('a task made with --kind docs goes from plan straight to build', (t) => {

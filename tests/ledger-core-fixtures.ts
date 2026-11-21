@@ -2,13 +2,21 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
 import module from 'node:module';
+import os from 'node:os';
 import path from 'node:path';
 import type { TestContext } from 'node:test';
 import { pathToFileURL } from 'node:url';
-import { readRecordJson, renderRecord } from '../tools/ledger/record.js';
+import { fileStore } from '../tools/ledger/file-store.js';
+import { ledgerPaths } from '../tools/ledger/paths.js';
+import { parseRecord, readRecordJson, recordJson, renderRecord } from '../tools/ledger/record.js';
+import { repoKey } from '../tools/ledger/repo-key.js';
+import { hostLabel } from '../tools/ledger/settings.js';
 import { freshHome, REPO } from './helpers.js';
 
 export const LEDGER_BIN = path.join(REPO, 'bin/ledger');
+
+/** The host label every active record a command of these tests starts names, as no fixture sets "host". */
+export const THIS_HOST = hostLabel(os.hostname());
 
 /**
  * Why the SQLite store cannot run on the Node at `node`, or false where it can: the skip reason of its tests. A child
@@ -166,16 +174,26 @@ export function repository(h: string, main: string): string {
   return main;
 }
 
-/** A linked worktree at <main>/.claude/worktrees/<slug> on branch me/<slug>, with a ledger. */
+/** A linked worktree at <main>/.claude/worktrees/<slug> on branch me/<slug>, with a .claude folder and its active record in the file store; gives the record's file. */
 export function worktreeTask(h: string, main: string, fields: Omit<Fields, 'worktree' | 'branch' | 'base'>): string {
-  const worktree = path.join(main, '.claude/worktrees', fields.slug);
+  const worktree = worktreeOf(main, fields.slug);
   git(h, main, 'worktree', 'add', '--quiet', '-b', `me/${fields.slug}`, worktree, 'main');
   const short = git(h, main, 'rev-parse', '--short', 'main');
-  const file = path.join(worktree, '.claude/ledger.md');
-  mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, ledgerText({ ...fields, worktree, branch: `me/${fields.slug}`, base: `origin/main @ ${short}` }));
-  return file;
+  mkdirSync(path.join(worktree, '.claude'));
+  return putActive(h, main, fields.slug, ledgerText({ ...fields, worktree, branch: `me/${fields.slug}`, base: `origin/main @ ${short}` }));
 }
+
+/** Writes `markdown` as the new active record `slug` of the repo at `main`, or of the repo key `repo`, in the file store; gives its file. A slug that is taken fails, as in the store. */
+export function putActive(h: string, main: string, slug: string, markdown: string, repo = repoKey(main)): string {
+  const { active } = fileStore(ledgerPaths(h));
+  assert.ok(active.create(repo, slug, markdown), `the active ledger ${slug} of ${repo} is taken`);
+  return active.location(repo, slug);
+}
+
+/** The file of the active record `slug` of the repo at `main` in the file store. */
+export const activeFile = (h: string, main: string, slug: string): string => fileStore(ledgerPaths(h)).active.location(repoKey(main), slug);
+
+export const worktreeOf = (main: string, slug: string): string => path.join(main, '.claude/worktrees', slug);
 
 /**
  * The store key of the repo at `main`: the address of its origin, which every fixture repo has as a local bare repo,
@@ -216,11 +234,16 @@ export const recordFile = (file: string): string => file.replace(/\.md$/, '.json
 
 /**
  * The text of a ledger file as a reader of the store sees it: a task record <name>.json rendered to Markdown, and a
- * <name>.md that a record replaced read as that record. Any other file, such as a worktree's ledger.md, as it is.
+ * <name>.md that a record replaced read as that record. Any other file as it is.
  */
 export function readLedgerFile(file: string): string {
   const record = file.endsWith('.json') ? file : recordFile(file);
   return existsSync(record) && (record !== file || file.endsWith('.json')) ? renderRecord(readRecordJson(readFileSync(record, 'utf8'), record)) : readFileSync(file, 'utf8');
+}
+
+/** Writes `markdown` to a ledger file of the file store as the store keeps it: a task record for <name>.json, else as it is. */
+export function writeLedgerFile(file: string, markdown: string): void {
+  writeFileSync(file, file.endsWith('.json') ? recordJson(parseRecord(markdown)) : markdown);
 }
 
 /** Whether the store holds the ledger of `file`, as <name>.md from before task records or as its record <name>.json. */

@@ -152,6 +152,20 @@ function deployMods(opts: DeployOptions): void {
   }
 }
 
+/**
+ * Moves each .claude/ledger.md the registry names into the ledger store, as the ledger now installed reads only the
+ * store. A ledger it leaves, or a run that fails, is reported and does not fail the deploy: the rest is installed.
+ */
+function moveActiveLedgers(home: string): void {
+  const rerun = 'ledger store migrate --active';
+  // From HOME, not this repo: the repo's own worktrees are found only through the registry, as every other repo's are.
+  const moved = spawnSync(path.join(REPO, 'bin/ledger'), ['store', 'migrate', '--active'], { cwd: home, encoding: 'utf8' });
+  const lines = `${moved.stdout ?? ''}${moved.stderr ?? ''}`.split('\n').filter((line) => line.trim() !== '');
+  for (const line of lines) console.log(`ledgers  ${line}`);
+  if (moved.error) console.log(`ledgers  could not run ${rerun}: ${moved.error.message}. Run it by hand.`);
+  else if (moved.status !== 0) console.log(`ledgers  ${rerun} exited ${moved.status ?? 'on a signal'}; the deploy is done. Fix what it names above, then run ${rerun} again.`);
+}
+
 const isFile = (filename: string): boolean => existsSync(filename) && statSync(filename).isFile();
 
 function manifestLines(filename: string): string[] {
@@ -387,6 +401,7 @@ export function deploy(opts: DeployOptions): number {
   const status = policy.status ?? 1;
   if (status !== 0) return status;
   deployMods(opts);
+  if (!opts.dry) moveActiveLedgers(home);
   if (opts.dry) console.log('\nDRY RUN -- nothing was written.');
   else if (existsSync(backup) && statSync(backup).isDirectory()) console.log(`backup   ${short(backup)}`);
   return 0;

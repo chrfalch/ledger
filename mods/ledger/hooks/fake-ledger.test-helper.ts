@@ -15,7 +15,8 @@ export const refused = (error: string, exitCode = 1): Reply => ran(exitCode, JSO
 
 export const MAIN = '/repo'
 export const worktreeOf = (slug: string, main = MAIN): string => `${main}/.claude/worktrees/${slug}`
-export const ledgerOf = (slug: string, main = MAIN): string => `${worktreeOf(slug, main)}/.claude/ledger.md`
+/** Where the store keeps the active record of a task; only shown, never read. */
+export const ledgerOf = (slug: string, main = MAIN): string => `/home/.claude/ledger-active${main}/${slug}.json`
 
 type Ref = { slug: string; main: string }
 
@@ -27,7 +28,7 @@ export function task(slug: string, extra: { main?: string; parent?: Ref; finishe
     repo: 'repo',
     main,
     status,
-    path: ledgerOf(slug, main),
+    worktree: worktreeOf(slug, main),
     branch: `me/${slug}`,
     updated: '2026-11-18T10:00:00.000Z',
     goal: `Goal of ${slug}.`,

@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { after, before, type TestContext } from 'node:test';
 import { fileStore } from '../tools/ledger/file-store.js';
+import { parseLedger } from '../tools/ledger/format.js';
+import { mainCheckout } from '../tools/ledger/git.js';
 import { parseHookInput, preToolUse } from '../tools/ledger/hooks.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
+import { parseRecord, recordJson } from '../tools/ledger/record.js';
+import { repoKey } from '../tools/ledger/repo-key.js';
 import { REPO } from './helpers.js';
-import { git, home, LEDGER_BIN, ledgerText, touch } from './ledger-core-fixtures.js';
+import { git, home, LEDGER_BIN, ledgerText, readLedgerFile, touch } from './ledger-core-fixtures.js';
 
 type Ran = { status: number | null; stdout: string; stderr: string };
 
@@ -50,20 +54,33 @@ function worktree(h: string, main: string, location: string): string {
   return location;
 }
 
-/** The linked worktrees' ledgers in the order git lists the worktrees. */
+/** The active ledgers of the linked worktrees of `main`, in the order git lists the worktrees. */
 function linkedLedgers(h: string, main: string): string[] {
+  const { active } = fileStore(ledgerPaths(h));
   return git(h, main, 'worktree', 'list', '--porcelain')
     .split('\n')
     .filter((line) => line.startsWith('worktree '))
     .slice(1)
-    .map((line) => path.join(line.slice('worktree '.length), '.claude/ledger.md'));
+    .flatMap((line) => {
+      const key = active.byWorktree(line.slice('worktree '.length));
+      return key === undefined ? [] : [active.location(key.repo, key.slug)];
+    });
 }
 
-function ledgerIn(folder: string, text = `# Task ledger — ${path.basename(folder)}\n\n## Goal\nA goal.\n\n## Next step\nA step.\n`): string {
-  mkdirSync(path.join(folder, '.claude'), { recursive: true });
-  const ledger = path.join(folder, '.claude/ledger.md');
-  writeFileSync(ledger, text);
-  return ledger;
+/**
+ * `text` as the active ledger of the task whose worktree is `folder`, filed under the repo that holds the folder, or under
+ * the folder outside a git repository; its slug is the heading's, else the folder's name. Gives the record's file.
+ */
+function ledgerIn(h: string, folder: string, text = `# Task ledger — ${path.basename(folder)}\n\n## Goal\nA goal.\n\n## Next step\nA step.\n`): string {
+  mkdirSync(folder, { recursive: true });
+  const main = mainCheckout(folder);
+  const repo = main === undefined ? folder : repoKey(main);
+  const slug = parseLedger(text).slug ?? path.basename(folder);
+  const { active } = fileStore(ledgerPaths(h));
+  const file = active.location(repo, slug);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, recordJson({ ...parseRecord(text), worktree: folder }));
+  return file;
 }
 
 function familyLedger(slug: string, location: string[], rest = '## Next step\nA step.\n'): string {
@@ -87,8 +104,17 @@ function archiveCopy(h: string, repo: string, name: string, text: string): strin
   return copy;
 }
 
+/** How session-start names the task of an active ledger file: its slug and its worktree. */
+const taskOf = (ledger: string): string => `${path.basename(ledger, '.json')} in the worktree ${(JSON.parse(readFileSync(ledger, 'utf8')) as { worktree: string }).worktree}`;
+
 const fullLedgerText = (ledger: string): string =>
-  `A task ledger exists at ${ledger}. Contents follow. If it has open steps, continue from Next step without re-verifying finished steps.\n\n${readFileSync(ledger, 'utf8')}`;
+  `A task ledger exists for ${taskOf(ledger)}. It is kept in the ledger store; its contents follow. If it has open steps, continue from Next step without re-verifying finished steps. Write to it with \`ledger notes\`, never by editing a file.\n\n${readLedgerFile(ledger)}`;
+
+const SUMMARIES_HEAD =
+  'task ledgers exist. Summary of each follows. If asked what we are working on, answer from this. Before continuing one, ask which, then read its full ledger. Each is kept in the ledger store: read it with `ledger show <slug>`, and write to it with `ledger notes`, never by editing a file.\n';
+
+/** The line that heads the summary of an active ledger file when session-start lists several. */
+const summaryHead = (ledger: string): string => `=== ${taskOf(ledger).replace(' in the worktree ', ' in ')}`;
 
 function relationText(ledger: string, ...lines: string[]): string {
   const [first, ...contents] = fullLedgerText(ledger).split('\n');
@@ -111,7 +137,7 @@ test('a main checkout\'s own ledger is never read back or named on compaction', 
   const h = home(t);
   const main = checkout(h, 'main');
   worktree(h, main, path.join(h, 'sibling'));
-  ledgerIn(main);
+  ledgerIn(h, main);
 
   assert.equal(hook(h, 'session-start', { cwd: main }), '');
   assert.equal(preCompact(h, main), '');
@@ -120,22 +146,23 @@ test('a main checkout\'s own ledger is never read back or named on compaction', 
 test('session-start from a main checkout summarises worktree ledgers inside and outside it, but not its own', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const own = ledgerIn(main);
-  const inside = ledgerIn(worktree(h, main, path.join(main, '.claude/worktrees/inside')));
-  const sibling = ledgerIn(worktree(h, main, path.join(h, 'sibling')));
+  const own = ledgerIn(h, main);
+  const inside = ledgerIn(h, worktree(h, main, path.join(main, '.claude/worktrees/inside')));
+  const sibling = ledgerIn(h, worktree(h, main, path.join(h, 'sibling')));
 
   const context = sessionStart(h, main).additionalContext;
 
-  assert.ok(!context.includes(own), `main checkout ledger shown:\n${context}`);
-  assert.ok(context.includes(`=== ${inside}\n`), `worktree ledger missing:\n${context}`);
-  assert.ok(context.includes(`=== ${sibling}\n`), `sibling ledger missing:\n${context}`);
+  assert.ok(!context.includes(summaryHead(own)), `main checkout ledger shown:\n${context}`);
+  assert.ok(context.includes(`${summaryHead(inside)}\n`), `worktree ledger missing:\n${context}`);
+  assert.ok(context.includes(`${summaryHead(sibling)}\n`), `sibling ledger missing:\n${context}`);
 });
 
-test('session-start from a subdirectory of a main checkout ignores a ledger in that subdirectory', (t) => {
+test('session-start from a subdirectory of a main checkout ignores a ledger file in that subdirectory', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  ledgerIn(path.join(main, 'sub'));
-  const sibling = ledgerIn(worktree(h, main, path.join(h, 'sibling')));
+  mkdirSync(path.join(main, 'sub/.claude'), { recursive: true });
+  writeFileSync(path.join(main, 'sub/.claude/ledger.md'), '# Task ledger — sub\n');
+  const sibling = ledgerIn(h, worktree(h, main, path.join(h, 'sibling')));
 
   const output = sessionStart(h, path.join(main, 'sub'));
 
@@ -146,10 +173,10 @@ test('session-start from a subdirectory of a main checkout ignores a ledger in t
 test('session-start in a linked worktree shows only its own ledger and titles the session with the slug', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  ledgerIn(main);
-  ledgerIn(worktree(h, main, path.join(h, 'other')));
+  ledgerIn(h, main);
+  ledgerIn(h, worktree(h, main, path.join(h, 'other')));
   const sibling = worktree(h, main, path.join(h, 'sibling'));
-  const ledger = ledgerIn(sibling, '# Task ledger — window-title  \n\n## Goal\nA goal.\n');
+  const ledger = ledgerIn(h, sibling, '# Task ledger — window-title  \n\n## Goal\nA goal.\n');
 
   const output = sessionStart(h, sibling);
 
@@ -160,7 +187,7 @@ test('session-start in a linked worktree shows only its own ledger and titles th
 test('session-start accepts a hyphen instead of an em dash in the ledger heading', (t) => {
   const h = home(t);
   const sibling = worktree(h, checkout(h, 'main'), path.join(h, 'sibling'));
-  ledgerIn(sibling, '# Task ledger - hyphenated\n');
+  ledgerIn(h, sibling, '# Task ledger - hyphenated\n');
 
   assert.equal(sessionStart(h, sibling).sessionTitle, 'hyphenated');
 });
@@ -168,7 +195,7 @@ test('session-start accepts a hyphen instead of an em dash in the ledger heading
 test('session-start omits the title when the ledger has no heading', (t) => {
   const h = home(t);
   const sibling = worktree(h, checkout(h, 'main'), path.join(h, 'sibling'));
-  const ledger = ledgerIn(sibling, '## Goal\nA goal.\n');
+  const ledger = ledgerIn(h, sibling, '## Goal\nA goal.\n');
 
   const output = sessionStart(h, sibling);
 
@@ -180,9 +207,9 @@ test('session-start omits the title when the heading has an empty slug or one th
   const h = home(t);
   const main = checkout(h, 'main');
   const empty = worktree(h, main, path.join(h, 'empty'));
-  ledgerIn(empty, '# Task ledger —   \n');
+  ledgerIn(h, empty, '# Task ledger —   \n');
   const odd = worktree(h, main, path.join(h, 'odd'));
-  ledgerIn(odd, '# Task ledger — "quoted" \\ slug\n');
+  ledgerIn(h, odd, '# Task ledger — "quoted" \\ slug\n');
 
   assert.equal('sessionTitle' in sessionStart(h, empty), false);
   assert.equal('sessionTitle' in sessionStart(h, odd), false);
@@ -191,17 +218,17 @@ test('session-start omits the title when the heading has an empty slug or one th
 test('session-start in a main checkout summarises several worktree ledgers without a title', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  ledgerIn(worktree(h, main, path.join(h, 'first')));
-  ledgerIn(worktree(h, main, path.join(h, 'second')));
+  ledgerIn(h, worktree(h, main, path.join(h, 'first')));
+  ledgerIn(h, worktree(h, main, path.join(h, 'second')));
 
   const output = sessionStart(h, main);
 
   assert.equal('sessionTitle' in output, false);
   assert.equal(
     output.additionalContext,
-    '2 task ledgers exist. Summary of each follows. If asked what we are working on, answer from this. Before continuing one, ask which, then read its full ledger.\n' +
+    `2 ${SUMMARIES_HEAD}` +
       linkedLedgers(h, main)
-        .map((ledger) => `\n=== ${ledger}\nA goal.\n\nA step.\n`)
+        .map((ledger) => `\n${summaryHead(ledger)}\nA goal.\n\nA step.\n`)
         .join(''),
   );
 });
@@ -209,7 +236,7 @@ test('session-start in a main checkout summarises several worktree ledgers witho
 test('session-start in a main checkout with one worktree ledger shows it in full without a title', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const ledger = ledgerIn(worktree(h, main, path.join(h, 'sibling')));
+  const ledger = ledgerIn(h, worktree(h, main, path.join(h, 'sibling')));
 
   const output = sessionStart(h, main);
 
@@ -217,34 +244,94 @@ test('session-start in a main checkout with one worktree ledger shows it in full
   assert.equal(output.additionalContext, fullLedgerText(ledger));
 });
 
-test('session-start outside a git repository shows the ledger in the working directory and titles the session', (t) => {
+test('session-start outside a git repository shows no ledger, not even a .claude/ledger.md there', (t) => {
   const h = home(t);
   const plain = path.join(h, 'plain');
-  const ledger = ledgerIn(plain);
+  mkdirSync(path.join(plain, '.claude'), { recursive: true });
+  writeFileSync(path.join(plain, '.claude/ledger.md'), '# Task ledger — plain\n');
 
-  const output = sessionStart(h, plain);
-
-  assert.equal(output.sessionTitle, 'plain');
-  assert.equal(output.additionalContext, fullLedgerText(ledger));
+  assert.equal(hook(h, 'session-start', { cwd: plain }), '');
 });
 
-test('session-start outside a git repository finds a ledger under .claude/worktrees, without a title', (t) => {
+test('session-start says the ledgers are kept in the store and written with ledger notes, and names no .claude/ledger.md', (t) => {
   const h = home(t);
-  const plain = path.join(h, 'plain');
-  const ledger = ledgerIn(path.join(plain, '.claude/worktrees/x'));
+  const main = checkout(h, 'main');
+  const first = worktree(h, main, path.join(h, 'first'));
+  ledgerIn(h, first);
+  const one = sessionStart(h, first).additionalContext;
+  ledgerIn(h, worktree(h, main, path.join(h, 'second')));
+  const several = sessionStart(h, main).additionalContext;
 
-  const output = sessionStart(h, plain);
+  for (const context of [one, several]) {
+    assert.match(context, /kept in the ledger store/);
+    assert.match(context, /`ledger notes`, never by editing a file/);
+    assert.ok(!context.includes('.claude/ledger.md'), context);
+  }
+});
 
-  assert.equal('sessionTitle' in output, false);
-  assert.equal(output.additionalContext, fullLedgerText(ledger));
+/** A linked worktree of `main` that still holds its ledger as .claude/ledger.md, with no active record. */
+function unmovedLedger(h: string, main: string, name: string): string {
+  const folder = worktree(h, main, path.join(h, name));
+  mkdirSync(path.join(folder, '.claude'));
+  writeFileSync(path.join(folder, '.claude/ledger.md'), ledgerText({ slug: name, worktree: folder }));
+  return folder;
+}
+
+const UNMOVED_HINT = /^(\d+) ledgers? still kept in \.claude\/ledger\.md; run `ledger store migrate --active`\.$/m;
+
+test('session-start counts the linked worktrees of the session\'s repo that still keep their ledger in .claude/ledger.md', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const first = unmovedLedger(h, main, 'first');
+  unmovedLedger(h, main, 'second');
+  const moved = worktree(h, main, path.join(h, 'moved'));
+  ledgerIn(h, moved);
+  mkdirSync(path.join(moved, '.claude'), { recursive: true });
+  writeFileSync(path.join(moved, '.claude/ledger.md'), ledgerText({ slug: 'moved', worktree: moved }));
+  unmovedLedger(h, checkout(h, 'other'), 'elsewhere');
+
+  assert.equal(UNMOVED_HINT.exec(sessionStart(h, main).additionalContext)?.[1], '2');
+  assert.equal(UNMOVED_HINT.exec(sessionStart(h, moved).additionalContext)?.[1], '2');
+  assert.equal(UNMOVED_HINT.exec(JSON.parse(hook(h, 'session-start', { cwd: first })).hookSpecificOutput.additionalContext)?.[1], '2');
+});
+
+test('session-start gives no hint when no linked worktree of the repo keeps a .claude/ledger.md without a record', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  mkdirSync(path.join(main, '.claude'));
+  writeFileSync(path.join(main, '.claude/ledger.md'), ledgerText({ slug: 'main' }));
+  const moved = worktree(h, main, path.join(h, 'moved'));
+  ledgerIn(h, moved);
+  mkdirSync(path.join(moved, '.claude'), { recursive: true });
+  writeFileSync(path.join(moved, '.claude/ledger.md'), ledgerText({ slug: 'moved', worktree: moved }));
+
+  assert.doesNotMatch(sessionStart(h, moved).additionalContext, /still kept in/);
+  assert.equal(hook(h, 'session-start', { cwd: h }), '');
+});
+
+test('session-start whose git worktree listing does not answer gives no hint and still exits 0', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  unmovedLedger(h, main, 'first');
+  const stubs = path.join(h, 'hanging-git');
+  mkdirSync(stubs);
+  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  writeFileSync(path.join(stubs, 'git'), `#!/bin/sh\nfor arg in "$@"; do [ "$arg" = list ] && exec sleep 30; done\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+  const started = Date.now();
+
+  const ran = runHook(h, 'session-start', JSON.stringify({ cwd: main }), { PATH: `${stubs}${path.delimiter}${process.env.PATH ?? ''}` }, 20_000);
+
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.ok(Date.now() - started < 9_000);
+  assert.doesNotMatch(ran.stdout, /still kept in/);
 });
 
 test('session-start in a child task names its parent and the parent status', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
   const child = worktree(h, main, path.join(h, 'child'));
-  const ledger = ledgerIn(child, familyLedger('child', ['- parent: epic']));
-  ledgerIn(worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], '## Children\n- child\n\n## Next step\nParked: 2026-10-01 — waiting.\nA step.\n'));
+  const ledger = ledgerIn(h, child, familyLedger('child', ['- parent: epic']));
+  ledgerIn(h, worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], '## Children\n- child\n\n## Next step\nParked: 2026-10-01 — waiting.\nA step.\n'));
 
   assert.equal(sessionStart(h, child).additionalContext, relationText(ledger, 'Parent task: epic (parked).'));
 });
@@ -252,7 +339,7 @@ test('session-start in a child task names its parent and the parent status', (t)
 test('session-start in a child task whose parent has no ledger names the parent as missing, with CRLF line ends', (t) => {
   const h = home(t);
   const child = worktree(h, checkout(h, 'main'), path.join(h, 'child'));
-  const ledger = ledgerIn(child, familyLedger('child', ['- parent: epic']).replace(/\n/g, '\r\n'));
+  const ledger = ledgerIn(h, child, familyLedger('child', ['- parent: epic']).replace(/\n/g, '\r\n'));
 
   assert.equal(sessionStart(h, child).additionalContext, relationText(ledger, 'Parent task: epic (missing).'));
 });
@@ -262,9 +349,9 @@ test('session-start in a parent task names each child in list order with its sta
   const main = checkout(h, 'main');
   const epic = worktree(h, main, path.join(h, 'epic'));
   const children = '## Children\n- child-a\n- child-b\n- old (retired 2026-10-01)\n- lost\n\n## Next step\nA step.\n';
-  const ledger = ledgerIn(epic, familyLedger('epic', [], children));
-  ledgerIn(worktree(h, main, path.join(h, 'child-a')), familyLedger('child-a', ['- parent: epic']));
-  ledgerIn(worktree(h, main, path.join(h, 'child-b')), familyLedger('child-b', ['- parent: epic'], '## Next step\n\nParked: 2026-10-02 - later.\n'));
+  const ledger = ledgerIn(h, epic, familyLedger('epic', [], children));
+  ledgerIn(h, worktree(h, main, path.join(h, 'child-a')), familyLedger('child-a', ['- parent: epic']));
+  ledgerIn(h, worktree(h, main, path.join(h, 'child-b')), familyLedger('child-b', ['- parent: epic'], '## Next step\n\nParked: 2026-10-02 - later.\n'));
   archiveCopy(h, 'main', '2026-10-01-old', familyLedger('old', [`- main: ${main}`, `- worktree: ${path.join(main, '.claude/worktrees/old')}`, '- parent: epic']));
 
   assert.equal(
@@ -277,8 +364,8 @@ test('session-start shows a child marked retired with its date, not the status o
   const h = home(t);
   const main = checkout(h, 'main');
   const epic = worktree(h, main, path.join(h, 'epic'));
-  const ledger = ledgerIn(epic, familyLedger('epic', [], '## Children\n- reused (retired 2026-10-01)\n\n## Next step\nA step.\n'));
-  ledgerIn(worktree(h, main, path.join(h, 'reused')), familyLedger('reused', ['- parent: epic']));
+  const ledger = ledgerIn(h, epic, familyLedger('epic', [], '## Children\n- reused (retired 2026-10-01)\n\n## Next step\nA step.\n'));
+  ledgerIn(h, worktree(h, main, path.join(h, 'reused')), familyLedger('reused', ['- parent: epic']));
 
   assert.equal(sessionStart(h, epic).additionalContext, relationText(ledger, 'Child task: reused (retired 2026-10-01).'));
 });
@@ -288,9 +375,9 @@ test('session-start in a parent task names a child marked started, with or witho
   const main = checkout(h, 'main');
   const epic = worktree(h, main, path.join(h, 'epic'));
   const children = '## Children\n- child-a (started 2026-10-20)\n- child-b (started 2026-10-20; PR #31 is open)\n- lost (started 2026-10-21)\n\n## Next step\nA step.\n';
-  const ledger = ledgerIn(epic, familyLedger('epic', [], children));
-  ledgerIn(worktree(h, main, path.join(h, 'child-a')), familyLedger('child-a', ['- parent: epic']));
-  ledgerIn(worktree(h, main, path.join(h, 'child-b')), familyLedger('child-b', ['- parent: epic']));
+  const ledger = ledgerIn(h, epic, familyLedger('epic', [], children));
+  ledgerIn(h, worktree(h, main, path.join(h, 'child-a')), familyLedger('child-a', ['- parent: epic']));
+  ledgerIn(h, worktree(h, main, path.join(h, 'child-b')), familyLedger('child-b', ['- parent: epic']));
 
   assert.equal(sessionStart(h, epic).additionalContext, relationText(ledger, 'Child task: child-a (active).', 'Child task: child-b (active).'));
 });
@@ -298,9 +385,9 @@ test('session-start in a parent task names a child marked started, with or witho
 test('session-start in a main checkout names the parent or children under each ledger summary', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const epic = ledgerIn(worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], '## Children\n- child-a\n- child-b\n\n## Next step\nA step.\n'));
-  const childA = ledgerIn(worktree(h, main, path.join(h, 'child-a')), familyLedger('child-a', ['- parent: epic']));
-  const childB = ledgerIn(worktree(h, main, path.join(h, 'child-b')), familyLedger('child-b', ['- parent: epic'], '## Next step\nParked: 2026-10-02 — later.\n'));
+  const epic = ledgerIn(h, worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], '## Children\n- child-a\n- child-b\n\n## Next step\nA step.\n'));
+  const childA = ledgerIn(h, worktree(h, main, path.join(h, 'child-a')), familyLedger('child-a', ['- parent: epic']));
+  const childB = ledgerIn(h, worktree(h, main, path.join(h, 'child-b')), familyLedger('child-b', ['- parent: epic'], '## Next step\nParked: 2026-10-02 — later.\nA step.\n'));
   const relations: Record<string, string[]> = {
     [epic]: ['Child task: child-a (active).', 'Child task: child-b (parked).'],
     [childA]: ['Parent task: epic (active).'],
@@ -314,8 +401,8 @@ test('session-start in a main checkout names the parent or children under each l
   assert.deepEqual(
     context.split('\n=== ').slice(1),
     ledgers.map((ledger) => {
-      const next = ledger === childB ? 'Parked: 2026-10-02 — later.' : 'A step.';
-      return [ledger, ...(relations[ledger] ?? []), 'A goal.', '', next, ''].join('\n');
+      const next = ledger === childB ? 'Parked: 2026-10-02 — later.\nA step.' : 'A step.';
+      return [summaryHead(ledger).slice('=== '.length), ...(relations[ledger] ?? []), 'A goal.', '', next, ''].join('\n');
     }),
   );
 });
@@ -325,9 +412,9 @@ test('session-start names a parent in another repository with that repository an
   const main = checkout(h, 'main');
   const child = worktree(h, main, path.join(h, 'child'));
   const other = checkout(h, 'app');
-  const ledger = ledgerIn(child, familyLedger('child', [`- parent: epic @ ${other}`]));
-  ledgerIn(worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], '## Children\n- child\n\n## Next step\nA step.\n'));
-  ledgerIn(worktree(h, other, path.join(h, 'app-epic')), familyLedger('epic', [], '## Next step\nParked: 2026-10-02 — later.\n'));
+  const ledger = ledgerIn(h, child, familyLedger('child', [`- parent: epic @ ${other}`]));
+  ledgerIn(h, worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], '## Children\n- child\n\n## Next step\nA step.\n'));
+  ledgerIn(h, worktree(h, other, path.join(h, 'app-epic')), familyLedger('epic', [], '## Next step\nParked: 2026-10-02 — later.\n'));
 
   assert.equal(sessionStart(h, child).additionalContext, relationText(ledger, `Parent task: epic @ ${other} (parked).`));
 });
@@ -336,7 +423,7 @@ test('session-start names a parent in a repository that is gone as missing', (t)
   const h = home(t);
   const child = worktree(h, checkout(h, 'main'), path.join(h, 'child'));
   const other = path.join(h, 'elsewhere/app');
-  const ledger = ledgerIn(child, familyLedger('child', [`- parent: epic @ ${other}`]));
+  const ledger = ledgerIn(h, child, familyLedger('child', [`- parent: epic @ ${other}`]));
 
   assert.equal(sessionStart(h, child).additionalContext, relationText(ledger, `Parent task: epic @ ${other} (missing).`));
 });
@@ -346,7 +433,7 @@ test('session-start names tasks in a repository whose git does not answer as unk
   const child = worktree(h, checkout(h, 'main'), path.join(h, 'child'));
   const slow = path.join(h, 'slow/app');
   const parts = ['part-a', 'part-b', 'part-c', 'part-d'];
-  const ledger = ledgerIn(child, familyLedger('child', [`- parent: epic @ ${slow}`], `## Children\n${parts.map((part) => `- ${part} @ ${slow}\n`).join('')}\n## Next step\nA step.\n`));
+  const ledger = ledgerIn(h, child, familyLedger('child', [`- parent: epic @ ${slow}`], `## Children\n${parts.map((part) => `- ${part} @ ${slow}\n`).join('')}\n## Next step\nA step.\n`));
 
   const { ran, took } = sessionStartWithHangingGit(h, child, slow);
 
@@ -364,7 +451,7 @@ test('session-start waits once for a hanging repository, also when tasks name it
   const slow = path.join(h, 'slow/app');
   const worktreeOf = (name: string): string => path.join(slow, '.claude/worktrees', name);
   const children = `## Children\n- part-a @ ${slow}\n- part-b @ ${worktreeOf('part-b')}\n\n## Next step\nA step.\n`;
-  const ledger = ledgerIn(child, familyLedger('child', [`- parent: epic @ ${worktreeOf('epic')}`], children));
+  const ledger = ledgerIn(h, child, familyLedger('child', [`- parent: epic @ ${worktreeOf('epic')}`], children));
 
   const { ran, took } = sessionStartWithHangingGit(h, child, slow);
 
@@ -393,11 +480,11 @@ test('session-start in a parent task names each child in another repository with
   const epic = worktree(h, main, path.join(h, 'epic'));
   const lib = checkout(h, 'lib');
   const children = `## Children\n- child-a\n- child-a @ ${lib}\n- begun @ ${lib} (started 2026-10-20)\n- old @ ${lib} (retired 2026-10-01)\n- gone @ ${lib}\n\n## Next step\nA step.\n`;
-  const ledger = ledgerIn(epic, familyLedger('epic', [], children).replace(/\n/g, '\r\n'));
-  ledgerIn(worktree(h, main, path.join(h, 'child-a')), familyLedger('child-a', ['- parent: epic']));
+  const ledger = ledgerIn(h, epic, familyLedger('epic', [], children).replace(/\n/g, '\r\n'));
+  ledgerIn(h, worktree(h, main, path.join(h, 'child-a')), familyLedger('child-a', ['- parent: epic']));
   backlogLedger(h, 'main', 'begun', main);
   backlogLedger(h, 'lib', 'child-a', lib);
-  ledgerIn(worktree(h, lib, path.join(h, 'lib-begun')), familyLedger('begun', [`- parent: epic @ ${main}`]));
+  ledgerIn(h, worktree(h, lib, path.join(h, 'lib-begun')), familyLedger('begun', [`- parent: epic @ ${main}`]));
   archiveCopy(h, 'lib', '2026-10-01-old', familyLedger('old', [`- main: ${lib}`, `- worktree: ${path.join(lib, '.claude/worktrees/old')}`, `- parent: epic @ ${main}`]));
 
   assert.equal(
@@ -417,7 +504,7 @@ test('session-start names a parent in this repository\'s backlog as backlog', (t
   const h = home(t);
   const main = checkout(h, 'main');
   const child = worktree(h, main, path.join(h, 'child'));
-  const ledger = ledgerIn(child, familyLedger('child', ['- parent: epic']));
+  const ledger = ledgerIn(h, child, familyLedger('child', ['- parent: epic']));
   backlogLedger(h, 'main', 'epic', main);
 
   assert.equal(sessionStart(h, child).additionalContext, relationText(ledger, 'Parent task: epic (backlog).'));
@@ -427,7 +514,7 @@ test('session-start names a backlog child as backlog, but not one of another rep
   const h = home(t);
   const main = checkout(h, 'main');
   const epic = worktree(h, main, path.join(h, 'epic'));
-  const ledger = ledgerIn(epic, familyLedger('epic', [], '## Children\n- idea\n- foreign\n\n## Next step\nA step.\n'));
+  const ledger = ledgerIn(h, epic, familyLedger('epic', [], '## Children\n- idea\n- foreign\n\n## Next step\nA step.\n'));
   backlogLedger(h, 'main', 'idea', main, ['- parent: epic']);
   backlogLedger(h, 'elsewhere/main', 'foreign', path.join(h, 'elsewhere/main'), ['- parent: epic']);
 
@@ -437,7 +524,7 @@ test('session-start names a backlog child as backlog, but not one of another rep
 test('session-start reads only the Location parent bullet, and a Children bullet that names no known task adds no line', (t) => {
   const h = home(t);
   const sibling = worktree(h, checkout(h, 'main'), path.join(h, 'sibling'));
-  const ledger = ledgerIn(sibling, familyLedger('sibling', ['- parent: <slug>'], '## Children (old)\n- child-a\n\n## Notes\n- parent: epic\n'));
+  const ledger = ledgerIn(h, sibling, familyLedger('sibling', ['- parent: <slug>'], '## Children (old)\n- child-a\n\n## Notes\n- parent: epic\n'));
 
   assert.equal(sessionStart(h, sibling).additionalContext, fullLedgerText(ledger));
 });
@@ -461,16 +548,16 @@ test('session-start leaves out backlog tasks, both their ledger files and their 
 
   assert.equal(hook(h, 'session-start', { cwd: main }), '');
 
-  const sibling = ledgerIn(worktree(h, main, path.join(h, 'sibling')));
+  const sibling = ledgerIn(h, worktree(h, main, path.join(h, 'sibling')));
   const context = sessionStart(h, main).additionalContext;
-  assert.ok(context.includes(sibling), `worktree ledger missing:\n${context}`);
+  assert.ok(context.includes(taskOf(sibling)), `worktree ledger missing:\n${context}`);
   assert.ok(!context.includes(backlog) && !context.includes('A backlog goal.'), `backlog task shown:\n${context}`);
 });
 
 test('session-start keeps quotes, backslashes, tabs and non-ASCII text intact', (t) => {
   const h = home(t);
   const sibling = worktree(h, checkout(h, 'main'), path.join(h, 'sibling'));
-  const ledger = ledgerIn(sibling, '# Task ledger — quoted\n\n## Goal\nSay "hi" \\n then \\ and \ttab — ✓ æøå\n');
+  const ledger = ledgerIn(h, sibling, '# Task ledger — quoted\n\n## Goal\nSay "hi" \\n then \\ and \ttab — ✓ æøå\n');
 
   const output = sessionStart(h, sibling);
 
@@ -484,7 +571,7 @@ const registeredPaths = (h: string): string[] =>
 test('session-start registers its one ledger in ~/.claude/ledgers.json', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const ledger = ledgerIn(worktree(h, main, path.join(h, 'sibling')));
+  const ledger = ledgerIn(h, worktree(h, main, path.join(h, 'sibling')));
 
   sessionStart(h, main);
 
@@ -494,8 +581,8 @@ test('session-start registers its one ledger in ~/.claude/ledgers.json', (t) => 
 test('session-start registers each of several ledgers', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const first = ledgerIn(worktree(h, main, path.join(h, 'first')));
-  const second = ledgerIn(worktree(h, main, path.join(h, 'second')));
+  const first = ledgerIn(h, worktree(h, main, path.join(h, 'first')));
+  const second = ledgerIn(h, worktree(h, main, path.join(h, 'second')));
 
   sessionStart(h, main);
 
@@ -505,38 +592,43 @@ test('session-start registers each of several ledgers', (t) => {
 test('session-start prints the same JSON and exits 0 when the registry cannot be written', (t) => {
   const h = home(t);
   const sibling = worktree(h, checkout(h, 'main'), path.join(h, 'sibling'));
-  const ledger = ledgerIn(sibling);
+  const ledger = ledgerIn(h, sibling);
   const expected = hook(h, 'session-start', { cwd: sibling });
-  rmSync(path.join(h, '.claude'), { recursive: true, force: true });
-  writeFileSync(path.join(h, '.claude'), 'a file, so ~/.claude/ledgers.json cannot exist');
+  rmSync(path.join(h, '.claude/ledgers.json'), { force: true });
+  mkdirSync(path.join(h, '.claude/ledgers.json'));
 
   assert.equal(hook(h, 'session-start', { cwd: sibling }), expected);
   assert.equal(sessionStart(h, sibling).additionalContext, fullLedgerText(ledger));
 });
 
-test('pre-compact names the one ledger and leaves the registry alone', (t) => {
+test('pre-compact names the one task by slug and worktree, kept in the store, and leaves the registry alone', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const ledger = ledgerIn(worktree(h, main, path.join(h, 'sibling')));
+  const sibling = worktree(h, main, path.join(h, 'sibling'));
+  const ledger = ledgerIn(h, sibling);
 
-  assert.equal(preCompact(h, main), `Task ledger at ${ledger} is authoritative. Preserve its path and its Next step section verbatim.\n`);
+  const text = preCompact(h, main);
+
+  assert.equal(text, `Task ledger sibling (worktree ${sibling}) is kept in the ledger store and is authoritative. Preserve its slug, worktree path and its Next step section verbatim.\n`);
+  assert.ok(!text.includes(ledger) && !text.includes('.claude/ledger.md'), text);
   assert.throws(() => readFileSync(path.join(h, '.claude/ledgers.json')), { code: 'ENOENT' });
 });
 
-test('pre-compact names several ledgers, most recently modified first', (t) => {
+test('pre-compact names several tasks by slug and worktree, most recently updated first, and no ledger path', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const older = ledgerIn(worktree(h, main, path.join(h, 'a-older')));
-  const newer = ledgerIn(worktree(h, main, path.join(h, 'b-newer')));
-  const middle = ledgerIn(worktree(h, main, path.join(h, 'c-middle')));
-  touch(older, '2026-10-01T00:00:00Z');
-  touch(newer, '2026-10-03T00:00:00Z');
-  touch(middle, '2026-10-02T00:00:00Z');
+  const [older, newer, middle] = ['a-older', 'b-newer', 'c-middle'].map((name) => worktree(h, main, path.join(h, name)));
+  touch(ledgerIn(h, older), '2026-10-01T00:00:00Z');
+  touch(ledgerIn(h, newer), '2026-10-03T00:00:00Z');
+  touch(ledgerIn(h, middle), '2026-10-02T00:00:00Z');
+
+  const text = preCompact(h, main);
 
   assert.equal(
-    preCompact(h, main),
-    `3 task ledgers exist (most recently modified first). Preserve the path of the ledger this session is working on, and its Next step section verbatim:\n${newer}\n${middle}\n${older}\n`,
+    text,
+    `3 task ledgers exist (most recently updated first), kept in the ledger store. Preserve the slug and worktree of the one this session is working on, and its Next step section verbatim:\nb-newer — ${newer}\nc-middle — ${middle}\na-older — ${older}\n`,
   );
+  assert.ok(!text.includes(path.join(h, '.claude')) && !text.includes('.claude/ledger.md'), text);
 });
 
 // UserPromptSubmit
@@ -557,7 +649,7 @@ const archive = (h: string, repo: string, slug: string): string => archiveCopy(h
 test('prompt-submit titles an untitled session in the main checkout with the slug from go', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  ledgerIn(worktree(h, main, path.join(h, 'alpha')));
+  ledgerIn(h, worktree(h, main, path.join(h, 'alpha')));
 
   assert.equal(promptSubmitTitle(h, { prompt: 'go alpha', cwd: main }), 'alpha');
 });
@@ -566,8 +658,8 @@ test('prompt-submit replaces the title of another worktree\'s task', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
   const alpha = worktree(h, main, path.join(h, 'alpha'));
-  ledgerIn(alpha);
-  ledgerIn(worktree(h, main, path.join(main, '.claude/worktrees/beta')));
+  ledgerIn(h, alpha);
+  ledgerIn(h, worktree(h, main, path.join(main, '.claude/worktrees/beta')));
 
   assert.equal(promptSubmitTitle(h, { prompt: '  go beta\n', cwd: alpha, session_title: 'alpha' }), 'beta');
 });
@@ -575,7 +667,7 @@ test('prompt-submit replaces the title of another worktree\'s task', (t) => {
 test('prompt-submit replaces a title that names an archived task', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  ledgerIn(worktree(h, main, path.join(h, 'alpha')));
+  ledgerIn(h, worktree(h, main, path.join(h, 'alpha')));
   archive(h, 'main', 'finished-task');
 
   assert.equal(promptSubmitTitle(h, { prompt: 'go alpha', cwd: main, session_title: 'finished-task' }), 'alpha');
@@ -584,7 +676,7 @@ test('prompt-submit replaces a title that names an archived task', (t) => {
 test('prompt-submit ignores the archive of another repository', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  ledgerIn(worktree(h, main, path.join(h, 'alpha')));
+  ledgerIn(h, worktree(h, main, path.join(h, 'alpha')));
   archive(h, 'other', 'finished-task');
 
   assert.equal(promptSubmit(h, { prompt: 'go alpha', cwd: main, session_title: 'finished-task' }), '');
@@ -593,7 +685,7 @@ test('prompt-submit ignores the archive of another repository', (t) => {
 test('prompt-submit keeps a title the operator chose', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  ledgerIn(worktree(h, main, path.join(h, 'alpha')));
+  ledgerIn(h, worktree(h, main, path.join(h, 'alpha')));
 
   assert.equal(promptSubmit(h, { prompt: 'go alpha', cwd: main, session_title: 'my custom name' }), '');
 });
@@ -601,7 +693,7 @@ test('prompt-submit keeps a title the operator chose', (t) => {
 test('prompt-submit prints nothing when the title already names the task', (t) => {
   const h = home(t);
   const alpha = worktree(h, checkout(h, 'main'), path.join(h, 'alpha'));
-  ledgerIn(alpha);
+  ledgerIn(h, alpha);
 
   assert.equal(promptSubmit(h, { prompt: 'go alpha', cwd: alpha, session_title: 'alpha' }), '');
 });
@@ -609,7 +701,7 @@ test('prompt-submit prints nothing when the title already names the task', (t) =
 test('prompt-submit prints nothing for a slug with no active ledger', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  ledgerIn(worktree(h, main, path.join(h, 'alpha')));
+  ledgerIn(h, worktree(h, main, path.join(h, 'alpha')));
   archive(h, 'main', 'finished-task');
 
   assert.equal(promptSubmit(h, { prompt: 'go unknown', cwd: main }), '');
@@ -619,7 +711,7 @@ test('prompt-submit prints nothing for a slug with no active ledger', (t) => {
 test('prompt-submit prints nothing unless the prompt is exactly go and one slug', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  ledgerIn(worktree(h, main, path.join(h, 'alpha')));
+  ledgerIn(h, worktree(h, main, path.join(h, 'alpha')));
 
   for (const prompt of ['go', 'go ', 'go alpha beta', 'please go alpha', 'go alpha\nand more', 'Go alpha', 'goalpha', 'go\nalpha']) {
     assert.equal(promptSubmit(h, { prompt, cwd: main }), '', JSON.stringify(prompt));
@@ -629,8 +721,8 @@ test('prompt-submit prints nothing unless the prompt is exactly go and one slug'
 test('prompt-submit prints nothing outside a git repository', (t) => {
   const h = home(t);
   const plain = path.join(h, 'plain');
-  ledgerIn(plain, '# Task ledger — alpha\n');
-  ledgerIn(path.join(plain, '.claude/worktrees/alpha'), '# Task ledger — alpha\n');
+  ledgerIn(h, plain, '# Task ledger — alpha\n');
+  ledgerIn(h, path.join(plain, '.claude/worktrees/alpha'), '# Task ledger — alpha\n');
 
   assert.equal(promptSubmit(h, { prompt: 'go alpha', cwd: plain }), '');
 });
@@ -638,7 +730,7 @@ test('prompt-submit prints nothing outside a git repository', (t) => {
 test('prompt-submit skips a worktree whose folder is gone', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  ledgerIn(worktree(h, main, path.join(h, 'alpha')));
+  ledgerIn(h, worktree(h, main, path.join(h, 'alpha')));
   rmSync(worktree(h, main, path.join(h, 'gone')), { recursive: true, force: true });
 
   assert.equal(promptSubmitTitle(h, { prompt: 'go alpha', cwd: main }), 'alpha');
@@ -685,36 +777,26 @@ function assertAllowed(stdout: string): void {
   assert.equal(stdout, '', `expected silence, got ${stdout}`);
 }
 
-const mainCheckoutReason = (...targets: string[]): string =>
-  [
-    `This would write a task ledger in a repo's main checkout:${targets.map((target) => ` ${target}`).join('')}`,
-    '',
-    "A ledger belongs in the task's worktree, never in the main checkout.",
-    'Start the task first. This writes its ledger to the backlog, with no branch or worktree yet:',
-    `  ${BIN} task new <slug> --goal '<one paragraph>'`,
-    'Then give it a branch and a worktree, and move its ledger in:',
-    `  ${BIN} go <slug>`,
-    'Then work in the worktree that ledger go prints.',
-    "This check does not follow cd: from the main checkout, use the absolute path to the worktree's .claude/ledger.md.",
-  ].join('\n');
+const STORE_REASON = `Task ledgers are kept in the ledger store, not in .claude/ledger.md. Read this task's ledger with \`${BIN} show\`. Write one item with \`${BIN} notes <command>\`; \`${BIN} notes --help\` lists them.`;
+const UNMOVED_REASON = `${STORE_REASON}\nThis ledger has not been moved yet: run \`${BIN} store migrate --active\`.`;
 
 const CITATION_REASON =
   "A task ledger may not cite files in the Claude Code session folder or its scratchpad, because macOS deletes them. Move the file to .claude/evidence/ in the task's worktree and cite that path, for example .claude/evidence/xcodebuild-red.log. Copy the file and write the ledger in two separate commands.";
 
 for (const tool of ['Write', 'Edit', 'MultiEdit']) {
-  test(`${tool} of the ledger in a main checkout is denied, naming the ledger command`, () => {
-    const target = path.join(gateWorld.main, '.claude/ledger.md');
-    assert.equal(assertDenied(gate(gateWorld.main, tool, { file_path: target })), mainCheckoutReason(target));
+  test(`${tool} of .claude/ledger.md in a main checkout is denied, naming ledger show and ledger notes`, () => {
+    assert.equal(assertDenied(gate(gateWorld.main, tool, { file_path: path.join(gateWorld.main, '.claude/ledger.md') })), STORE_REASON);
   });
 
-  test(`${tool} of the ledger in a linked worktree is allowed`, () => {
-    assertAllowed(gate(gateWorld.main, tool, { file_path: path.join(gateWorld.worktree, '.claude/ledger.md') }));
+  test(`${tool} of .claude/ledger.md in a linked worktree is denied, naming ledger show and ledger notes`, () => {
+    assert.equal(assertDenied(gate(gateWorld.main, tool, { file_path: path.join(gateWorld.worktree, '.claude/ledger.md') })), STORE_REASON);
   });
 }
 
 test('a relative file_path is resolved against the hook cwd', () => {
-  assertDenied(gate(gateWorld.main, 'Write', { file_path: '.claude/ledger.md' }));
-  assertAllowed(gate(gateWorld.worktree, 'Write', { file_path: '.claude/ledger.md' }));
+  assert.equal(assertDenied(gate(gateWorld.main, 'Write', { file_path: '.claude/ledger.md' })), STORE_REASON);
+  assert.equal(assertDenied(gate(gateWorld.worktree, 'Write', { file_path: '.claude/ledger.md' })), STORE_REASON);
+  assertAllowed(gate(gateWorld.worktree, 'Write', { file_path: 'ledger.md' }));
 });
 
 test('other files in a main checkout are allowed', () => {
@@ -723,14 +805,76 @@ test('other files in a main checkout are allowed', () => {
   }
 });
 
-test('a tool that writes nothing is allowed, even on the ledger in a main checkout', () => {
-  assertAllowed(gate(gateWorld.main, 'Read', { file_path: path.join(gateWorld.main, '.claude/ledger.md') }));
+test('reading .claude/ledger.md is allowed, in a main checkout and in a linked worktree', () => {
+  for (const folder of [gateWorld.main, gateWorld.worktree]) {
+    assertAllowed(gate(folder, 'Read', { file_path: path.join(folder, '.claude/ledger.md') }));
+    assertAllowed(gate(folder, 'Bash', { command: 'cat .claude/ledger.md' }));
+  }
 });
 
-test('the ledger outside any git repository is allowed', () => {
+test('.claude/ledger.md outside any git repository is denied too', () => {
   const { plain } = gateWorld;
-  assertAllowed(gate(plain, 'Write', { file_path: path.join(plain, '.claude/ledger.md') }));
-  assertAllowed(gate(plain, 'Bash', { command: 'echo x > .claude/ledger.md' }));
+  assert.equal(assertDenied(gate(plain, 'Write', { file_path: path.join(plain, '.claude/ledger.md') })), STORE_REASON);
+  assert.equal(assertDenied(gate(plain, 'Bash', { command: 'echo x > .claude/ledger.md' })), STORE_REASON);
+});
+
+test('a Bash write to ledger.md after a cd into .claude in the same command is denied', () => {
+  for (const command of ['cd .claude && echo x > ledger.md', 'cd .claude; tee -a ledger.md < /dev/null', `cd ${gateWorld.worktree}/.claude && cp /dev/null ledger.md`]) {
+    assert.equal(assertDenied(gate(gateWorld.main, 'Bash', { command })), STORE_REASON, command);
+  }
+  assertAllowed(gate(gateWorld.main, 'Bash', { command: 'cd docs && echo x > ledger.md' }));
+});
+
+test('a write to .claude/ledger.md through a symbolic link to the file or to its folder is denied', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  mkdirSync(path.join(main, '.claude'), { recursive: true });
+  writeFileSync(path.join(main, '.claude/ledger.md'), ledgerText({ slug: 'main' }));
+  symlinkSync('.claude/ledger.md', path.join(main, 'notes.md'));
+  symlinkSync('.claude', path.join(main, 'meta'));
+
+  for (const file of [path.join(main, 'notes.md'), path.join(main, 'meta/ledger.md')]) {
+    assert.equal(assertDenied(gate(main, 'Write', { file_path: file }, h)), STORE_REASON, file);
+    assert.equal(assertDenied(gate(main, 'Bash', { command: `echo x > ${file}` }, h)), STORE_REASON, file);
+  }
+});
+
+test('a .claude/ledger.md that exists without an active record adds the line naming ledger store migrate --active', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const unmoved = worktree(h, main, path.join(h, 'unmoved'));
+  const moved = worktree(h, main, path.join(h, 'moved'));
+  ledgerIn(h, moved);
+  const absent = worktree(h, main, path.join(h, 'absent'));
+  for (const folder of [unmoved, moved]) {
+    mkdirSync(path.join(folder, '.claude'), { recursive: true });
+    writeFileSync(path.join(folder, '.claude/ledger.md'), ledgerText({ slug: path.basename(folder), worktree: folder }));
+  }
+
+  for (const tool of ['Write', 'Edit', 'MultiEdit']) {
+    assert.equal(assertDenied(gate(unmoved, tool, { file_path: path.join(unmoved, '.claude/ledger.md') }, h)), UNMOVED_REASON);
+    assert.equal(assertDenied(gate(moved, tool, { file_path: path.join(moved, '.claude/ledger.md') }, h)), STORE_REASON);
+    assert.equal(assertDenied(gate(absent, tool, { file_path: path.join(absent, '.claude/ledger.md') }, h)), STORE_REASON);
+  }
+  assert.equal(assertDenied(gate(unmoved, 'Bash', { command: "sed -i '' 's/a/b/' .claude/ledger.md" }, h)), UNMOVED_REASON);
+  assert.equal(assertDenied(gate(moved, 'Bash', { command: 'echo x >> .claude/ledger.md' }, h)), STORE_REASON);
+  assertAllowed(gate(unmoved, 'Read', { file_path: path.join(unmoved, '.claude/ledger.md') }, h));
+});
+
+test('a .claude/ledger.md that migrate --active would not move gets no migrate line', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const linked = worktree(h, main, path.join(h, 'linked'));
+  const sub = path.join(linked, 'sub');
+  const plain = path.join(h, 'plain');
+  for (const folder of [main, sub, plain]) {
+    mkdirSync(path.join(folder, '.claude'), { recursive: true });
+    writeFileSync(path.join(folder, '.claude/ledger.md'), ledgerText({ slug: path.basename(folder), worktree: folder }));
+  }
+
+  for (const folder of [main, sub, plain]) {
+    assert.equal(assertDenied(gate(folder, 'Write', { file_path: path.join(folder, '.claude/ledger.md') }, h)), STORE_REASON);
+  }
 });
 
 const bashWrites = [
@@ -771,26 +915,38 @@ const bashWrites = [
 
 for (const command of bashWrites) {
   test(`Bash ${JSON.stringify(command)} in a main checkout is denied`, () => {
-    assertDenied(gate(gateWorld.main, 'Bash', { command }));
+    assert.equal(assertDenied(gate(gateWorld.main, 'Bash', { command })), STORE_REASON);
   });
 
-  test(`Bash ${JSON.stringify(command)} in a linked worktree is allowed`, () => {
-    assertAllowed(gate(gateWorld.worktree, 'Bash', { command }));
+  test(`Bash ${JSON.stringify(command)} in a linked worktree is denied`, () => {
+    assert.equal(assertDenied(gate(gateWorld.worktree, 'Bash', { command })), STORE_REASON);
   });
 }
 
-test('Bash write to an absolute ledger path in a main checkout is denied from anywhere', () => {
-  const { main, plain } = gateWorld;
-  assertDenied(gate(plain, 'Bash', { command: `echo x >> ${path.join(main, '.claude/ledger.md')}` }));
-  assertDenied(gate(plain, 'Bash', { command: `cp /tmp/x '${path.join(main, '.claude/ledger.md')}'` }));
+test('Bash write to an absolute ledger path is denied from anywhere', () => {
+  const { main, worktree: linked, plain } = gateWorld;
+  for (const folder of [main, linked]) {
+    assertDenied(gate(plain, 'Bash', { command: `echo x >> ${path.join(folder, '.claude/ledger.md')}` }));
+    assertDenied(gate(plain, 'Bash', { command: `cp /tmp/x '${path.join(folder, '.claude/ledger.md')}'` }));
+  }
 });
 
-test('a Bash write after cd into a worktree is denied with a hint to use the absolute path', () => {
-  const reason = assertDenied(gate(gateWorld.main, 'Bash', { command: 'cd .claude/worktrees/task && echo x > .claude/ledger.md' }));
-  assert.equal(reason, mainCheckoutReason(path.join(gateWorld.main, '.claude/ledger.md')));
+test('a Bash write after cd into a worktree is denied', () => {
+  assert.equal(assertDenied(gate(gateWorld.main, 'Bash', { command: 'cd .claude/worktrees/task && echo x > .claude/ledger.md' })), STORE_REASON);
 });
 
-test('Bash write through ~ to a ledger in a main checkout is denied', () => {
+test('a Bash write to ledger.md from inside .claude/ is denied, as is its absolute path', () => {
+  for (const folder of [gateWorld.main, gateWorld.worktree]) {
+    const claude = path.join(folder, '.claude');
+    mkdirSync(claude, { recursive: true });
+    for (const command of ['echo x > ledger.md', 'cp /tmp/x ./ledger.md', 'echo x | tee ledger.md', "sed -i '' 's/a/b/' ledger.md"]) {
+      assert.equal(assertDenied(gate(claude, 'Bash', { command })), STORE_REASON, `${command} in ${claude}`);
+    }
+    assertAllowed(gate(folder, 'Bash', { command: 'echo x > ledger.md' }));
+  }
+});
+
+test('Bash write through ~ to .claude/ledger.md is denied', () => {
   const { h, main, plain } = gateWorld;
   assertDenied(gate(plain, 'Bash', { command: `echo x > ~/${path.relative(h, path.join(main, '.claude/ledger.md'))}` }));
 });
@@ -814,13 +970,17 @@ for (const command of bashReads) {
   test(`Bash ${JSON.stringify(command)} in a main checkout is allowed`, () => {
     assertAllowed(gate(gateWorld.main, 'Bash', { command }));
   });
+
+  test(`Bash ${JSON.stringify(command)} in a linked worktree is allowed`, () => {
+    assertAllowed(gate(gateWorld.worktree, 'Bash', { command }));
+  });
 }
 
-test('a git failure is allowed', () => {
+test('a write to .claude/ledger.md is denied when git fails, as the gate asks git nothing', () => {
   const { h, main } = gateWorld;
   const ran = runHook(h, 'pre-tool-use', JSON.stringify(toolUse(main, 'Bash', { command: 'echo x > .claude/ledger.md' })), { GIT_DIR: path.join(h, 'missing') });
   assert.equal(ran.status, 0, ran.stderr);
-  assertAllowed(ran.stdout);
+  assert.equal(assertDenied(ran.stdout), STORE_REASON);
 });
 
 const SESSION = '/private/tmp/claude-501/-Users-me-repos-app/3757e52e-56c2-4bea-866f-8e427c324a1e';
@@ -850,27 +1010,21 @@ function writing(tool: string, file: string, text: string): ToolInput {
   }
 }
 
+/** The backlog ledger the citation tests write: since active ledgers left .claude/ledger.md, the only ledger a file tool may write. */
+const backlogLedgerFile = (): string => path.join(gateWorld.h, '.claude/ledger-backlog/main/idea.md');
+
 for (const tool of ['Write', 'Edit', 'MultiEdit']) {
   for (const citation of citations) {
-    test(`${tool} of a worktree ledger that cites ${citation} is denied`, () => {
-      const { worktree: linked } = gateWorld;
-      assert.equal(assertDenied(gate(linked, tool, writing(tool, path.join(linked, '.claude/ledger.md'), `- red: ${citation}`))), CITATION_REASON);
+    test(`${tool} of a backlog ledger that cites ${citation} is denied`, () => {
+      assert.equal(assertDenied(gate(gateWorld.plain, tool, writing(tool, backlogLedgerFile(), `- red: ${citation}`))), CITATION_REASON);
     });
   }
 
   for (const text of prose) {
-    test(`${tool} of a worktree ledger with ${JSON.stringify(text)} is allowed`, () => {
-      const { worktree: linked } = gateWorld;
-      assertAllowed(gate(linked, tool, writing(tool, path.join(linked, '.claude/ledger.md'), text)));
+    test(`${tool} of a backlog ledger with ${JSON.stringify(text)} is allowed`, () => {
+      assertAllowed(gate(gateWorld.plain, tool, writing(tool, backlogLedgerFile(), text)));
     });
   }
-
-  test(`${tool} of a backlog ledger that cites the scratchpad is denied`, () => {
-    const { h, plain } = gateWorld;
-    const backlog = path.join(h, '.claude/ledger-backlog/main/idea.md');
-    assertDenied(gate(plain, tool, writing(tool, backlog, `- notes: ${citations[0]}`)));
-    assertAllowed(gate(plain, tool, writing(tool, backlog, '- red: .claude/evidence/red.log')));
-  });
 
   test(`${tool} of a file that is not a ledger may cite the scratchpad`, () => {
     const { worktree: linked } = gateWorld;
@@ -879,20 +1033,19 @@ for (const tool of ['Write', 'Edit', 'MultiEdit']) {
 }
 
 test('an Edit whose old text cites the scratchpad and new text does not is allowed', () => {
-  const { worktree: linked } = gateWorld;
-  const edit = { file_path: path.join(linked, '.claude/ledger.md'), old_string: `- red: ${citations[0]}`, new_string: '- red: .claude/evidence/red.log' };
-  assertAllowed(gate(linked, 'Edit', edit));
+  const edit = { file_path: backlogLedgerFile(), old_string: `- red: ${citations[0]}`, new_string: '- red: .claude/evidence/red.log' };
+  assertAllowed(gate(gateWorld.plain, 'Edit', edit));
 });
 
-test('a ledger write in a main checkout that also cites the scratchpad keeps the main-checkout reason', () => {
-  const target = path.join(gateWorld.main, '.claude/ledger.md');
-  assert.equal(assertDenied(gate(gateWorld.main, 'Write', writing('Write', target, `- red: ${citations[0]}`))), mainCheckoutReason(target));
+test('a write to .claude/ledger.md that also cites the scratchpad gets the ledger store reason', () => {
+  const target = path.join(gateWorld.worktree, '.claude/ledger.md');
+  assert.equal(assertDenied(gate(gateWorld.worktree, 'Write', writing('Write', target, `- red: ${citations[0]}`))), STORE_REASON);
 });
 
 const bashCitingWrites = [
-  `cat > .claude/ledger.md <<EOF\n# Task ledger — task\n- red: ${citations[0]}\nEOF`,
-  "echo '- handover: <scratchpad>/handover.md' >> .claude/ledger.md",
-  "printf '%s\\n' '- review: scratchpad/review-1.txt' | tee -a .claude/ledger.md",
+  `cat > ~/.claude/ledger-backlog/main/idea.md <<EOF\n# Task ledger — task\n- red: ${citations[0]}\nEOF`,
+  "echo '- handover: <scratchpad>/handover.md' >> ~/.claude/ledger-backlog/main/idea.md",
+  "printf '%s\\n' '- review: scratchpad/review-1.txt' | tee -a ~/.claude/ledger-backlog/main/idea.md",
   `cat >> ~/.claude/ledger-backlog/main/idea.md <<EOF\n- red: ${citations[1]}\nEOF`,
 ];
 
@@ -905,7 +1058,7 @@ for (const command of bashCitingWrites) {
 const bashAllowedNearCitations = [
   `cp ${citations[0]} .claude/evidence/xcodebuild-red.log`,
   `cat ${citations[0]} > .claude/evidence/red.log`,
-  "echo '- the scratchpad is gone; see .claude/evidence/red.log' >> .claude/ledger.md",
+  "echo '- the scratchpad is gone; see .claude/evidence/red.log' >> ~/.claude/ledger-backlog/main/idea.md",
 ];
 
 for (const command of bashAllowedNearCitations) {
@@ -921,7 +1074,7 @@ function removal(t: TestContext) {
   const h = home(t);
   const main = checkout(h, 'main');
   const task = worktree(h, main, path.join(main, '.claude/worktrees/task'));
-  ledgerIn(task, ledgerText({ slug: 'task', main, worktree: task }));
+  ledgerIn(h, task, ledgerText({ slug: 'task', main, worktree: task }));
   return { h, main, task };
 }
 
@@ -1006,7 +1159,7 @@ test('a glob with a POSIX class over folders without a ledger is allowed', (t) =
   assertAllowed(gate(main, 'Bash', { command: 'rm -rf build/[[:alpha:]]*' }, h));
 });
 
-test('a check that throws does not disable the other: a failed archive read still lets a main-checkout ledger write be denied', (t) => {
+test('a check that throws does not disable the other: a failed archive read still lets a .claude/ledger.md write be denied', (t) => {
   const { h, main, task } = removal(t);
   const paths = ledgerPaths(h);
   const store = fileStore(paths);
@@ -1020,7 +1173,7 @@ test('a check that throws does not disable the other: a failed archive read stil
   const target = path.join(main, '.claude/ledger.md');
   const input = parseHookInput(JSON.stringify(toolUse(main, 'Bash', { command: `rm -rf ${task} && echo x > ${target}` })));
 
-  assert.equal(preToolUse(input, context)?.hookSpecificOutput.permissionDecisionReason, mainCheckoutReason(target));
+  assert.equal(preToolUse(input, context)?.hookSpecificOutput.permissionDecisionReason, STORE_REASON);
   assert.throws(() => preToolUse(parseHookInput(JSON.stringify(toolUse(main, 'Bash', { command: `rm -rf ${task}` }))), context), /the archive cannot be read/);
 });
 
@@ -1037,6 +1190,41 @@ test('a glob that matches nothing, or only folders without a ledger, is allowed'
   for (const command of ['rm -rf build/*', 'rm -rf nothing-here/*', 'rm -rf .claude/worktrees/x?z', 'rm -rf *']) {
     assertAllowed(gate(main, 'Bash', { command }, h));
   }
+});
+
+const unmovedReason = (...folders: string[]): string =>
+  [
+    `This would remove a worktree whose task ledger is not yet moved into the ledger store:${folders.map((folder) => ` ${folder}`).join('')}`,
+    '',
+    'Its .claude/ledger.md is the record of the task. Move it into the store, then retire the task, which archives the ledger and then removes the worktree:',
+    `  ${BIN} store migrate --active`,
+    `  ${BIN} task retire <slug>`,
+  ].join('\n');
+
+test('removing a worktree whose ledger is still an unmoved .claude/ledger.md is denied, naming migrate --active, until the moved ledger is archived', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const task = worktree(h, main, path.join(main, '.claude/worktrees/task'));
+  mkdirSync(path.join(task, '.claude'));
+  writeFileSync(path.join(task, '.claude/ledger.md'), ledgerText({ slug: 'task', main, worktree: task }));
+
+  for (const command of [`git worktree remove ${task}`, `rm -rf ${task}`]) assert.equal(assertDenied(gate(main, 'Bash', { command }, h)), unmovedReason(task), command);
+
+  ledgerIn(h, task, ledgerText({ slug: 'task', main, worktree: task }));
+  assert.equal(assertDenied(gate(main, 'Bash', { command: `git worktree remove ${task}` }, h)), removalReason(main, task));
+  archiveCopy(h, 'main', '2026-11-01-task', ledgerText({ slug: 'task', main, worktree: task }));
+  assertAllowed(gate(main, 'Bash', { command: `git worktree remove ${task}` }, h));
+});
+
+test('removing a worktree whose ledger is still an unmoved .claude/ledger.md is denied even with an archive copy naming it', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const task = worktree(h, main, path.join(main, '.claude/worktrees/task'));
+  mkdirSync(path.join(task, '.claude'));
+  writeFileSync(path.join(task, '.claude/ledger.md'), ledgerText({ slug: 'task', main, worktree: task }));
+  archiveCopy(h, 'main', '2026-11-01-task', ledgerText({ slug: 'task', main, worktree: task }));
+
+  assert.equal(assertDenied(gate(main, 'Bash', { command: `rm -rf ${task}` }, h)), unmovedReason(task));
 });
 
 test('removing a folder without a ledger, or a command that removes nothing, is allowed', (t) => {
@@ -1113,7 +1301,7 @@ test('a failing ledger hook that cannot write its log still prints nothing and e
 test('session-start reports the unreported hook failures above the ledger, once', (t) => {
   const h = home(t);
   const sibling = worktree(h, checkout(h, 'main'), path.join(h, 'sibling'));
-  const ledger = ledgerIn(sibling);
+  const ledger = ledgerIn(h, sibling);
   writeFileSync(failureLog(h), failureLine('2026-11-01T10:00:00Z') + failureLine('2026-11-02T11:00:00Z', 'usage-pace.sh'));
 
   const first = sessionStartIn(h, sibling);
@@ -1192,18 +1380,15 @@ test('session-start that cannot read the log prints what it prints with no failu
   assert.equal(hook(h, 'session-start', { cwd: main }), '');
 });
 
-test('a path the gates cannot check counts as no ledger, and the rest of the command is still checked', (t) => {
+test('a path the gates cannot check counts as no ledger on disk, and the rest of the command is still checked', (t) => {
   const { h, main, task } = removal(t);
   const tooLong = 'a'.repeat(300);
 
   for (const word of [tooLong, '/broken\u0000folder']) {
     assert.equal(assertDenied(gate(main, 'Bash', { command: `rm -rf ${task} && echo ${word}` }, h)), removalReason(main, task));
   }
-  assert.equal(
-    assertDenied(gate(main, 'Bash', { command: `echo x > ${tooLong}/.claude/ledger.md; echo y > .claude/ledger.md` }, h)),
-    mainCheckoutReason(path.join(main, tooLong, '.claude/ledger.md'), path.join(main, '.claude/ledger.md')),
-  );
-  assertAllowed(gate(`${h}/broken\u0000folder`, 'Write', { file_path: '.claude/ledger.md' }, h));
+  assert.equal(assertDenied(gate(main, 'Bash', { command: `echo x > ${tooLong}/.claude/ledger.md; echo y > .claude/ledger.md` }, h)), STORE_REASON);
+  assert.equal(assertDenied(gate(`${h}/broken\u0000folder`, 'Write', { file_path: '.claude/ledger.md' }, h)), STORE_REASON);
 });
 
 test('a folder the gate may not read counts as no ledger, and the rest of the command is still checked', { skip: process.getuid?.() === 0 && 'root reads every folder' }, (t) => {

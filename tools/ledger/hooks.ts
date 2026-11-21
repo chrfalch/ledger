@@ -2,19 +2,20 @@ import { statSync, type Stats } from 'node:fs';
 import path from 'node:path';
 import { claimClock, otherClaim, type ClaimClock } from './claims.js';
 import { limitCloneGitCalls } from './clone.js';
+import { Failure } from './failure.js';
 import { folderEntries } from './files.js';
 import { logHookFailure, markHookFailuresReported, unreportedHookFailures } from './hook-failures.js';
-import { findSection, serializeLedger, type Child, type Claim, type Ledger, type TaskRef } from './format.js';
-import { checkoutRoot, forgetStoppedGitCalls, gitTimedOut, inMainCheckout, limitGitCalls, mainCheckout } from './git.js';
+import { findSection, parseLedger, serializeLedger, type Child, type Claim, type Ledger, type TaskRef } from './format.js';
+import { checkoutRoot, gitTimedOut, inMainCheckout, limitGitCalls, mainCheckout, worktrees } from './git.js';
 import { limitLockWaits } from './lock.js';
 import { conversionHint } from './migrate-repo-ids.js';
-import { samePath, worktreeLedger } from './paths.js';
+import { CITATION_ADVICE, realPath, samePath, SESSION_CITATION } from './paths.js';
 import { repoKey, repoLabel } from './repo-key.js';
-import { loadTasks } from './registry.js';
-import { mirrorLedgers } from './mirror.js';
-import { hostProblem } from './settings.js';
+import { holdsUnmovedLedger, keepsUnmovedLedger, loadTasks } from './registry.js';
 import { pullForSession, syncNotice } from './sync.js';
-import { archivedTasks, findNamed, findTasks, folderTask, locateChild, namedChildren, worktreeTasks, type Task } from './tasks.js';
+import { keyAndAliases, type LedgerStore } from './store.js';
+import { activeTask, activeTasks, archivedTasks, findNamed, findTasks, locateChild, namedChildren, type Task } from './tasks.js';
+import { plural } from './views.js';
 import type { Context } from './write.js';
 
 // @ref LLP 0000#hooks — the four events, their registration in settings.policy.json, and why a failed hook allows the call.
@@ -51,12 +52,9 @@ export function parseHookInput(json: string): HookInput {
 
 const folderOf = (input: HookInput, context: HookContext): string => input.cwd || context.cwd;
 
-/** How long a hook, and the mirror after each answered turn, lets git and the locks take, so neither stalls Claude Code. */
-export const GIT_TIMEOUT_MS = 5000;
-/** What the session start keeps of its 5 s after the pull of git storage: for the copy of the worktree ledgers, then the ledgers. */
-const AFTER_PULL_MS = 1500;
-/** What the session start keeps of its 5 s for the ledgers after that copy, so a slow copy cannot cost the session its ledgers. */
-const AFTER_MIRROR_MS = 1000;
+const GIT_TIMEOUT_MS = 5000;
+/** What the session start keeps of its 5 s for the ledgers, after the pull of git storage. */
+const AFTER_PULL_MS = 1000;
 
 /**
  * What the hook prints on stdout for Claude Code's JSON `stdin`: hook JSON, plain text for pre-compact, or nothing.
@@ -74,7 +72,7 @@ export function answerHook(event: HookEvent, stdin: string, context: HookContext
     case 'prompt-submit':
       return json(promptSubmit(input, context));
     case 'pre-compact':
-      return preCompactText(sessionLedgers(folderOf(input, context)));
+      return preCompactText(sessionLedgers(context.store, folderOf(input, context)));
     case 'pre-tool-use':
       return json(preToolUse(input, context));
   }
@@ -84,29 +82,18 @@ export function answerHook(event: HookEvent, stdin: string, context: HookContext
 export type SessionLedgers = { tasks: Task[]; own: boolean };
 
 /**
- * The ledgers of a session in `cwd`. In a main checkout: those of its linked worktrees, wherever they live, never its
- * own, because a ledger lives only in a linked worktree. In a linked worktree: its own. Outside a git repository: the
- * folder's own, then those under .claude/worktrees/ and .worktrees/.
+ * The ledgers of a session in `cwd`. In a main checkout: the active tasks of its linked worktrees, wherever they live,
+ * never one of its own, as an active task lives only in a linked worktree. In a linked worktree: its own active task.
+ * Outside a git repository: none.
  */
-export function sessionLedgers(cwd: string): SessionLedgers {
+export function sessionLedgers(store: LedgerStore, cwd: string): SessionLedgers {
   const root = checkoutRoot(cwd);
-  if (root === undefined) {
-    const own = folderTask(cwd);
-    const nested = ['.claude/worktrees', '.worktrees'].flatMap((folder) =>
-      folderEntries(path.join(cwd, folder))
-        .map(({ name }) => path.join(cwd, folder, name))
-        .sort()
-        .flatMap((sub) => folderTask(sub) ?? []),
-    );
-    return { tasks: [...(own === undefined ? [] : [own]), ...nested], own: own !== undefined };
-  }
   const main = mainCheckout(cwd);
-  if (main === undefined) return { tasks: [], own: false };
-  const tasks = worktreeTasks(main);
-  const ledgerOf = (folder: string) => (task: Task): boolean => samePath(task.file, worktreeLedger(folder));
-  if (inMainCheckout(cwd)) return { tasks: tasks.filter((task) => !ledgerOf(main)(task)), own: false };
-  const own = tasks.filter(ledgerOf(root));
-  return { tasks: own, own: own.length > 0 };
+  if (root === undefined || main === undefined) return { tasks: [], own: false };
+  if (inMainCheckout(cwd)) return { tasks: activeTasks(store, repoKey(main)).filter(({ worktree }) => worktree === undefined || !samePath(worktree, main)), own: false };
+  const task = activeTask(store, root);
+  // Two machines can see one disk, so a record of another machine can name this folder; it is never the session's own.
+  return { tasks: task === undefined ? [] : [task], own: task !== undefined && !task.elsewhere };
 }
 
 /** The slug that titles the session: only when its one ledger is its folder's own. */
@@ -114,19 +101,19 @@ export const sessionTitle = ({ tasks, own }: SessionLedgers): string | undefined
 
 const shown = ({ slug, main }: TaskRef): string => (main === undefined ? slug : `${slug} @ ${main}`);
 
-/** A task in a repo whose git did not answer in time is unknown, not missing. */
+/** A task in a repo whose git did not answer in time is unknown, not missing; asking git for its checkout finds that out, once. */
 function statusText(ref: Required<TaskRef> | undefined, find: (ref: Required<TaskRef>) => Task | undefined): string {
   if (ref === undefined) return 'missing';
-  if (gitTimedOut(ref.main)) return 'unknown';
+  if (mainCheckout(ref.main) === undefined && gitTimedOut(ref.main)) return 'unknown';
   const task = find(ref);
   if (task === undefined) return 'missing';
   return task.status === 'retired' && task.archived !== undefined ? `retired ${task.archived}` : task.status;
 }
 
-/** A worktree beats a backlog ledger, which beats the newest archive copy. */
+/** An active task beats a backlog ledger, which beats the newest archive copy. */
 function namedTask(tasks: Task[], ref: Required<TaskRef>): Task | undefined {
   const named = findNamed(tasks, ref);
-  return named.find(({ place }) => place === 'worktree') ?? named[0];
+  return named.find(({ place }) => place === 'active') ?? named[0];
 }
 
 /**
@@ -167,58 +154,37 @@ export function sessionStartText({ tasks: ledgers }: SessionLedgers, tasks: Task
     const heldLine = held === undefined ? [] : [`Held by another session: ${held.session} since ${held.since}, active ${held.active}.`];
     return [...relationLines(task, tasks), ...heldLine].map((line) => `${line}\n`).join('');
   };
+  const inWorktree = ({ worktree }: Task, words: string): string => (worktree === undefined ? '' : ` ${words} ${worktree}`);
   if (ledgers.length === 1) {
     const [task] = ledgers;
-    return `A task ledger exists at ${task.file}. Contents follow. If it has open steps, continue from Next step without re-verifying finished steps.\n${lead(task)}\n${serializeLedger(task.ledger)}`;
+    return `A task ledger exists for ${task.slug}${inWorktree(task, 'in the worktree')}. It is kept in the ledger store; its contents follow. If it has open steps, continue from Next step without re-verifying finished steps. Write to it with \`ledger notes\`, never by editing a file.\n${lead(task)}\n${serializeLedger(task.ledger)}`;
   }
-  const summaries = ledgers.map((task) => `\n=== ${task.file}\n${lead(task)}${summary(task.ledger)}`).join('');
-  return `${ledgers.length} task ledgers exist. Summary of each follows. If asked what we are working on, answer from this. Before continuing one, ask which, then read its full ledger.\n${summaries}`;
+  const summaries = ledgers.map((task) => `\n=== ${task.slug}${inWorktree(task, 'in')}\n${lead(task)}${summary(task.ledger)}`).join('');
+  return `${ledgers.length} task ledgers exist. Summary of each follows. If asked what we are working on, answer from this. Before continuing one, ask which, then read its full ledger. Each is kept in the ledger store: read it with \`ledger show <slug>\`, and write to it with \`ledger notes\`, never by editing a file.\n${summaries}`;
+}
+
+/** A hint for the linked worktrees of the repo of `cwd` whose ledger is still a .claude/ledger.md. A git call that times out lists no worktree. */
+function unmovedHint(store: LedgerStore, cwd: string): string | undefined {
+  const main = mainCheckout(cwd);
+  if (main === undefined) return undefined;
+  const count = worktrees(main)
+    .slice(1)
+    .filter((linked) => keepsUnmovedLedger(store, linked.path)).length;
+  return count === 0 ? undefined : `${plural(count, 'ledger')} still kept in .claude/ledger.md; run \`ledger store migrate --active\`.`;
 }
 
 /** The registry is a cache: a session start that cannot write it still shows its ledgers. */
-function tasksOnDisk(context: HookContext, mains: string[]): Task[] {
+function tasksOnDisk(context: HookContext): Task[] {
   try {
-    return loadTasks(context, mains);
+    return loadTasks(context);
   } catch {
-    return findTasks(context.store, mains);
+    return findTasks(context.store);
   }
-}
-
-/** Ends every later git call and lock wait of the process by `until`, a time from Date.now(). */
-function limitHookTo(until: number): void {
-  limitLockWaits(until);
-  limitCloneGitCalls(until);
-  limitGitCalls(GIT_TIMEOUT_MS, until);
 }
 
 /**
- * A failed or slow copy must not cost the session its ledgers: the copy ends by `until`, a repo where its git ran out of
- * that time is asked again after it, and a failure is logged, which the next session start reports. Every later git
- * call and lock wait ends by `deadline` again. With a "host" that names no folder, nothing is copied, and the line it
- * gives says why.
- */
-function mirrorForSession(context: HookContext, until: number, deadline: number): string | undefined {
-  const problem = context.store.active === undefined ? undefined : hostProblem(context.paths.home);
-  if (problem !== undefined) {
-    limitHookTo(deadline);
-    return `The worktree ledgers are not copied to git storage: ${problem}`;
-  }
-  limitHookTo(until);
-  try {
-    mirrorLedgers(context);
-  } catch (error) {
-    logHookFailure(context.paths.home, 'ledger hook session-start', `the copy of the worktree ledgers to git storage failed: ${error instanceof Error ? error.message : String(error)}`);
-  } finally {
-    forgetStoppedGitCalls();
-    limitHookTo(deadline);
-  }
-  return undefined;
-}
-
-/**
- * With git storage it pulls first, then copies the worktree ledgers there, and a sync problem and a "host" that names
- * no folder each add one line before the ledgers. The pull, and every git call and lock wait after it, opening and
- * closing the store too, end by `deadline`; the pull ends AFTER_PULL_MS before it, and the copy AFTER_MIRROR_MS before it.
+ * With git storage it pulls first, and a sync problem adds one line before the ledgers. The pull, and every git call and
+ * lock wait after it, opening and closing the store too, end by `deadline`.
  */
 function sessionLedgerContext(input: HookInput, context: HookContext, deadline: number): { hint?: string; text?: string; title?: string } {
   limitLockWaits(deadline);
@@ -228,17 +194,17 @@ function sessionLedgerContext(input: HookInput, context: HookContext, deadline: 
   pullForSession(context.paths, deadline - AFTER_PULL_MS);
   limitGitCalls(GIT_TIMEOUT_MS, deadline);
   // After the pull, which may bring ledgers under folder names, and before the ledgers, whose registry rebuild re-keys the entries the hint counts.
-  const hint = conversionHint(context.store);
-  const copyNotice = mirrorForSession(context, deadline - AFTER_MIRROR_MS, deadline);
-  const notices = [syncNotice(context.paths), copyNotice].filter((line) => line !== undefined);
-  const notice = notices.length === 0 ? undefined : notices.join('\n');
-  const found = sessionLedgers(folderOf(input, context));
-  if (found.tasks.length === 0) return { hint, text: notice };
-  const mains = found.tasks.flatMap(({ main, ledger: { location, children } }) => [main, location.parent?.main, ...children.map((child) => child.main)].filter((known) => known !== undefined));
+  const conversion = conversionHint(context.store);
+  const notice = syncNotice(context.paths);
+  const cwd = folderOf(input, context);
+  const found = sessionLedgers(context.store, cwd);
   let clock: ClaimClock | undefined;
   const heldElsewhere = ({ ledger: { location } }: Task): Claim | undefined =>
     location.claim && otherClaim(location.claim, input.sessionId || undefined, (clock ??= claimClock(context.paths.home)));
-  const ledgers = sessionStartText(found, tasksOnDisk(context, mains), heldElsewhere);
+  const ledgers = found.tasks.length === 0 ? undefined : sessionStartText(found, tasksOnDisk(context), heldElsewhere);
+  // Last, so a worktree listing that hangs costs the hint and not the ledgers.
+  const hint = [conversion, unmovedHint(context.store, cwd)].filter((part) => part !== undefined).join('\n') || undefined;
+  if (ledgers === undefined) return { hint, text: notice };
   return { hint, text: notice === undefined ? ledgers : `${notice}\n${ledgers}`, title: sessionTitle(found) };
 }
 
@@ -269,11 +235,16 @@ export function sessionStart(input: HookInput, context: HookContext, deadline = 
   };
 }
 
+/** `mtimeMs` of an active task is when its record was last written. */
 export function preCompactText({ tasks }: SessionLedgers): string {
   if (tasks.length === 0) return '';
-  if (tasks.length === 1) return `Task ledger at ${tasks[0].file} is authoritative. Preserve its path and its Next step section verbatim.\n`;
-  const newestFirst = [...tasks].sort((a, b) => b.mtimeMs - a.mtimeMs || a.file.localeCompare(b.file));
-  return `${tasks.length} task ledgers exist (most recently modified first). Preserve the path of the ledger this session is working on, and its Next step section verbatim:\n${newestFirst.map(({ file }) => `${file}\n`).join('')}`;
+  if (tasks.length === 1) {
+    const [{ slug, worktree }] = tasks;
+    return `Task ledger ${slug}${worktree === undefined ? '' : ` (worktree ${worktree})`} is kept in the ledger store and is authoritative. Preserve its slug, worktree path and its Next step section verbatim.\n`;
+  }
+  const newestFirst = [...tasks].sort((a, b) => b.mtimeMs - a.mtimeMs || a.slug.localeCompare(b.slug));
+  const lines = newestFirst.map(({ slug, worktree }) => `${worktree === undefined ? slug : `${slug} — ${worktree}`}\n`).join('');
+  return `${tasks.length} task ledgers exist (most recently updated first), kept in the ledger store. Preserve the slug and worktree of the one this session is working on, and its Next step section verbatim:\n${lines}`;
 }
 
 const GO = /^\s*go[ \t]+(\S+)\s*$/;
@@ -287,7 +258,9 @@ export function promptSubmit(input: HookInput, context: HookContext): PromptSubm
   if (target === undefined) return undefined;
   const main = mainCheckout(folderOf(input, context));
   if (main === undefined) return undefined;
-  const active = worktreeTasks(main).flatMap(({ ledger }) => ledger.slug ?? []);
+  const { store } = context;
+  // From the records alone: the hook runs at every prompt, so it asks git nothing per task.
+  const active = keyAndAliases(store.aliases.read(), repoKey(main)).flatMap((repo) => store.active.list(repo).flatMap(({ text }) => parseLedger(text).slug ?? []));
   const title = input.sessionTitle;
   if (!active.includes(target) || title === target) return undefined;
   // A title that names no task came from /rename; the operator keeps it.
@@ -325,8 +298,6 @@ function statOf(file: string): Stats | undefined {
     return undefined;
   }
 }
-
-const isFile = (file: string): boolean => statOf(file)?.isFile() ?? false;
 
 const GLOB = /[*?[]/;
 const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
@@ -416,18 +387,48 @@ function archiveHint(cwd: string, { paths, store }: HookContext): string {
   return `Archived ledgers of ${repoLabel(key)} live in ${paths.tilde(store.archive.repoLocation(key))}/.`;
 }
 
-/** Denies a Bash removal of a folder whose ledger no archive copy names as its worktree. */
+/**
+ * Denies a Bash removal of a linked worktree whose ledger is still a .claude/ledger.md, and of a folder whose ledger no
+ * archive copy names as its worktree.
+ */
 function worktreeRemovalReason(input: HookInput, context: HookContext): string | undefined {
   if (input.toolName !== 'Bash') return undefined;
   const command = text(input.toolInput.command);
   if (RETIRE_COMMANDS.some((retire) => command.includes(retire)) || !REMOVALS.some((removal) => command.includes(removal))) return undefined;
   const cwd = folderOf(input, context);
-  const holdingLedgers = command
+  const named = command
     .split(/\s+/)
     .flatMap((word) => (word === '' ? [] : expandGlob(word, cwd)))
     .filter((word) => !word.startsWith('-'))
-    .map((word) => pathOf(word, cwd, context.paths.home))
-    .filter((folder) => isFile(worktreeLedger(folder)));
+    .map((word) => pathOf(word, cwd, context.paths.home));
+  const shared: string[] = [];
+  const holdingLedgers = named.filter((folder) => {
+    try {
+      return context.store.active.byWorktree(folder) !== undefined;
+    } catch (error) {
+      if (!(error instanceof Failure)) throw error;
+      shared.push(error.message);
+      return false;
+    }
+  });
+  if (shared.length > 0) {
+    return [
+      `This would remove a worktree that more than one active task names. ${shared.join(' ')}`,
+      '',
+      'Retire each of those tasks, or fix the record that names the wrong worktree, before the worktree is removed:',
+      `  ${context.ledgerBin} task retire <slug>`,
+    ].join('\n');
+  }
+  const unmoved = named.filter((folder) => holdsUnmovedLedger(context.store, folder));
+  if (unmoved.length > 0) {
+    return [
+      `This would remove a worktree whose task ledger is not yet moved into the ledger store:${unmoved.map((folder) => ` ${folder}`).join('')}`,
+      '',
+      'Its .claude/ledger.md is the record of the task. Move it into the store, then retire the task, which archives the ledger and then removes the worktree:',
+      `  ${context.ledgerBin} store migrate --active`,
+      `  ${context.ledgerBin} task retire <slug>`,
+    ].join('\n');
+  }
   if (holdingLedgers.length === 0) return undefined;
   const archived = archivedTasks(context.store).flatMap(({ ledger }) => ledger.location.worktree ?? []);
   const unarchived = holdingLedgers.filter((folder) => !archived.some((worktree) => samePath(worktree, folder)));
@@ -444,7 +445,8 @@ function worktreeRemovalReason(input: HookInput, context: HookContext): string |
 }
 
 const FILE_TOOLS = ['Write', 'Edit', 'MultiEdit'];
-const WORKTREE_LEDGER = /\/\.claude\/ledger\.md$/;
+const CITATION_REASON = `${CITATION_ADVICE} Copy the file and write the ledger in two separate commands.`;
+const LEGACY_LEDGER_FILE = /\/\.claude\/ledger\.md$/;
 // Backlog ledgers are files only with the file store; with SQLite storage no file tool can write one.
 const BACKLOG_LEDGER = /\/\.claude\/ledger-backlog\/.*\/.*\.md$/;
 
@@ -454,31 +456,36 @@ const REDIRECT_TARGET = />\s*[^\s;&|<>]+/g;
 const TEE = new RegExp(`${COMMAND_START}tee\\s${ARGUMENTS}`, 'g');
 const SED_IN_PLACE = new RegExp(`${COMMAND_START}sed\\s(?:${ARGUMENTS}\\s)?-(?:-in-place|[A-Za-z]*i)${ARGUMENTS}`, 'g');
 const COPY = new RegExp(`${COMMAND_START}(?:cp|mv)\\s${ARGUMENTS}`, 'g');
+const CD = new RegExp(`${COMMAND_START}cd\\s+([^\\s;&|)]+)`, 'g');
 const INPUT_REDIRECT = /[0-9]*<<?<?\s*\S*/g;
 const ANY_REDIRECT = /[0-9]*(?:>[>|&]?|<<?<?)\s*\S*/g;
-const LEDGER_WORD = /^["']?[^\s;&|<>"']*\.claude\/(?:ledger|ledger-backlog\/[^/\s]+\/[^/\s]+)\.md["']?$/;
 
-const matches = (line: string, pattern: RegExp): string[] => [...line.matchAll(pattern)].map(([match]) => match);
+/** Each match of `pattern` in `line`, as `read` gives its words, with where in the line it starts. */
+const matches = (line: string, pattern: RegExp, read: (match: string) => string[]): { word: string; at: number }[] =>
+  [...line.matchAll(pattern)].flatMap(({ 0: match, index }) => read(match).map((word) => ({ word, at: index })));
 const words = (part: string): string[] => part.split(/\s+/).filter((word) => word !== '');
 
-/** A heuristic, line by line: a ledger a command writes is a redirect target, a tee or sed -i argument, or the last argument of cp or mv. */
-function bashLedgerTargets(command: string): string[] {
-  return command
-    .split('\n')
-    .flatMap((line) => [
-      ...matches(line, REDIRECT_TARGET).map((match) => match.replace(/^>\s*/, '')),
-      ...matches(line, TEE).flatMap((match) => words(match.replace(INPUT_REDIRECT, ''))),
-      ...matches(line, SED_IN_PLACE).flatMap(words),
-      ...matches(line, COPY).map((match) => words(match.replace(ANY_REDIRECT, '')).at(-1) ?? ''),
-    ])
-    .filter((word) => LEDGER_WORD.test(word));
+/**
+ * A heuristic, line by line: a file a command writes is a redirect target, a tee or sed -i argument, or the last argument
+ * of cp or mv. Each is resolved against `cwd` as each cd before it on its line changed it.
+ */
+function bashWriteTargets(command: string, cwd: string, home: string): string[] {
+  return command.split('\n').flatMap((line) => {
+    const cds = [...line.matchAll(CD)].map(({ 1: folder, index }) => ({ folder, at: index }));
+    const folderAt = (at: number): string => cds.filter((cd) => cd.at < at).reduce((folder, cd) => pathOf(cd.folder, folder, home), cwd);
+    return [
+      ...matches(line, REDIRECT_TARGET, (match) => [match.replace(/^>\s*/, '')]),
+      ...matches(line, TEE, (match) => words(match.replace(INPUT_REDIRECT, ''))),
+      ...matches(line, SED_IN_PLACE, words),
+      ...matches(line, COPY, (match) => words(match.replace(ANY_REDIRECT, '')).slice(-1)),
+    ]
+      .filter(({ word }) => word !== '')
+      .map(({ word, at }) => pathOf(word, folderAt(at), home));
+  });
 }
 
-function nearestFolder(file: string): string {
-  let folder = path.dirname(file);
-  while (!(statOf(folder)?.isDirectory() ?? false) && folder !== path.dirname(folder)) folder = path.dirname(folder);
-  return folder;
-}
+/** `file` as written, with the symbolic links to it resolved, and with those of its folder resolved. */
+const pathsOf = (file: string): string[] => [file, realPath(file), path.join(realPath(path.dirname(file)), path.basename(file))];
 
 /** Only the text being written: an Edit's old_string may still name an old path. For Bash, the whole command. */
 function newText(toolInput: Record<string, unknown>): string {
@@ -488,35 +495,30 @@ function newText(toolInput: Record<string, unknown>): string {
     .join('\n');
 }
 
-const UUID = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
-const SESSION_CITATION = new RegExp(`/tmp/claude-[0-9]+/[^/\\s]+/${UUID}|<scratchpad>/\\S|scratchpad/[A-Za-z0-9_.-]`);
-
-const CITATION_REASON =
-  "A task ledger may not cite files in the Claude Code session folder or its scratchpad, because macOS deletes them. Move the file to .claude/evidence/ in the task's worktree and cite that path, for example .claude/evidence/xcodebuild-red.log. Copy the file and write the ledger in two separate commands.";
-
 /**
- * Denies a write to .claude/ledger.md in a main checkout, and new ledger text, in a worktree or the backlog, that cites
- * a file in a Claude Code session folder, which macOS deletes.
+ * Denies a write to a .claude/ledger.md anywhere, as an active task's ledger lives in the store, and new backlog ledger
+ * text that cites a file in a Claude Code session folder, which macOS deletes.
  */
 function ledgerWriteReason(input: HookInput, context: HookContext): string | undefined {
   const { toolName, toolInput } = input;
-  const targets = toolName === 'Bash' ? bashLedgerTargets(text(toolInput.command)) : FILE_TOOLS.includes(toolName) ? [text(toolInput.file_path)] : [];
   const cwd = folderOf(input, context);
-  const ledgers = targets.map((target) => pathOf(target, cwd, context.paths.home)).filter((file) => WORKTREE_LEDGER.test(file) || BACKLOG_LEDGER.test(file));
-  if (ledgers.length === 0) return undefined;
-  const inMain = ledgers.filter((file) => WORKTREE_LEDGER.test(file) && inMainCheckout(nearestFolder(file)));
-  if (inMain.length > 0) {
+  const { home } = context.paths;
+  const files = toolName === 'Bash' ? bashWriteTargets(text(toolInput.command), cwd, home) : FILE_TOOLS.includes(toolName) ? [pathOf(text(toolInput.file_path), cwd, home)] : [];
+  const legacy = files.flatMap(pathsOf).filter((file) => LEGACY_LEDGER_FILE.test(file));
+  if (legacy.length > 0) {
+    const bin = context.ledgerBin;
+    const unmoved = legacy.some((file) => {
+      try {
+        return holdsUnmovedLedger(context.store, path.dirname(path.dirname(file)));
+      } catch {
+        // A store that cannot be read costs only this line: the write is denied all the same.
+        return false;
+      }
+    });
     return [
-      `This would write a task ledger in a repo's main checkout:${inMain.map((file) => ` ${file}`).join('')}`,
-      '',
-      "A ledger belongs in the task's worktree, never in the main checkout.",
-      'Start the task first. This writes its ledger to the backlog, with no branch or worktree yet:',
-      `  ${context.ledgerBin} task new <slug> --goal '<one paragraph>'`,
-      'Then give it a branch and a worktree, and move its ledger in:',
-      `  ${context.ledgerBin} go <slug>`,
-      'Then work in the worktree that ledger go prints.',
-      "This check does not follow cd: from the main checkout, use the absolute path to the worktree's .claude/ledger.md.",
+      `Task ledgers are kept in the ledger store, not in .claude/ledger.md. Read this task's ledger with \`${bin} show\`. Write one item with \`${bin} notes <command>\`; \`${bin} notes --help\` lists them.`,
+      ...(unmoved ? [`This ledger has not been moved yet: run \`${bin} store migrate --active\`.`] : []),
     ].join('\n');
   }
-  return SESSION_CITATION.test(newText(toolInput)) ? CITATION_REASON : undefined;
+  return files.some((file) => BACKLOG_LEDGER.test(file)) && SESSION_CITATION.test(newText(toolInput)) ? CITATION_REASON : undefined;
 }

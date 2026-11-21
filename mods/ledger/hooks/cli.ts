@@ -91,8 +91,13 @@ export async function readSession($: EngineInterface): Promise<Answer<Session>> 
   return ledgerJson<Session>($, ['session', await $.session.cwd()])
 }
 
-/** The session's own task: the ledger of the linked worktree it is in, which `ledger session` lists first. */
-export const ownTask = (session: Session): ListedTask | undefined => (session.own ? session.ledgers[0] : undefined)
+export type OwnTask = ListedTask & { worktree: string }
+
+/**
+ * The session's own task: the active task of the linked worktree it is in, which `ledger session` lists first. It is
+ * found by that worktree, so it always names one.
+ */
+export const ownTask = (session: Session): OwnTask | undefined => (session.own ? (session.ledgers[0] as OwnTask) : undefined)
 
 export type Started = {
   slug: string

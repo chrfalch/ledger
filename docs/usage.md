@@ -11,8 +11,9 @@ and reviews. It does not usually write code.
 The **subagents** do the expensive work in their own contexts and return short
 reports. See [fleet.md](fleet.md).
 
-The **ledger** is a file at `.claude/ledger.md` in the task's worktree. Every
-non-trivial task has one. It is the state of the task.
+The **ledger** is a record in the ledger store. Every non-trivial task has one.
+It is the state of the task. `ledger show` prints it, and `ledger notes`
+writes it, one item per command.
 
 The **hooks** read the ledger into a session at start, and protect it when a
 session compacts.
@@ -318,9 +319,9 @@ task whose work all shipped in its child tasks. It has no worktree and no
 branch, so `/ledger:retire <name>` archives its ledger, then deletes the
 backlog file. A backlog task of another repo is not found.
 
-`ledger show <name>` prints a task's ledger from the terminal: its worktree
-ledger in this clone; else, with git storage, the copy of a task in a worktree
-on another machine; else its backlog ledger, else its newest archive copy. `ledger show <name> --evidence` lists
+`ledger show <name>` prints a task's ledger from the terminal: its active
+ledger, in a worktree of this clone or, with git storage, on another machine;
+else its backlog ledger, else its newest archive copy. `ledger show <name> --evidence` lists
 the evidence files of the newest archive copy, and `--evidence <file>` prints one.
 
 The paths in this guide are for file storage, the default. With
@@ -431,61 +432,46 @@ fails, the next session start says so.
 `ledger store sync` does all of it by hand: it commits, pulls with a rebase, checks
 the commits, and pushes.
 
-The ledger of a started task, `.claude/ledger.md` in its worktree, stays the
-one you work on. Git storage also keeps a copy of it, so your other machines
-can read it:
+The ledger of a started task is an active record in git storage too, so your
+other machines can read it:
 
-- The copy is `active/<host>/<repo key>/<slug>.md`, with the same text, as
-  Markdown. `<repo key>` is the folder of the repo key, as in the table below:
-  the repo's remote address, or the path of its main checkout when it has no
-  remote. So your clones of one repo on two machines name the same task the
-  same way, whatever their folders are called. `<host>`
-  names the machine: `"host"` in `~/.claude/ledger-settings.json`, such as
-  `{"storage": "git", "host": "work-laptop"}`, in lowercase letters, digits and
-  hyphens. Without it, the host name up to its first dot, in lowercase, with
-  each other character as `-` and no `-` at either end. When that leaves no
-  name, or `"host"` is no such name, nothing is copied: `ledger store mirror`
-  stops and asks you to set `"host"`, and the session start says so in one
-  line. `ledger store sync`, the pull at session start and the other commands
-  still work, and the session start still shows your ledgers. Their commits
-  leave every copy in git storage as it was, so a copy of this machine that
-  was not committed yet is dropped; the first copy after you fix `"host"`
-  writes it again. `ledger task retire` of a started task stops with nothing
-  changed until you fix `"host"`, as it must remove the copy first.
-- ⚠ Two machines with the same host name write the same folder, and each
-  overwrites the copies of the other. Set a different `"host"` on each of
-  them.
-- Changing `"host"` leaves the copies under the old name in git storage. Your
-  other machines list those tasks on the old host until the folder
-  `active/<old host>/` is removed. This machine lists each of its own tasks
-  once.
-- The copies are brought up to date at session start and at the end of each
-  answered turn of the main agent, then committed and pushed in the
-  background. A subagent's turn, or a turn that ends without an answer,
-  copies nothing; its changes go with the next answered turn.
-  `ledger store mirror` does it by hand. A copy is removed only when git
-  confirms that its worktree is gone, or when the same worktree's ledger was
-  just copied under another repo key or slug, as for a copy under a repo
-  folder name from before repo keys, or after the ledger's title changed.
-  `ledger task retire` removes the copy in the same commit that adds the
-  archive copy.
-- A machine never commits the copies of another machine. A sync puts an
-  edited or added file in another machine's folder back as git storage holds
-  it, and prints one warning for each file.
+- The record names the machine that started the task in `- host:`.
+  `"host"` in `~/.claude/ledger-settings.json`, such as
+  `{"storage": "git", "host": "work-laptop"}`, names it, in lowercase letters,
+  digits and hyphens. Without it, the host name up to its first dot, in
+  lowercase, with each other character as `-` and no `-` at either end. When
+  that leaves no name, or `"host"` is no such name, the tasks this machine
+  starts name no host, and another machine shows them on `unknown host` while
+  their worktree is not there.
+- ⚠ Two machines with the same host name take each other's tasks for their
+  own. Set a different `"host"` on each of them.
+- Each machine lists every host name it has written on a record in
+  `~/.claude/ledger-hosts.json`. After you change `"host"`, the tasks it started
+  under an older name are still its own, and the next change to each one writes
+  the new name.
 - On another machine, `ledger list` shows the task as `active on <host>`, and
   it replaces a backlog ledger with the same repo and slug. `ledger show
-  <slug>` prints one line that says the copy is read-only and names the host,
-  then the copy. `ledger go`, park, retire and `ledger notes` refuse the task there: continue
-  it on its own machine.
-- So the text of your tasks in progress now leaves the machine too, to the
+  <slug>` prints one line that says the ledger is read-only and names the host,
+  then the ledger. `ledger go`, park, claim, `ledger notes`, and `ledger tree
+  add` and `remove` refuse the task there: continue it on its own machine. A
+  retire of its child leaves it alone and says so.
+- A machine never commits a change to another machine's record. A sync puts an
+  edited or added record that names another host back as git storage holds
+  it, and prints one warning for each; `--quiet` prints none. Only
+  `ledger task retire --force` removes such a record, for a task whose machine
+  is gone.
+- Git storage set up before active records may hold copies of worktree ledgers
+  under `active/<host>/`. Nothing reads them, and the first command that writes
+  removes them.
+- So the text of your tasks in progress leaves the machine too, to the
   private ledger repository. It goes through the same secret scan as every
   other ledger, before each push.
 
 | Pushed | Stays on this machine |
 |---|---|
-| Backlog ledgers, `backlog/<repo key>/<slug>.json`, or `.md` from before task records | Evidence, in `~/.claude/ledger-evidence/<repo key>/<name>/` |
-| Archive copies, `archive/<repo key>/<name>.json`, or `.md` from before task records | The task list `~/.claude/ledgers-git.json`, the repo aliases `~/.claude/ledger-aliases-git.json`, the pre-push hook, lock files and temporary files |
-| Copies of worktree ledgers, `active/<host>/<repo key>/<slug>.md` | |
+| Backlog ledgers, `backlog/<repo key>/<slug>.json`, or `.md` from before task records | Evidence, in `~/.claude/ledger-evidence/<repo key>/<name>/`, and the `.claude/evidence/` of each worktree |
+| Active ledgers, `active/<repo key>/<slug>.json` | The task list `~/.claude/ledgers-git.json`, the repo aliases `~/.claude/ledger-aliases-git.json`, the pre-push hook, lock files and temporary files |
+| Archive copies, `archive/<repo key>/<name>.json`, or `.md` from before task records | |
 | `.ledger-data`, `.gitignore` | |
 
 `<repo key>` is the repo's address, URI-encoded as one folder, such as

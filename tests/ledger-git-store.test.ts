@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
-import { clearStatus, cloneEnv, readStatus, recordProblem, SyncProblem } from '../tools/ledger/clone.js';
+import { clearStatus, cloneEnv, FORMAT, readStatus, recordProblem, SyncProblem } from '../tools/ledger/clone.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { gitStore } from '../tools/ledger/git-store.js';
 import { withLock } from '../tools/ledger/lock.js';
@@ -124,9 +124,9 @@ test('sync init on a private, empty repository clones it, writes the marker and 
 
   assert.match(stdout, /github\.com\/me\/ledgers/);
   assert.deepEqual(readFileSync(path.join(a.h, 'gh-calls'), 'utf8').trim().split(' '), ['repo', 'view', 'github.com/me/ledgers', '--json', 'visibility,isEmpty']);
-  assert.deepEqual(JSON.parse(readFileSync(path.join(a.clone, '.ledger-data'), 'utf8')), { format: 1 });
+  assert.deepEqual(JSON.parse(readFileSync(path.join(a.clone, '.ledger-data'), 'utf8')), { format: FORMAT });
   assert.deepEqual(remoteFiles(bare).sort(), ['.gitignore', '.ledger-data']);
-  assert.deepEqual(JSON.parse(remoteText(bare, '.ledger-data')), { format: 1 });
+  assert.deepEqual(JSON.parse(remoteText(bare, '.ledger-data')), { format: FORMAT });
   assertOwnHook(a);
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), remoteHead(bare));
   for (const folder of ['backlog', 'archive']) assert.ok(lstatSync(path.join(a.clone, folder)).isDirectory(), `${folder}/ is made`);
@@ -206,7 +206,7 @@ test('sync init refuses a marker with an unknown format and removes its clone', 
   const a = machine(t, bare);
   const other = path.join(a.h, 'other');
   git(a.h, a.h, 'clone', '--quiet', bare, other);
-  writeFileSync(path.join(other, '.ledger-data'), '{"format":2}\n');
+  writeFileSync(path.join(other, '.ledger-data'), `${JSON.stringify({ format: FORMAT + 1 })}\n`);
   git(a.h, other, 'add', '-A');
   git(a.h, other, 'commit', '--quiet', '-m', 'newer');
   git(a.h, other, 'push', '--quiet', 'origin', 'HEAD:main');
@@ -1102,7 +1102,7 @@ test('two sync inits at once: the second refuses at once and asks gh nothing, an
   assert.equal(readFileSync(path.join(a.h, 'gh-calls'), 'utf8').trim().split('\n').length, 1);
   const done = await first;
   assert.equal(done.status, 0, done.stderr);
-  assert.deepEqual(JSON.parse(readFileSync(path.join(a.clone, '.ledger-data'), 'utf8')), { format: 1 });
+  assert.deepEqual(JSON.parse(readFileSync(path.join(a.clone, '.ledger-data'), 'utf8')), { format: FORMAT });
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), remoteHead(bare));
 });
 
@@ -1772,7 +1772,7 @@ test('sync init reaches the URL as git config outside any repository sends it: a
   ok(run(a, ['store', 'sync', 'init', URL]));
 
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), remoteHead(bare));
-  assert.equal(remoteText(bare, '.ledger-data').trim(), '{"format":1}');
+  assert.equal(remoteText(bare, '.ledger-data').trim(), JSON.stringify({ format: FORMAT }));
 });
 
 // ------------------------------------------------------------------------------------------------- what reaches git
@@ -1940,7 +1940,7 @@ test('gh error text is printed and recorded without secret-like words', (t) => {
 });
 
 for (const held of ['lock', 'reclaim guard'] as const) {
-  test(`the whole session start stays within its 5 s, when the pull uses its share, git then hangs in the session folder, and another process holds the registry's ${held}`, (t) => {
+  test(`the whole session start in a linked worktree stays within its 5 s, when the pull uses its share, git then hangs in the main checkout, and another process holds the registry's ${held}`, (t) => {
     const bare = remote(t);
     const a = machine(t, bare);
     setUp(a);
@@ -1965,13 +1965,16 @@ for (const held of ['lock', 'reclaim guard'] as const) {
     const stubs = path.join(b.h, 'hanging-git');
     mkdirSync(stubs);
     const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
-    writeFileSync(path.join(stubs, 'git'), `#!/bin/sh\nfor arg in "$@"; do case "$arg" in '${b.app}'*) exec sleep 30 ;; esac; done\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+    // Only the main checkout hangs, so the session finds its own active task first, and then the registry is rebuilt.
+    writeFileSync(path.join(stubs, 'git'), `#!/bin/sh\nfor arg in "$@"; do case "$arg" in '${b.app}') exec sleep 30 ;; esac; done\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
     const env = { ...quietEnv(b), PATH: `${stubs}${path.delimiter}${quietEnv(b).PATH ?? ''}` };
     const [, startUp] = timed(() => run(b, ['--help'], { env }));
+    const mine = path.join(b.app, '.claude/worktrees/mine');
 
-    const [ran, ms] = timed(() => run(b, ['hook', 'session-start'], { cwd: b.app, env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd: b.app }) }));
+    const [ran, ms] = timed(() => run(b, ['hook', 'session-start'], { cwd: mine, env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd: mine }) }));
 
     assert.equal(ran.status, 0, ran.stderr);
+    assert.match((JSON.parse(ran.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext, /A task ledger exists for mine in the worktree /);
     assert.ok(existsSync(rewriting), 'the session start did not rebase');
     if (held === 'lock') {
       assert.equal(existsSync(registry), false, 'the session start wrote the registry: its lock was not in the way');

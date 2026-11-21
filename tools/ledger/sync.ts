@@ -13,16 +13,15 @@ import {
   commitChanges,
   committingGit,
   countOf,
-  FORMAT,
   GITIGNORE,
   type GitRun,
-  heldChanges,
-  heldInProcessFor,
   installGitignore,
   installHook,
   isAncestor,
+  isKnownFormat,
   MARKER,
   markerFormat,
+  markerText,
   must,
   notLedgers,
   nulSeparated,
@@ -32,7 +31,6 @@ import {
   refExists,
   remoteGit,
   repairHook,
-  restoreFromHead,
   setUpClone,
   shownPaths,
   SyncProblem,
@@ -48,7 +46,7 @@ import { gh } from './git.js';
 import { withLockIfFree } from './lock.js';
 import { realPath, type LedgerPaths } from './paths.js';
 import { ADDED_LINES_LOG, CHANGED_PATHS_LOG, MESSAGES_LOG, messageLocations, secretLocations } from './secret-scan.js';
-import { readStorage, validHost } from './settings.js';
+import { ownHosts, readStorage, validHost } from './settings.js';
 import { plural } from './views.js';
 
 type Line = (text: string) => void;
@@ -300,14 +298,14 @@ function remoteGitOutsideRepositories(args: string[]): GitRun {
 /** An empty repository on branch main, with what ledger store sync init writes; a path that is there already throws. */
 function writeLayout(clone: string): void {
   must(cloneGit(clone, ['symbolic-ref', 'HEAD', 'refs/heads/main']));
-  for (const folder of ['backlog', 'archive']) mkdirSync(path.join(clone, folder));
-  writeFileSync(path.join(clone, MARKER), `${JSON.stringify({ format: FORMAT })}\n`, { flag: 'wx' });
+  for (const folder of ['backlog', 'active', 'archive']) mkdirSync(path.join(clone, folder));
+  writeFileSync(path.join(clone, MARKER), markerText(), { flag: 'wx' });
   writeFileSync(path.join(clone, '.gitignore'), GITIGNORE, { flag: 'wx' });
 }
 
 /**
  * Checks out the default branch of a repository that is not empty, once it holds only ledgers and the marker, and makes
- * the backlog and archive folders, which git does not keep while they hold no ledger.
+ * the backlog, active and archive folders, which git does not keep while they hold no ledger.
  */
 function checkOut(clone: string, shown: string): void {
   const noMarker = `${STOPPED} on the remote: ${shown} has commits but no ${MARKER} file at the root of its default branch, so it holds no ledgers. Use an empty private repository, or one that ledger store sync init set up.`;
@@ -315,8 +313,8 @@ function checkOut(clone: string, shown: string): void {
   const unsafe = unique([...unsafeEntries(clone, 'HEAD'), ...unsafeChanges(clone, ['HEAD'])]);
   if (unsafe.length > 0) fail(`${STOPPED}: the history of ${shown} holds ${shownPaths(unsafe)}. Ledger checks out only ledgers and its marker, as plain files: no symbolic link, executable file or other path.`);
   must(cloneGit(clone, ['reset', '--quiet', '--hard', 'HEAD']));
-  if (markerFormat(clone) !== FORMAT) fail(`${STOPPED} on the remote: the ${MARKER} file of ${shown} names a format this ledger does not know. Update ledger, then try again.`);
-  for (const folder of ['backlog', 'archive']) mkdirSync(path.join(clone, folder), { recursive: true });
+  if (!isKnownFormat(markerFormat(clone))) fail(`${STOPPED} on the remote: the ${MARKER} file of ${shown} names a format this ledger does not know. Update ledger, then try again.`);
+  for (const folder of ['backlog', 'active', 'archive']) mkdirSync(path.join(clone, folder), { recursive: true });
 }
 
 /** A second init on the clone of the same URL only writes the pre-push hook again; anything else at the clone's place is refused. */
@@ -354,7 +352,7 @@ export function syncLedgers(paths: LedgerPaths, line: Line, { daily = false, qui
     const remote = checkedRemote(clone);
     checkPrivate(paths, clone, remote.repo, daily);
     repairHook(clone);
-    syncClone({ clone, where: paths.tilde(clone), remote, line, host: validHost(paths.home), warn: quiet ? () => {} : undefined });
+    syncClone({ clone, where: paths.tilde(clone), remote, line, host: validHost(paths.home), ownHosts: ownHosts(paths.home), warn: quiet ? () => {} : undefined });
     clearStatus(paths, number);
   } catch (error) {
     if (error instanceof Failure) recordProblem(paths, error instanceof SyncProblem ? error : new SyncProblem('git', error.message), number);
@@ -392,10 +390,10 @@ export function syncInBackground(paths: LedgerPaths): void {
 }
 
 /**
- * `host` is the host folder of this machine under active/, the only one a sync commits; undefined, from a "host" that
- * names no folder, leaves every one as HEAD has it. `warn` says that a copy was put back; on stderr by default.
+ * `host` is this machine's host label, and `ownHosts` the labels it stamped before: a sync commits no change of an
+ * active record that names another host. `warn` says that such a change was put back; on stderr by default.
  */
-type Sync = { clone: string; where: string; remote: Remote; line: Line; host: string | undefined; warn?: Line };
+type Sync = { clone: string; where: string; remote: Remote; line: Line; host: string | undefined; ownHosts: ReadonlySet<string>; warn?: Line };
 
 /** Two syncs that start together push the same commits; one more try covers a remote that moved in between. */
 const PUSH_TRIES = 3;
@@ -410,13 +408,13 @@ function syncClone(sync: Sync): void {
   const branch = branchOf(clone);
   const upstream = `refs/remotes/origin/${branch}`;
   // Before the fetch, so the ledgers are committed here even when the remote cannot be reached.
-  withCloneLock(clone, () => commitChanges(clone, { host, warn, held: heldInProcessFor(clone) }));
+  withCloneLock(clone, () => commitChanges(clone, { host, ownHosts: sync.ownHosts, warn }));
   for (let tries = 1; ; tries++) {
     // The fetch moves refs of the clone, so it holds the lock, and no other fetch moves them before the commit it found
     // is read. Only the push, which changes nothing here, runs outside it.
     const { base, head, count } = withCloneLock(clone, () => {
       const base = fetch(sync, upstream);
-      commitChanges(clone, { host, warn, held: heldInProcessFor(clone) });
+      commitChanges(clone, { host, ownHosts: sync.ownHosts, warn });
       rebaseOnto(sync, { upstream, incoming: base });
       return { base, ...checkedOutgoing(sync, base, branch) };
     });
@@ -505,24 +503,6 @@ function fetch({ clone, where, remote }: Sync, upstream: string, deadline?: numb
   return head;
 }
 
-/**
- * Puts each held-back copy back as HEAD has it, as git rebase stops at a changed file. They stay held back; the next
- * mirror that goes through writes them again. Call it under the clone lock.
- */
-function putBackHeld({ clone, where, remote }: Pick<Sync, 'clone' | 'where' | 'remote'>, deadline?: number): void {
-  const held = heldChanges(clone, deadline);
-  if (held.length === 0) return;
-  try {
-    restoreFromHead(clone, held, deadline);
-  } catch (error) {
-    if (error instanceof SyncProblem && error.problem === 'timeout') throw error;
-    throw new SyncProblem(
-      'git',
-      `Could not put back the copies ${shownPaths(held)}, which git storage holds back after a failed mirror or retire, so the pull from ${remote.shown} cannot rebase in ${where}; nothing was pulled or pushed.\nRun ledger store mirror, which copies each worktree ledger again, then ledger store sync.\n${(error as Error).message}`,
-    );
-  }
-}
-
 /** Of the time a pull has, what it keeps for git rebase --abort, so a rebase that runs out of time is still undone. */
 const ABORT_MS = 500;
 
@@ -547,7 +527,6 @@ function rebaseOnto({ clone, where, remote }: Sync, { upstream, incoming }: { up
       `The commits to pull from ${remote.shown} hold ${shownPaths(unsafe)}, which ledger never checks out, so nothing was pulled or pushed.\nOnly ledgers and the marker, as plain files, belong there: remove the rest from the repository, then run ledger store sync.`,
     );
   }
-  putBackHeld({ clone, where, remote }, deadline);
   const rebased = committingGit(clone, ['rebase', '--quiet', '--no-autostash', incoming], deadline === undefined ? undefined : deadline - ABORT_MS);
   if (rebased.ok) return;
   const conflicted = rebased.timedOut ? [] : nulSeparated(cloneGit(clone, ['diff', '--name-only', '-z', '--diff-filter=U'], { deadline }).stdout);
@@ -605,7 +584,7 @@ export function pullForSession(paths: LedgerPaths, deadline: number): void {
     const { clone } = clonePaths(paths);
     if (cloneProblem(clone, deadline) !== undefined) return;
     number = takeSyncNumber(paths, { waitMs: left() });
-    const sync: Sync = { clone, where: paths.tilde(clone), remote: checkedRemote(clone, deadline), line: () => {}, host: validHost(paths.home) };
+    const sync: Sync = { clone, where: paths.tilde(clone), remote: checkedRemote(clone, deadline), line: () => {}, host: validHost(paths.home), ownHosts: ownHosts(paths.home) };
     withCloneLock(
       clone,
       () => {
@@ -614,7 +593,7 @@ export function pullForSession(paths: LedgerPaths, deadline: number): void {
         installHook(clone, deadline);
         installGitignore(clone);
         const incoming = fetch(sync, upstream, deadline);
-        commitChanges(clone, { deadline, host: sync.host, held: heldInProcessFor(clone) });
+        commitChanges(clone, { deadline, host: sync.host, ownHosts: sync.ownHosts });
         rebaseOnto(sync, { upstream, incoming }, deadline);
       },
       { waitMs: left() },

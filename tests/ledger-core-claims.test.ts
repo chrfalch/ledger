@@ -1,23 +1,23 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { parseHookInput } from '../tools/ledger/hooks.js';
-import { archivedTask, backlogTask, commandEnv, home, LEDGER_BIN, readLedgerFile, repository, storeFolder, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { activeFile, archivedTask, backlogTask, commandEnv, home, LEDGER_BIN, readLedgerFile, repository, storeFolder, worktreeOf, worktreeTask, writeLedgerFile, type Ran } from './ledger-core-fixtures.js';
 
 const T0 = '2026-11-20T10:00:00Z';
 const later = (minutes: number): string => new Date(Date.parse(T0) + minutes * 60_000).toISOString().replace('.000Z', 'Z');
 const claimLine = (session: string, since: string, active: string): string => `- claim: session ${session} since ${since}, active ${active}`;
 const CLAIM_LINE = /^- claim: .*$/m;
 
-/** ~/repos/app with the active task fix-login, whose .claude/ git ignores. */
+/** ~/repos/app with the active task fix-login, whose .claude/ git ignores; `file` is its active record. */
 function setup(t: TestContext) {
   const h = home(t);
   const app = repository(h, path.join(h, 'repos/app'));
   writeFileSync(path.join(app, '.git/info/exclude'), '.claude/\n');
   const file = worktreeTask(h, app, { slug: 'fix-login' });
-  return { h, app, file, worktree: path.dirname(path.dirname(file)) };
+  return { h, app, file, worktree: worktreeOf(app, 'fix-login') };
 }
 
 type Env = { now?: string; session?: string; input?: string };
@@ -39,20 +39,20 @@ function exits(ran: Ran, status: number): Ran {
   return ran;
 }
 
-const claimOf = (file: string): string | undefined => CLAIM_LINE.exec(readFileSync(file, 'utf8'))?.[0];
+const claimOf = (file: string): string | undefined => CLAIM_LINE.exec(readLedgerFile(file))?.[0];
 
 function withClaim(file: string, line: string): void {
-  const text = readFileSync(file, 'utf8');
-  writeFileSync(file, text.replace('- design refs: none\n', `- design refs: none\n${line}\n`));
+  const text = readLedgerFile(file);
+  writeLedgerFile(file, text.replace('- design refs: none\n', `- design refs: none\n${line}\n`));
 }
 
 test('claim with no claim writes one for this session, since and active now, and prints claimed <slug>', (t) => {
   const { h, app, file } = setup(t);
-  const before = readFileSync(file, 'utf8');
+  const before = readLedgerFile(file);
   const ran = exits(run(h, app, { now: T0 }, 'task', 'claim', 'fix-login', '--session', 's1'), 0);
   assert.equal(ran.stdout, 'claimed fix-login\n');
   assert.equal(claimOf(file), claimLine('s1', T0, T0));
-  assert.equal(readFileSync(file, 'utf8').replace(`${claimLine('s1', T0, T0)}\n`, ''), before, 'only the claim bullet is added');
+  assert.equal(readLedgerFile(file).replace(`${claimLine('s1', T0, T0)}\n`, ''), before, 'only the claim bullet is added');
 });
 
 test('claim with no slug claims the task of the worktree it runs in, and takes the session from CLAUDE_CODE_SESSION_ID', (t) => {
@@ -65,12 +65,12 @@ test('--session wins over CLAUDE_CODE_SESSION_ID; with neither, every claim comm
   const { h, file, worktree } = setup(t);
   exits(run(h, worktree, { now: T0, session: 'env-session' }, 'task', 'claim', '--session', 'flag-session'), 0);
   assert.equal(claimOf(file), claimLine('flag-session', T0, T0));
-  const text = readFileSync(file, 'utf8');
+  const text = readLedgerFile(file);
   for (const command of ['claim', 'touch', 'release']) {
     const ran = exits(run(h, worktree, { now: later(30) }, 'task', command), 2);
     assert.match(ran.stderr, /--session/);
     assert.equal(ran.stderr.trimEnd().split('\n').length, 1, ran.stderr);
-    assert.equal(readFileSync(file, 'utf8'), text, command);
+    assert.equal(readLedgerFile(file), text, command);
   }
 });
 
@@ -84,13 +84,13 @@ test('claim by the session that holds it keeps since and sets active to now', (t
 test('claim of a task another session holds live exits 3, names the holder, and writes nothing; --json gives the holder as "held"', (t) => {
   const { h, app, file } = setup(t);
   withClaim(file, claimLine('s1', T0, later(10)));
-  const text = readFileSync(file, 'utf8');
+  const text = readLedgerFile(file);
   const ran = exits(run(h, app, { now: later(129) }, 'task', 'claim', 'fix-login', '--session', 's2'), 3);
   assert.match(ran.stdout + ran.stderr, new RegExp(`^held: session s1 since ${T0}, active ${later(10)}$`, 'm'));
   const json = JSON.parse(exits(run(h, app, { now: later(129) }, 'task', 'claim', 'fix-login', '--session', 's2', '--json'), 3).stdout);
   assert.equal(json.ok, false);
   assert.deepEqual(json.held, { session: 's1', since: T0, active: later(10) });
-  assert.equal(readFileSync(file, 'utf8'), text);
+  assert.equal(readLedgerFile(file), text);
 });
 
 test('a claim expires 120 minutes after its last activity: another session then claims the task with no warning, since now', (t) => {
@@ -106,7 +106,7 @@ test('--take-over replaces a live claim of another session with this one, since 
   const ran = exits(run(h, app, { now: later(20) }, 'task', 'claim', 'fix-login', '--session', 's2', '--take-over'), 0);
   assert.equal(ran.stdout, 'took over fix-login from session s1\n');
   assert.equal(claimOf(file), claimLine('s2', later(20), later(20)));
-  assert.equal(readFileSync(file, 'utf8').match(/^- claim:/gm)?.length, 1);
+  assert.equal(readLedgerFile(file).match(/^- claim:/gm)?.length, 1);
 });
 
 test('claimExpiryMinutes in ~/.claude/ledger-settings.json sets the expiry; any value but a positive whole number fails and names the key and the file', (t) => {
@@ -163,10 +163,10 @@ test('touch never claims: a task held by another session, an expired claim and n
 test('release removes the claim of this session; for a claim of another session or none it prints not held by this session and changes nothing', (t) => {
   const { h, app, file } = setup(t);
   withClaim(file, claimLine('s1', T0, T0));
-  const text = readFileSync(file, 'utf8');
+  const text = readLedgerFile(file);
   const release = (session: string): string => exits(run(h, app, { now: later(5), session }, 'task', 'release', 'fix-login'), 0).stdout;
   assert.equal(release('s2'), 'not held by this session\n');
-  assert.equal(readFileSync(file, 'utf8'), text);
+  assert.equal(readLedgerFile(file), text);
   release('s1');
   assert.equal(claimOf(file), undefined);
   assert.equal(release('s1'), 'not held by this session\n');
@@ -195,13 +195,13 @@ const json = (ran: Ran): Record<string, unknown> => JSON.parse(exits(ran, 0).std
 
 test('touch --all marks every claim of this session in the repo active, and leaves the claims of other sessions', (t) => {
   const { h, app, file, other, third, unclaimed } = claimedBySessions(t);
-  const untouched = [readFileSync(third, 'utf8'), readFileSync(unclaimed, 'utf8')];
+  const untouched = [readLedgerFile(third), readLedgerFile(unclaimed)];
   const answer = json(run(h, app, { now: later(20) }, 'task', 'touch', '--all', '--session', 's1', '--json'));
   assert.equal(answer.ok, true);
   assert.deepEqual([...(answer.touched as string[])].sort(), ['fix-login', 'other']);
   assert.equal(claimOf(file), claimLine('s1', T0, later(20)));
   assert.equal(claimOf(other), claimLine('s1', T0, later(20)));
-  assert.deepEqual([readFileSync(third, 'utf8'), readFileSync(unclaimed, 'utf8')], untouched);
+  assert.deepEqual([readLedgerFile(third), readLedgerFile(unclaimed)], untouched);
 });
 
 test('touch --all prints one touched <slug> line per claim it marked, and nothing when it marked none', (t) => {
@@ -225,13 +225,13 @@ test('touch --all for a session that holds no claim touches nothing', (t) => {
 
 test('release --all removes every claim of this session in the repo, and leaves the claims of other sessions', (t) => {
   const { h, app, file, other, third, unclaimed } = claimedBySessions(t);
-  const untouched = [readFileSync(third, 'utf8'), readFileSync(unclaimed, 'utf8')];
+  const untouched = [readLedgerFile(third), readLedgerFile(unclaimed)];
   const answer = json(run(h, app, { now: later(5) }, 'task', 'release', '--all', '--session', 's1', '--json'));
   assert.equal(answer.ok, true);
   assert.deepEqual([...(answer.released as string[])].sort(), ['fix-login', 'other']);
   assert.equal(claimOf(file), undefined);
   assert.equal(claimOf(other), undefined);
-  assert.deepEqual([readFileSync(third, 'utf8'), readFileSync(unclaimed, 'utf8')], untouched);
+  assert.deepEqual([readLedgerFile(third), readLedgerFile(unclaimed)], untouched);
 });
 
 test('release --all removes expired claims of this session too, and prints one released <slug> line each', (t) => {
@@ -250,38 +250,34 @@ test('release --all for a session that holds no claim releases nothing and print
 
 test('--all with a slug is a usage error: exit 2, and no claim changes', (t) => {
   const { h, app, file, other } = claimedBySessions(t);
-  const before = [readFileSync(file, 'utf8'), readFileSync(other, 'utf8')];
+  const before = [readLedgerFile(file), readLedgerFile(other)];
   for (const command of ['touch', 'release']) {
     const ran = exits(run(h, app, { now: later(20) }, 'task', command, 'fix-login', '--all', '--session', 's1'), 2);
     assert.match(ran.stderr, /--all/, command);
   }
-  assert.deepEqual([readFileSync(file, 'utf8'), readFileSync(other, 'utf8')], before);
+  assert.deepEqual([readLedgerFile(file), readLedgerFile(other)], before);
 });
 
 test('--all needs a session too: with none it exits 2 and changes nothing', (t) => {
   const { h, app, file } = claimedBySessions(t);
-  const before = readFileSync(file, 'utf8');
+  const before = readLedgerFile(file);
   for (const command of ['touch', 'release']) exits(run(h, app, { now: later(20) }, 'task', command, '--all'), 2);
-  assert.equal(readFileSync(file, 'utf8'), before);
+  assert.equal(readLedgerFile(file), before);
 });
 
 type Broken = ReturnType<typeof setup> & { broken: string; good: string };
 
 /**
- * fix-login, m-broken and z-good claimed by s1, while m-broken's ledger folder takes no writes, so no lock or claim can
- * be written there. The folder is made writable again before the home folder is removed.
+ * fix-login, m-broken and z-good claimed by s1, while m-broken's lock is a folder, which no command can take, so no claim
+ * can be written to its record. The records share one folder, so taking writes from that folder would break all three.
  */
 function withOneBrokenBetweenTwo(t: TestContext, check: (repo: Broken) => void): void {
   const repo = setup(t);
   const broken = worktreeTask(repo.h, repo.app, { slug: 'm-broken' });
   const good = worktreeTask(repo.h, repo.app, { slug: 'z-good' });
   for (const file of [repo.file, broken, good]) withClaim(file, claimLine('s1', T0, T0));
-  chmodSync(path.dirname(broken), 0o555);
-  try {
-    check({ ...repo, broken, good });
-  } finally {
-    chmodSync(path.dirname(broken), 0o755);
-  }
+  mkdirSync(`${broken}.lock`);
+  check({ ...repo, broken, good });
 }
 
 for (const [command, key, at] of [
@@ -315,13 +311,13 @@ test('park removes the claim, whichever session holds it', (t) => {
   withClaim(file, claimLine('s1', T0, T0));
   exits(run(h, app, { now: later(1), session: 's2' }, 'task', 'park', 'fix-login', '--reason', 'waiting'), 0);
   assert.equal(claimOf(file), undefined);
-  assert.match(readFileSync(file, 'utf8'), /^Parked: /m);
+  assert.match(readLedgerFile(file), /^Parked: /m);
 });
 
 test('retire removes the claim, whichever session holds it: the archive copy has none', (t) => {
   const { h, app, file, worktree } = setup(t);
   withClaim(file, claimLine('s1', T0, T0));
-  const expected = readFileSync(file, 'utf8').replace(`${claimLine('s1', T0, T0)}\n`, '');
+  const expected = readLedgerFile(file).replace(`${claimLine('s1', T0, T0)}\n`, '');
   exits(run(h, worktree, { now: later(1), session: 's2' }, 'task', 'retire'), 0);
   const [copy] = readdirSync(storeFolder(h, 'ledger-archive', app));
   assert.equal(readLedgerFile(path.join(storeFolder(h, 'ledger-archive', app), copy)), expected);
@@ -330,9 +326,9 @@ test('retire removes the claim, whichever session holds it: the archive copy has
 
 test('go to a task another session holds live exits 3 with the holder, and changes nothing; --json adds "held"', (t) => {
   const { h, app, file } = setup(t);
-  writeFileSync(file, readFileSync(file, 'utf8').replace('## Next step\n', '## Next step\nParked: 2026-11-19 — waiting\n'));
+  writeLedgerFile(file, readLedgerFile(file).replace('## Next step\n', '## Next step\nParked: 2026-11-19 — waiting\n'));
   withClaim(file, claimLine('s1', T0, later(10)));
-  const text = readFileSync(file, 'utf8');
+  const text = readLedgerFile(file);
   for (const env of [{ session: 's2' }, {}]) {
     const ran = exits(run(h, app, { now: later(20), ...env }, 'go', 'fix-login'), 3);
     assert.match(ran.stdout + ran.stderr, new RegExp(`^held: session s1 since ${T0}, active ${later(10)}$`, 'm'));
@@ -341,16 +337,16 @@ test('go to a task another session holds live exits 3 with the holder, and chang
   const json = JSON.parse(exits(run(h, app, { now: later(20), session: 's2' }, 'go', 'fix-login', '--json'), 3).stdout);
   assert.equal(json.ok, false);
   assert.deepEqual(json.held, { session: 's1', since: T0, active: later(10) });
-  assert.equal(readFileSync(file, 'utf8'), text, 'go changed the ledger');
+  assert.equal(readLedgerFile(file), text, 'go changed the ledger');
 });
 
 test('go --take-over replaces the claim of the other session with its own and goes on as go does', (t) => {
   const { h, app, file } = setup(t);
-  writeFileSync(file, readFileSync(file, 'utf8').replace('## Next step\n', '## Next step\nParked: 2026-11-19 — waiting\n'));
+  writeLedgerFile(file, readLedgerFile(file).replace('## Next step\n', '## Next step\nParked: 2026-11-19 — waiting\n'));
   withClaim(file, claimLine('s1', T0, later(10)));
   exits(run(h, app, { now: later(20), session: 's2' }, 'go', 'fix-login', '--take-over'), 0);
   assert.equal(claimOf(file), claimLine('s2', later(20), later(20)));
-  assert.doesNotMatch(readFileSync(file, 'utf8'), /^Parked: /m);
+  assert.doesNotMatch(readLedgerFile(file), /^Parked: /m);
 });
 
 test('go --take-over says whose claim it took over, in its output and as "tookOverFrom" in --json', (t) => {
@@ -358,7 +354,7 @@ test('go --take-over says whose claim it took over, in its output and as "tookOv
   withClaim(file, claimLine('s1', T0, later(10)));
   const ran = exits(run(h, app, { now: later(20), session: 's2' }, 'go', 'fix-login', '--take-over'), 0);
   assert.match(ran.stdout, /^claim {4}took over from session s1$/m);
-  writeFileSync(file, readFileSync(file, 'utf8').replace(CLAIM_LINE, claimLine('s1', T0, later(10))));
+  writeLedgerFile(file, readLedgerFile(file).replace(CLAIM_LINE, claimLine('s1', T0, later(10))));
   const json = JSON.parse(exits(run(h, app, { now: later(20), session: 's2' }, 'go', 'fix-login', '--take-over', '--json'), 0).stdout);
   assert.deepEqual(json.tookOverFrom, { session: 's1', since: T0, active: later(10) });
 });
@@ -371,7 +367,7 @@ test('go with a session claims nothing for a task of another repo than the one i
   assert.equal(claimOf(file), undefined);
   assert.match(ran.stdout, /^claim {4}not claimed: /m);
   const json = JSON.parse(exits(run(h, h, { now: T0, session: 's1' }, 'go', 'next-up', '--repo', app, '--json'), 0).stdout);
-  assert.equal(claimOf(path.join(app, '.claude/worktrees/next-up/.claude/ledger.md')), undefined);
+  assert.equal(claimOf(activeFile(h, app, 'next-up')), undefined);
   assert.match(json.unclaimed, /another repo/);
   const here = JSON.parse(exits(run(h, app, { now: T0, session: 's1' }, 'go', 'fix-login', '--json'), 0).stdout);
   assert.equal('unclaimed' in here, false);
@@ -413,9 +409,9 @@ test('go of a backlog task claims its new worktree ledger for the session, and c
   backlogTask(h, app, { slug: 'next-up' });
   backlogTask(h, app, { slug: 'unclaimed' });
   exits(run(h, app, { now: T0, session: 's1' }, 'go', 'next-up'), 0);
-  assert.equal(claimOf(path.join(app, '.claude/worktrees/next-up/.claude/ledger.md')), claimLine('s1', T0, T0));
+  assert.equal(claimOf(activeFile(h, app, 'next-up')), claimLine('s1', T0, T0));
   exits(run(h, app, { now: T0 }, 'go', 'unclaimed'), 0);
-  assert.equal(claimOf(path.join(app, '.claude/worktrees/unclaimed/.claude/ledger.md')), undefined);
+  assert.equal(claimOf(activeFile(h, app, 'unclaimed')), undefined);
 });
 
 test('claim --from hands a claim of that session over to this one, live or expired, and prints claimed <slug>', (t) => {
@@ -424,7 +420,7 @@ test('claim --from hands a claim of that session over to this one, live or expir
   const ran = exits(run(h, app, { now: later(20) }, 'task', 'claim', 'fix-login', '--session', 'new', '--from', 'old'), 0);
   assert.equal(ran.stdout, 'claimed fix-login\n');
   assert.equal(claimOf(file), claimLine('new', later(20), later(20)));
-  writeFileSync(file, readFileSync(file, 'utf8').replace(CLAIM_LINE, claimLine('old', T0, later(10))));
+  writeLedgerFile(file, readLedgerFile(file).replace(CLAIM_LINE, claimLine('old', T0, later(10))));
   exits(run(h, app, { now: later(500) }, 'task', 'claim', 'fix-login', '--session', 'new', '--from', 'old'), 0);
   assert.equal(claimOf(file), claimLine('new', later(500), later(500)));
 });
@@ -432,10 +428,10 @@ test('claim --from hands a claim of that session over to this one, live or expir
 test('claim --from refuses a live claim of a third session with exit 3, and writes nothing', (t) => {
   const { h, app, file } = setup(t);
   withClaim(file, claimLine('third', T0, later(10)));
-  const text = readFileSync(file, 'utf8');
+  const text = readLedgerFile(file);
   const ran = exits(run(h, app, { now: later(20) }, 'task', 'claim', 'fix-login', '--session', 'new', '--from', 'old'), 3);
   assert.match(ran.stdout + ran.stderr, new RegExp(`^held: session third since ${T0}, active ${later(10)}$`, 'm'));
-  assert.equal(readFileSync(file, 'utf8'), text);
+  assert.equal(readLedgerFile(file), text);
 });
 
 test('claim --from with no claim claims the task as claim does', (t) => {
@@ -465,13 +461,14 @@ test('session start adds one line for a ledger held live by another session; its
 });
 
 test('in the summary of several ledgers, the line follows the ledger it is about', (t) => {
-  const { h, app, file } = setup(t);
-  const other = worktreeTask(h, app, { slug: 'other' });
+  const { h, app, file, worktree } = setup(t);
+  worktreeTask(h, app, { slug: 'other' });
   withClaim(file, claimLine('s1', T0, later(10)));
   const context = sessionStart(h, app, later(20), 's2');
   const blocks = context.split('\n=== ').slice(1);
-  assert.deepEqual(blocks.map((block) => block.split('\n')[0]).sort(), [file, other].sort(), context);
+  const [heading, otherHeading] = [`fix-login in ${worktree}`, `other in ${worktreeOf(app, 'other')}`];
+  assert.deepEqual(blocks.map((block) => block.split('\n')[0]).sort(), [heading, otherHeading].sort(), context);
   const held = blocks.filter((block) => block.includes('Held by another session'));
-  assert.deepEqual(held.map((block) => block.split('\n')[0]), [file]);
+  assert.deepEqual(held.map((block) => block.split('\n')[0]), [heading]);
   assert.ok(held[0].includes(`\nHeld by another session: s1 since ${T0}, active ${later(10)}.\n`), held[0]);
 });

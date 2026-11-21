@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import {
@@ -60,7 +60,7 @@ function world(t: TestContext) {
   return { h, app, lib, files: { epic, live, parked, idea, libPart } };
 }
 
-type ListedTask = { slug: string; repo: string; main: string; status: string; path: string; branch: string; parent?: { slug: string; main: string }; updated: string; goal: string; next: string };
+type ListedTask = { slug: string; repo: string; main: string; status: string; worktree?: string; path?: string; branch: string; parent?: { slug: string; main: string }; updated: string; goal: string; next: string };
 type ShownChild = { slug: string; main: string; status: string; next: string; report: string[] };
 type Shown = { slug: string; main: string; goal: string; children: ShownChild[] };
 type RegistryEntry = { repo: string; slug: string; path: string; branch: string; parent?: string; parentMain?: string; status: string; main?: string; created: string; updated: string; archivePath?: string };
@@ -121,7 +121,8 @@ test('ledger list --json gives one object per live task, newest first', (t) => {
     tasks.map(({ slug, status }) => [slug, status]),
     [['epic', 'active'], ['live-child', 'active'], ['parked-child', 'parked'], ['idea', 'backlog'], ['lib-part', 'active']],
   );
-  assert.equal(bySlug.get('live-child')?.path, files.live);
+  assert.equal(bySlug.get('live-child')?.worktree, path.join(app, '.claude/worktrees/live-child'));
+  assert.equal(bySlug.get('live-child')?.path, undefined);
   assert.equal(bySlug.get('live-child')?.branch, 'me/live-child');
   assert.deepEqual(bySlug.get('live-child')?.parent, { slug: 'epic', main: app });
   assert.deepEqual(bySlug.get('lib-part')?.parent, { slug: 'epic', main: app });
@@ -155,7 +156,7 @@ test('ledger list puts each child task under its parent, marked ↳ and indented
   assert.equal(arrow('step-a'), arrow('step-b'));
 });
 
-test('without ~/.claude/ledgers.json, list finds the repos under ~/repos from any folder and rebuilds the registry', (t) => {
+test('without ~/.claude/ledgers.json, list finds the repos of the stored ledgers from any folder and rebuilds the registry', (t) => {
   const { h, app, files } = world(t);
   assert.equal(existsSync(registryFile(h)), false);
   assert.deepEqual(listJson(h, h).map(({ slug }) => slug), ['epic', 'live-child', 'parked-child', 'idea', 'lib-part']);
@@ -197,54 +198,22 @@ test('a stale registry is rebuilt from disk: a gone ledger is dropped, a new one
   assert.ok(entries.some(({ slug }) => slug === 'old-a'));
 });
 
-test('registry entries of a repo git cannot read are kept; a gone ledger in a readable repo is dropped', (t) => {
+test('the active entries of the registry are the active records: one with no record is dropped, also of a repo git cannot read', (t) => {
   const { h, app } = world(t);
   const plain = path.join(h, 'plain');
-  const plainLedger = path.join(plain, '.claude/worktrees/kept/.claude/ledger.md');
-  mkdirSync(path.dirname(plainLedger), { recursive: true });
-  writeFileSync(plainLedger, '# Task ledger — kept\n');
+  mkdirSync(plain);
   const created = '2020-01-01T00:00:00.000Z';
-  const unreadable: RegistryEntry[] = [
+  const stale: RegistryEntry[] = [
     { repo: 'gone', slug: 'on-a-disk', path: path.join(h, 'gone/.claude/worktrees/on-a-disk/.claude/ledger.md'), branch: 'me/on-a-disk', status: 'active', main: path.join(h, 'gone'), created, updated: created },
-    { repo: 'plain', slug: 'kept', path: plainLedger, branch: 'me/kept', status: 'active', main: plain, created, updated: created },
+    { repo: 'plain', slug: 'kept', path: path.join(plain, '.claude/worktrees/kept/.claude/ledger.md'), branch: 'me/kept', status: 'active', main: plain, created, updated: created },
     { repo: 'no-main', slug: 'old', path: path.join(h, 'unmounted/.claude/worktrees/old/.claude/ledger.md'), branch: 'me/old', status: 'active', created, updated: created },
+    { repo: 'app', slug: 'gone', path: path.join(app, '.claude/worktrees/gone/.claude/ledger.md'), branch: 'me/gone', status: 'active', main: app, created, updated: created },
   ];
-  const dropped: RegistryEntry = { repo: 'app', slug: 'gone', path: path.join(app, '.claude/worktrees/gone/.claude/ledger.md'), branch: 'me/gone', status: 'active', main: app, created, updated: created };
-  writeFileSync(registryFile(h), `${JSON.stringify([...unreadable, dropped], null, 2)}\n`);
+  writeFileSync(registryFile(h), `${JSON.stringify(stale, null, 2)}\n`);
   ok(ledger(h, app, 'list'));
   const entries = readRegistry(h);
-  for (const entry of unreadable) assert.deepEqual(entries.find(({ slug }) => slug === entry.slug), entry);
-  assert.equal(entries.find(({ slug }) => slug === 'gone'), undefined);
+  for (const { slug } of stale) assert.equal(entries.find((entry) => entry.slug === slug), undefined, slug);
   assert.ok(entries.some(({ slug }) => slug === 'epic'));
-});
-
-/** A ledger at <folder>/.claude/ledger.md in a folder that is not a git repository. */
-function plainFolderTask(folder: string, slug: string, next?: string): string {
-  const file = path.join(folder, '.claude/ledger.md');
-  mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, ledgerText({ slug, next }));
-  return file;
-}
-
-test('a ledger in a folder that is not a git repository stays in the list, once in the registry', (t) => {
-  const { h, app } = world(t);
-  const folder = path.join(h, 'work/disk-watcher');
-  const file = plainFolderTask(folder, 'disk-growth-scan');
-  const created = '2020-01-01T00:00:00.000Z';
-  const stored: RegistryEntry = { repo: 'disk-watcher', slug: 'disk-growth-scan', path: file, branch: '', status: 'active', created, updated: created };
-  writeFileSync(registryFile(h), `${JSON.stringify([stored], null, 2)}\n`);
-  const listed = listJson(h, app).find(({ slug }) => slug === 'disk-growth-scan');
-  assert.deepEqual(listed && [listed.repo, listed.status, listed.path], [folder, 'active', file]);
-  assert.match(lineWith(ok(ledger(h, app, 'list')), 'disk-growth-scan'), /^disk-watcher\s+disk-growth-scan\s+active\b/);
-  assert.equal(readRegistry(h).filter(({ path: entry }) => entry === file).length, 1);
-});
-
-test('without a registry, the scan finds a ledger in a folder under ~/repos that is not a git repository', (t) => {
-  const { h } = world(t);
-  const folder = path.join(h, 'repos/disk-watcher');
-  const file = plainFolderTask(folder, 'disk-growth-scan', 'Parked: 2026-11-10 — waiting\nScan again.');
-  const listed = listJson(h, h).find(({ slug }) => slug === 'disk-growth-scan');
-  assert.deepEqual(listed && [listed.repo, listed.status, listed.path, listed.next], [folder, 'parked', file, 'Scan again.']);
 });
 
 test('an unreadable registry is rebuilt from disk', (t) => {
@@ -403,21 +372,6 @@ test('a child with no ledger anywhere is missing, even when the parent marks it 
   const shown: Shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'epic', '--json')));
   assert.deepEqual(shown.children.map(({ slug, status }) => [slug, status]), [['lost', 'missing']]);
   assert.match(lineWith(ok(ledger(h, app, 'tree', 'show', 'epic')), 'lost'), /^lost +missing\b/);
-});
-
-test('a worktree whose .claude/ledger.md is a symbolic link to a file is a task: list, parent and retire find it', (t) => {
-  const h = home(t);
-  const app = repository(h, path.join(h, 'repos/app'));
-  const file = worktreeTask(h, app, { slug: 'epic', children: ['- part'] });
-  backlogTask(h, app, { slug: 'part', parent: 'epic' });
-  const target = path.join(h, 'elsewhere/epic-ledger.md');
-  mkdirSync(path.dirname(target), { recursive: true });
-  renameSync(file, target);
-  symlinkSync(target, file);
-  assert.deepEqual(listJson(h, app).filter(({ slug }) => slug === 'epic').map(({ path: listed }) => listed), [file]);
-  const shown: Shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'epic', '--json')));
-  assert.deepEqual(shown.children.map(({ slug, status }) => [slug, status]), [['part', 'backlog']]);
-  assert.match(ok(ledger(h, app, 'task', 'retire', 'epic', '--dry-run')), /^Retire epic · dry run/m);
 });
 
 test('a reused slug: an archive copy of another parent does not retire a live child', (t) => {

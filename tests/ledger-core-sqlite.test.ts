@@ -10,7 +10,7 @@ import { sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { shellWord } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
-import { cannotHideSqlite, home, LEDGER_BIN, ledger, ledgerIn, ledgerText, lineWith, noSqlite, noSqliteOn, ok, repoKeyOf, repository, storeFolder, withoutSqlite, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { cannotHideSqlite, git, home, LEDGER_BIN, ledger, ledgerIn, ledgerText, lineWith, noSqlite, noSqliteOn, ok, repoKeyOf, repository, storeFolder, withoutSqlite, worktreeOf, type Ran } from './ledger-core-fixtures.js';
 
 type Storage = 'file' | 'sqlite';
 
@@ -40,7 +40,7 @@ const keyOf = (h: string, name: string): string => repoKeyOf(path.join(h, 'repos
 function keptIn(h: string, storage: Storage): void {
   const claude = path.join(h, '.claude');
   if (storage === 'file') return assert.equal(existsSync(path.join(claude, 'ledgers.db')), false, 'the file store made ledgers.db');
-  for (const name of ['ledger-backlog', 'ledger-archive', 'ledgers.json']) assert.equal(existsSync(path.join(claude, name)), false, `the SQLite store made ~/.claude/${name}`);
+  for (const name of ['ledger-backlog', 'ledger-active', 'ledger-archive', 'ledgers.json']) assert.equal(existsSync(path.join(claude, name)), false, `the SQLite store made ~/.claude/${name}`);
   assert.ok(existsSync(path.join(claude, 'ledgers.db')), 'the SQLite store made no ~/.claude/ledgers.db');
 }
 
@@ -70,7 +70,7 @@ function failed(ran: Ran): string {
 /** The task fix-login started with `go`, given evidence, and retired with `retire`: its archive copy and evidence. */
 function retiredWithEvidence(t: TestContext, storage: Storage) {
   const world = setup(t, storage);
-  const { h, app } = world;
+  const { h, app, store } = world;
   ok(ledger(h, app, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.'));
   ok(ledger(h, app, 'go', 'fix-login'));
   const worktree = path.join(app, '.claude/worktrees/fix-login');
@@ -78,7 +78,7 @@ function retiredWithEvidence(t: TestContext, storage: Storage) {
   mkdirSync(path.join(evidence, 'logs'), { recursive: true });
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
   writeFileSync(path.join(evidence, 'logs/trace.bin'), BYTES);
-  const text = readFileSync(path.join(worktree, '.claude/ledger.md'), 'utf8');
+  const text = store().active.read(keyOf(h, 'app'), 'fix-login')?.text ?? assert.fail('fix-login has no active ledger');
   const stdout = ok(ledger(h, app, 'task', 'retire', 'fix-login'));
   return { ...world, worktree, text, stdout, name: `${today()}-fix-login` };
 }
@@ -92,12 +92,12 @@ for (const storage of ['file', 'sqlite'] as const) {
     assert.match(store().backlog.read(keyOf(h, 'app'), 'fix-login')?.text ?? '', /Users cannot log in\./);
   });
 
-  test(`${storage} store: ledger go moves the backlog ledger out of the store into the worktree's .claude/ledger.md`, { skip }, (t) => {
+  test(`${storage} store: ledger go moves the backlog ledger to an active ledger in the store`, { skip }, (t) => {
     const { h, app, store } = setup(t, storage);
     ok(ledger(h, app, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.'));
     ok(ledger(h, app, 'go', 'fix-login'));
     keptIn(h, storage);
-    assert.match(readFileSync(path.join(app, '.claude/worktrees/fix-login/.claude/ledger.md'), 'utf8'), /Users cannot log in\./);
+    assert.match(store().active.read(keyOf(h, 'app'), 'fix-login')?.text ?? '', /Users cannot log in\./);
     assert.equal(store().backlog.has(keyOf(h, 'app'), 'fix-login'), false);
   });
 
@@ -124,12 +124,13 @@ for (const storage of ['file', 'sqlite'] as const) {
   test(`${storage} store: ledger list shows backlog tasks from the store, and retired ones with --archived`, { skip }, (t) => {
     const { h, app, store } = retiredWithEvidence(t, storage);
     ok(ledger(h, app, 'task', 'new', 'idea', '--goal', 'An idea.'));
-    type Listed = { slug: string; status: string; path: string };
+    type Listed = { slug: string; status: string };
     const listed = (...args: string[]): Listed[] => (JSON.parse(ok(ledger(h, app, 'list', '--json', ...args))) as { tasks: Listed[] }).tasks;
     assert.deepEqual(
-      listed().map(({ slug, status, path: location }) => ({ slug, status, location })),
-      [{ slug: 'idea', status: 'backlog', location: store().backlog.location(keyOf(h, 'app'), 'idea') }],
+      listed().map(({ slug, status }) => ({ slug, status })),
+      [{ slug: 'idea', status: 'backlog' }],
     );
+    assert.equal(store().backlog.has(keyOf(h, 'app'), 'idea'), true);
     assert.deepEqual(listed('--archived').map(({ slug }) => slug).sort(), ['fix-login', 'idea']);
     assert.match(ok(ledger(h, app, 'list')), /idea/);
     keptIn(h, storage);
@@ -137,7 +138,9 @@ for (const storage of ['file', 'sqlite'] as const) {
 
   test(`${storage} store: the SessionStart hook names a backlog child and an archived child with the status the store gives them`, { skip }, (t) => {
     const { h, app, store } = setup(t, storage);
-    const epic = path.dirname(path.dirname(worktreeTask(h, app, { slug: 'epic', main: app, children: ['- idea', '- old'] })));
+    const epic = worktreeOf(app, 'epic');
+    git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/epic', epic, 'main');
+    store().active.write(keyOf(h, 'app'), 'epic', ledgerText({ slug: 'epic', main: app, worktree: epic, children: ['- idea', '- old'] }));
     ok(ledger(h, app, 'task', 'new', 'idea', '--goal', 'An idea.'));
     store().archive.write(keyOf(h, 'app'), '2026-10-01-old', ledgerText({ slug: 'old', main: app, worktree: path.join(app, '.claude/worktrees/old'), parent: 'epic' }));
     const input = JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup', cwd: epic });
@@ -157,11 +160,10 @@ for (const storage of ['file', 'sqlite'] as const) {
     ok(ledger(h, app, 'task', 'new', 'part', '--goal', 'Ship a part.'));
     ok(ledger(h, app, 'tree', 'add', 'epic', 'part'));
     ok(ledger(h, app, 'go', 'part'));
-    const file = path.join(app, '.claude/worktrees/part/.claude/ledger.md');
-    const text = readFileSync(file, 'utf8');
+    const text = store().active.read(keyOf(h, 'app'), 'part')?.text ?? assert.fail('part has no active ledger');
     const placeholder = '<3–5 lines for the parent task: outcome, PR link, what the parent must know>';
     assert.ok(text.includes(placeholder), text);
-    writeFileSync(file, text.replace(placeholder, report.join('\n')));
+    store().active.write(keyOf(h, 'app'), 'part', text.replace(placeholder, report.join('\n')));
     const ran = ledger(h, app, 'task', 'retire', 'part');
     assert.equal(ran.status, 0, ran.stderr);
     keptIn(h, storage);

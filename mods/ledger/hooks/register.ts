@@ -1,6 +1,6 @@
 import type { EngineInterface, PluginState, Register, ToolCallResult } from 'claude-code'
 
-import { ledgerBin, ledgerJson, ledgerSucceeded, ledgerText, LONG_TIMEOUT_MS, message, ownTask, readSession, type AutoPruned, type Claimed, type NextChild, type Parked, type RetirePlan, type Started } from './cli'
+import { ledgerBin, ledgerJson, ledgerSucceeded, ledgerText, LONG_TIMEOUT_MS, message, ownTask, readSession, type AutoPruned, type Claimed, type NextChild, type OwnTask, type Parked, type RetirePlan, type Started } from './cli'
 import {
   claimFailedMessage,
   CLEAR_POINT_OPTION,
@@ -44,7 +44,6 @@ import {
   type BranchFacts,
   type Switch,
   type GoFields,
-  type ListedTask,
 } from './ledger'
 
 type Armed = NonNullable<PluginState['ledger']['armed']>
@@ -83,12 +82,15 @@ const words = (args: string | undefined): string[] => (args ?? '').split(/\s+/).
 
 const basename = (folder: string): string => folder.slice(folder.lastIndexOf('/') + 1)
 
-const previousOf = ({ slug, path, main, parent }: ListedTask): PreviousTask => ({
+const previousOf = ({ slug, worktree, main, parent }: OwnTask): PreviousTask => ({
   slug,
-  ledger: path,
+  worktree,
   ...(main === undefined ? {} : { main }),
   ...(parent === undefined ? {} : { parent }),
 })
+
+/** The session's own task as `ledger notes --task` takes it, for the `ledger:` line of a command's markdown. */
+const ownName = ({ slug, main }: OwnTask, here: string | undefined): string => (main === undefined ? slug : taskName({ slug, main }, here))
 
 /** The fields go.md reads from what `ledger go` did, each task named as the operator types it in the repo at `here`. */
 function goFields({ worktree, promoted, chain, parent, children = [], unparked, marked, warnings }: Started, here: string): GoFields {
@@ -140,11 +142,11 @@ async function startGo(
     let fields: GoFields
     if (started.ok) {
       if (started.main !== here) return { text: startedElsewhereMessage(started) }
-      arm = { mode: 'go', slug: started.slug, sessionId, ...(own === undefined || own.path === started.ledger ? {} : { previous: previousOf(own) }) }
+      arm = { mode: 'go', slug: started.slug, sessionId, ...(own === undefined || (own.slug === started.slug && own.main === started.main) ? {} : { previous: previousOf(own) }) }
       fields = goFields(started, here)
     } else if (started.held !== undefined) {
       await recordHeld($, sessionId, target)
-      return { heldArgs: goArgs(target, own?.path, { held: started.held }) }
+      return { heldArgs: goArgs(target, own && ownName(own, here), { held: started.held }) }
     } else if (started.exitCode === NO_SUCH_TASK && isNewSlug(target) && here !== undefined) {
       arm = { mode: 'go', slug: target, sessionId, isNew: true, main: here, ...(own === undefined ? {} : { previous: previousOf(own) }) }
       fields = { isNew: true }
@@ -154,7 +156,7 @@ async function startGo(
       return { text: startFailedMessage(target, started.error) }
     }
     await $.state.set(armed, arm)
-    return { target: arm.slug, fields, args: goArgs(arm.slug, own?.path, fields), arm }
+    return { target: arm.slug, fields, args: goArgs(arm.slug, own && ownName(own, here), fields), arm }
   } finally {
     switchStarting = undefined
   }
@@ -220,16 +222,16 @@ async function parkOther($: EngineInterface, slug: string, reason: string): Prom
 }
 
 /** `currentRepo` is the key `repo` is an alias of, for a ledger still filed under an old key. */
-type Listed = { tasks: { slug: string; repo: string; currentRepo?: string; main?: string; place?: string }[] }
+type Listed = { tasks: { slug: string; repo: string; currentRepo?: string; main?: string; host?: string }[] }
 
 /**
- * Whether the repo at `main` has a live task `slug`; with `remoteRepo`, the repo key of that repo, also one in a worktree
- * on another machine, which `ledger list` names by its repo key only. An error when `ledger list` failed.
+ * Whether the repo at `main` has a live task `slug`. With `remoteRepo`, the repo key of that repo, the key alone decides:
+ * one key is one repo in every clone, so the task's main may be another clone's, here or on another machine. An error
+ * when `ledger list` failed.
  */
 async function hasTask($: EngineInterface, slug: string, main: string, { remoteRepo }: { remoteRepo?: string } = {}): Promise<boolean | { error: string }> {
   const listed = await ledgerJson<Listed>($, ['list'])
-  const inRepo = (task: Listed['tasks'][number]): boolean =>
-    task.main === main || (remoteRepo !== undefined && task.place === 'remote' && (task.currentRepo ?? task.repo) === remoteRepo)
+  const inRepo = (task: Listed['tasks'][number]): boolean => (remoteRepo === undefined ? task.main === main : (task.currentRepo ?? task.repo) === remoteRepo)
   return listed.ok ? listed.tasks.some(task => task.slug === slug && inRepo(task)) : { error: listed.error }
 }
 
@@ -247,7 +249,7 @@ async function branchFacts($: EngineInterface, slug: string): Promise<BranchFact
  * run asks git and gh whether the branch is merged, which can take seconds.
  */
 async function showRetireHint($: EngineInterface, previous: PreviousTask, namesNextChild: boolean): Promise<void> {
-  const pruned = await ledgerJson<AutoPruned>($, ['worktrees', 'auto-prune', previous.ledger])
+  const pruned = await ledgerJson<AutoPruned>($, ['worktrees', 'auto-prune', previous.worktree])
   if (!pruned.ok) return
   if (pruned.message) await $.ui.log(pruned.message)
   if (!pruned.finished) return
@@ -353,22 +355,12 @@ async function releaseClaims($: EngineInterface, sessionId?: string): Promise<vo
 
 /** At a turn end that does not clear: the model may have just finished or reopened the task, which auto-prune acts on once. */
 async function finishTurn($: EngineInterface, clearPointTokens: number): Promise<void> {
-  await titleAndPrune($, clearPointTokens)
-  await mirrorLedgers($)
-}
-
-/** Any session may have changed a worktree ledger of this machine. A failed copy is no news for the operator: the next turn tries again. */
-async function mirrorLedgers($: EngineInterface): Promise<void> {
-  await ledgerText($, ['store', 'mirror', '--quiet'])
-}
-
-async function titleAndPrune($: EngineInterface, clearPointTokens: number): Promise<void> {
   const session = await readSession($)
   if (!session.ok) return
   if (session.title !== undefined) await titleSession($, session.title)
   const own = ownTask(session)
   if (own === undefined) return
-  const pruned = await ledgerJson<AutoPruned>($, ['worktrees', 'auto-prune', own.path])
+  const pruned = await ledgerJson<AutoPruned>($, ['worktrees', 'auto-prune', own.worktree])
   if (pruned.ok && pruned.message) await $.ui.log(pruned.message)
   if (!(pruned.ok && pruned.finished)) await markClearPoint($, clearPointTokens)
 }
@@ -499,7 +491,7 @@ export const register: Register = (on, options) => {
     if (own === undefined) return { text: noLedgerMessage(session.folder) }
     await $.state.set(armed, { mode: 'close', slug: own.slug })
     // Set here, so only this hook can tell close.md that there is no ledger.
-    return next({ ...e, args: `ledger: ${own.path}` })
+    return next({ ...e, args: `ledger: ${ownName(own, session.main)}` })
   }).catch(async ($, e, next) => {
     await $.state.set(armed, null)
     return next.called ? next(e) : { text: lookupFailedMessage(next.error.message ?? next.error.kind) }
@@ -600,7 +592,7 @@ export const register: Register = (on, options) => {
     if (session.removed) return { text: removedFolderMessage(session.folder) }
     if (own === undefined) return { text: noLedgerMessage(session.folder) }
     await $.state.set(armed, { mode: 'park', slug: own.slug, reason })
-    return next({ ...e, args: parkArgs(own.slug, own.path, reason) })
+    return next({ ...e, args: parkArgs(own.slug, ownName(own, session.main), reason) })
   }).catch(async ($, e, next) => {
     await $.state.set(armed, null)
     return next.called ? next(e) : { text: lookupFailedMessage(next.error.message ?? next.error.kind) }
@@ -640,19 +632,19 @@ export const register: Register = (on, options) => {
     }
     await $.state.set(armed, null)
     if (e.reason !== 'answer') return next(e)
-    // After the model's turn, so its own edits to the ledger cannot move or drop the marker.
-    const parked = value.mode === 'park' ? await ledgerJson<Parked>($, ['task', 'park', value.slug, '--reason', value.reason]) : undefined
-    // Before the switch and after the marker, so the copy holds what this turn wrote whatever the switch does next.
-    await mirrorLedgers($)
-    if (parked !== undefined && !parked.ok) {
-      await $.ui.log(parkFailedMessage(value.slug, parked.error))
-      return next(e)
-    }
     // go.md creates the task only when the conversation shows what it is; without a ledger, `go <slug>` would find nothing.
     if (value.mode === 'go' && 'isNew' in value) {
       const made = await hasTask($, value.slug, value.main)
       if (made !== true) {
         await $.ui.log(made === false ? notCreatedMessage(value.slug) : notCheckedMessage(value.slug, made.error))
+        return next(e)
+      }
+    }
+    // After the model's turn, so its own edits to the ledger cannot move or drop the marker.
+    if (value.mode === 'park') {
+      const parked = await ledgerJson<Parked>($, ['task', 'park', value.slug, '--reason', value.reason])
+      if (!parked.ok) {
+        await $.ui.log(parkFailedMessage(value.slug, parked.error))
         return next(e)
       }
     }
