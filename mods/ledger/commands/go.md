@@ -12,6 +12,9 @@ $ARGUMENTS
 - `task:` is the slug of the task to switch to. Do not start that
   task in this session: the next session does.
 - `ledger:` is the absolute path of this session's task ledger, or `none`.
+- `held:`, when present, means another session holds a live claim on that
+  task: `session <id> since <time>, active <time>`. Nothing was started, and
+  the session does not clear.
 - `new:`, when present, means no task has the `task:` slug yet. Make it first,
   as the next section says.
 - `parked:`, when present, is the date and reason the task was parked. The
@@ -27,6 +30,20 @@ $ARGUMENTS
 - `marked:`, when present, is the ledger in which the hook just marked the task
   started under `## Children`.
 - Each `warning:` line says what the hook could not do.
+
+If there is a `held:` line, change no files and skip the rest of this command.
+Ask the operator with AskUserQuestion what to do. Name the task, the session
+that holds it, when it claimed the task and when it was last active. Give
+three options:
+
+1. "Take over", described as ending the other session's claim. If picked, run
+   `/ledger:go <task> --take-over`, where `<task>` is the `task:` value.
+2. "Pick another task". If picked, list this repo's tasks, ask which one to
+   continue, and run `/ledger:go` with the slug the operator picks.
+3. "Stop", described as changing nothing. If picked, say that nothing changed.
+
+Offer "Stop", not "Close": /ledger:close would write a ledger that the other
+session owns.
 
 If there is a `new:` line, make the task in this turn with these new-task
 steps, before anything else. Its ledger is not this session's ledger, so the

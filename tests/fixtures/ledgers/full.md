@@ -21,7 +21,7 @@ The store keeps its string API as an adapter.
 - stage: implement
 - order: 2
 - depends on: wf-command-groups, wf-repo-identity @ /repos/ledger
-- claim: session 42
+- claim: session 42 since 2026-11-20T10:00:00Z, active 2026-11-20T11:30:00Z
 - pr: https://github.com/chrfalch/ledger/pull/109
 - repo: github.com/chrfalch/ledger
 

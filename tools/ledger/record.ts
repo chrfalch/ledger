@@ -1,7 +1,7 @@
 // @ref LLP 0001#4-storage — D29: each task is one structured record; the Markdown is a view rendered from it.
 import { isDeepStrictEqual } from 'node:util';
 import { fail, Failure } from './failure.js';
-import { findSection, isParkedMarker, parseLedger, parseRef, plainLine, titleText, type ChildMark, type Section, type TaskRef } from './format.js';
+import { claimText, findSection, isClaimTime, isParkedMarker, parseClaim, parseLedger, parseRef, plainLine, titleText, type ChildMark, type Claim, type Section, type TaskRef } from './format.js';
 
 export type Step = { n: string; step: string; status: string; owner: string; note: string };
 export type Decision = { text: string; reason?: string; tag?: string; date?: string };
@@ -27,7 +27,7 @@ export type TaskRecord = {
   parent?: TaskRef;
   order?: number;
   dependencies?: TaskRef[];
-  claim?: string;
+  claim?: Claim;
   pr?: string;
   repo?: string;
   worktree?: string;
@@ -187,7 +187,7 @@ const BULLETS: Bullet[] = [
   bullet('stage', 'stage', asText, asText),
   bullet('order', 'order', (value) => (/^(0|[1-9]\d*)$/.test(value) ? Number(value) : undefined), String),
   bullet('depends on', 'dependencies', (value) => listOf(value, parseRef), (refs) => refs.map(showRef).join(', ')),
-  bullet('claim', 'claim', asText, asText),
+  bullet('claim', 'claim', parseClaim, claimText),
   bullet('pr', 'pr', asText, asText),
   bullet('repo', 'repo', asText, asText),
 ];
@@ -486,6 +486,7 @@ const isText = passes((value) => typeof value === 'string', 'is not a string');
 const isWhole = passes(Number.isInteger, 'is not a whole number');
 const isTrue = passes((value) => value === true, 'is not true');
 const isTime = passes((value) => typeof value === 'string' && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value, 'is not a time such as 2026-11-20T12:00:00.000Z');
+const isClaimStamp = passes((value) => typeof value === 'string' && isClaimTime(value), 'is not a time such as 2026-11-20T10:00:00Z');
 const isOne = (...allowed: unknown[]): Check => passes((value) => allowed.includes(value), `is not ${allowed.map((each) => JSON.stringify(each)).join(' or ')}`);
 const listOfChecks = (item: Check): Check => (value, where) => {
   if (!Array.isArray(value)) return invalid(where, 'is not a list');
@@ -523,7 +524,8 @@ const isRecord = shape(
     next: isText,
   },
   {
-    ...Object.fromEntries((['title', 'kind', 'state', 'stage', 'claim', 'pr', 'repo', 'worktree', 'branch', 'main'] as const).map((key) => [key, isText])),
+    ...Object.fromEntries((['title', 'kind', 'state', 'stage', 'pr', 'repo', 'worktree', 'branch', 'main'] as const).map((key) => [key, isText])),
+    claim: shape({ session: isText, since: isClaimStamp, active: isClaimStamp }),
     parent: isRef,
     order: isWhole,
     dependencies: listOfChecks(isRef),

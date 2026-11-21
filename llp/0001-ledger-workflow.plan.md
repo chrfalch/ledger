@@ -212,12 +212,29 @@ D16). The tool reads its state from the store like any other task.
 
 ### 5.4 Claims
 
-A task is claimed by one session when the session starts work on it. Another
-session that tries to start the same task gets a warning and a choice: take
-over, or pick another task. The claim ends at close, park or retire.
+A task is claimed by one session when the session starts work on it: at the
+`go <slug>` prompt that starts each session in a task. Another session that
+tries to start the same task gets a warning and a question with three
+options:
+
+- **Take over** ends the other session's claim, and this session continues
+  the task.
+- **Pick another task** lists the repo's tasks and asks which one to continue.
+- **Stop** changes nothing.
+
+The model may take over only the held task, right after the operator picks
+"Take over" for it. The claim ends at close, park, retire and session end.
+
+The claim is a line under `## Location` in the task's ledger:
+`- claim: session <id> since <iso>, active <iso>`. The claim is taken once,
+at `go <slug>`. After that, each finished turn counts as activity and
+refreshes the `active` time, at most every 15 minutes. Claiming the task
+again as its owner also refreshes it. Activity and release act on every claim
+the session holds in the repo, however it took each one.
 
 **Expiry (D17).** A claim whose session shows no activity for a set time ends
-by itself. The time is a setting, with a default of two hours. A later session
+by itself. The time is the setting `claimExpiryMinutes` in
+`~/.claude/ledger-settings.json`, with a default of two hours. A later session
 then takes the task with no warning. This covers a session that crashed or was
 closed without `/ledger:close`.
 

@@ -1,9 +1,10 @@
 import { statSync, type Stats } from 'node:fs';
 import path from 'node:path';
+import { claimClock, otherClaim, type ClaimClock } from './claims.js';
 import { limitCloneGitCalls } from './clone.js';
 import { folderEntries } from './files.js';
 import { logHookFailure, markHookFailuresReported, unreportedHookFailures } from './hook-failures.js';
-import { findSection, serializeLedger, type Child, type Ledger, type TaskRef } from './format.js';
+import { findSection, serializeLedger, type Child, type Claim, type Ledger, type TaskRef } from './format.js';
 import { checkoutRoot, gitTimedOut, inMainCheckout, limitGitCalls, mainCheckout } from './git.js';
 import { limitLockWaits } from './lock.js';
 import { conversionHint } from './migrate-repo-ids.js';
@@ -23,7 +24,7 @@ export const HOOK_EVENTS = ['session-start', 'prompt-submit', 'pre-compact', 'pr
 export type HookEvent = (typeof HOOK_EVENTS)[number];
 
 /** The fields of Claude Code's hook input that the hooks read; a missing or mistyped field is empty. */
-export type HookInput = { cwd: string; prompt: string; sessionTitle: string; toolName: string; toolInput: Record<string, unknown> };
+export type HookInput = { cwd: string; sessionId: string; prompt: string; sessionTitle: string; toolName: string; toolInput: Record<string, unknown> };
 
 type HookOutput<Event extends string, Fields> = { hookSpecificOutput: { hookEventName: Event } & Fields };
 export type SessionStartOutput = HookOutput<'SessionStart', { additionalContext: string; sessionTitle?: string }>;
@@ -38,6 +39,7 @@ export function parseHookInput(json: string): HookInput {
   if (!isRecord(input)) throw new Error('the hook input is not a JSON object');
   return {
     cwd: text(input.cwd),
+    sessionId: text(input.session_id),
     prompt: text(input.prompt),
     sessionTitle: text(input.session_title),
     toolName: text(input.tool_name),
@@ -150,14 +152,21 @@ function summary({ lines, sections }: Ledger): string {
   return [...body('Goal'), ...body('Next step')].map((line) => `${line}\n`).join('');
 }
 
-/** The SessionStart context for one or more ledgers. `tasks` are all known tasks, for the parent and child statuses. */
-export function sessionStartText({ tasks: ledgers }: SessionLedgers, tasks: Task[]): string {
-  const relations = (task: Task): string => relationLines(task, tasks).map((line) => `${line}\n`).join('');
+/**
+ * The SessionStart context for one or more ledgers. `tasks` are all known tasks, for the parent and child statuses.
+ * `heldElsewhere` gives the live claim of another session on a ledger.
+ */
+export function sessionStartText({ tasks: ledgers }: SessionLedgers, tasks: Task[], heldElsewhere: (task: Task) => Claim | undefined): string {
+  const lead = (task: Task): string => {
+    const held = heldElsewhere(task);
+    const heldLine = held === undefined ? [] : [`Held by another session: ${held.session} since ${held.since}, active ${held.active}.`];
+    return [...relationLines(task, tasks), ...heldLine].map((line) => `${line}\n`).join('');
+  };
   if (ledgers.length === 1) {
     const [task] = ledgers;
-    return `A task ledger exists at ${task.file}. Contents follow. If it has open steps, continue from Next step without re-verifying finished steps.\n${relations(task)}\n${serializeLedger(task.ledger)}`;
+    return `A task ledger exists at ${task.file}. Contents follow. If it has open steps, continue from Next step without re-verifying finished steps.\n${lead(task)}\n${serializeLedger(task.ledger)}`;
   }
-  const summaries = ledgers.map((task) => `\n=== ${task.file}\n${relations(task)}${summary(task.ledger)}`).join('');
+  const summaries = ledgers.map((task) => `\n=== ${task.file}\n${lead(task)}${summary(task.ledger)}`).join('');
   return `${ledgers.length} task ledgers exist. Summary of each follows. If asked what we are working on, answer from this. Before continuing one, ask which, then read its full ledger.\n${summaries}`;
 }
 
@@ -187,7 +196,10 @@ function sessionLedgerContext(input: HookInput, context: HookContext, deadline: 
   const found = sessionLedgers(folderOf(input, context));
   if (found.tasks.length === 0) return { hint, text: notice };
   const mains = found.tasks.flatMap(({ main, ledger: { location, children } }) => [main, location.parent?.main, ...children.map((child) => child.main)].filter((known) => known !== undefined));
-  const ledgers = sessionStartText(found, tasksOnDisk(context, mains));
+  let clock: ClaimClock | undefined;
+  const heldElsewhere = ({ ledger: { location } }: Task): Claim | undefined =>
+    location.claim && otherClaim(location.claim, input.sessionId || undefined, (clock ??= claimClock(context.paths.home)));
+  const ledgers = sessionStartText(found, tasksOnDisk(context, mains), heldElsewhere);
   return { hint, text: notice === undefined ? ledgers : `${notice}\n${ledgers}`, title: sessionTitle(found) };
 }
 

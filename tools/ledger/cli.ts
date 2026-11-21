@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { claimResultText, claimTask, Held, knownSession, releaseAll, releaseTask, requiredSession, touchAll, touchTask, type AllResult } from './claims.js';
 import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
 import { planProgress } from './format.js';
@@ -215,6 +216,15 @@ function deploy(args: string[]): number {
 }
 
 const JSON_HELP = 'print one JSON object: {"ok":true,...} or {"ok":false,"error":"..."}';
+const sessionOption = (): Option => new Option('--session <id>', 'the Claude Code session; by default $CLAUDE_CODE_SESSION_ID');
+const ACTIVE_SLUG = 'the active task in this repo, or <slug>@<path> for the repo at <path>; by default the task of the worktree you are in';
+
+type ClaimsOptions = { session?: string; all?: boolean };
+
+function sessionForAll(slug: string | undefined, session: string | undefined): string {
+  if (slug !== undefined) fail(`--all acts on every active task of this repo, so it takes no slug: drop ${slug} or --all.`, 2);
+  return requiredSession(session);
+}
 
 /** Runs the `ledger` command line `argv`, without the node and script paths, and returns its exit code. */
 export async function main(argv: string[]): Promise<number> {
@@ -246,18 +256,30 @@ export async function main(argv: string[]): Promise<number> {
     console.log(text);
     if (failed) exitCode = 1;
   };
+  /** The tasks a `--all` touch or release changed, which stay changed when another task failed; then the failures, with exit 1. */
+  const printAll = (key: 'touched' | 'released', { changed, failures }: AllResult): void => {
+    const error = failures.length === 0 ? undefined : failures.join('\n');
+    if (json) printJson({ [key]: changed }, error);
+    else {
+      print(changed.map((slug) => `${key} ${slug}`).join('\n'));
+      if (error !== undefined) console.error(error);
+    }
+    if (error !== undefined) exitCode = 1;
+  };
 
   // Shared by `ledger task <name>` and its short form `ledger <name>`, so the two cannot drift apart.
   const goCommand = (command: Command): Command =>
     command
       .description(
-        "Start a task: a parent starts its first child still in the backlog; a backlog task gets its worktree and branch, and its ledger moves there; a task with a worktree is only gone to. Then its parked mark is removed and its parent marks it started. The branch starts at the ledger's \"- base:\" when it names one, else at the default branch.",
+        "Start a task: a parent starts its first child still in the backlog; a backlog task gets its worktree and branch, and its ledger moves there; a task with a worktree is only gone to. Then its parked mark is removed and its parent marks it started. The branch starts at the ledger's \"- base:\" when it names one, else at the default branch. A task another session holds a live claim on exits 3, with nothing changed, unless --take-over.",
       )
       .argument('<slug>', 'the task')
       .option('--repo <path>', 'start the task of the repo that holds <path>')
+      .addOption(sessionOption())
+      .option('--take-over', "remove another session's live claim and go on; `ledger task claim` in the new session claims the task")
       .option('--json', JSON_HELP)
-      .action((slug: string, { repo }: { repo?: string }) => {
-        const started = goTask(context, slug, repo);
+      .action((slug: string, { repo, session, takeOver = false }: { repo?: string; session?: string; takeOver?: boolean }) => {
+        const started = goTask(context, slug, repo, { session: knownSession(session), takeOver });
         warn(started.warnings);
         if (json) printJson(realMains(started));
         else print(goText(context, started));
@@ -297,7 +319,7 @@ export async function main(argv: string[]): Promise<number> {
       });
 
   const program = new Command('ledger').description('Read and change the task ledgers on this machine.').enablePositionalOptions().exitOverride();
-  const taskGroup = program.command('task').description('Make, start, park, retire and read tasks.');
+  const taskGroup = program.command('task').description('Make, start, claim, park, retire and read tasks.');
   taskGroup
     .command('new')
     .description('Write a backlog ledger for a new task, from ~/.claude/ledger.template.md. /ledger:go <slug> starts it.')
@@ -311,8 +333,42 @@ export async function main(argv: string[]): Promise<number> {
     .action((slug: string | undefined, options: TaskOptions) => show(createTask(context, slug, options), createdText));
   goCommand(taskGroup.command('go'));
   taskGroup
+    .command('claim')
+    .description(
+      'Mark an active task as worked on by this session: a "- claim:" line under ## Location. A claim with no activity for "claimExpiryMinutes" in ~/.claude/ledger-settings.json, 120 by default, has expired. Exits 3, with nothing changed, while another session holds a live claim.',
+    )
+    .argument('[slug]', ACTIVE_SLUG)
+    .addOption(sessionOption())
+    .option('--take-over', 'take the claim over from the session that holds it')
+    .option('--json', JSON_HELP)
+    .action((slug: string | undefined, { session, takeOver = false }: { session?: string; takeOver?: boolean }) =>
+      show(claimTask(context, slug, requiredSession(session), { takeOver }), claimResultText),
+    );
+  taskGroup
+    .command('touch')
+    .description("Mark this session's live claim on a task active now, once it was last marked 15 minutes ago or more. Any other claim, or none, stays as it is.")
+    .argument('[slug]', ACTIVE_SLUG)
+    .addOption(sessionOption())
+    .option('--all', 'mark every live claim of this session on an active task of this repo; prints one touched <slug> line each')
+    .option('--json', JSON_HELP)
+    .action((slug: string | undefined, { session, all = false }: ClaimsOptions) => {
+      if (all) return printAll('touched', touchAll(context, sessionForAll(slug, session)));
+      show(touchTask(context, slug, requiredSession(session)), (result) => (result.touched ? `touched ${result.slug}` : ''));
+    });
+  taskGroup
+    .command('release')
+    .description("Remove this session's claim on a task, live or expired. Any other claim, or none, stays as it is.")
+    .argument('[slug]', ACTIVE_SLUG)
+    .addOption(sessionOption())
+    .option('--all', 'remove every claim of this session, live or expired, from the active tasks of this repo; prints one released <slug> line each')
+    .option('--json', JSON_HELP)
+    .action((slug: string | undefined, { session, all = false }: ClaimsOptions) => {
+      if (all) return printAll('released', releaseAll(context, sessionForAll(slug, session)));
+      show(releaseTask(context, slug, requiredSession(session)), (result) => (result.released ? `released ${result.slug}` : 'not held by this session'));
+    });
+  taskGroup
     .command('park')
-    .description('Mark a task parked: a "Parked: <date> — <reason>" line first under ## Next step.')
+    .description('Mark a task parked: a "Parked: <date> — <reason>" line first under ## Next step. Its claim is removed.')
     .argument('<slug>', 'the task in this repo, or <slug>@<path> for the repo at <path>')
     .requiredOption('--reason <text>', 'why the task waits')
     .option('--json', JSON_HELP)
@@ -707,7 +763,7 @@ export async function main(argv: string[]): Promise<number> {
       return error.exitCode;
     }
     if (error instanceof Failure) {
-      if (json) printJson({}, error.message);
+      if (json) printJson(error instanceof Held ? { held: error.held } : {}, error.message);
       else console.error(error.message);
       return error.exitCode;
     }

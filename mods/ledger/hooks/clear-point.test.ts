@@ -153,7 +153,8 @@ for (const clearPointTokens of [0, -1]) {
 }
 
 test('a new session starts again at clearPointTokens, and drops an offer the old one had not delivered', EVERY_100, async ($, on) => {
-  const w = world(on, OWN_EPIC, { cwd: CWD })
+  const claimed = done({ slug: 'epic', ledger: EPIC, claim: { session: 'session-2', since: '2026-11-20T10:00:00Z', active: '2026-11-20T10:00:00Z' } })
+  const w = world(on, { ...OWN_EPIC, 'task claim epic --session session-2 --json': claimed }, { cwd: CWD })
 
   w.useContext(150)
   await $.turn.complete(turnEnd)

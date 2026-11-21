@@ -48,8 +48,11 @@ export const removedSession = (folder: string): Reply => done({ folder, removed:
 
 export type Call = { args: string[]; cwd?: string; timeoutMs?: number }
 
-/** An engine call `world` can make throw: a command's markdown, the Skill tool, /clear, /rename, a prompt submit, a write of the clear-point pick or a usage read. */
-export type Breakable = 'markdown' | 'skill' | 'clear' | 'rename' | 'submit' | 'approval' | 'usage' | 'offer'
+/**
+ * An engine call `world` can make throw: a command's markdown, the Skill tool, /clear, /rename, a prompt submit, a write of
+ * the clear-point pick or of the take-over pick, or a usage read.
+ */
+export type Breakable = 'markdown' | 'skill' | 'clear' | 'rename' | 'submit' | 'approval' | 'takeOver' | 'usage' | 'offer'
 
 /**
  * `replies` are keyed by the arguments after bin/ledger, joined by spaces. Any other program, and any arguments with no
@@ -58,6 +61,7 @@ export type Breakable = 'markdown' | 'skill' | 'clear' | 'rename' | 'submit' | '
  */
 export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [] }: { cwd: string; missing?: string[] }) {
   const calls: Call[] = []
+  const callsBeforeClear: number[] = []
   const others: string[][] = []
   const events: string[] = []
   const armed: unknown[] = []
@@ -102,6 +106,7 @@ export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [
   on('state.set', async (_, e, next) => {
     // A state.set hook that throws is skipped and the write still lands; a deny is what fails it.
     if (e.plugin === 'ledger' && e.key === 'clearApproved' && takeBreak('approval')) return { deny: 'approval broke' }
+    if (e.plugin === 'ledger' && e.key === 'takeOverApproved' && takeBreak('takeOver')) return { deny: 'take-over broke' }
     if (e.plugin === 'ledger' && e.key === 'clearPoint' && takeBreak('offer')) return { deny: 'offer broke' }
     if (e.plugin === 'ledger' && e.key === 'armed' && e.value !== null) armed.push(e.value)
     return next(e)
@@ -127,6 +132,7 @@ export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [
   on('command.run', { command: 'clear' }, async () => {
     breakIfBroken('clear')
     events.push('clear')
+    callsBeforeClear.push(calls.length)
     return { text: '' }
   })
   on('command.run', { command: 'rename' }, async (_, e) => {
@@ -145,9 +151,12 @@ export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [
     return { value: undefined }
   })
   on('turn.complete', async () => ({ text: '' }))
+  on('session.end', async (_, e) => ({ sessionId: e.sessionId }))
 
   return {
     calls,
+    /** For each /clear, how many bin/ledger calls ran before it. */
+    callsBeforeClear,
     /** Each call as the argument list after bin/ledger. */
     argvs: () => calls.map(({ args }) => args),
     others,

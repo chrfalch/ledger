@@ -335,6 +335,16 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.deepEqual(store.archive.markdownNames?.('app'), []);
   });
 
+  test(`${name}: a claim reads back as written, in the backlog and in the archive`, { skip }, (t) => {
+    const store = makeStore(t);
+    const claimed = text('claimed').replace('- design refs: none\n', '- design refs: none\n- claim: session s-1 since 2026-11-20T10:00:00Z, active 2026-11-20T10:20:00Z\n');
+    store.backlog.write('app', 'claimed', claimed);
+    store.archive.write('app', '2026-11-01-claimed', claimed);
+    for (const read of [store.backlog.read('app', 'claimed'), store.archive.read('app', '2026-11-01-claimed')]) {
+      assert.deepEqual(parseRecord(read?.text ?? '').claim, { session: 's-1', since: '2026-11-20T10:00:00Z', active: '2026-11-20T10:20:00Z' });
+    }
+  });
+
   test(`${name}: a ledger kept as Markdown from before records reads as its record, rendered, and lists with the records`, { skip }, (t) => {
     const h = home(t);
     const store = open(h);
@@ -1024,6 +1034,13 @@ test('file store: a list skips what is not a .md file, such as an evidence folde
   writeFileSync(path.join(h, '.claude/ledger-archive/stray.md'), 'not in a repo folder');
   assert.deepEqual(store.archive.list('app').map(({ name }) => name), ['2026-11-01-fix-login']);
   assert.deepEqual(store.archive.repos(), ['app']);
+});
+
+test('file store: a claim is kept in the task record as an object of its session, since and active times', (t) => {
+  const { store } = fileHome(t);
+  store.backlog.write('app', 'claimed', text('claimed').replace('- design refs: none\n', '- design refs: none\n- claim: session s-1 since 2026-11-20T10:00:00Z, active 2026-11-20T10:20:00Z\n'));
+  const record = JSON.parse(readFileSync(store.backlog.location('app', 'claimed'), 'utf8'));
+  assert.deepEqual(record.claim, { session: 's-1', since: '2026-11-20T10:00:00Z', active: '2026-11-20T10:20:00Z' });
 });
 
 test('file store: a folder named <name>.md is no ledger: has, read and list all leave it out', (t) => {

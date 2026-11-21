@@ -14,12 +14,16 @@ export type TaskRef = { slug: string; main?: string };
 /** `start` is the heading line; `end` is the next heading line, or the line count. */
 export type Section = { heading: string; start: number; end: number };
 
+/** `since` and `active` are UTC times to the second, as 2026-11-20T10:00:00Z. */
+export type Claim = { session: string; since: string; active: string };
+
 export type Location = {
   worktree?: string;
   branch?: string;
   base?: { ref: string; commit?: string };
   main?: string;
   parent?: TaskRef & { line: number };
+  claim?: Claim;
 };
 
 export type ChildMark = { kind: 'retired' | 'started'; date: string };
@@ -52,6 +56,7 @@ const REF = /^([A-Za-z0-9._-]+)(?:[ \t]*@[ \t]*(\/\S*))?$/;
 const CHILD = /^- ([A-Za-z0-9._-]+)(?:[ \t]*@[ \t]*(\/\S*))?(?:[ \t]+(.*))?$/;
 const MARK = /^\((retired|started) (\d{4}-\d\d-\d\d)\b/;
 const PARKED = /^Parked:[ \t]*(\d{4}-\d{2}-\d{2})[ \t]*[—-][ \t]*(.*)$/;
+const CLAIM = /^session (\S+) since (\S+), active (\S+)$/;
 
 export const isPlaceholder = (text: string): boolean => /^<.*>$/.test(text);
 
@@ -63,6 +68,20 @@ export function parseRef(text: string): TaskRef | undefined {
   const [, slug, main] = REF.exec(text) ?? [];
   return slug === undefined ? undefined : { slug, ...(main === undefined ? {} : { main }) };
 }
+
+/** A UTC time to the second that names a real moment, such as 2026-11-20T10:00:00Z. */
+export function isClaimTime(text: string): boolean {
+  const time = Date.parse(text);
+  return /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(text) && !Number.isNaN(time) && new Date(time).toISOString() === text.replace('Z', '.000Z');
+}
+
+/** The value of a `- claim:` bullet, `session <id> since <time>, active <time>`; undefined for any other text. */
+export function parseClaim(text: string): Claim | undefined {
+  const [, session, since, active] = CLAIM.exec(text) ?? [];
+  return session !== undefined && isClaimTime(since) && isClaimTime(active) ? { session, since, active } : undefined;
+}
+
+export const claimText = ({ session, since, active }: Claim): string => `session ${session} since ${since}, active ${active}`;
 
 /** Whether `line` reads as the parked marker when it is the first text under ## Next step. */
 export const isParkedMarker = (line: string): boolean => PARKED.test(line.trim());
@@ -172,7 +191,7 @@ function parseLocation(plain: string[], range: number[]): Location {
     } else if (name === 'parent' && location.parent === undefined) {
       const [, slug, main] = REF.exec(value) ?? [];
       if (slug !== undefined) location.parent = { slug, ...(main === undefined ? {} : { main }), line: index };
-    }
+    } else if (name === 'claim') location.claim ??= parseClaim(value);
   }
   return location;
 }
