@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { lstatSync } from 'node:fs';
 import path from 'node:path';
 import { checkCommitted, cloneEnv, cloneGit, clonePaths, commitChanges, otherOwner, recordProblem, removeLegacyCopies, repairHook, setUpClone, SyncProblem, upgradeFormat, withCloneLock } from './clone.js';
-import { fail } from './failure.js';
+import { fail, Failure } from './failure.js';
 import { fileStoreAt, keptCreated } from './file-store.js';
 import { folderEntries } from './files.js';
 import { ledgerBin, type LedgerPaths } from './paths.js';
@@ -113,7 +113,9 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
           if (collection === 'active' && touched.some((repo) => otherOwner(clone, ledgerFiles(collection, repo, args[1])[0], { host, ownHosts: hosts }) !== undefined)) {
             try {
               commitWritten();
-            } catch {}
+            } catch (error) {
+              if (!(error instanceof Failure)) throw error;
+            }
           }
           return result;
         } catch (error) {
