@@ -17,6 +17,7 @@ import {
   mainCheckout,
   mergedPrHeads,
   originHead,
+  pruneWorktrees,
   removeLinkedWorktree,
 } from './git.js';
 import { ledgerBin, samePath } from './paths.js';
@@ -26,7 +27,7 @@ import { repoKey } from './repo-key.js';
 import type { Archive } from './store.js';
 import { findNamed, findTasks, inRepo, locateChild, namedChildren, sameTask, type Task } from './tasks.js';
 import { plural } from './views.js';
-import { below, deleteInBackground, linkAboveBuildFolders, xcodeFolderOf } from './worktrees.js';
+import { below, deleteInBackground, linkAboveBuildFolders, removedWorktreeXcodeFolder, xcodeFolderOf } from './worktrees.js';
 import { readLedger, shellWord, today, updateLedger, type Context } from './write.js';
 
 /** bin/ledger as one shell word, so the commands that messages name can be pasted as they are. */
@@ -55,6 +56,9 @@ export type EvidenceProblem =
 /** `evidence` is set when the folder holds anything. */
 export type WorktreeFacts = { folder: string; state: BranchState; evidence?: string; evidenceProblem?: EvidenceProblem; buildFolders: string[] };
 
+/** The worktree `folder` of the repo at `main`, which git removed while it still lists it, with the state of its branch. */
+export type RemovedWorktree = { main: string; folder: string; state: BranchState; buildFolders: string[] };
+
 /** Everything planRetire decides on, read from disk, git and gh. `worktree` is undefined for a backlog task. */
 export type RetireFacts = {
   task: Task;
@@ -67,10 +71,10 @@ export type RetireFacts = {
   /** Whether a copy or an evidence folder already uses the archive name. */
   archiveNameTaken: (name: string) => boolean;
   /**
-   * A retire that stopped after it removed the worktree: the record names a host of this machine, its worktree folder is
+   * A retire that stopped after git removed the worktree folder: the record names a host of this machine, the folder is
    * gone, and the archive holds the ledger. A rerun then finishes without --force; any other missing worktree needs it.
    */
-  worktreeRemoved?: true;
+  removedWorktree?: RemovedWorktree;
   /** An archive copy with the ledger's text, and whether removing the worktree would lose evidence it does not hold. */
   alreadyArchived?: { name: string; location: string; losesEvidence: boolean };
   archiveLocation: (name: string) => string;
@@ -95,6 +99,7 @@ export type RetireAction =
   | { kind: 'archive'; repo: string; name: string; location: string; evidenceLocation: string; text: string; evidence?: string }
   | { kind: 'already-archived'; repo: string; name: string; location: string }
   | { kind: 'remove-worktree'; main: string; folder: string; force: boolean }
+  | { kind: 'prune-worktrees'; main: string; folder: string }
   | { kind: 'remove-active'; repo: string; name: string; location: string }
   | { kind: 'remove-backlog'; repo: string; name: string; location: string }
   | { kind: 'mark-parent'; parent: Task; parentRef: Ref; child: Ref; childName: string }
@@ -189,7 +194,7 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
   const active = named('live');
   if (active.length > 0) blockers.push({ kind: 'children', names: active });
   for (const name of named('missing')) blockers.push({ kind: 'missing-child', name });
-  if (task.elsewhere && !facts.worktreeRemoved) blockers.push({ kind: 'elsewhere', ...(task.worktree === undefined ? {} : { worktree: task.worktree }) });
+  if (task.elsewhere && facts.removedWorktree === undefined) blockers.push({ kind: 'elsewhere', ...(task.worktree === undefined ? {} : { worktree: task.worktree }) });
   if (worktree !== undefined) {
     if (worktree.state.dirty > 0) blockers.push({ kind: 'dirty', count: worktree.state.dirty });
     if (!isMerged(worktree.state)) blockers.push({ kind: 'unmerged' });
@@ -218,8 +223,11 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
     });
   }
   const removal = { repo: task.repo, name: task.name, location: task.file };
+  const removed = facts.removedWorktree;
   actions.push(
-    ...(worktree === undefined
+    ...(removed !== undefined
+      ? [{ kind: 'prune-worktrees', main: removed.main, folder: removed.folder } as const, { kind: 'remove-active', ...removal } as const]
+      : worktree === undefined
       ? [{ kind: task.place === 'backlog' ? 'remove-backlog' : 'remove-active', ...removal } as const]
       : // The worktree first: one git cannot remove keeps the task, for a rerun to find by its active ledger.
         [{ kind: 'remove-worktree', main: ref.main, folder: worktree.folder, force } as const, { kind: 'remove-active', ...removal } as const]),
@@ -228,15 +236,16 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
   const hint = parent.filter(({ kind }) => kind === 'hint');
   actions.push(...parent.filter(({ kind }) => kind !== 'hint'));
   actions.push({ kind: 'update-registry' });
-  const state = worktree?.state;
+  const state = worktree?.state ?? removed?.state;
   if (state?.branch !== undefined) {
     actions.push(
       isMerged(state) && state.head !== undefined
-        ? { kind: 'delete-branch', main: ref.main, branch: state.branch, head: state.head }
+        ? { kind: 'delete-branch', main: removed?.main ?? ref.main, branch: state.branch, head: state.head }
         : { kind: 'keep-branch', branch: state.branch, reason: keptReason(state) },
     );
   }
-  if (worktree !== undefined && worktree.buildFolders.length > 0) actions.push({ kind: 'delete-build-folders', folders: worktree.buildFolders });
+  const buildFolders = worktree?.buildFolders ?? removed?.buildFolders ?? [];
+  if (buildFolders.length > 0) actions.push({ kind: 'delete-build-folders', folders: buildFolders });
   actions.push(...hint);
 
   const blocked = blockers.some((blocker) => !isForceable(blocker) || !force);
@@ -254,14 +263,17 @@ function defaultBranchOf(main: string, warnings: string[]): string {
 }
 
 function stateFacts(folder: string, main: string, warnings: string[]): BranchState {
-  const branch = currentBranch(folder);
-  const head = commitOf(folder, 'HEAD');
+  const changes = changedFiles(folder) ?? fail(`Could not read the state of ${folder}: git status failed.`);
+  return branchState(folder, main, currentBranch(folder), commitOf(folder, 'HEAD'), changes.length, warnings);
+}
+
+/** The state of `branch`, checked out at `head`, read in `folder`, a checkout of the repo at `main`, with `dirty` uncommitted changes. */
+function branchState(folder: string, main: string, branch: string | undefined, head: string | undefined, dirty: number, warnings: string[]): BranchState {
   const defaultBranch = defaultBranchOf(main, warnings);
   const fetchError = fetchBranch(main, 'origin', defaultBranch);
   if (fetchError !== undefined) warnings.push(`git fetch origin ${defaultBranch} failed, so origin/${defaultBranch} may be out of date: ${fetchError}`);
-  const ahead = commitsAhead(folder, `origin/${defaultBranch}`);
+  const ahead = head === undefined ? undefined : commitsAhead(folder, `origin/${defaultBranch}`, head);
   if (ahead === undefined) warnings.push(`git could not count the commits ahead of origin/${defaultBranch}, so only a merged PR that ends at HEAD makes the branch merged.`);
-  const changes = changedFiles(folder) ?? fail(`Could not read the state of ${folder}: git status failed.`);
   const prs = branch === undefined ? [] : mergedPrHeads(folder, branch);
   if ('error' in prs) warnings.push(`${prs.error}. Merged PRs are unknown, so only the commit count decides whether the branch is merged.`);
   const state: BranchState = {
@@ -269,7 +281,7 @@ function stateFacts(folder: string, main: string, warnings: string[]): BranchSta
     ...(head === undefined ? {} : { head }),
     defaultBranch,
     ...(ahead === undefined ? {} : { ahead }),
-    dirty: changes.length,
+    dirty,
     ...('error' in prs ? {} : { mergedHeads: prs }),
   };
   if (branch === undefined || isMerged(state)) return state;
@@ -380,6 +392,26 @@ function evidenceProblem(evidence: string): EvidenceProblem | undefined {
 /** The ledger as it is archived: a retired task has no claim, whichever session held it. */
 
 /** Reads what planRetire needs. It writes nothing; the fetch of the default branch only moves origin/<default>. */
+/**
+ * The worktree of `task` when a retire stopped after git removed its folder: the record names a host of this machine
+ * and a worktree folder that is gone. Call it only once the archive holds the ledger. The branch is the record's, as
+ * the main checkout of the task, else `main`, holds it.
+ */
+function removedWorktreeOf({ store }: Context, task: Task, main: string, warnings: string[]): RemovedWorktree | undefined {
+  const { host, worktree: folder, branch } = task.ledger.location;
+  if (!task.elsewhere || host === undefined || !(store.ownHosts?.has(host) ?? false) || folder === undefined || isTaken(folder)) return undefined;
+  const repo = task.main ?? main;
+  const xcode = removedWorktreeXcodeFolder(repo, folder);
+  if (xcode?.keptBecause !== undefined) warnings.push(`the build folder ${xcode.path} is kept: ${xcode.keptBecause}.`);
+  const head = branch === undefined ? undefined : commitOf(repo, `refs/heads/${branch}`);
+  return {
+    main: repo,
+    folder,
+    state: branchState(repo, repo, head === undefined ? undefined : branch, head, 0, warnings),
+    buildFolders: xcode === undefined || xcode.keptBecause !== undefined ? [] : [xcode.path],
+  };
+}
+
 export function readRetire(context: Context, slug: string | undefined): RetireFacts {
   const { cwd, store } = context;
   const main = mainCheckout(cwd) ?? fail(`${cwd} is not inside a git repository. Run ${ledgerCommand} task retire in the repo of the task.`);
@@ -410,8 +442,7 @@ export function readRetire(context: Context, slug: string | undefined): RetireFa
   const text = withoutClaim(readLedger(context, task));
   const archiveRepo = repoKey(main);
   const identical = store.archive.list(archiveRepo).find((copy) => copy.text === storedText(text));
-  const { host, worktree: named } = task.ledger.location;
-  const worktreeRemoved = identical !== undefined && task.elsewhere === true && host !== undefined && (store.ownHosts?.has(host) ?? false) && named !== undefined && !isTaken(named);
+  const removedWorktree = identical === undefined ? undefined : removedWorktreeOf(context, task, main, warnings);
   return {
     task,
     ref: { slug: task.slug, main },
@@ -420,7 +451,7 @@ export function readRetire(context: Context, slug: string | undefined): RetireFa
     tasks,
     archiveRepo,
     archiveNameTaken: (name) => store.archive.nameTaken(archiveRepo, name),
-    ...(worktreeRemoved ? { worktreeRemoved } : {}),
+    ...(removedWorktree === undefined ? {} : { removedWorktree }),
     ...(identical === undefined ? {} : { alreadyArchived: { name: identical.name, location: identical.location, losesEvidence: losesEvidence(store.archive, archiveRepo, identical.name, evidence) } }),
     archiveLocation: (name) => store.archive.location(archiveRepo, name),
     archiveEvidenceLocation: (name) => store.archive.evidenceLocation(archiveRepo, name),
@@ -510,6 +541,8 @@ function stepText(action: RetireAction): string | string[] | undefined {
       return `leave the archive as it is: the ledger is archived already at ${action.location}`;
     case 'remove-worktree':
       return `remove the worktree ${action.folder}${action.force ? ' with --force' : ''}`;
+    case 'prune-worktrees':
+      return `prune what git keeps of the removed worktree ${action.folder}`;
     case 'remove-active':
       return `delete the active ledger ${action.location}`;
     case 'remove-backlog':
@@ -663,8 +696,14 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
         out.line(`removed  ${action.folder}`);
         break;
       }
+      case 'prune-worktrees': {
+        const error = pruneWorktrees(action.main);
+        if (error !== undefined) fail(`Could not prune the removed worktree ${action.folder}: ${error}\nThe ledger is archived; run ${ledgerCommand} task retire again once git -C ${shellWord(action.main)} worktree prune goes through.`);
+        out.line(`pruned   ${action.folder}`);
+        break;
+      }
       case 'remove-active': {
-        // The worktree is gone by now, so a rerun finds the record as a task that is not on this machine: it needs --force.
+        // The worktree is gone by now. A rerun finishes without --force only when the record names a host of this machine.
         const left = `The worktree is removed and the ledger archived, but the active ledger ${action.location} is left`;
         const remedy = `Retire it with ${ledgerCommand} task retire ${shellWord(plan.task.slug)} --force.`;
         let removed: boolean;

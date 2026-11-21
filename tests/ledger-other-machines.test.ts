@@ -910,3 +910,71 @@ test('a plain ledger task retire finishes a retire whose worktree removal delete
   const copies = git(a.h, a.clone, 'ls-files', '--', `archive/${APP}/*.json`).split('\n').filter(Boolean);
   assert.deepEqual(copies, [`archive/${APP}/${today()}-${SLUG}.json`]);
 });
+
+/** A started task whose forced retire archived it, then failed in a worktree removal that deleted the whole folder. */
+function retiredHalfway(t: TestContext, { unmerged = false } = {}) {
+  const a = machine(t, remote(t));
+  setUpAs(a, 'host-a');
+  const record = startTask(a);
+  const worktree = worktreeOf(a);
+  if (unmerged) git(a.h, worktree, 'commit', '--quiet', '--allow-empty', '-m', 'work');
+  const buildFolder = path.join(fs.realpathSync(a.app), '.claude/worktrees/.build', SLUG);
+  mkdirSync(path.join(buildFolder, 'Debug-sim'), { recursive: true });
+  stubGit(a, '*"worktree remove"*', `rm -rf ${JSON.stringify(worktree)}; echo "fatal: refused by the test" >&2; exit 128`);
+  try {
+    assert.notEqual(run(a, ['task', 'retire', SLUG, '--force']).status, 0, 'the first retire went through');
+  } finally {
+    unstubGit(a);
+  }
+  assert.equal(existsSync(worktree), false, 'the stub left the worktree folder');
+  return { a, record, worktree, buildFolder };
+}
+
+const branchExists = (m: Machine, branch: string): boolean => gitRan(m.h, m.app, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`).status === 0;
+
+test('a plain rerun of a retire whose worktree folder is gone prunes the worktree, deletes the merged branch and the build folder', (t) => {
+  const { a, buildFolder } = retiredHalfway(t);
+  assert.ok(branchExists(a, SLUG), 'the first retire deleted the branch');
+
+  const rerun = run(a, ['task', 'retire', SLUG]);
+
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.doesNotMatch(git(a.h, a.app, 'worktree', 'list', '--porcelain'), /prunable/);
+  assert.equal(branchExists(a, SLUG), false, 'the merged branch is kept');
+  assert.match(rerun.stdout, new RegExp(`^deleted  branch ${SLUG}$`, 'm'));
+  assert.ok(rerun.stdout.includes(`deleted  ${buildFolder}`), rerun.stdout);
+});
+
+test('a plain rerun of a retire whose worktree folder is gone keeps an unmerged branch and names it', (t) => {
+  const { a } = retiredHalfway(t, { unmerged: true });
+
+  const rerun = run(a, ['task', 'retire', SLUG]);
+
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.doesNotMatch(git(a.h, a.app, 'worktree', 'list', '--porcelain'), /prunable/);
+  assert.ok(branchExists(a, SLUG), 'the unmerged branch was deleted');
+  assert.equal(linesWith(rerun.stdout, `kept     branch ${SLUG}, because it is not merged`).length, 1, rerun.stdout);
+});
+
+test('a plain retire of a task of this machine whose worktree folder is gone still needs --force when the archive holds no copy of it', (t) => {
+  const a = machine(t, remote(t));
+  setUpAs(a, 'host-a');
+  startTask(a);
+  git(a.h, a.app, 'worktree', 'remove', '--force', worktreeOf(a));
+
+  const refused = failed(run(a, ['task', 'retire', SLUG]));
+
+  assert.match(refused, /--force/);
+  assert.ok(existsSync(path.join(a.clone, recordOf())), 'the record is gone');
+});
+
+test('a plain retire of a task of this machine whose worktree folder is gone still needs --force when its archive copy holds other text', (t) => {
+  const { a, record } = retiredHalfway(t);
+  editRecord(record, (markdown) => markdown.replace('## Next step\n', '## Next step\nA line written after the archive copy.\n'));
+  assert.match(readLedgerFile(record), /A line written after the archive copy/);
+
+  const refused = failed(run(a, ['task', 'retire', SLUG]));
+
+  assert.match(refused, /--force/);
+  assert.ok(existsSync(record), 'the record is gone');
+});

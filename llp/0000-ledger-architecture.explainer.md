@@ -160,6 +160,14 @@ elsewhere task is read-only: `ledger go`, park, claim, retire's parent step,
 and name its host. A changed record of another host is put back, never
 committed (`commitChanges` in `tools/ledger/clone.ts`).
 
+"Another host" means a label that is not among `ownHosts`. Each label a machine
+stamps on a record goes into `~/.claude/ledger-hosts.json`, a list that stays
+on that machine and is never synced (`noteOwnHost` in
+`tools/ledger/settings.ts`). Each store gives that list, with the current label,
+as `ownHosts`. So after `"host"` changes, the records a machine stamped earlier
+are still its own. `updateActive` in `tools/ledger/write.ts` stamps the current
+label on such a record at its next write.
+
 Three stores implement the interfaces:
 
 - `fileStore` in `tools/ledger/file-store.ts` keeps files under `~/.claude`.

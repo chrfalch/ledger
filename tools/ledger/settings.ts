@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fail, Failure } from './failure.js';
 import { exists, writeAtomic } from './files.js';
+import { withLock } from './lock.js';
 import { ledgerPaths } from './paths.js';
 
 export const STORAGES = ['file', 'sqlite', 'git'] as const;
@@ -126,10 +127,14 @@ export function ownHosts(home: string): ReadonlySet<string> {
 
 /** Adds `host`, a label just stamped on an active record, to the hosts file, unless it is there. */
 export function noteOwnHost(home: string, host: string): void {
-  const hosts = stampedHosts(home);
-  if (hosts.includes(host)) return;
+  if (stampedHosts(home).includes(host)) return;
+  const file = ownHostsFile(home);
   try {
-    writeAtomic(ownHostsFile(home), `${JSON.stringify([...hosts, host])}\n`);
+    // Read again under the lock, so a label another command adds meanwhile is kept.
+    withLock(file, () => {
+      const hosts = stampedHosts(home);
+      if (!hosts.includes(host)) writeAtomic(file, `${JSON.stringify([...hosts, host])}\n`);
+    });
   } catch (error) {
     // The record is written; only a later change of "host" would miss this label.
     console.error(`warning: could not add the host ${host} to ${ledgerPaths(home).tilde(ownHostsFile(home))}: ${(error as Error).message}`);

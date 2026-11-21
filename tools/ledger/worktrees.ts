@@ -50,9 +50,16 @@ export type XcodeFolder = { path: string; keptBecause?: string; refused?: boolea
 export function xcodeFolderOf(folder: string): XcodeFolder | undefined {
   const main = mainCheckout(folder);
   const top = checkoutRoot(folder);
-  const root = main === undefined ? undefined : real(main);
-  if (main === undefined || root === undefined || top === undefined) return undefined;
-  const own = path.join(buildRootOf(root), inMainCheckout(folder) ? MAIN_BUILD_FOLDER : path.basename(top));
+  return main === undefined || top === undefined ? undefined : buildFolderOf(main, top, inMainCheckout(folder));
+}
+
+/** xcodeFolderOf for the linked worktree `folder` of the repo at `main` once git removed its folder, which git can no longer ask. */
+export const removedWorktreeXcodeFolder = (main: string, folder: string): XcodeFolder | undefined => buildFolderOf(main, folder, false);
+
+function buildFolderOf(main: string, top: string, isMain: boolean): XcodeFolder | undefined {
+  const root = real(main);
+  if (root === undefined) return undefined;
+  const own = path.join(buildRootOf(root), isMain ? MAIN_BUILD_FOLDER : path.basename(top));
   if (!isFolder(own)) return undefined;
   const link = linkAboveBuildFolders(path.dirname(own));
   if (link !== undefined) return { path: own, keptBecause: `${link} is a symbolic link`, refused: true };

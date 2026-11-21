@@ -132,9 +132,9 @@ export function fetchBranch(main: string, remote: string, branch: string): strin
   return result.ok ? undefined : result.stderr || 'git fetch failed';
 }
 
-/** The commits HEAD has that `base` has not; undefined when git cannot count them. */
-export function commitsAhead(folder: string, base: string): number | undefined {
-  const count = line(folder, 'rev-list', '--count', `${base}..HEAD`);
+/** The commits `head` has that `base` has not; undefined when git cannot count them. */
+export function commitsAhead(folder: string, base: string, head = 'HEAD'): number | undefined {
+  const count = line(folder, 'rev-list', '--count', `${base}..${head}`);
   return count !== undefined && /^\d+$/.test(count) ? Number(count) : undefined;
 }
 
@@ -156,6 +156,12 @@ export const lastCommitDate = (folder: string): string | undefined => line(folde
 export function removeLinkedWorktree(main: string, folder: string, force: boolean): string | undefined {
   const result = run(main, ['worktree', 'remove', ...(force ? ['--force'] : []), folder]);
   return result.ok ? undefined : result.stderr || 'git worktree remove failed';
+}
+
+/** Drops what git keeps of each worktree whose folder is gone; undefined when it did, else git's error text. */
+export function pruneWorktrees(main: string): string | undefined {
+  const result = run(main, ['worktree', 'prune']);
+  return result.ok ? undefined : result.stderr || 'git worktree prune failed';
 }
 
 /**
