@@ -74,6 +74,7 @@ export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [
   const reminders: string[] = []
   let contextTokens: number | undefined = 0
   let sessionId = 'session-1'
+  let sessionAfterClear: string | undefined
   let agentStatuses: AgentStatus[] = []
 
   const takeBreak = (call: Breakable): boolean => {
@@ -133,6 +134,7 @@ export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [
     breakIfBroken('clear')
     events.push('clear')
     callsBeforeClear.push(calls.length)
+    if (sessionAfterClear !== undefined) sessionId = sessionAfterClear
     return { text: '' }
   })
   on('command.run', { command: 'rename' }, async (_, e) => {
@@ -181,6 +183,10 @@ export function world(on: On, replies: Record<string, Reply>, { cwd, missing = [
     /** Makes `$.session.id()` answer `id`, as a /clear does. */
     newSession: (id: string) => {
       sessionId = id
+    },
+    /** Makes each later /clear start the session `id`, as a real /clear starts a new one. */
+    clearsTo: (id: string) => {
+      sessionAfterClear = id
     },
     /** Makes `$.agent.list()` list one agent of each status. */
     listAgents: (...statuses: AgentStatus[]) => {

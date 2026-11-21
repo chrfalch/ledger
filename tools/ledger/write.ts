@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { refuseIfHeld } from './claims.js';
+import { claimLedger, refuseIfHeld } from './claims.js';
 import {
   addChild,
   addDecision,
@@ -19,7 +19,8 @@ import {
 } from './edit.js';
 import { fail } from './failure.js';
 import { exists, isFolder, readText, writeAtomic } from './files.js';
-import { findSection, isNewSlug, isReadableSlug, isRepoKeyShape, parseDependencies, parseLedger, showDependencies, type Child, type ChildMark, type Dependency, type Location, type TaskRef } from './format.js';
+import { installPackages } from './install.js';
+import { findSection, isNewSlug, isReadableSlug, isRepoKeyShape, parseDependencies, parseLedger, showDependencies, type Child, type ChildMark, type Claim, type Dependency, type Location, type TaskRef } from './format.js';
 import {
   addWorktree,
   branchExists,
@@ -296,7 +297,8 @@ function promote(context: Context, slug: string, main: string, repo: string): St
 /**
  * What `ledger go` did. `chain` runs from the named task down to the child it started instead, empty when it started the
  * named task itself. `parent` is the started task's parent and `children` its own child tasks. `marked` is the parent
- * that now marks the task started; `unparked` the marker it removed.
+ * that now marks the task started; `unparked` the marker it removed. `installed` is the install command it ran.
+ * `tookOverFrom` is the live claim of another session it took over; `unclaimed` says why the session given was not claimed.
  */
 export type GoResult = {
   slug: string;
@@ -311,6 +313,9 @@ export type GoResult = {
   children: { slug: string; main: string; status: ChildStatus }[];
   unparked?: { date: string; reason: string };
   marked?: { parent: Ref; ledger: string };
+  installed?: string;
+  tookOverFrom?: Claim;
+  unclaimed?: string;
   warnings: string[];
 };
 
@@ -345,8 +350,11 @@ const liveLedger = (tasks: Task[], ref: Ref): Task | undefined => {
  * Starts a task, as /ledger:go does: a parent with a child still in the backlog starts that child instead, a backlog
  * task gets its worktree, a task with a worktree is only gone to. Then its parked marker is removed and its parent marks
  * it started; a parent that cannot be marked is a warning, not a failure. A parent in the backlog with no child left
- * there fails, as there is nothing to start. The slug names a ledger that exists, so the reading rule applies. A task with
- * a worktree that a session other than `session` holds live is refused, unless `takeOver`.
+ * there fails, as there is nothing to start. The slug names a ledger that exists, so the reading rule applies. The task is
+ * claimed for `session`; a task with a worktree that another session holds live is refused with Held, unless `takeOver`.
+ * With no session known, or for a task of another repo than the one it runs in, nothing is claimed. Last, the worktree's
+ * packages are installed when it needs it; a failed install exits INSTALL_FAILED and keeps the started task, claim
+ * included, so the same start installs again.
  */
 export function goTask(context: Context, slug: string, repo: string | undefined, { session, takeOver = false }: { session?: string; takeOver?: boolean } = {}): GoResult {
   const { cwd } = context;
@@ -371,11 +379,17 @@ export function goTask(context: Context, slug: string, repo: string | undefined,
   if (!isReadableSlug(target.slug)) fail(notASlug(target.slug));
   const found = (chain.length === 0 ? task : liveLedger(tasks, target)) ?? refuseMissing(context.store, tasks, target);
   if (found.place === 'remote') fail(onAnotherMachine(found));
-  if (found.place === 'worktree') refuseIfHeld(context, found, session, takeOver);
   const place =
     found.place === 'worktree'
       ? { ledger: found.file, worktree: path.dirname(path.dirname(found.file)), ...(found.branch === undefined ? {} : { branch: found.branch }), promoted: false }
       : { ...promote(context, target.slug, target.main, found.repo), promoted: true };
+  const cwdMain = mainCheckout(cwd);
+  const inCwdRepo = cwdMain !== undefined && samePath(cwdMain, target.main);
+  // A session stays in its own repo, and its touch and release reach only that repo, so a claim elsewhere would hold until it expires.
+  const claimFor = inCwdRepo ? session : undefined;
+  const { tookOverFrom } = claimFor === undefined ? {} : claimLedger(context, { slug: target.slug, file: place.ledger }, claimFor, { takeOver });
+  if (claimFor === undefined && found.place === 'worktree') refuseIfHeld(context, found, takeOver);
+  const unclaimed = session !== undefined && !inCwdRepo ? `the task is in another repo, so a session in ${target.main} claims it with ledger go ${target.slug}` : undefined;
 
   const text = readText(place.ledger);
   const { parked, location } = parseLedger(text);
@@ -394,6 +408,8 @@ export function goTask(context: Context, slug: string, repo: string | undefined,
   }
   refreshRegistry(context, [target.main]);
   const children = childrenOf(found, target.main, tasks).map(({ slug: child, main, status }) => ({ slug: child, main, status }));
+  const again = inCwdRepo ? `ledger go ${target.slug}` : `ledger go ${target.slug} --repo ${shellWord(target.main)}`;
+  const installed = installPackages(place.worktree, again);
   return {
     ...target,
     ...place,
@@ -402,17 +418,23 @@ export function goTask(context: Context, slug: string, repo: string | undefined,
     children,
     ...(parked === undefined ? {} : { unparked: { date: parked.date, reason: parked.reason } }),
     ...(marked === undefined ? {} : { marked }),
+    ...(installed === undefined ? {} : { installed }),
+    ...(tookOverFrom === undefined ? {} : { tookOverFrom }),
+    ...(unclaimed === undefined ? {} : { unclaimed }),
     warnings,
   };
 }
 
-export function goText(context: Context, { ledger, worktree, branch, base, chain, unparked, marked }: GoResult): string {
+export function goText(context: Context, { ledger, worktree, branch, base, chain, unparked, marked, installed, tookOverFrom, unclaimed }: GoResult): string {
   const name = nameFrom(context.cwd);
   return [
     ...(base === undefined ? [`worktree ${worktree}`, ...(branch === undefined ? [] : [`branch   ${branch}`]), `ledger   ${ledger}`] : startedLines({ worktree, branch: branch ?? '', base, ledger })),
     ...(chain.length === 0 ? [] : [`chain    ${chain.map(name).join(' ')}`]),
     ...(unparked === undefined ? [] : [`unparked ${unparked.date} — ${unparked.reason}`]),
     ...(marked === undefined ? [] : [`marked   ${marked.ledger}`]),
+    ...(installed === undefined ? [] : [`packages ${installed}`]),
+    ...(tookOverFrom === undefined ? [] : [`claim    took over from session ${tookOverFrom.session}`]),
+    ...(unclaimed === undefined ? [] : [`claim    not claimed: ${unclaimed}`]),
   ].join('\n');
 }
 

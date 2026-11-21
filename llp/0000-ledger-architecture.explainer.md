@@ -246,6 +246,19 @@ the plugin clears the session. After `/ledger:next`, the new session continues
 from the ledger's next step with no typing. After `/ledger:go`, it continues in
 the other task. After `/ledger:close`, nothing starts.
 
+**Claims.** A claim marks the one session that works on a task
+(`tools/ledger/claims.ts`, [LLP 0001
+section 5.4](0001-ledger-workflow.plan.md#54-claims)). `ledger go --session`
+claims the task when it is in the repo the command runs in; a task of another
+repo is not claimed, as the session stays in its own repo. A `go <slug>`
+prompt claims with `ledger task claim`. Each turn end marks the session's
+claims active, and a clear releases them. A release can fail, so before an
+armed `/ledger:go` clears, `register.ts` writes the state key `handover`: the
+task's slug and the session `from` that claimed it. The new session's first
+`go <slug>` prompt reads and empties it, and for that slug runs
+`ledger task claim --from <from>`, which takes that session's claim over with
+no held question.
+
 Only the operator may type `/ledger:close` and `/ledger:park` (`TYPED_ONLY` in
 `register.ts`). The plugin refuses them when the agent starts them through the
 `Skill` tool. The agent may start `/ledger:next` once, right after the operator
@@ -435,7 +448,11 @@ Known limits of task records:
 1. `ledger task new` writes a backlog ledger from the template.
 2. `ledger go <slug>` makes the worktree and branch, and moves the ledger
    into the worktree. The branch starts at the ledger's `- base:` line, or at
-   the default branch.
+   the default branch. It claims the task for the session, when the task is in
+   the repo the command runs in, and installs the
+   packages of a worktree with a lockfile and no `node_modules`
+   (`tools/ledger/install.ts`); a failed install exits 5 and keeps the
+   worktree.
 3. The agent edits `.claude/ledger.md` by hand during the work. The rules say
    when.
 4. `ledger task park` and `ledger task unpark` mark a task that waits.
@@ -446,8 +463,9 @@ A parent task stays in the backlog. Its ledger lists its child tasks.
 
 ## Known gaps
 
-`ledger notes stage` tracks a task's stage. The code does not track child
-order, claims or PR state. The agent writes the ledger by hand, and only rules
-guard most steps. [LLP 0001
+`ledger notes stage` tracks a task's stage, claims track the session that
+works on a task, and `ledger tree order` keeps a parent's child order. The
+code does not track PR state. The agent
+writes the ledger by hand, and only rules guard most steps. [LLP 0001
 section 15](0001-ledger-workflow.plan.md#15-from-today-to-this-spec) lists each
 gap and the planned work.

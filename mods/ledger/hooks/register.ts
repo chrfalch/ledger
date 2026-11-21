@@ -14,6 +14,7 @@ import {
   goDeniedMessage,
   heldMessage,
   HELP,
+  installFailedMessage,
   isDescription,
   isGoArgs,
   isNewSlug,
@@ -58,9 +59,13 @@ const takeOverApproved = { plugin: 'ledger', key: 'takeOverApproved' } as const
 const clearPoint = { plugin: 'ledger', key: 'clearPoint' } as const
 const touched = { plugin: 'ledger', key: 'touched' } as const
 const heldTask = { plugin: 'ledger', key: 'heldTask' } as const
+const handover = { plugin: 'ledger', key: 'handover' } as const
 
 /** `ledger go` exits 2 when no task has the slug. */
 const NO_SUCH_TASK = 2
+
+/** `ledger go` exits 5 when the task started but its package install failed; the worktree and ledger stay. */
+const INSTALL_FAILED = 5
 
 const TAKE_OVER = '--take-over'
 
@@ -130,19 +135,21 @@ async function startGo(
     const own = ownTask(session)
     const here = session.main
     const sessionId = await $.session.id()
-    const started = await ledgerJson<Started>($, [...goCommand(target), '--session', sessionId, ...(takeOver ? [TAKE_OVER] : [])])
+    const started = await ledgerJson<Started>($, [...goCommand(target), '--session', sessionId, ...(takeOver ? [TAKE_OVER] : [])], LONG_TIMEOUT_MS)
     let arm: GoArm
     let fields: GoFields
     if (started.ok) {
       if (started.main !== here) return { text: startedElsewhereMessage(started) }
-      arm = { mode: 'go', slug: started.slug, ...(own === undefined || own.path === started.ledger ? {} : { previous: previousOf(own) }) }
+      arm = { mode: 'go', slug: started.slug, sessionId, ...(own === undefined || own.path === started.ledger ? {} : { previous: previousOf(own) }) }
       fields = goFields(started, here)
     } else if (started.held !== undefined) {
       await recordHeld($, sessionId, target)
       return { heldArgs: goArgs(target, own?.path, { held: started.held }) }
     } else if (started.exitCode === NO_SUCH_TASK && isNewSlug(target) && here !== undefined) {
-      arm = { mode: 'go', slug: target, isNew: true, main: here, ...(own === undefined ? {} : { previous: previousOf(own) }) }
+      arm = { mode: 'go', slug: target, sessionId, isNew: true, main: here, ...(own === undefined ? {} : { previous: previousOf(own) }) }
       fields = { isNew: true }
+    } else if (started.exitCode === INSTALL_FAILED) {
+      return { text: installFailedMessage(target, started.error) }
     } else {
       return { text: startFailedMessage(target, started.error) }
     }
@@ -305,11 +312,15 @@ async function recordHeld($: EngineInterface, sessionId: string, slug: string): 
 
 /**
  * Claims the task for this session; a line for the model when it could not, which never stops the turn. A claim forgets
- * a task found held before, so a later "Take over" pick cannot approve taking that one over.
+ * a task found held before, so a later "Take over" pick cannot approve taking that one over. The first go prompt after an
+ * armed /ledger:go cleared ends the hand-over; for that task, it takes the claim over from the session that cleared.
  */
 async function claimAtGo($: EngineInterface, slug: string): Promise<ClaimLine | undefined> {
   const sessionId = await $.session.id()
-  const answer = await ledgerJson<Claimed>($, ['task', 'claim', slug, '--session', sessionId])
+  const { value: handedOver } = await $.state.get(handover).catch(() => ({ value: null }))
+  if (handedOver) await $.state.set(handover, null).catch(() => undefined)
+  const from = handedOver?.slug === slug ? ['--from', handedOver.from] : []
+  const answer = await ledgerJson<Claimed>($, ['task', 'claim', slug, '--session', sessionId, ...from])
   if (answer.ok) {
     await $.state.set(heldTask, null).catch(() => undefined)
     return undefined
@@ -647,6 +658,8 @@ export const register: Register = (on, options) => {
     }
     // The new session has another id, so the claim of this one would hold the task against it.
     await releaseClaims($)
+    // A release that failed leaves that claim live; the new session's go prompt takes it over.
+    if (value.mode === 'go') await $.state.set(handover, { slug: value.slug, from: value.sessionId }).catch(() => undefined)
     const go = `go ${value.slug}`
     const continues = value.mode === 'next' || value.mode === 'go'
     try {

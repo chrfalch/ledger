@@ -61,8 +61,10 @@ start:   /ledger:go offline-queue-loss
 ```
 
 You type that line. `/ledger:go` makes the branch and the worktree the same
-way, and moves the ledger into the worktree. The session then clears and
-continues in the task's worktree.
+way, and moves the ledger into the worktree. A worktree with a lockfile and no
+`node_modules` gets its packages installed, with bun, pnpm, yarn or npm by the
+lockfile. The task is claimed for the session, so a second session is warned.
+The session then clears and continues in the task's worktree.
 
 ### 2. The orchestrator investigates
 
@@ -341,7 +343,9 @@ another stops with exit 1 and says so; run it again. The next command takes
 over a lock that a killed command left behind. If another command changes a
 backlog ledger while `ledger go` starts it, `ledger go` starts nothing. It
 removes the new worktree, keeps the backlog ledger, and exits 1. Run
-`ledger go` again.
+`ledger go` again. When the package install of `ledger go` fails, it exits 5,
+prints the install's last lines, and keeps the worktree and its ledger. Fix
+the cause and run `ledger go` again: it installs again.
 
 #### Switching storage
 

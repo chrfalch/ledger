@@ -48,6 +48,9 @@ export const lookupFailedMessage = (error: string): string => `Could not check t
 
 export const startFailedMessage = (target: string, error: string): string => `Could not start task ${target}. ${sentence(error)} ${UNCHANGED}`
 
+export const installFailedMessage = (target: string, error: string): string =>
+  `Task ${target} started, but its packages did not install. ${sentence(error)} Its worktree and ledger are kept, and the session was not cleared. Fix the cause, then retry with /ledger:go ${target}.`
+
 export const parkFailedMessage = (slug: string, error: string): string => `/ledger:park could not mark ${slug} parked: ${sentence(error)} The session was not cleared.`
 
 export const GO_USAGE = 'Usage: /ledger:go <slug>. Run /ledger to see the slug of each task.'

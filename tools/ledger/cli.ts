@@ -283,12 +283,12 @@ export async function main(argv: string[]): Promise<number> {
   const goCommand = (command: Command): Command =>
     command
       .description(
-        "Start a task: a parent starts its first child still in the backlog; a backlog task gets its worktree and branch, and its ledger moves there; a task with a worktree is only gone to. Then its parked mark is removed and its parent marks it started. The branch starts at the ledger's \"- base:\" when it names one, else at the default branch. A task another session holds a live claim on exits 3, with nothing changed, unless --take-over.",
+        "Start a task: a backlog task gets its worktree, and a branch from the ledger's \"- base:\" or the default branch; a parent starts its first backlog child. Claims the task for this session in this repo only; a live claim of another session exits 3 unless --take-over. Installs missing packages; a failed install exits 5 and keeps the worktree.",
       )
       .argument('<slug>', 'the task')
       .option('--repo <path>', 'start the task of the repo that holds <path>')
       .addOption(sessionOption())
-      .option('--take-over', "remove another session's live claim and go on; `ledger task claim` in the new session claims the task")
+      .option('--take-over', "take the claim over from the session that holds it live, and go on")
       .option('--json', JSON_HELP)
       .action((slug: string, { repo, session, takeOver = false }: { repo?: string; session?: string; takeOver?: boolean }) => {
         const started = goTask(context, slug, repo, { session: knownSession(session), takeOver });
@@ -356,9 +356,10 @@ export async function main(argv: string[]): Promise<number> {
     .argument('[slug]', ACTIVE_SLUG)
     .addOption(sessionOption())
     .option('--take-over', 'take the claim over from the session that holds it')
+    .option('--from <id>', 'take the claim over from session <id> only, live or expired, as a session does from the one it continues after a /clear')
     .option('--json', JSON_HELP)
-    .action((slug: string | undefined, { session, takeOver = false }: { session?: string; takeOver?: boolean }) =>
-      show(claimTask(context, slug, requiredSession(session), { takeOver }), claimResultText),
+    .action((slug: string | undefined, { session, takeOver = false, from }: { session?: string; takeOver?: boolean; from?: string }) =>
+      show(claimTask(context, slug, requiredSession(session), { takeOver, from }), claimResultText),
     );
   taskGroup
     .command('touch')

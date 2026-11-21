@@ -72,10 +72,13 @@ function activeTask(context: Context, name: string | undefined): Task {
   return fail(`${task.slug} is not active: ${task.place === 'backlog' ? `it is in the backlog. ledger go ${task.slug} starts it.` : 'it is retired.'}`, 2);
 }
 
-type ClaimState = { task: Task; text: string; stored?: Claim; live?: Claim; now: Date };
+/** What a claim reads and writes of a task: its ledger file, and its slug for the result. */
+type ClaimedLedger = Pick<Task, 'slug' | 'file'>;
+
+type ClaimState = { task: ClaimedLedger; text: string; stored?: Claim; live?: Claim; now: Date };
 
 /** Runs `work` on the ledger of `task` and its live claim, read and written under the ledger's lock. */
-function lockedClaim<T>(task: Task, clock: ClaimClock, work: (state: ClaimState) => T): T {
+function lockedClaim<T>(task: ClaimedLedger, clock: ClaimClock, work: (state: ClaimState) => T): T {
   return withLock(task.file, () => {
     const text = readText(task.file);
     const stored = parseLedger(text).location.claim;
@@ -109,16 +112,19 @@ function changedInRepo(context: Context, verb: string, work: (state: ClaimState)
   return result;
 }
 
-function writeClaim(task: Task, text: string, claim: Claim): void {
+function writeClaim(task: ClaimedLedger, text: string, claim: Claim): void {
   writeAtomic(task.file, withClaim(text, claim) ?? fail(`${task.file} has no ## Location section to hold the claim.`));
 }
 
 export type ClaimResult = { slug: string; ledger: string; claim: Claim; tookOverFrom?: Claim };
 
-/** Claims the task for `session`; refuses with Held while another session holds it live, unless `takeOver`. */
-export function claimTask(context: Context, name: string | undefined, session: string, { takeOver }: { takeOver: boolean }): ClaimResult {
-  return underLock(context, name, ({ task, text, live, now: at }) => {
-    const other = live?.session === session ? undefined : live;
+/** `from` names the session this one continues, such as the one before a /clear: its claim passes over with no take-over. */
+export type ClaimOptions = { takeOver: boolean; from?: string };
+
+/** Claims `task` for `session`; refuses with Held while a session other than `session` or `from` holds it live, unless `takeOver`. */
+export function claimLedger(context: Context, task: ClaimedLedger, session: string, { takeOver, from }: ClaimOptions): ClaimResult {
+  return lockedClaim(task, claimClock(context.paths.home), ({ text, live, now: at }) => {
+    const other = live === undefined || live.session === session || live.session === from ? undefined : live;
     if (other !== undefined && !takeOver) throw new Held(other);
     const time = stamp(at);
     const claim = { session, since: live?.session === session ? live.since : time, active: time };
@@ -126,6 +132,10 @@ export function claimTask(context: Context, name: string | undefined, session: s
     return { slug: task.slug, ledger: task.file, claim, ...(other === undefined ? {} : { tookOverFrom: other }) };
   });
 }
+
+/** Claims the active task `name`, or that of the worktree the command runs in, as claimLedger does. */
+export const claimTask = (context: Context, name: string | undefined, session: string, options: ClaimOptions): ClaimResult =>
+  claimLedger(context, activeTask(context, name), session, options);
 
 export const claimResultText = ({ slug, tookOverFrom }: ClaimResult): string => (tookOverFrom === undefined ? `claimed ${slug}` : `took over ${slug} from session ${tookOverFrom.session}`);
 
@@ -160,12 +170,12 @@ export function releaseTask(context: Context, name: string | undefined, session:
 export const releaseAll = (context: Context, session: string): AllResult => changedInRepo(context, 'release', releaseClaim(session));
 
 /**
- * Refuses with Held to go to `task` while a session other than `session` holds it live. With `takeOver`, it removes that
- * claim instead, and the session that goes there claims the task itself.
+ * For a start with no session known, which claims nothing: refuses with Held to go to `task` while any session holds it
+ * live. With `takeOver`, it removes that claim instead.
  */
-export function refuseIfHeld(context: Context, task: Task, session: string | undefined, takeOver: boolean): void {
+export function refuseIfHeld(context: Context, task: Task, takeOver: boolean): void {
   const { claim } = task.ledger.location;
-  const other = claim === undefined ? undefined : otherClaim(claim, session, claimClock(context.paths.home));
+  const other = claim === undefined ? undefined : otherClaim(claim, undefined, claimClock(context.paths.home));
   if (other === undefined) return;
   if (!takeOver) throw new Held(other);
   withLock(task.file, () => writeAtomic(task.file, withoutClaim(readText(task.file))));
