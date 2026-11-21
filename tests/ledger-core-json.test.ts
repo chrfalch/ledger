@@ -58,7 +58,7 @@ function bigFile(file: string): void {
 
 test('every command with --json prints one {"ok":false,"error"} object for an unknown option, and exits non-zero', (t) => {
   const { h, app } = setup(t);
-  for (const command of [['list'], ['task', 'archive'], ['tree', 'show', 'x'], ['go', 'x'], ['task', 'new', 'x'], ['task', 'park', 'x', '--reason', 'r'], ['task', 'unpark', 'x'], ['task', 'claim', 'x'], ['task', 'retire'], ['worktrees'], ['worktrees', 'prune'], ['worktrees', 'auto-prune'], ['session']]) {
+  for (const command of [['list'], ['task', 'archive'], ['tree', 'show', 'x'], ['tree', 'order', 'x', 'y'], ['tree', 'depends', 'x'], ['go', 'x'], ['task', 'new', 'x'], ['task', 'park', 'x', '--reason', 'r'], ['task', 'unpark', 'x'], ['task', 'claim', 'x'], ['task', 'retire'], ['worktrees'], ['worktrees', 'prune'], ['worktrees', 'auto-prune'], ['session']]) {
     const ran = ledger(h, app, ...command, '--json', '--bogus');
     assert.notEqual(ran.status, 0, command.join(' '));
     refused(ran, /--bogus/, ran.status ?? 1);
@@ -137,10 +137,42 @@ test('parent --json shows the parent; add, remove, start and next each report wh
   assert.equal(again.marked, false);
   assert.equal(again.reason, 'already-marked');
 
-  rmSync(path.join(storeFolder(h, 'ledger-backlog', app), 'first.md'));
+  const firstFile = path.join(storeFolder(h, 'ledger-backlog', app), 'first.md');
+  for (const file of [firstFile, recordFile(firstFile)]) rmSync(file, { force: true });
   assert.deepEqual(done(json(h, app, 'tree', 'next', 'epic')).chain, []);
   refused(json(h, app, 'tree', 'add', 'epic'), /missing required argument 'child'/);
   refused(json(h, app, 'tree', 'show', 'ghost'), /ghost/);
+});
+
+test('tree order and tree depends --json report what they set; tree next --json names what blocks each child; refusals are JSON', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'epic', children: ['- first', '- second'] });
+  backlogTask(h, app, { slug: 'first', parent: 'epic' });
+  backlogTask(h, app, { slug: 'second', parent: 'epic' });
+  const [key, epic, first, second] = [repoKeyOf(app), { slug: 'epic', main: app }, { slug: 'first', main: app }, { slug: 'second', main: app }];
+
+  assert.deepEqual(done(json(h, app, 'tree', 'order', 'epic', 'second', 'first')), { ok: true, action: 'order', parent: epic, children: [second, first] });
+  const api = { slug: 'api', repo: 'github.com/acme/api' };
+  assert.deepEqual(done(json(h, app, 'tree', 'depends', 'second', 'first', 'api@github.com/acme/api')), {
+    ok: true,
+    action: 'depends',
+    child: second,
+    dependencies: [{ slug: 'first', repo: key }, api],
+  });
+  done(json(h, app, 'tree', 'depends', 'first', 'later'));
+  assert.deepEqual(done(json(h, app, 'tree', 'next', 'epic')), {
+    ok: true,
+    action: 'next',
+    parent: epic,
+    chain: [],
+    blocked: [
+      { child: second, dependencies: [{ slug: 'first', repo: key }, api] },
+      { child: first, dependencies: [{ slug: 'later', repo: key }] },
+    ],
+  });
+  assert.deepEqual(done(json(h, app, 'tree', 'depends', 'first')), { ok: true, action: 'depends', child: first, dependencies: [] });
+  refused(json(h, app, 'tree', 'order', 'epic', 'first'), /second/);
+  refused(json(h, app, 'tree', 'depends', 'first', 'first'), /itself/);
 });
 
 test('go --json promotes a backlog task and reports its worktree, branch, base and ledger', (t) => {

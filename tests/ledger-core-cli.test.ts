@@ -332,7 +332,11 @@ test('ledger parent --json takes each child status from disk: archive, then work
     ghost: 'missing',
     'lib-part': 'active',
   });
-  assert.deepEqual(shown.children.slice(0, 2).map(({ slug }) => slug).sort(), ['lib-part', 'live-child'], 'active children first');
+  assert.deepEqual(
+    shown.children.map(({ slug }) => slug),
+    ['live-child', 'parked-child', 'idea', 'old-a', 'old-b', 'old-c', 'old-d', 'ghost', 'lib-part'],
+    'children without an order keep the order of their lines',
+  );
   const child = (slug: string): ShownChild => shown.children.find((entry) => entry.slug === slug) ?? assert.fail(`no child ${slug}`);
   assert.equal(child('lib-part').main, lib);
   assert.equal(child('ghost').main, app);
