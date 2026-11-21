@@ -978,3 +978,11 @@ test('a plain retire of a task of this machine whose worktree folder is gone sti
   assert.match(refused, /--force/);
   assert.ok(existsSync(record), 'the record is gone');
 });
+
+test('a plain rerun with --json of a retire whose worktree folder is gone gives its place as active', (t) => {
+  const { a } = retiredHalfway(t);
+
+  const retired = JSON.parse(ledgerOk(a, 'task', 'retire', SLUG, '--json')) as { place: string };
+
+  assert.equal(retired.place, 'active');
+});

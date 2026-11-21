@@ -836,7 +836,7 @@ export function retireTask(context: Context, slug: string | undefined, { dryRun,
   return {
     slug: task.slug,
     main: facts.ref.main,
-    place: worktree === undefined ? 'backlog' : 'active',
+    place: task.place === 'backlog' ? 'backlog' : 'active',
     ledger: task.file,
     dryRun,
     blocked: plan.blocked,

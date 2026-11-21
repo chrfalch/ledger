@@ -657,3 +657,11 @@ test('store migrate --to sqlite stops, and changes nothing, when an active slug 
     assert.equal(existsSync(path.join(h, '.claude/ledger-settings.json')), false, `${clash}: the setting was switched`);
   }
 });
+
+test('ledger task retire --json of an active task whose worktree is not on this machine gives its place as active', (t) => {
+  const { h, app } = elsewhere(t);
+
+  const retired = json(ledger(h, app, 'task', 'retire', 'far', '--force', '--json'));
+
+  assert.equal(retired.place, 'active');
+});
