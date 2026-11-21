@@ -1316,6 +1316,8 @@ function recording(inner: LedgerStore): { store: LedgerStore; calls: string[] } 
   const calls: string[] = [];
   const note = (...call: string[]): void => void calls.push(call.join(' '));
   const store: LedgerStore = {
+    host: inner.host,
+    ownHosts: inner.ownHosts,
     active: inner.active,
     backlog: {
       location: (repo, name) => inner.backlog.location(repo, name),
