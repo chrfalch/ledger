@@ -48,11 +48,29 @@ function sizeProblem(record: TaskRecord): string[] {
   return [`The ledger is ${count(markdown.length)} characters, over the limit of ${count(LEDGER_SIZE_LIMIT)}. Shorten the largest sections: ${largest.join(', ')}.`];
 }
 
+/** The stages of each kind of task, in the order a task goes through them. */
+export const STAGES: Readonly<Record<'code' | 'docs' | 'investigation', readonly string[]>> = {
+  code: ['plan', 'red', 'build', 'verify', 'review', 'pr'],
+  docs: ['plan', 'build', 'review', 'pr'],
+  investigation: ['plan', 'investigate', 'report', 'review'],
+};
+export type Kind = keyof typeof STAGES;
+const KINDS = Object.keys(STAGES).join(', ');
+const FINISHED = 'finished';
+const isKind = (kind: string): kind is Kind => Object.hasOwn(STAGES, kind);
+
+function stageProblems({ kind = 'code', stage }: TaskRecord): string[] {
+  if (!isKind(kind)) return [`The kind ${kind} is not one of ${KINDS}.`];
+  const stages = STAGES[kind];
+  return stage === undefined || stage === FINISHED || stages.includes(stage) ? [] : [`The stage ${stage} is neither ${FINISHED} nor a stage of a ${kind} task: ${stages.join(', ')}.`];
+}
+
 /** What `ledger notes check` finds beyond the record's shape. A resolved question blocks nothing. */
 function problemsOf(record: TaskRecord): string[] {
   const steps = new Set(record.plan.steps.map(({ n }) => n));
   return [
     ...(record.goal.trim() === '' ? ['The goal is empty.'] : []),
+    ...stageProblems(record),
     ...record.questions.flatMap(({ id, blocks, resolved }) =>
       blocks === undefined || resolved || steps.has(String(blocks)) ? [] : [`Question ${id} blocks step ${blocks}, which is not in the plan.`],
     ),
@@ -216,6 +234,60 @@ export function setNext(context: Context, name: string | undefined, text: string
 }
 
 export const setNextText = ({ slug }: ReturnType<typeof setNext>): string => `Set the next step of ${slug}.`;
+
+export type StageCall = { outcome?: string; back?: string; skip?: string; step?: number };
+
+const STEP_STATUS_AFTER: Readonly<Record<string, string>> = { red: 'red', build: 'green', review: 'reviewed' };
+
+/**
+ * Records the outcome of the stage the task is at, which must be `stage`, and moves the task on: to the next stage on
+ * pass or skip, to `back` on fail with it. A record with no kind is code; one with no stage is at the first.
+ */
+export function recordStage(context: Context, name: string | undefined, stage: string, { outcome, back, skip, step }: StageCall) {
+  return write(context, name, (record, task) => {
+    const kind = record.kind ?? 'code';
+    if (!isKind(kind)) fail(`${task.slug} has the kind ${kind}, which is not one of ${KINDS}.`);
+    const stages = STAGES[kind];
+    const current = record.stage ?? stages[0];
+    const refuse = (problem: string): never =>
+      fail(`${problem} ${current === FINISHED ? `${task.slug} is ${FINISHED}` : `${task.slug} is at stage ${current}`}; the stages of a ${kind} task are ${stages.join(', ')}.`);
+
+    if (outcome !== undefined && skip !== undefined) refuse('Give pass or fail, or --skip, not both.');
+    if (outcome === undefined && skip === undefined) refuse('Give pass or fail, or --skip "<reason>".');
+    if (outcome !== undefined && outcome !== 'pass' && outcome !== 'fail') refuse(`The outcome is pass or fail, not "${outcome}".`);
+    if (back !== undefined && outcome !== 'fail') refuse('--back goes only with fail.');
+    if (step !== undefined && outcome === 'fail') refuse('--step goes only with pass or --skip.');
+    const reason = skip?.trim();
+    if (reason === '') refuse('The reason for --skip is empty.');
+    if (reason?.includes('\n')) refuse('The reason for --skip must be one line.');
+
+    if (!stages.includes(stage)) refuse(`${stage} is not a stage of a ${kind} task.`);
+    if (current === FINISHED) refuse('Every stage has passed.');
+    const at = stages.indexOf(current);
+    if (at === -1) refuse(`The ledger's stage is not a stage of a ${kind} task.`);
+    const asked = stages.indexOf(stage);
+    if (asked > at) refuse(`Stage ${stage} comes after ${current}; skipping needs --skip at the current stage.`);
+    if (asked < at) refuse(`Stage ${stage} has passed; to go back to it, use fail --back ${stage} at the current stage.`);
+    if (back !== undefined && !stages.slice(0, at).includes(back)) refuse(`--back takes a stage before ${stage}, not ${back}.`);
+
+    const planStep = step === undefined ? undefined : (record.plan.steps.find(({ n }) => n === String(step)) ?? refuse(`${task.slug} has no step ${step} in its plan.`));
+    if (planStep !== undefined) planStep.status = STEP_STATUS_AFTER[stage] ?? 'done';
+
+    const result = reason !== undefined ? 'skipped' : outcome === 'pass' ? 'passed' : 'failed';
+    const next = result === 'failed' ? (back ?? stage) : (stages[at + 1] ?? FINISHED);
+    record.stage = next;
+    const note = reason !== undefined ? `skipped: ${reason}` : back !== undefined ? `fail, back to ${back}` : outcome;
+    record.notes.push(`${today()} stage ${stage} ${note}`);
+    return { stage, result, next };
+  });
+}
+
+export function recordStageText({ slug, stage, result, next }: ReturnType<typeof recordStage>): string {
+  const onward = next === FINISHED ? `${slug} is ${FINISHED}` : `next is ${next}`;
+  if (result === 'skipped') return `Skipped stage ${stage} of ${slug}; ${onward}.`;
+  if (result === 'passed') return `Stage ${stage} of ${slug} passed; ${onward}.`;
+  return `Stage ${stage} of ${slug} failed; ${next === stage ? `it stays at ${stage}` : `back to ${next}`}.`;
+}
 
 export type CheckResult = { slug: string; ledger: string; problems: string[] };
 
