@@ -51,6 +51,7 @@ import {
   locateChild,
   namedChildren,
   notASlug,
+  onAnotherMachine,
   orderedChildren,
   sameTask,
   taskRef,
@@ -68,13 +69,15 @@ export type Context = { paths: LedgerPaths; cwd: string; store: LedgerStore };
 /** A backlog ledger is in the store; a worktree ledger is the plain file that hooks read. */
 export function readLedger({ store }: Context, task: Task): string {
   if (task.place === 'worktree') return readText(task.file);
-  const collection = task.place === 'backlog' ? store.backlog : store.archive;
-  return (collection.read(task.repo, task.name) ?? fail(`The ledger ${task.file} is gone.`)).text;
+  const collection =
+    task.place === 'backlog' ? store.backlog : task.place === 'archive' ? store.archive : task.host === undefined ? undefined : store.active?.copiesOf(task.host);
+  return (collection?.read(task.repo, task.name) ?? fail(`The ledger ${task.file} is gone.`)).text;
 }
 
 /** Rewrites a live ledger with `change` of its text as it is now, which may differ from the text in `task`. True when it was written. */
 export function updateLedger({ store }: Context, task: Task, change: Change<string>): boolean {
   if (task.place === 'archive') throw new Error(`An archive copy is never changed: ${task.file}`);
+  if (task.place === 'remote') fail(onAnotherMachine(task));
   if (task.place === 'backlog') return store.backlog.update(task.repo, task.name, change);
   return withLock(task.file, () => {
     const text = change(readText(task.file));
@@ -349,6 +352,7 @@ export function goTask(context: Context, slug: string, repo: string | undefined,
   const named = { slug, main: repoOf(cwd, repo === undefined ? cwd : path.resolve(cwd, repo)) };
   const tasks = loadTasks(context, [named.main]);
   const task = liveLedger(tasks, named);
+  if (task?.place === 'remote') fail(onAnotherMachine(task));
   let chain: Ref[] = [];
   if (task !== undefined && namedChildren(task, tasks).length > 0) {
     const blocked: Blocked[] = [];
@@ -364,6 +368,7 @@ export function goTask(context: Context, slug: string, repo: string | undefined,
   const target = chain.at(-1) ?? named;
   if (!isReadableSlug(target.slug)) fail(notASlug(target.slug));
   const found = (chain.length === 0 ? task : liveLedger(tasks, target)) ?? refuseMissing(context.store, tasks, target);
+  if (found.place === 'remote') fail(onAnotherMachine(found));
   if (found.place === 'worktree') refuseIfHeld(context, found, session, takeOver);
   const place =
     found.place === 'worktree'
@@ -576,6 +581,12 @@ function ancestors(tasks: Task[], { task, ref }: Linked): Ref[] {
   return seen;
 }
 
+/** A change of a parent and child writes both ledgers, so a read-only copy of either refuses it before the other is written. */
+function refuseRemote(...tasks: Task[]): void {
+  const remote = tasks.find(({ place }) => place === 'remote');
+  if (remote !== undefined) fail(onAnotherMachine(remote));
+}
+
 function addChildTask(context: Context, tasks: Task[], parent: Linked, childRef: Ref): ParentChange {
   const name = nameFrom(context.cwd);
   if (sameTask(parent.ref, childRef, parent.task.place)) fail(`${name(childRef)} cannot be its own parent.`);
@@ -593,6 +604,7 @@ function addChildTask(context: Context, tasks: Task[], parent: Linked, childRef:
   if (namesClone(parent.task, child.place) && /\s/.test(childRef.main)) {
     fail(`The repo at ${childRef.main} has whitespace in its path, so none of its worktree tasks can be a child of a backlog task.`);
   }
+  refuseRemote(parent.task, child);
 
   if (findSection(child.ledger.sections, 'Location') === undefined) fail(`${child.file} has no ## Location section. Nothing was changed.`);
 
@@ -661,6 +673,7 @@ function removeChildTask(context: Context, tasks: Task[], parent: Linked, childR
   const name = nameFrom(context.cwd);
   const child = theTask(tasks, childRef, { live: true });
   if (!namesParent(child.ledger.location.parent, childRef.main, parent)) fail(`${name(childRef)} is not a child of ${name(parent.ref)}.`);
+  refuseRemote(parent.task, child);
   // The parent first: until the child's line is gone, running the same remove again still finds the pair.
   updateLedger(context, parent.task, (text) => {
     const listed = linesOf(parent, childRef, child.place, text);

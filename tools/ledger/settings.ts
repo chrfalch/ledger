@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { fail } from './failure.js';
+import { fail, Failure } from './failure.js';
 import { exists, writeAtomic } from './files.js';
 import { ledgerPaths } from './paths.js';
 
@@ -52,6 +53,54 @@ export function readClaimExpiryMinutes(home: string): number {
   if (typeof minutes === 'number' && Number.isInteger(minutes) && minutes > 0) return minutes;
   return fail(`"claimExpiryMinutes" in ${shownSettingsFile(home)} must be a whole number of minutes above 0, such as 120, not ${JSON.stringify(minutes)}.`);
 }
+
+/**
+ * A host label, the name of a machine's folder in git storage, as a pattern that is both a JavaScript regular expression
+ * and a POSIX extended one: the allowlist and the pre-push hook take a host folder by it.
+ */
+export const HOST_LABEL = '[a-z0-9-]+';
+
+const isHostLabel = (text: string): boolean => new RegExp(`^${HOST_LABEL}$`).test(text);
+
+/** A host name as a host label: up to its first dot, in lowercase, with each character outside a-z, 0-9 and - as -, and no - at either end. */
+export const hostLabel = (raw: string): string =>
+  raw
+    .split('.')[0]
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+const SET_HOST = 'lowercase letters, digits and hyphens, such as "work-laptop"';
+
+/**
+ * The name of this machine in git storage, the folder of its active copies: "host" in ~/.claude/ledger-settings.json,
+ * else the label of its host name. A "host" that is no label fails, as it becomes part of a path, and so does a host
+ * name that gives an empty label.
+ */
+export function readHost(home: string): string {
+  const { host } = readSettings(home, 'Fix it, or delete it to use the default settings.') ?? {};
+  const shown = shownSettingsFile(home);
+  if (host === undefined) {
+    const label = hostLabel(os.hostname());
+    return label !== '' ? label : fail(`The host name ${JSON.stringify(os.hostname())} gives no folder name for git storage. Set "host" in ${shown} to ${SET_HOST}.`);
+  }
+  if (typeof host === 'string' && isHostLabel(host)) return host;
+  return fail(`"host" in ${shown} is ${JSON.stringify(host)}. Set "host" there to ${SET_HOST}.`);
+}
+
+/** Why readHost fails; undefined when it gives a host label. */
+export function hostProblem(home: string): string | undefined {
+  try {
+    readHost(home);
+    return undefined;
+  } catch (error) {
+    if (error instanceof Failure) return error.message;
+    throw error;
+  }
+}
+
+/** readHost, or undefined where it fails: then no host folder under active/ is this machine's. */
+export const validHost = (home: string): string | undefined => (hostProblem(home) === undefined ? readHost(home) : undefined);
 
 /** Sets "storage" in the settings file and keeps every other key. Call readStorage first: it refuses a broken file. */
 export function writeStorage(home: string, storage: Storage): void {

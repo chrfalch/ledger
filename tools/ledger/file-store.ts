@@ -1,7 +1,7 @@
 import { cpSync, lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, utimesSync } from 'node:fs';
 import path from 'node:path';
 import { fail } from './failure.js';
-import { createFile, folderEntries, holdsAnything, isEntryName, isFolder, isReadableFile, isTaken, moveAside, putBack, readText, readTimedText, sameTree, treeEntries, writeAtomic, type TimedText } from './files.js';
+import { createFile, folderEntries, holdsAnything, isEntryName, isFolder, isReadableFile, isTaken, moveAside, putBack, readBytes, readText, readTimedText, sameTree, treeEntries, writeAtomic, type TimedText } from './files.js';
 import { withLock } from './lock.js';
 import type { LedgerPaths } from './paths.js';
 import { parseRecord, readStoredRecord, recordJson, recordToWrite, renderRecord, type StoredRecord } from './record.js';
@@ -118,7 +118,7 @@ type FileCollection = LedgerCollection & { files: (repo: string, name: string) =
  * while there is no <name>.json, and a write replaces it. A ledger is a readable regular file, never a symbolic link; a
  * repo is a folder, through a symbolic link or not. A file such as `...md`, whose name would be `..`, is no ledger.
  */
-function collection(root: string): FileCollection {
+export function collection(root: string): FileCollection {
   const repoLocation = (repo?: string): string => (repo === undefined ? root : path.join(root, folderOf(repo)));
   const files = (repo: string, name: string) => {
     const base = path.join(repoLocation(repo), entryName(name));
@@ -360,6 +360,7 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync }: FileStore
         cpSync(evidenceFrom, evidence, { recursive: true, verbatimSymlinks: true });
         if (!sameTree(evidenceFrom, evidence)) fail(`The evidence copy ${evidence}/ differs from ${evidenceFrom}/.`);
       },
+      readBytes: (repo, name) => readBytes(archive.location(repo, name)),
       evidenceState,
       nameTaken: (repo, name) => isTaken(archive.location(repo, name)) || isTaken(evidenceOf(repo, name)),
       evidenceLocation: evidenceOf,

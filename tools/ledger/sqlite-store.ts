@@ -390,6 +390,10 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
           fail(`The evidence copy ${evidenceLocation(repo, name)}/ differs from ${evidenceFrom}/.`);
         }
       },
+      readBytes: (repo, name) => {
+        const row = one<{ text: Uint8Array }>(`SELECT text FROM ledgers WHERE place = 'archive' AND repo = ? AND name = ?`, repo, name);
+        return row && Buffer.from(row.text);
+      },
       evidenceState,
       // Evidence is written with its copy in one transaction, so a name without a copy has no evidence.
       nameTaken: (repo, name) => archive.has(repo, name),

@@ -5,13 +5,16 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claimResultText, claimTask, Held, knownSession, releaseAll, releaseTask, requiredSession, touchAll, touchTask, type AllResult } from './claims.js';
+import { limitCloneGitCalls } from './clone.js';
 import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
 import { planProgress } from './format.js';
 import { GATE_NAMES, gateQuestion } from './gates.js';
-import { mainCheckout } from './git.js';
+import { limitGitCalls, mainCheckout } from './git.js';
+import { gitStore } from './git-store.js';
 import { logHookFailure, oneLine } from './hook-failures.js';
-import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookContext, type HookEvent } from './hooks.js';
+import { answerHook, GIT_TIMEOUT_MS, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookContext, type HookEvent } from './hooks.js';
+import { limitLockWaits } from './lock.js';
 import { ledgerBin, ledgerPaths, realPath } from './paths.js';
 import { repoKey, repoLabel } from './repo-key.js';
 import { migrateStorage } from './migrate.js';
@@ -48,9 +51,10 @@ import {
   TAGS,
   type Tag,
 } from './notes.js';
+import { mirrorLedgers, mirrorText } from './mirror.js';
 import { openStore } from './open-store.js';
 import { loadTasks } from './registry.js';
-import { retireTask, retireText } from './retire.js';
+import { PartlyRemoved, retireTask, retireText } from './retire.js';
 import { readStorage, STORAGES, type Storage } from './settings.js';
 import { shownLedger } from './show.js';
 import { sqliteFile } from './sqlite-store.js';
@@ -100,6 +104,8 @@ function listed(task: Task) {
     repo: task.repo,
     ...(task.main === undefined ? {} : { main: task.main }),
     status: task.status,
+    place: task.place,
+    ...(task.host === undefined ? {} : { host: task.host }),
     path: task.file,
     branch: task.branch ?? '',
     ...(parent === undefined ? {} : { parent: { slug: parent.slug, ...(parentMain === undefined ? {} : { main: parentMain }) } }),
@@ -301,7 +307,7 @@ export async function main(argv: string[]): Promise<number> {
       });
   const showCommand = (command: Command): Command =>
     command
-      .description("Print a task's ledger: its worktree ledger in this clone, else its backlog ledger in this repo, else its newest archive copy.")
+      .description("Print a task's ledger: its worktree ledger in this clone, else the copy of it in a worktree on another machine, else its backlog ledger in this repo, else its newest archive copy.")
       .argument('<slug>', 'the task, or a full archive name <date>-<slug>[-N] for that one copy')
       .option('--repo <repo>', 'read the ledgers of another repo: its key, such as github.com/me/app, an alias, or its short label, such as me/app')
       .addOption(new Option('--evidence [file]', "list the archive copy's evidence files, one path per line, or print the bytes of one").conflicts('json'))
@@ -314,8 +320,11 @@ export async function main(argv: string[]): Promise<number> {
           else if (evidence !== undefined) {
             const bytes = context.store.archive.readEvidence(found.repo, found.name, evidence) ?? fail(`${evidence} is not an evidence file of ${slug}, archived as ${found.name} in the repo ${repoLabel(found.repo)}.`);
             process.stdout.write(bytes);
-          } else if (json) printJson({ repo: found.repo, name: found.name, location: found.location, text: found.text });
-          else process.stdout.write(found.text);
+          } else if (json) printJson({ repo: found.repo, name: found.name, location: found.location, ...(found.host === undefined ? {} : { host: found.host }), text: found.text });
+          else {
+            if (found.host !== undefined) console.log(`${found.name} is in a worktree on ${found.host}. This is a read-only copy of its ledger:`);
+            process.stdout.write(found.text);
+          }
         } catch (error) {
           if (!(error instanceof Failure)) throw error;
           console.error(error.message);
@@ -394,8 +403,16 @@ export async function main(argv: string[]): Promise<number> {
     .option('--force', 'retire it anyway with uncommitted changes, an unmerged branch or active children')
     .option('--json', JSON_HELP)
     .action((slug: string | undefined, { dryRun = false, force = false }: { dryRun?: boolean; force?: boolean }) => {
-      const silent = { line: () => {}, warn: () => {} };
-      show(json ? retireTask(context, slug, { dryRun, force }, silent) : retireTask(context, slug, { dryRun, force }), retireText);
+      if (!json) return show(retireTask(context, slug, { dryRun, force }), retireText);
+      const warnings: string[] = [];
+      try {
+        printJson(retireTask(context, slug, { dryRun, force }, { line: () => {}, warn: (text) => void warnings.push(text) }));
+      } catch (error) {
+        // This retire went on after the error and warned about later steps, as one that goes through does.
+        if (!(error instanceof PartlyRemoved)) throw error;
+        printJson({ warnings }, error.message);
+        exitCode = error.exitCode;
+      }
     });
   showCommand(taskGroup.command('show'));
   listCommand(taskGroup.command('list'));
@@ -701,6 +718,35 @@ export async function main(argv: string[]): Promise<number> {
     )
     .argument('<url>', 'the private repository, as https://github.com/<owner>/<repo>.git or git@github.com:<owner>/<repo>.git')
     .action((url: string) => initSync(paths, url, print));
+  storeGroup
+    .command('mirror')
+    .description(
+      'Copy each worktree ledger of this machine into git storage, as active/<host>/<repo>/<slug>.md, so your other machines can read it; remove the copies whose worktree ledger is gone, commit, and push in the background. With file or SQLite storage it does nothing.',
+    )
+    .option('--quiet', 'print nothing, exit 1 without a word when it fails, and stop git and lock waits after 5 s, as a hook does; for the copy after each answered turn')
+    .action(({ quiet = false }: { quiet?: boolean }) => {
+      try {
+        if (readStorage(paths.home) !== 'git') return;
+        if (quiet) {
+          const deadline = Date.now() + GIT_TIMEOUT_MS;
+          limitGitCalls(GIT_TIMEOUT_MS, deadline);
+          limitCloneGitCalls(deadline);
+          limitLockWaits(deadline);
+        }
+        const store = gitStore(paths, { backgroundSync: true, quiet });
+        try {
+          const mirrored = mirrorLedgers({ paths, cwd, store });
+          // The mirror leaves a commit that fails to close(), which only records and reports it; this one fails the command.
+          store.commit?.();
+          if (!quiet && mirrored !== undefined) print(mirrorText(mirrored));
+        } finally {
+          store.close?.();
+        }
+      } catch (error) {
+        if (!quiet) throw error;
+        exitCode = 1;
+      }
+    });
 
   const worktrees = program
     .command('worktrees')

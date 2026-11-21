@@ -1,3 +1,5 @@
+import { HOST_LABEL } from './settings.js';
+
 /**
  * Secret-like text, as patterns that are both JavaScript regular expressions and POSIX extended ones, so `ledger store sync`
  * and the pre-push hook it writes search for exactly the same text. An `sk-` key must not follow a letter, a digit, `_`
@@ -203,10 +205,11 @@ export function prePushHook(): string {
     "  '",
     '}',
     '',
-    '# The allowlist of ledger store sync: a repo folder and a ledger name are never . or .., and hold no / or \\ or line break.',
-    "ledger_path='^(backlog|archive)/([^/\\]+)/([^/\\]+)\\.(md|json)$'",
+    '# The allowlist of ledger store sync: a host folder is a host label; a repo folder and a ledger name are never . or ..,',
+    '# and hold no / or \\ or line break. An active copy is Markdown only.',
+    `ledger_path='^(backlog/|archive/|active/${HOST_LABEL}/)([^/\\]+)/([^/\\]+)\\.(md|json)$'`,
     'is_ledger() {',
-    '  case $1 in .ledger-data | .gitignore) return 0 ;; *$\'\\n\'*) return 1 ;; esac',
+    '  case $1 in .ledger-data | .gitignore) return 0 ;; *$\'\\n\'*) return 1 ;; active/*.json) return 1 ;; esac',
     '  [[ $1 =~ $ledger_path ]] || return 1',
     '  case ${BASH_REMATCH[2]} in . | ..) return 1 ;; esac',
     '  case ${BASH_REMATCH[3]} in . | ..) return 1 ;; esac',

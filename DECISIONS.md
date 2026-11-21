@@ -1300,3 +1300,103 @@ Not covered: a ledger names its repository by absolute path, so a command
 such as `ledger task park <slug>` finds another machine's task only when the
 repository is at the same path. A clone whose hook was deleted pushes by hand
 without the scan until the next `ledger store sync` writes the hook again.
+
+## 2026-11-19 — Git storage keeps read-only copies of the active ledgers
+
+With git storage, a started task was invisible to the other machines: its
+ledger, `.claude/ledger.md` in its worktree, never left the machine. Another
+machine saw the task neither in its backlog nor as active. Git storage now
+keeps a copy of each worktree ledger, `active/<host>/<repo>/<slug>.md` in the
+clone, with the same text.
+
+**A copy, not a move.** The worktree ledger stays the one that changes: hooks,
+agents and the plugin read and write it on disk, as before. The copy only
+follows it. `ledger store mirror` writes each copy that differs and removes
+each whose worktree git confirms is gone: a repo it cannot read, a worktree
+list that fails, an unreadable ledger, or a task the registry lists as active
+keeps its copy. A worktree ledger that is a symbolic link is not copied. The
+mirror holds the clone lock from its first read to its commit, so a sync never
+commits half of it, and a retire meanwhile cannot get its copy back. It pushes
+in the background as after any other write. The
+plugin runs `ledger store mirror --quiet` at the end of each answered turn of
+the main agent, also in a session without a ledger, and the session-start hook
+runs it after its pull. A failed mirror never stops a session: the hook logs
+it as a hook failure and still injects the ledgers. `ledger task retire`
+removes the copy in the commit that adds the archive copy, so no other machine
+sees the task active and retired at once.
+
+**A folder per machine.** `<host>` is `"host"` in
+`~/.claude/ledger-settings.json`, else the host name up to its first dot, in
+lowercase, with each character outside a-z, 0-9 and - as -, and no - at
+either end. A `"host"` with any other character, or a host name that leaves
+no name, stops only the copies until `"host"` is set: `ledger store mirror`
+fails and asks for it, and the session start says so in one line. A sync, the
+session pull and every other store write go on, and their commits leave all
+of `active/` as HEAD has it; a copy of this machine not committed yet is
+dropped, and the first mirror after the fix writes it again. A worktree task
+cannot be retired until `"host"` is fixed: the retire must remove its copy
+first, and it stops with nothing changed. The allowlist
+and the pre-push hook take a host folder by the same pattern. A machine writes
+only its own folder, so two machines never change the same file, and a
+conflict between copies cannot happen. A machine ignores its own folder when
+it reads: it reads its worktrees from disk.
+
+**Read-only on the other machines.** The copies of other hosts are tasks of
+place `remote`, with a host. `ledger list` shows them as `active on <host>`,
+and `--json` adds `place` and `host`. A remote task hides a backlog ledger with
+the same repo and slug, as that backlog ledger may only be a removal this
+machine has not pulled yet. `ledger show` prints a line that names the host and
+says the copy is read-only, then the copy. `ledger go`, park and retire refuse
+a remote task and change nothing. The registry leaves remote tasks out, as the
+plugin would take them for ledgers of this machine.
+
+**The same allowlist and scan.** The `.gitignore`, the commit allowlist and
+the pre-push hook allow `active/<host>/<repo>/<slug>.md`, with the same rule
+for each folder name. A clone set up before has its `.gitignore` and hook
+written again at the next sync or session start. In-progress ledger text now
+reaches the private ledger repository, so the secret scan before each push
+covers it as it covers every ledger.
+
+Not covered: a copy is only as new as the last answered turn or session start
+on its machine. A mirror whose commit fails leaves the copies written but not
+committed, records the problem for the next session start, and says so on
+stderr unless `--quiet`. The next mirror commits them, also when nothing
+changed since; so does the next sync. Two worktree ledgers of one machine with
+the same repo folder name and slug share one copy, and so do two machines
+with the same host name.
+
+## 2026-11-20 — A machine never commits another machine's copies
+
+Each machine owns its folder `active/<host>/` in git storage. A copy in the
+folder of another machine could still change in this machine's clone: an
+edit by hand, or a tool that rewrites files. A sync then committed and pushed
+that change, and the owning machine's next copy overwrote it.
+
+Every commit of git storage now leaves the other machines' folders as HEAD
+holds them. Before it stages, it puts each changed file there back as
+committed, and removes a file that HEAD does not hold. It prints one warning
+on stderr for each file it put back; `ledger store mirror --quiet` and
+`ledger store sync --quiet` print none. This machine's own folder is committed as before.
+
+Put back, not refused: the copies are read-only here, and the owning machine
+writes them again anyway. A refusal would stop every sync until a person
+cleaned up a file that has no value.
+
+## 2026-11-20 — A failed retire with git storage is undone in full
+
+A retire writes the archive copy before it removes the worktree. When a later
+step failed, the archive copy stayed. With git storage, the next commit then
+pushed a task that was archived and active at once, because the retire had
+also removed the active copy.
+
+**Git storage undoes it.** When a retire fails before the worktree or the
+backlog ledger is gone, it removes the archive ledger and the evidence that
+this retire wrote, and puts the active copy back. All of this happens before
+the store commits, so the commit holds neither the archive copy nor the
+removal of the active copy. An archive copy of the same name that another
+command wrote stays. When the undo itself fails, the retire names the path to
+remove by hand, and its commit leaves that path out.
+
+**File and SQLite storage keep the archive copy.** These stores have no
+commit to protect, and no other machine reads them. A rerun finds the archive
+copy, reports it as archived already, and continues from there.

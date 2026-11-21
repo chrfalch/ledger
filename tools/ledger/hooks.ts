@@ -5,12 +5,14 @@ import { limitCloneGitCalls } from './clone.js';
 import { folderEntries } from './files.js';
 import { logHookFailure, markHookFailuresReported, unreportedHookFailures } from './hook-failures.js';
 import { findSection, serializeLedger, type Child, type Claim, type Ledger, type TaskRef } from './format.js';
-import { checkoutRoot, gitTimedOut, inMainCheckout, limitGitCalls, mainCheckout } from './git.js';
+import { checkoutRoot, forgetStoppedGitCalls, gitTimedOut, inMainCheckout, limitGitCalls, mainCheckout } from './git.js';
 import { limitLockWaits } from './lock.js';
 import { conversionHint } from './migrate-repo-ids.js';
 import { samePath, worktreeLedger } from './paths.js';
 import { repoKey, repoLabel } from './repo-key.js';
 import { loadTasks } from './registry.js';
+import { mirrorLedgers } from './mirror.js';
+import { hostProblem } from './settings.js';
 import { pullForSession, syncNotice } from './sync.js';
 import { archivedTasks, findNamed, findTasks, folderTask, locateChild, namedChildren, worktreeTasks, type Task } from './tasks.js';
 import type { Context } from './write.js';
@@ -49,9 +51,12 @@ export function parseHookInput(json: string): HookInput {
 
 const folderOf = (input: HookInput, context: HookContext): string => input.cwd || context.cwd;
 
-const GIT_TIMEOUT_MS = 5000;
-/** What the session start keeps of its 5 s for the ledgers, after the pull of git storage. */
-const AFTER_PULL_MS = 1000;
+/** How long a hook, and the mirror after each answered turn, lets git and the locks take, so neither stalls Claude Code. */
+export const GIT_TIMEOUT_MS = 5000;
+/** What the session start keeps of its 5 s after the pull of git storage: for the copy of the worktree ledgers, then the ledgers. */
+const AFTER_PULL_MS = 1500;
+/** What the session start keeps of its 5 s for the ledgers after that copy, so a slow copy cannot cost the session its ledgers. */
+const AFTER_MIRROR_MS = 1000;
 
 /**
  * What the hook prints on stdout for Claude Code's JSON `stdin`: hook JSON, plain text for pre-compact, or nothing.
@@ -179,9 +184,41 @@ function tasksOnDisk(context: HookContext, mains: string[]): Task[] {
   }
 }
 
+/** Ends every later git call and lock wait of the process by `until`, a time from Date.now(). */
+function limitHookTo(until: number): void {
+  limitLockWaits(until);
+  limitCloneGitCalls(until);
+  limitGitCalls(GIT_TIMEOUT_MS, until);
+}
+
 /**
- * With git storage it pulls first, and a sync problem adds one line before the ledgers. The pull, and every git call and
- * lock wait after it, opening and closing the store too, end by `deadline`.
+ * A failed or slow copy must not cost the session its ledgers: the copy ends by `until`, a repo where its git ran out of
+ * that time is asked again after it, and a failure is logged, which the next session start reports. Every later git
+ * call and lock wait ends by `deadline` again. With a "host" that names no folder, nothing is copied, and the line it
+ * gives says why.
+ */
+function mirrorForSession(context: HookContext, until: number, deadline: number): string | undefined {
+  const problem = context.store.active === undefined ? undefined : hostProblem(context.paths.home);
+  if (problem !== undefined) {
+    limitHookTo(deadline);
+    return `The worktree ledgers are not copied to git storage: ${problem}`;
+  }
+  limitHookTo(until);
+  try {
+    mirrorLedgers(context);
+  } catch (error) {
+    logHookFailure(context.paths.home, 'ledger hook session-start', `the copy of the worktree ledgers to git storage failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    forgetStoppedGitCalls();
+    limitHookTo(deadline);
+  }
+  return undefined;
+}
+
+/**
+ * With git storage it pulls first, then copies the worktree ledgers there, and a sync problem and a "host" that names
+ * no folder each add one line before the ledgers. The pull, and every git call and lock wait after it, opening and
+ * closing the store too, end by `deadline`; the pull ends AFTER_PULL_MS before it, and the copy AFTER_MIRROR_MS before it.
  */
 function sessionLedgerContext(input: HookInput, context: HookContext, deadline: number): { hint?: string; text?: string; title?: string } {
   limitLockWaits(deadline);
@@ -192,7 +229,9 @@ function sessionLedgerContext(input: HookInput, context: HookContext, deadline: 
   limitGitCalls(GIT_TIMEOUT_MS, deadline);
   // After the pull, which may bring ledgers under folder names, and before the ledgers, whose registry rebuild re-keys the entries the hint counts.
   const hint = conversionHint(context.store);
-  const notice = syncNotice(context.paths);
+  const copyNotice = mirrorForSession(context, deadline - AFTER_MIRROR_MS, deadline);
+  const notices = [syncNotice(context.paths), copyNotice].filter((line) => line !== undefined);
+  const notice = notices.length === 0 ? undefined : notices.join('\n');
   const found = sessionLedgers(folderOf(input, context));
   if (found.tasks.length === 0) return { hint, text: notice };
   const mains = found.tasks.flatMap(({ main, ledger: { location, children } }) => [main, location.parent?.main, ...children.map((child) => child.main)].filter((known) => known !== undefined));

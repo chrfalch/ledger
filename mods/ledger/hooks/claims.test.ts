@@ -517,7 +517,7 @@ test('the touch runs before an armed clear, which then releases every claim of t
   await $.command.run({ command: 'ledger:close', args: '' })
   await $.turn.complete(turnEnd)
 
-  expect(w.argvs()).toEqual([['session', CWD, '--json'], touchAllArgv(), releaseAllArgv()])
+  expect(w.argvs()).toEqual([['session', CWD, '--json'], touchAllArgv(), ['store', 'mirror', '--quiet'], releaseAllArgv()])
   expect(w.events).toEqual(['clear'])
 })
 
@@ -550,8 +550,8 @@ test('an armed /ledger:close releases every claim of the session before it clear
   await $.command.run({ command: 'ledger:close', args: '' })
   await $.turn.complete(turnEnd)
 
-  expect(w.argvs()).toEqual([['session', CWD, '--json'], releaseAllArgv()])
-  expect(w.callsBeforeClear).toEqual([2])
+  expect(w.argvs()).toEqual([['session', CWD, '--json'], ['store', 'mirror', '--quiet'], releaseAllArgv()])
+  expect(w.callsBeforeClear).toEqual([3])
   expect(w.events).toEqual(['clear'])
 })
 
@@ -580,7 +580,7 @@ test('an armed /ledger:park releases every claim of the session after the park a
   await $.command.run({ command: 'ledger:park', args: 'waiting' })
   await $.turn.complete(turnEnd)
 
-  expect(w.argvs().slice(-2)).toEqual([['task', 'park', 'epic', '--reason', 'waiting', '--json'], releaseAllArgv()])
+  expect(w.argvs().slice(-3)).toEqual([['task', 'park', 'epic', '--reason', 'waiting', '--json'], ['store', 'mirror', '--quiet'], releaseAllArgv()])
   expect(w.callsBeforeClear).toEqual([w.calls.length])
 })
 

@@ -114,6 +114,13 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, rendered(withNul));
   });
 
+  test(`${name}: an archive copy reads back as its bytes, and an unknown name as none`, { skip }, (t) => {
+    const store = makeStore(t);
+    store.archive.write('app', '2026-11-01-fix-login', text('fix-login'));
+    assert.deepEqual(store.archive.readBytes('app', '2026-11-01-fix-login'), Buffer.from(text('fix-login')));
+    assert.equal(store.archive.readBytes('app', '2026-11-01-unknown'), undefined);
+  });
+
   test(`${name}: no evidence reads back as none, and readEvidence gives nothing for a path that is not an evidence file`, { skip }, (t) => {
     const h = home(t);
     const store = open(h);
@@ -1337,6 +1344,7 @@ function recording(inner: LedgerStore): { store: LedgerStore; calls: string[] } 
       read: (repo, name) => (note('archive.read', repo, name), inner.archive.read(repo, name)),
       has: (repo, name) => (note('archive.has', repo, name), inner.archive.has(repo, name)),
       write: (repo, name, body, evidenceFrom) => (note('archive.write', repo, name), inner.archive.write(repo, name, body, evidenceFrom)),
+      readBytes: (repo, name) => (note('archive.readBytes', repo, name), inner.archive.readBytes(repo, name)),
       evidenceState: (repo, name, from) => (note('archive.evidenceState', repo, name), inner.archive.evidenceState(repo, name, from)),
       nameTaken: (repo, name) => (note('archive.nameTaken', repo, name), inner.archive.nameTaken(repo, name)),
       evidenceLocation: (repo, name) => (note('archive.evidenceLocation', repo, name), inner.archive.evidenceLocation(repo, name)),

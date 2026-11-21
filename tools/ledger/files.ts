@@ -5,6 +5,7 @@ import {
   constants,
   existsSync,
   fchmodSync,
+  fstatSync,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -131,22 +132,16 @@ export const isFolder = (file: string): boolean => statSync(file, { throwIfNoEnt
 
 type Links = { followLinks?: boolean };
 
-/**
- * The stat of a regular file this process may read; undefined for anything else. A symbolic link counts only with
- * `followLinks`, so in the store a link can never pass for a ledger or an archive copy of the file it points to.
- */
-function readableFile(file: string, { followLinks = false }: Links = {}): Stats | undefined {
+/** Whether `file` is a regular file this process may read; a symbolic link is not. */
+export function isReadableFile(file: string): boolean {
   try {
-    const stat = followLinks ? statSync(file) : lstatSync(file);
-    if (!stat.isFile()) return undefined;
+    if (!lstatSync(file).isFile()) return false;
     accessSync(file, constants.R_OK);
-    return stat;
+    return true;
   } catch {
-    return undefined;
+    return false;
   }
 }
-
-export const isReadableFile = (file: string): boolean => readableFile(file) !== undefined;
 
 /** The entries of `folder` and its subfolders. Unlike readdir's recursive option, a symbolic link to a folder is not followed. */
 export function treeEntries(folder: string): Dirent[] {
@@ -164,13 +159,33 @@ export function folderEntries(folder: string): Dirent[] {
 
 export type TimedText = { text: string; mtimeMs: number; birthtimeMs: number };
 
-/** The text and times of a file; undefined when it is not a readable file. A file system without birth times gives the mtime. */
+/**
+ * The text and times of a regular file; undefined for anything else or an unreadable file. A file system without birth
+ * times gives the mtime. A symbolic link counts only with `followLinks`, so in the store a link can never pass for a
+ * ledger or an archive copy of the file it points to. One open, checked and read through its descriptor, so a link put
+ * in place after a check is never read; O_NONBLOCK keeps a FIFO from blocking the open.
+ */
 export function readTimedText(file: string, links: Links = {}): TimedText | undefined {
-  const stat = readableFile(file, links);
-  if (stat === undefined) return undefined;
+  const found = readRegularFile(file, links);
+  return found && { text: found.bytes.toString('utf8'), mtimeMs: found.stat.mtimeMs, birthtimeMs: found.stat.birthtimeMs > 0 ? found.stat.birthtimeMs : found.stat.mtimeMs };
+}
+
+/** The bytes of a regular file, read as readTimedText reads it; undefined for anything else or an unreadable file. */
+export const readBytes = (file: string, links: Links = {}): Buffer | undefined => readRegularFile(file, links)?.bytes;
+
+function readRegularFile(file: string, { followLinks = false }: Links): { bytes: Buffer; stat: Stats } | undefined {
+  let descriptor: number;
   try {
-    return { text: readText(file), mtimeMs: stat.mtimeMs, birthtimeMs: stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.mtimeMs };
+    descriptor = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | (followLinks ? 0 : constants.O_NOFOLLOW));
   } catch {
     return undefined;
+  }
+  try {
+    const stat = fstatSync(descriptor);
+    return stat.isFile() ? { bytes: readFileSync(descriptor), stat } : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    closeSync(descriptor);
   }
 }

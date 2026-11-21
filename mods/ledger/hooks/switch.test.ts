@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { done, ledgerOf, MAIN, refused, removedSession, session, task, turnEnd, world, worktreeOf } from './fake-ledger.test-helper'
+import { done, ledgerOf, MAIN, ran, refused, removedSession, session, task, turnEnd, world, worktreeOf } from './fake-ledger.test-helper'
 import { GO_FROM_SUBAGENT, NEXT_FROM_SUBAGENT, nextAfterSwitchMessage, noLedgerMessage, oneSwitchPerTurnMessage, removedFolderMessage, typedOnlyMessage } from './ledger'
 
 const CWD = worktreeOf('epic')
@@ -26,7 +26,7 @@ test('/ledger:close passes the ledger path to close.md, and the turn end clears 
   await $.turn.complete(turnEnd)
 
   expect(w.markdown()).toEqual({ command: 'ledger:close', args: `ledger: ${EPIC}` })
-  expect(w.argvs()).toEqual([['session', CWD, '--json'], ['task', 'release', '--all', '--session', 'session-1']])
+  expect(w.argvs()).toEqual([['session', CWD, '--json'], ['store', 'mirror', '--quiet'], ['task', 'release', '--all', '--session', 'session-1']])
   expect(w.events).toEqual(['clear'])
 })
 
@@ -75,6 +75,7 @@ test('/ledger:next clears at the turn end, then continues the same task with go 
   expect(w.events).toEqual(['clear', 'submit: go epic'])
   expect(w.argvs()).toEqual([
     ['session', CWD, '--json'],
+    ['store', 'mirror', '--quiet'],
     ['task', 'release', '--all', '--session', 'session-1'],
     ['worktrees', 'auto-prune', EPIC, '--json'],
     ['task', 'claim', 'epic', '--session', 'session-1', '--json'],
@@ -655,11 +656,56 @@ test('/ledger:park <reason> parks this task after the model turn, then clears wi
   expect(w.argvs().some(([group, command]) => group === 'task' && command === 'park')).toBe(false)
   await $.turn.complete(turnEnd)
 
-  expect(w.argvs().slice(-2)).toEqual([
+  expect(w.argvs().slice(-3)).toEqual([
     ['task', 'park', 'epic', '--reason', 'waits for review', '--json'],
+    ['store', 'mirror', '--quiet'],
     ['task', 'release', '--all', '--session', 'session-1'],
   ])
   expect(w.events).toEqual(['clear'])
+})
+
+test('at the turn end of /ledger:park, the parked marker is written before the worktree ledgers are copied', async ($, on) => {
+  const w = world(
+    on,
+    {
+      [SESSION]: ownEpic(),
+      'list --json': done({ tasks: [task('epic')] }),
+      'task park epic --reason waits for review --json': done({ slug: 'epic', main: MAIN, ledger: EPIC, parked: { date: '2026-11-18', reason: 'waits for review' } }),
+      'store mirror --quiet': ran(0, ''),
+    },
+    { cwd: CWD },
+  )
+
+  await $.command.run({ command: 'ledger:park', args: 'waits for review' })
+  await $.turn.complete(turnEnd)
+
+  expect(w.argvs().filter(([group, command]) => command === 'park' || group === 'store')).toEqual([
+    ['task', 'park', 'epic', '--reason', 'waits for review', '--json'],
+    ['store', 'mirror', '--quiet'],
+  ])
+  expect(w.events).toEqual(['clear'])
+})
+
+const ON_HOST_A = 'fix-login is in a worktree on host-a, and this machine has only a read-only copy of its ledger. Continue the task on host-a.'
+
+test('/ledger:park <slug of a task on another machine> <reason> answers that it is read-only here, and parks nothing here', async ($, on) => {
+  const w = world(
+    on,
+    {
+      [SESSION]: ownEpic(),
+      'list --json': done({ tasks: [task('epic'), { ...task('fix-login'), main: undefined, place: 'remote', host: 'host-a' }] }),
+      'task park fix-login --reason waits for review --json': refused(ON_HOST_A),
+    },
+    { cwd: CWD },
+  )
+
+  const { text } = await $.command.run({ command: 'ledger:park', args: 'fix-login waits for review' })
+  await $.turn.complete(turnEnd)
+
+  expect(text).toBe(`Could not park fix-login. ${ON_HOST_A}`)
+  expect(w.armed).toEqual([])
+  expect(w.markdown()).toBeUndefined()
+  expect(w.events).not.toContain('clear')
 })
 
 test('/ledger:park <own slug> <reason> parks this task, with the reason after the slug', async ($, on) => {
@@ -718,7 +764,14 @@ test('an answered turn names the session after its task once per slug, and runs 
   await $.turn.complete({ ...turnEnd, turnId: 't2' })
 
   expect(w.events).toEqual(['rename: epic'])
-  expect(w.argvs()).toEqual([['session', CWD, '--json'], ['worktrees', 'auto-prune', EPIC, '--json'], ['session', CWD, '--json'], ['worktrees', 'auto-prune', EPIC, '--json']])
+  expect(w.argvs()).toEqual([
+    ['session', CWD, '--json'],
+    ['worktrees', 'auto-prune', EPIC, '--json'],
+    ['store', 'mirror', '--quiet'],
+    ['session', CWD, '--json'],
+    ['worktrees', 'auto-prune', EPIC, '--json'],
+    ['store', 'mirror', '--quiet'],
+  ])
 })
 
 test('an answered turn shows the line auto-prune gives when it pruned a finished task', async ($, on) => {
@@ -741,6 +794,7 @@ test('a turn that clears neither renames nor runs auto-prune a second time', asy
 
   expect(w.events).toEqual(['clear', 'submit: go kid'])
   expect(w.argvs().filter(([, command]) => command === 'auto-prune').length).toBe(1)
+  expect(w.argvs().filter(([group]) => group === 'store')).toEqual([['store', 'mirror', '--quiet']])
 })
 
 test('an answered turn in a folder with no ledger of its own renames nothing and prunes nothing', async ($, on) => {
@@ -749,7 +803,7 @@ test('an answered turn in a folder with no ledger of its own renames nothing and
   await $.turn.complete(turnEnd)
 
   expect(w.events).toEqual([])
-  expect(w.argvs()).toEqual([['session', MAIN, '--json']])
+  expect(w.argvs()).toEqual([['session', MAIN, '--json'], ['store', 'mirror', '--quiet']])
 })
 
 test('no switch runs a program other than bin/ledger', async ($, on) => {
@@ -933,6 +987,24 @@ test('/ledger:go <new slug> does not clear when only another repo has a task wit
       [SESSION]: ownEpic(),
       'go new-api --session session-1 --json': refused('No backlog task new-api for the repo at /repo.', 2),
       'list --json': done({ tasks: [task('new-api', { main: '/other' })] }),
+    },
+    { cwd: CWD },
+  )
+
+  await $.command.run({ command: 'ledger:go', args: 'new-api' })
+  await $.turn.complete(turnEnd)
+
+  expect(w.events.length).toBe(1)
+  expect(w.events[0]).toContain('did not create task new-api')
+})
+
+test('/ledger:go <new slug> does not clear when only another machine has a task with that slug in this repo', async ($, on) => {
+  const w = world(
+    on,
+    {
+      [SESSION]: ownEpic(),
+      'go new-api --session session-1 --json': refused('No backlog task new-api for the repo at /repo.', 2),
+      'list --json': done({ tasks: [task('epic'), { ...task('new-api'), main: undefined, place: 'remote', host: 'host-a' }] }),
     },
     { cwd: CWD },
   )
