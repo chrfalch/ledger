@@ -227,7 +227,9 @@ const onThisHost = ({ host }: LedgerStore, markdown: string): string => (host ==
  * tell whose task it is by its host.
  */
 function createActive({ store, paths }: Context, main: string, slug: string, text: string): string {
-  const { host, worktree } = parseLedger(text).location;
+  const ledger = parseLedger(text);
+  const { host, worktree } = ledger.location;
+  if (findSection(ledger.sections, 'Location') === undefined) fail(`The ledger of ${slug} has no ## Location section to name its host and worktree, so ${slug} was not made. Add a ## Location section to the template for a new task, then try again.`);
   if (host === undefined) fail(`${hostProblem(paths.home) ?? 'This machine has no host label.'} An active record must name its host, so ${slug} was not made.`);
   if (worktree === undefined) fail(`The ledger of ${slug} has no "- worktree:" line under ## Location to name its worktree, so ${slug} was not made. Add "- worktree: <path>" there, or to the template for a new task, then try again.`);
   const repo = repoKey(main);

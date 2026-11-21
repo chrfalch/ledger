@@ -755,3 +755,21 @@ test('ledger task new --here and --stack make no active record from a template w
   assert.equal(store().active.has(key, 'side'), false);
   assert.equal(existsSync(worktreeOf(app, 'side')), false);
 });
+
+test('ledger task new --here and --stack make no active record from a template with no ## Location section, and say so', (t) => {
+  const { h, app, key, store } = setup(t);
+  worktreeTask(h, app, { slug: 'epic' });
+  const loose = looseWorktree(h, app, 'loose');
+  const template = path.join(h, '.claude/ledger.template.md');
+  writeFileSync(template, readFileSync(template, 'utf8').replace(/^## Location\n(?:- .*\n)*\n/m, ''));
+
+  for (const [cwd, args] of [[loose, ['--here']], [worktreeOf(app, 'epic'), ['side', '--stack']]] as const) {
+    const ran = ledger(h, cwd, 'task', 'new', ...args);
+    assert.equal(ran.status, 1, ran.stdout);
+    assert.match(ran.stderr, /## Location/);
+    assert.doesNotMatch(ran.stderr, /no host label/);
+  }
+  assert.deepEqual(recordsNaming(store(), key, loose), []);
+  assert.equal(store().active.has(key, 'side'), false);
+  assert.equal(existsSync(worktreeOf(app, 'side')), false);
+});
