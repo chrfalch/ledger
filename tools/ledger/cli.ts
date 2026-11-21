@@ -33,6 +33,8 @@ import {
   count,
   LEDGER_SIZE_LIMIT,
   positive,
+  recordStage,
+  recordStageText,
   reportStep,
   reportStepText,
   reportToParent,
@@ -41,6 +43,7 @@ import {
   resolveQuestionText,
   setNext,
   setNextText,
+  STAGES,
   TAGS,
   type Tag,
 } from './notes.js';
@@ -369,6 +372,7 @@ export async function main(argv: string[]): Promise<number> {
         '  ledger notes decide "Keep files" --because "they are simple" --tag observed',
         '  ledger notes question "Which port?" --blocks 2',
         '  ledger notes report --step 2 --file .claude/evidence/red.txt',
+        '  ledger notes stage review fail --back build',
         '  ledger notes next "Review step 2 with reviewer" --task fix-login',
       ].join('\n'),
     );
@@ -431,10 +435,26 @@ export async function main(argv: string[]): Promise<number> {
   notesCommand(notesGroup, 'next', 'Set the next step, in place of the one there.')
     .argument('<text>', 'exactly one action, with the agent and effort to use')
     .action((text: string, { task }: TaskOption) => written(setNext(context, task, text), setNextText));
+  const kindStages = Object.entries(STAGES)
+    .map(([kind, stages]) => `${kind}: ${stages.join(', ')}`)
+    .join('; ');
+  notesCommand(
+    notesGroup,
+    'stage',
+    `Record the outcome of the stage the task is at, and add a dated line to the notes. A task goes through the stages of its kind in order (${kindStages}); a task with no kind is code. Pass moves it to the next stage, or to finished after the last. Fail keeps it at the stage, or with --back returns it to an earlier one. A later stage is reached only by passing or skipping each one before it.`,
+  )
+    .argument('<stage>', 'the stage the task is at')
+    .argument('[outcome]', 'pass or fail')
+    .option('--back <stage>', 'with fail, the earlier stage to go back to')
+    .option('--skip <reason>', 'in place of an outcome: pass the stage without doing its work, and why')
+    .option('--step <n>', 'with pass or --skip, the plan step to mark: red after red, green after build, reviewed after review, done after any other stage')
+    .action((stage: string, outcome: string | undefined, { back, skip, step, task }: TaskOption & { back?: string; skip?: string; step?: string }) =>
+      written(recordStage(context, task, stage, { outcome, back, skip, step: step === undefined ? undefined : positive(step, '--step') }), recordStageText),
+    );
   notesCommand(
     notesGroup,
     'check',
-    `Check the ledger and change nothing: the record reads back the same from its Markdown, the goal is not empty, each open question and step report names a step of the plan, and the ledger is at most ${count(LEDGER_SIZE_LIMIT)} characters. Prints ok, or each problem on a line and exits 1.`,
+    `Check the ledger and change nothing: the record reads back the same from its Markdown, the goal is not empty, each open question and step report names a step of the plan, the kind and stage are known, and the ledger is at most ${count(LEDGER_SIZE_LIMIT)} characters. Prints ok, or each problem on a line and exits 1.`,
   ).action(({ task }: TaskOption) => {
     const checked = checkTask(context, task);
     const { problems } = checked;

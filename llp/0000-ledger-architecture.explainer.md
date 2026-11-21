@@ -85,10 +85,21 @@ changes one item of the task record (D29 in LLP 0001):
 | `report --step <n> --file <path>`, `report --parent "<text>"` | sets the report of a step, or `## Report` |
 | `note "<text>"` | adds a line to the general notes |
 | `next "<text>"` | sets the next step |
+| `stage <stage> pass [--step <n>]`, `stage <stage> fail [--back <earlier>]`, `stage <stage> --skip "<reason>"` | records the outcome of the current stage, moves the stage, and adds a dated note |
 
 A tag is `observed`, `confirmed` or `inferred`. A step report keeps only the
 path of its file: relative to the worktree when the file is inside it, else
 absolute.
+
+`ledger notes stage` keeps the stages in order. `STAGES` in `notes.ts` lists
+the stages of each kind: code, docs and investigation. A task with no `kind`
+is code. The record's `stage` is the stage the task is at, and no `stage` means
+the first. The command's first argument must be that stage. Pass and `--skip` move to the next
+stage, or to `finished` after the last. Fail stays, or with `--back` returns
+to an earlier stage. A later stage is refused, as is an earlier one, and the
+message says to use `--skip` or `fail --back`. `--step <n>` also sets the
+status of plan step n: `red` after red, `green` after build, `reviewed` after
+review, `done` after any other stage.
 
 Each command acts on the task `--task` names, or else on the task of the
 worktree the command runs in. An archived task is refused. A write reads the
@@ -104,8 +115,9 @@ non-empty line, trimmed and cut to 160 characters. The reports of other steps st
 
 `ledger notes check` reads the ledger and changes nothing. It reports a
 record that does not read back the same from its Markdown, an empty goal, an
-open question that blocks a step not in the plan, and a step report for a step
-not in the plan. It also reports a ledger over `LEDGER_SIZE_LIMIT`, 16,000
+open question that blocks a step not in the plan, a step report for a step
+not in the plan, an unknown kind, and a stage that is not a stage of the kind
+or `finished`. It also reports a ledger over `LEDGER_SIZE_LIMIT`, 16,000
 characters of `renderRecord`, and names its three largest sections. Every
 write runs the same rules on the record it wrote and prints what they find as
 warnings, with exit 0.
@@ -403,7 +415,8 @@ A parent task stays in the backlog. Its ledger lists its child tasks.
 
 ## Known gaps
 
-The code does not track a task's stage, child order, claims or PR state. The
-agent writes the ledger by hand, and only rules guard most steps. [LLP 0001
+`ledger notes stage` tracks a task's stage. The code does not track child
+order, claims or PR state. The agent writes the ledger by hand, and only rules
+guard most steps. [LLP 0001
 section 15](0001-ledger-workflow.plan.md#15-from-today-to-this-spec) lists each
 gap and the planned work.

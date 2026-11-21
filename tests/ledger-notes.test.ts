@@ -439,3 +439,139 @@ for (const { storage, skip } of STORES) {
     if (storage === 'git') assert.equal(git(h, path.join(h, '.claude/ledger-data'), 'status', '--porcelain'), '');
   });
 }
+
+const CODE_STAGES = 'plan, red, build, verify, review, pr';
+
+/** The worktree task `wt` with `- kind:` and `- stage:` bullets set as given. */
+function withStage(t: TestContext, location: { kind?: string; stage?: string } = {}) {
+  const task = withWorktree(t);
+  const bullets = Object.entries(location).map(([key, value]) => `- ${key}: ${value}`);
+  writeFileSync(task.file, task.read().replace('- design refs: none\n', ['- design refs: none', ...bullets, ''].join('\n')));
+  const stage = (): string | undefined => task.read().match(/^- stage: (.*)$/m)?.[1];
+  const stageNotes = (): string[] => linesOf(task.read(), /^## Notes$/).filter((line) => line.includes(' stage '));
+  return { ...task, stage, stageNotes };
+}
+
+test('stage pass moves a task with no kind or stage from plan through the code stages to finished, with a note each', (t) => {
+  const { notes, stage, stageNotes } = withStage(t);
+  assert.equal(stage(), undefined);
+  assert.equal(passed(notes('stage', 'plan', 'pass')), 'Stage plan of wt passed; next is red.');
+  assert.equal(stage(), 'red');
+  for (const name of ['red', 'build', 'verify', 'review']) passed(notes('stage', name, 'pass'));
+  assert.equal(stage(), 'pr');
+  assert.equal(passed(notes('stage', 'pr', 'pass')), 'Stage pr of wt passed; wt is finished.');
+  assert.equal(stage(), 'finished');
+  assert.deepEqual(
+    stageNotes(),
+    ['plan', 'red', 'build', 'verify', 'review', 'pr'].map((name) => `${TODAY} stage ${name} pass`),
+  );
+});
+
+test('stage follows the stages of the docs and investigation kinds', (t) => {
+  const docs = withStage(t, { kind: 'docs', stage: 'plan' });
+  passed(docs.notes('stage', 'plan', 'pass'));
+  assert.equal(docs.stage(), 'build');
+  const investigation = withStage(t, { kind: 'investigation', stage: 'report' });
+  passed(investigation.notes('stage', 'report', 'pass'));
+  assert.equal(investigation.stage(), 'review');
+  passed(investigation.notes('stage', 'review', 'pass'));
+  assert.equal(investigation.stage(), 'finished');
+});
+
+test('stage fail keeps the stage, and with --back returns to an earlier one; each leaves a note', (t) => {
+  const { notes, stage, stageNotes } = withStage(t, { stage: 'review' });
+  assert.equal(passed(notes('stage', 'review', 'fail')), 'Stage review of wt failed; it stays at review.');
+  assert.equal(stage(), 'review');
+  assert.equal(passed(notes('stage', 'review', 'fail', '--back', 'build')), 'Stage review of wt failed; back to build.');
+  assert.equal(stage(), 'build');
+  assert.deepEqual(stageNotes(), [`${TODAY} stage review fail`, `${TODAY} stage review fail, back to build`]);
+});
+
+test('stage --skip passes the current stage and keeps the reason in the note', (t) => {
+  const { notes, stage, stageNotes } = withStage(t, { stage: 'red' });
+  assert.equal(passed(notes('stage', 'red', '--skip', 'a copy change has no test')), 'Skipped stage red of wt; next is build.');
+  assert.equal(stage(), 'build');
+  assert.deepEqual(stageNotes(), [`${TODAY} stage red skipped: a copy change has no test`]);
+});
+
+test('stage pass --step sets the status of the plan step by the stage passed, and so does --skip', (t) => {
+  const { notes, read } = withStage(t, { stage: 'red' });
+  const status = (n: string): string | undefined => linesOf(read(), /^## Plan/).find((row) => row.startsWith(`| ${n} |`))?.split('|')[3].trim();
+  passed(notes('stage', 'red', 'pass', '--step', '2'));
+  assert.equal(status('2'), 'red');
+  passed(notes('stage', 'build', 'pass', '--step', '2'));
+  assert.equal(status('2'), 'green');
+  passed(notes('stage', 'verify', '--skip', 'verified in build', '--step', '1'));
+  assert.equal(status('1'), 'done');
+  passed(notes('stage', 'review', 'pass', '--step', '2'));
+  assert.equal(status('2'), 'reviewed');
+});
+
+test('stage refuses a stage that is not the current one, and says how to skip or go back', (t) => {
+  const { notes, read } = withStage(t, { stage: 'build' });
+  const before = read();
+  const later = refused(notes('stage', 'review', 'pass'));
+  assert.match(later, /--skip/);
+  assert.match(later, /build/);
+  assert.match(later, new RegExp(CODE_STAGES));
+  assert.match(refused(notes('stage', 'verify', '--skip', 'no time')), /--skip at the current stage/);
+  const earlier = refused(notes('stage', 'red', 'fail'));
+  assert.match(earlier, /fail --back/);
+  assert.match(earlier, new RegExp(CODE_STAGES));
+  assert.equal(read(), before);
+});
+
+test('stage refuses a name that is not a stage of the kind, an unknown kind, and a finished task', (t) => {
+  const code = withStage(t, { stage: 'build' });
+  const before = code.read();
+  const unknown = refused(code.notes('stage', 'investigate', 'pass'));
+  assert.match(unknown, /investigate/);
+  assert.match(unknown, /build/);
+  assert.match(unknown, new RegExp(CODE_STAGES));
+  assert.equal(code.read(), before);
+
+  const odd = withStage(t, { kind: 'poetry' });
+  assert.match(refused(odd.notes('stage', 'plan', 'pass')), /poetry.*code, docs, investigation|code, docs, investigation.*poetry/);
+
+  const finished = withStage(t, { kind: 'docs', stage: 'finished' });
+  const done = finished.read();
+  const message = refused(finished.notes('stage', 'pr', 'pass'));
+  assert.match(message, /finished/);
+  assert.match(message, /plan, build, review, pr/);
+  assert.equal(finished.read(), done);
+});
+
+test('stage refuses a wrong outcome, both or neither of an outcome and --skip, --back where it does not belong, --step with fail, and an empty reason', (t) => {
+  const { notes, read } = withStage(t, { stage: 'review' });
+  const before = read();
+  const refusals = [
+    ['stage', 'review', 'maybe'],
+    ['stage', 'review', 'pass', '--skip', 'no reviewer'],
+    ['stage', 'review'],
+    ['stage', 'review', 'pass', '--back', 'build'],
+    ['stage', 'review', '--skip', 'no reviewer', '--back', 'build'],
+    ['stage', 'review', 'fail', '--step', '2'],
+    ['stage', 'review', '--skip', ' '],
+    ['stage', 'review', '--skip', 'two\nlines'],
+    ['stage', 'review', 'fail', '--back', 'review'],
+    ['stage', 'review', 'fail', '--back', 'pr'],
+    ['stage', 'review', 'fail', '--back', 'investigate'],
+    ['stage', 'review', 'pass', '--step', '9'],
+  ];
+  for (const args of refusals) {
+    const message = refused(notes(...args));
+    assert.match(message, /review/, args.join(' '));
+    assert.match(message, new RegExp(CODE_STAGES), args.join(' '));
+  }
+  assert.equal(read(), before);
+});
+
+test('check lists an unknown kind, and a stage that is not a stage of the kind', (t) => {
+  const odd = withStage(t, { kind: 'poetry' });
+  assert.match(refused(odd.notes('check')), /poetry/);
+  const lost = withStage(t, { kind: 'docs', stage: 'red' });
+  const problems = refused(lost.notes('check'));
+  assert.match(problems, /red/);
+  assert.match(problems, /plan, build, review, pr/);
+  assert.equal(passed(withStage(t, { stage: 'finished' }).notes('check')), 'ok');
+});
