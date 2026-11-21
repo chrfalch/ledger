@@ -32,7 +32,7 @@ declare module 'claude-code' {
     ledger: {
       armed: LedgerArmed | null
       titled: { sessionId: string; slug: string } | null
-      claimedTask: { sessionId: string; slug: string }
+      claimedTask: { sessionId: string; slug: string } | null
       clearApproved: boolean
       heldTask: { sessionId: string; slug: string } | null
       takeOverApproved: string | null

@@ -372,6 +372,8 @@ async function releaseClaims($: EngineInterface, sessionId?: string): Promise<vo
 async function finishTurn($: EngineInterface, clearPointTokens: number): Promise<void> {
   const session = await readSession($)
   if (!session.ok) return
+  // A worktree's own task replaces the claim as the task the session works on, so the claim must not name it again later.
+  if (session.title !== undefined) await $.state.set(claimedTask, null).catch(() => undefined)
   const title = session.title ?? (await claimedSlug($))
   if (title !== undefined) await titleSession($, title)
   const own = ownTask(session)

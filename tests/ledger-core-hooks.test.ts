@@ -691,6 +691,16 @@ test('prompt-submit keeps a title the operator chose while the session stays on 
   assert.equal(promptSubmitTitle(h, { prompt: 'go alpha', cwd: main, session_id: 's2', session_title: 'my custom name' }), 'alpha');
 });
 
+test('prompt-submit keeps a title the operator chose when the session claims the task among other claims', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const claim = ['- claim: session s1 since 2026-11-20T10:00:00Z, active 2026-11-20T10:00:00Z'];
+  ledgerIn(h, worktree(h, main, path.join(h, 'alpha')), familyLedger('alpha', claim));
+  ledgerIn(h, worktree(h, main, path.join(h, 'beta')), familyLedger('beta', claim));
+
+  assert.equal(promptSubmit(h, { prompt: 'go beta', cwd: main, session_id: 's1', session_title: 'my custom name' }), '');
+});
+
 test('prompt-submit prints nothing when the title already names the task', (t) => {
   const h = home(t);
   const alpha = worktree(h, checkout(h, 'main'), path.join(h, 'alpha'));

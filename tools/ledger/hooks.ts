@@ -263,8 +263,7 @@ export function promptSubmit(input: HookInput, context: HookContext): PromptSubm
   // From the records alone: the hook runs at every prompt, so it asks git nothing per task.
   const active = keyAndAliases(store.aliases.read(), repoKey(main)).flatMap((repo) => store.active.list(repo).map(({ text }) => parseLedger(text)));
   if (!active.some(({ slug }) => slug === target) || input.sessionTitle === target) return undefined;
-  const claimed = input.sessionId === '' ? undefined : active.find(({ location }) => location.claim?.session === input.sessionId)?.slug;
-  if (claimed === target) return undefined;
+  if (input.sessionId !== '' && active.some(({ slug, location }) => slug === target && location.claim?.session === input.sessionId)) return undefined;
   return { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', sessionTitle: target } };
 }
 

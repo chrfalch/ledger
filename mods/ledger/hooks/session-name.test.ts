@@ -55,6 +55,19 @@ test('D43: a session in the main checkout that claimed a task with go <slug> is 
   expect(renames(w.events)).toEqual(['rename: beta'])
 })
 
+test('D43: a session that claimed a task, then worked in another task\'s worktree, is not renamed back to the claim in the main checkout', async ($, on) => {
+  const w = world(on, { ...ownTasks, [sessionAt(MAIN)]: session(MAIN, undefined, [task('beta')]), 'task claim beta --session session-1 --json': claimed('beta', 'session-1') }, { cwd: MAIN })
+
+  await $.prompt.submit({ text: 'go beta' })
+  await $.turn.complete(turnEnd)
+  w.enterWorktree(A)
+  await $.turn.complete(turnEnd)
+  w.enterWorktree(MAIN)
+  await $.turn.complete(turnEnd)
+
+  expect(renames(w.events)).toEqual(['rename: beta', 'rename: alpha'])
+})
+
 test('D43: a new session in a task\'s worktree is named after it even when an earlier session last took that name', async ($, on) => {
   const w = world(on, ownTasks, { cwd: B })
 
