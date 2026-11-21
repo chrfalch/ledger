@@ -42,7 +42,7 @@ import { isKind, KINDS, type Kind } from './kinds.js';
 import { storedText } from './record.js';
 import { remoteKey, repoKey } from './repo-key.js';
 import { holdsUnmovedLedger, loadTasks } from './registry.js';
-import { noteOwnHost } from './settings.js';
+import { hostProblem, noteOwnHost } from './settings.js';
 import { keyAndAliases, type Change, type LedgerStore } from './store.js';
 import { pauseForTest } from './wait.js';
 import {
@@ -221,8 +221,15 @@ function refuseBacklog({ store, paths }: Context, key: string, slug: string): vo
 /** `markdown`, a new active ledger, naming this machine's host, which tells other machines whose task it is. */
 const onThisHost = ({ host }: LedgerStore, markdown: string): string => (host === undefined ? markdown : (setLocationBullet(markdown, 'host', host) ?? markdown));
 
-/** Writes the active record of a new task, filed under the key of the repo at `main`; fails, writing nothing, when the slug is taken. */
-function createActive(store: LedgerStore, main: string, slug: string, text: string): string {
+/**
+ * Writes the active record of a new task, filed under the key of the repo at `main`. It fails, writing nothing, when the
+ * slug is taken, and when `text` names no host or no worktree: lookup finds a record by its worktree, and other machines
+ * tell whose task it is by its host.
+ */
+function createActive({ store, paths }: Context, main: string, slug: string, text: string): string {
+  const { host, worktree } = parseLedger(text).location;
+  if (host === undefined) fail(`${hostProblem(paths.home) ?? 'This machine has no host label.'} An active record must name its host, so ${slug} was not made.`);
+  if (worktree === undefined) fail(`The ledger of ${slug} has no "- worktree:" line under ## Location to name its worktree, so ${slug} was not made. Add "- worktree: <path>" there, or to the template for a new task, then try again.`);
   const repo = repoKey(main);
   refuseActive(store, main, slug);
   const location = store.active.location(repo, slug);
@@ -250,7 +257,7 @@ function startWorktree(context: Context, main: string, slug: string, branch: str
   let started: Started;
   try {
     const text = onThisHost(store, ledgerText(location));
-    started = { ...location, ledger: createActive(store, main, slug, text) };
+    started = { ...location, ledger: createActive(context, main, slug, text) };
     try {
       moved();
     } catch (error) {
@@ -329,7 +336,7 @@ function hereTask(context: Context, given: string | undefined, goal: string | un
     refuseBacklog(context, repoKey(main), slug);
     const commit = commitOf(cwd, 'HEAD') ?? fail(`This worktree has no commit yet: ${worktree}`);
     const location = { worktree, branch: branch ?? 'detached HEAD', base: `HEAD @ ${short(cwd, commit)}` };
-    return { slug, ...location, ledger: createActive(store, main, slug, onThisHost(store, fillLedger(readTemplate(paths, refs), { slug, goal, ...location, designRefs: designRefs(worktree, refs), kind }))) };
+    return { slug, ...location, ledger: createActive(context, main, slug, onThisHost(store, fillLedger(readTemplate(paths, refs), { slug, goal, ...location, designRefs: designRefs(worktree, refs), kind }))) };
   });
   noteStamped(context);
   excludeEvidence(main);
