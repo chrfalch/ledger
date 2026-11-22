@@ -12,9 +12,10 @@ const PATH_WITHOUT_STUB = process.env.PATH ?? '';
 const STUB_ROOT = mkdtempSync(path.join(tmpdir(), 'ledger-claude-stub-'));
 process.on('exit', () => rmSync(STUB_ROOT, { recursive: true, force: true }));
 
-// A fake `claude` that answers the two plugin list commands from per-HOME state, so a
-// marketplace add or remove, plugin install or plugin uninstall changes what later lists report. The state lives
-// outside HOME: --dry-run tests assert that HOME is byte-for-byte unchanged.
+// A fake `claude` that answers the two plugin list commands and `plugin configure <id> --json` from per-HOME state, so a
+// marketplace add or remove, plugin install or plugin uninstall changes what later calls report. Like the real CLI, an
+// install copies the plugin's marketplace source into its installPath, and an uninstall drops its saved config. The
+// state lives outside HOME: --dry-run tests assert that HOME is byte-for-byte unchanged.
 const CLAUDE_STUB = `#!${process.execPath}
 const { createHash } = require('node:crypto');
 const fs = require('node:fs');
@@ -51,9 +52,32 @@ else if (sub === 'marketplace' && verb === 'add' && target) {
 } else if (sub === 'install' && verb) {
   failIfAsked('install');
   const [plugin, marketplace] = verb.split('@');
-  if (!read('marketplaces').some((entry) => entry.name === marketplace)) fail('Error: marketplace ' + marketplace + ' not found');
+  const source = read('marketplaces').find((entry) => entry.name === marketplace);
+  if (!source) fail('Error: marketplace ' + marketplace + ' not found');
+  const manifest = JSON.parse(fs.readFileSync(path.join(source.path, '.claude-plugin/marketplace.json'), 'utf8'));
+  const installPath = path.join(home, '.claude/plugins/cache', marketplace, plugin, '0.1.0');
+  fs.rmSync(installPath, { recursive: true, force: true });
+  fs.cpSync(path.join(source.path, manifest.plugins.find((entry) => entry.name === plugin).source), installPath, { recursive: true });
+  const config = {};
+  args.forEach((arg, index) => {
+    if (arg !== '--config') return;
+    const [key, ...value] = args[index + 1].split('=');
+    config[key] = value.join('=');
+  });
+  write('config-' + verb, config);
   const now = new Date().toISOString();
-  write('plugins', [...read('plugins'), { id: verb, version: '0.1.0', scope: 'user', enabled: true, installPath: path.join(home, '.claude/plugins/cache', marketplace, plugin, '0.1.0'), installedAt: now, lastUpdated: now }]);
+  write('plugins', [...read('plugins'), { id: verb, version: '0.1.0', scope: 'user', enabled: true, installPath, installedAt: now, lastUpdated: now }]);
+} else if (sub === 'configure' && verb && target === '--json') {
+  const saved = fs.existsSync(path.join(state, 'config-' + verb)) ? read('config-' + verb) : {};
+  const keys = ['clearPointTokens'];
+  console.log(JSON.stringify({
+    pluginId: verb,
+    schema: { clearPointTokens: { type: 'number' } },
+    inputs: Object.fromEntries(keys.map((key) => [key, saved[key] ?? ''])),
+    choices: {},
+    configured: keys.filter((key) => key in saved),
+    unconfigured: keys.filter((key) => !(key in saved)),
+  }));
 } else if (sub === 'uninstall' && verb) {
   failIfAsked('uninstall');
   const scope = args[args.indexOf('--scope') + 1];
@@ -63,6 +87,7 @@ else if (sub === 'marketplace' && verb === 'add' && target) {
   const matches = (entry) => entry.id === verb && entry.scope === scope && inProject(entry);
   if (!plugins.some(matches)) fail('Error: plugin ' + verb + ' is not installed at scope ' + scope + ' in ' + process.cwd());
   write('plugins', plugins.filter((entry) => !matches(entry)));
+  fs.rmSync(path.join(state, 'config-' + verb), { force: true });
 } else fail('stub claude: unexpected arguments: ' + args.join(' '));
 `;
 
@@ -103,6 +128,20 @@ export function claudeState(home: string): { marketplaces: string[]; plugins: st
     marketplaces: read<{ name: string }>('marketplaces').map(({ name }) => name),
     plugins: read<{ id: string }>('plugins').map(({ id }) => id),
   };
+}
+
+/** The installPath the stub claude lists for this plugin id under this HOME. */
+export function claudeInstallPath(home: string, id: string): string {
+  const plugins: { id: string; installPath: string }[] = JSON.parse(readFileSync(path.join(stubState(home), 'plugins'), 'utf8'));
+  const plugin = plugins.find((entry) => entry.id === id);
+  if (!plugin) throw new Error(`stub claude lists no plugin ${id}`);
+  return plugin.installPath;
+}
+
+/** Saves userConfig values for this plugin id, as `plugin install --config key=value` would, under this HOME. */
+export function claudeConfig(home: string, id: string, values: Record<string, string>): void {
+  mkdirSync(stubState(home), { recursive: true });
+  writeFileSync(path.join(stubState(home), `config-${id}`), JSON.stringify(values));
 }
 
 /** Makes the stub claude exit 1 with an error on stderr for every later `step` under this HOME. */

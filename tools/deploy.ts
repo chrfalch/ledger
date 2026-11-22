@@ -107,8 +107,39 @@ function samePath(first: string, second: string): boolean {
 
 const PAST = { add: 'added', install: 'installed' } as const;
 
-// Installed from this repo as a folder marketplace, so repo edits reach a session through
-// /reload-plugins without a reinstall. --revert leaves both in place: they live in Claude
+function filesUnder(root: string): Map<string, Buffer> {
+  const files = new Map<string, Buffer>();
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(entryPath);
+      else files.set(path.relative(root, entryPath), readFileSync(entryPath));
+    }
+  };
+  visit(root);
+  return files;
+}
+
+function sameTree(first: string, second: string): boolean {
+  if (!existsSync(first) || !existsSync(second)) return false;
+  const [a, b] = [filesUnder(first), filesUnder(second)];
+  return a.size === b.size && [...a].every(([file, bytes]) => b.get(file)?.equals(bytes));
+}
+
+function savedConfigArgs(mod: string): string[] {
+  const stdout = runClaude(['plugin', 'configure', mod, '--json']);
+  let config: { configured?: unknown; inputs?: Record<string, unknown> };
+  try {
+    config = JSON.parse(stdout);
+  } catch {
+    throw new DeployError(`deploy: claude plugin configure ${mod} --json printed something that is not JSON:\n${stdout.slice(0, 200)}`);
+  }
+  const configured = Array.isArray(config.configured) ? config.configured.filter((key): key is string => typeof key === 'string') : [];
+  return configured.flatMap((key) => ['--config', `${key}=${String(config.inputs?.[key] ?? '')}`]);
+}
+
+// Installed from this repo as a folder marketplace. Claude Code runs a cached copy of each mod, so deploy
+// reinstalls a mod whose copy differs from mods/<name>. --revert leaves both in place: they live in Claude
 // Code's own plugin state, which deploy does not own.
 function deployMods(opts: DeployOptions): void {
   if (opts.noMods) {
@@ -139,17 +170,33 @@ function deployMods(opts: DeployOptions): void {
     console.log(`mods     skipped install of ${MODS.map((name) => modId(name)).join(', ')} until the marketplace points at this repo`);
     return;
   }
-  let plugins: { id: string; scope?: string }[] | undefined;
+  let plugins: { id: string; scope?: string; installPath?: string }[] | undefined;
   const listPlugins = () => (plugins ??= claudeList(['plugin']));
   // Deploy installs at user scope only; an install at another scope is the operator's own.
-  const installedByDeploy = (mod: string): boolean => listPlugins().some(({ id, scope }) => id === mod && scope === 'user');
+  const installedByDeploy = (mod: string) => listPlugins().find(({ id, scope }) => id === mod && scope === 'user');
   if (marketplace) console.log(`mods     marketplace ${MARKETPLACE} already added`);
   else change('add', ['plugin', 'marketplace', 'add', REPO], `marketplace ${MARKETPLACE} (this repo)`);
   for (const name of MODS) {
     const mod = modId(name);
-    if (installedByDeploy(mod)) console.log(`mods     ${mod} already installed`);
-    else change('install', ['plugin', 'install', mod], `${mod} (/${name})`);
+    const installed = installedByDeploy(mod);
+    if (!installed) change('install', ['plugin', 'install', mod], `${mod} (/${name})`);
+    else if (installed.installPath && sameTree(installed.installPath, path.join(REPO, 'mods', name))) console.log(`mods     ${mod} already installed`);
+    else if (opts.dry) console.log(`mods     would reinstall ${mod} (installed copy differs from mods/${name})`);
+    else reinstall(mod, name);
   }
+}
+
+// An uninstall drops the mod's saved config, so the install passes it back.
+function reinstall(mod: string, name: string): void {
+  const configArgs = savedConfigArgs(mod);
+  runClaude(['plugin', 'uninstall', mod, '--scope', 'user', '--keep-data']);
+  try {
+    runClaude(['plugin', 'install', mod, '--scope', 'user', ...configArgs]);
+  } catch (error) {
+    if (!(error instanceof DeployError)) throw error;
+    throw new DeployError(`${error.message}\ndeploy: ${mod} is now uninstalled; run deploy again to install it`, error.status);
+  }
+  console.log(`mods     reinstalled ${mod} (installed copy differed from mods/${name})`);
 }
 
 /**
