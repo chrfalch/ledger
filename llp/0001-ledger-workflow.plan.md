@@ -695,7 +695,7 @@ Decided 2026-11-19:
 | Hook failures (D11) | allowed, error not visible | failure log at session start |
 | LLP 0000 upkeep (D12) | the rule in `CONTRIBUTING.md`; the reviewer check in `agents/reviewer.md`; the `npm run llp` warning (`llp0000Warnings` in `tools/llp-refs.ts`) | none |
 | Design refs (D46) | `designRefs`, a field of the task record (`tools/ledger/record.ts`), set by `ledger task new --design-refs` with the LLPs that `/ledger:task` and `/ledger:go` pick | none |
-| LLP decisions (D47) | one line in the operating-model rule puts lasting decisions in an LLP in the same PR; `agents/reviewer.md` checks that they reached one | plan stage reads the refs |
+| LLP decisions (D47) | the Plan gate in `rules/10-operating-model.md` reads the design refs before the plan and puts lasting decisions in an LLP in the same PR; `agents/reviewer.md` checks that they reached one | none |
 | Deploy migration (D48) | `ledger store migrate --pending` lists the one-time moves from their own dry runs (`tools/ledger/pending.ts`); `bin/deploy` offers them after Deploy, has a Migrate menu entry, and runs them with `--migrate` (`tools/deploy.ts`, `tools/wizard.ts`) | none |
 | Task kinds (D14) | none; every task is treated as code | `--kind`; stages per kind |
 | Claims (D5, D17) | `ledger task claim` with expiry; `ledger go` claims on start | none |
