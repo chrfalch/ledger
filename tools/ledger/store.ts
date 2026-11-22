@@ -106,7 +106,10 @@ export interface Backlog extends LedgerCollection {
 type ActiveKey = { repo: string; slug: string };
 
 export interface Active extends Backlog {
-  /** The active task in `folder`, resolving existing paths on this machine. Fails when two tasks name it. */
+  /**
+   * The active task in `folder`, resolving existing paths on this machine. Fails when two tasks name it. A lost task is
+   * never one: a new folder at its old path is not its folder.
+   */
   byWorktree(folder: string): ActiveKey | undefined;
 }
 
@@ -118,11 +121,14 @@ export function resolvedWorktree(folder: string): string | undefined {
   }
 }
 
+/** What `findWorktree` throws when two active records name one folder. */
+export class SharedWorktree extends Failure {}
+
 export function findWorktree(folder: string, resolved: string | undefined, candidates: Iterable<ActiveKey & { worktree: string }>): ActiveKey | undefined {
   let found: ActiveKey | undefined;
   for (const { repo, slug, worktree } of candidates) {
     if (worktree !== folder && (resolved === undefined || resolvedWorktree(worktree) !== resolved)) continue;
-    if (found) fail(`Both ${found.repo}/${found.slug} and ${repo}/${slug} name the worktree ${folder}.`);
+    if (found) throw new SharedWorktree(`Both ${found.repo}/${found.slug} and ${repo}/${slug} name the worktree ${folder}.`);
     found = { repo, slug };
   }
   return found;
@@ -226,7 +232,15 @@ export interface Aliases {
   add(old: string, key: string): void;
   /** Removes `old` while it is an alias of `key`, so a storage switch that stops can take back what it added. */
   remove(old: string, key: string): void;
+  /**
+   * Removes each alias of `removed` that is there, then adds each of `added` as `add` does, in one write, so a stop
+   * between them cannot lose an alias that no rebuild recreates. Throws, and leaves the map as it is, where `add` would.
+   */
+  replace(removed: readonly Alias[], added: readonly Alias[]): void;
 }
+
+/** An old repo key and the key that replaced it. */
+export type Alias = readonly [old: string, key: string];
 
 /** `key` and the old keys that are aliases of it: every key a backlog or archive ledger of the repo `key` can be filed under. */
 export const keyAndAliases = (aliases: ReadonlyMap<string, string>, key: string): string[] => [

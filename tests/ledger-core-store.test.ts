@@ -1363,6 +1363,7 @@ function recording(inner: LedgerStore): { store: LedgerStore; calls: string[] } 
       problem: () => (note('aliases.problem'), inner.aliases.problem()),
       add: (old, key) => (note('aliases.add', old, key), inner.aliases.add(old, key)),
       remove: (old, key) => (note('aliases.remove', old, key), inner.aliases.remove(old, key)),
+      replace: (removed, added) => (note('aliases.replace'), inner.aliases.replace(removed, added)),
     },
   };
   return { store, calls };

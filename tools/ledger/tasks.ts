@@ -8,7 +8,7 @@ import { repoKey } from './repo-key.js';
 import { keyAndAliases, readable, type LedgerStore, type StoredLedger } from './store.js';
 
 export type Place = 'active' | 'backlog' | 'archive';
-export type TaskStatus = 'active' | 'parked' | 'backlog' | 'retired';
+export type TaskStatus = 'active' | 'parked' | 'lost' | 'backlog' | 'retired';
 
 /** One task ledger. `main` is unknown for a backlog or archive ledger that does not name it. */
 export type Task = {
@@ -17,6 +17,8 @@ export type Task = {
   repo: string;
   /** The key `repo` is an alias of, for a ledger still filed under an old key. */
   currentRepo?: string;
+  /** Every key a checkout of the task's repo may have: its key now and each old key that is an alias of it. */
+  repoKeys: readonly string[];
   main?: string;
   /** The store's location of the ledger. */
   file: string;
@@ -47,7 +49,7 @@ type Found = {
   name: string;
   place: Place;
   repo: string;
-  currentRepo?: string;
+  aliases: ReadonlyMap<string, string>;
   fallbackSlug: string;
   mainOf: (ledger: Ledger) => string | undefined;
   branch?: string;
@@ -56,9 +58,10 @@ type Found = {
   host?: string;
 };
 
-function toTask({ file, name, place, repo, currentRepo, fallbackSlug, mainOf, branch, worktree, elsewhere, host }: Found, { text, mtimeMs, birthtimeMs }: TimedText): Task {
+function toTask({ file, name, place, repo, aliases, fallbackSlug, mainOf, branch, worktree, elsewhere, host }: Found, { text, mtimeMs, birthtimeMs }: TimedText): Task {
   const ledger = parseLedger(text);
-  const status: TaskStatus = place === 'archive' ? 'retired' : place === 'backlog' ? 'backlog' : ledger.parked ? 'parked' : 'active';
+  const currentRepo = aliases.get(repo);
+  const status: TaskStatus = place === 'archive' ? 'retired' : place === 'backlog' ? 'backlog' : ledger.location.lost ? 'lost' : ledger.parked ? 'parked' : 'active';
   const main = mainOf(ledger);
   const knownBranch = branch ?? ledger.location.branch;
   const archived = place === 'archive' ? parseArchiveName(name)?.date : undefined;
@@ -66,6 +69,7 @@ function toTask({ file, name, place, repo, currentRepo, fallbackSlug, mainOf, br
     slug: ledger.slug ?? fallbackSlug,
     repo,
     ...(currentRepo === undefined ? {} : { currentRepo }),
+    repoKeys: keyAndAliases(aliases, currentRepo ?? repo),
     ...(main === undefined ? {} : { main }),
     file,
     name,
@@ -88,7 +92,7 @@ export function backlogTasks(store: LedgerStore): Task[] {
     .repos()
     .flatMap((repo) => store.backlog.list(repo))
     .map((entry) =>
-      toTask({ file: entry.location, name: entry.name, place: 'backlog', repo: entry.repo, currentRepo: aliases.get(entry.repo), fallbackSlug: entry.name, mainOf: ({ location }) => location.main }, entry),
+      toTask({ file: entry.location, name: entry.name, place: 'backlog', repo: entry.repo, aliases, fallbackSlug: entry.name, mainOf: ({ location }) => location.main }, entry),
     );
 }
 
@@ -100,7 +104,7 @@ export function archivedTasks(store: LedgerStore, repo?: string): Task[] {
     .flatMap((name) => store.archive.list(name))
     .map((entry) => {
       const fallbackSlug = parseArchiveName(entry.name)?.slug ?? entry.name;
-      return toTask({ file: entry.location, name: entry.name, place: 'archive', repo: entry.repo, currentRepo: aliases.get(entry.repo), fallbackSlug, mainOf }, entry);
+      return toTask({ file: entry.location, name: entry.name, place: 'archive', repo: entry.repo, aliases, fallbackSlug, mainOf }, entry);
     });
 }
 
@@ -138,9 +142,12 @@ function activeOf(entry: StoredLedger, { aliases, checkoutOf, host: thisHost, ow
   const exists = worktree !== undefined && isFolder(worktree);
   const main = (worktree === undefined ? undefined : mainOfTaskWorktree(worktree)) ?? location.main ?? (exists ? mainCheckout(worktree) : undefined);
   const otherHost = location.host !== undefined && thisHost !== undefined && !ownHosts.has(location.host);
-  const checkout = !otherHost && exists && main !== undefined && repoKey(main) === (aliases.get(entry.repo) ?? entry.repo) ? checkoutOf(main, worktree) : undefined;
+  const resolved = (key: string): string => aliases.get(key) ?? key;
+  // A lost task's old path may hold another task's worktree now, which must never count as this task's.
+  const ownsFolder = exists && location.lost === undefined;
+  const checkout = !otherHost && ownsFolder && main !== undefined && resolved(repoKey(main)) === resolved(entry.repo) ? checkoutOf(main, worktree) : undefined;
   const host = otherHost ? location.host : checkout === undefined && location.host === undefined ? UNKNOWN_HOST : undefined;
-  const found = { file: entry.location, name: entry.name, place: 'active', repo: entry.repo, currentRepo: aliases.get(entry.repo), fallbackSlug: entry.name, mainOf: () => main, branch: checkout?.branch, worktree, elsewhere: checkout === undefined, host } as const;
+  const found = { file: entry.location, name: entry.name, place: 'active', repo: entry.repo, aliases, fallbackSlug: entry.name, mainOf: () => main, branch: checkout?.branch, worktree, elsewhere: checkout === undefined, host } as const;
   return toTask(found, entry);
 }
 
@@ -154,10 +161,10 @@ export function activeTask(store: LedgerStore, folder: string): Task | undefined
   return entry && activeOf(entry, activeContext(store));
 }
 
-/** The active tasks of every repo, or of the repo key `repo` and its old keys, by their records in the store. */
+/** The active tasks of every repo, or of the repo whose key or old key is `repo`, under every key of it, by their records in the store. */
 export function activeTasks(store: LedgerStore, repo?: string): Task[] {
   const context = activeContext(store);
-  return (repo === undefined ? store.active.repos() : keyAndAliases(context.aliases, repo))
+  return (repo === undefined ? store.active.repos() : keyAndAliases(context.aliases, context.aliases.get(repo) ?? repo))
     .flatMap((each) => store.active.list(each))
     .map((entry) => activeOf(entry, context));
 }
@@ -183,9 +190,9 @@ export function findTasks(store: LedgerStore): Task[] {
 
 /**
  * Whether `task` is a task of the repo at `main`: a task of one repo key is one of each clone of the repo, by its key with
- * an alias resolved, never by the main it names, as that path may be a clone of another origin now.
+ * an alias of either resolved, never by the main it names, as that path may be a clone of another origin now.
  */
-export const inRepo = (task: Task, main: string): boolean => (task.currentRepo ?? task.repo) === repoKey(main);
+export const inRepo = (task: Task, main: string): boolean => task.repoKeys.includes(repoKey(main));
 
 const PRECEDENCE: Place[] = ['active', 'backlog', 'archive'];
 

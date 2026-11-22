@@ -355,8 +355,8 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync }: FileStore
         if (!slug) continue;
         const file = active.location(repo, slug);
         const found = readTimedText(file);
-        const worktree = found && readable(() => readStoredRecord(found.text, file).record.worktree);
-        if (worktree !== undefined) yield { repo, slug, worktree };
+        const record = found && readable(() => readStoredRecord(found.text, file).record);
+        if (record?.worktree !== undefined && record.lost === undefined) yield { repo, slug, worktree: record.worktree };
       }
     }
   }
@@ -475,6 +475,13 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync }: FileStore
           const current = aliasEntries() ?? fail(`${damaged}, so the alias ${old} of ${key} was not removed. Fix or remove it.`);
           const kept = current.filter(([name, target]) => name !== old || target !== key);
           if (kept.length < current.length) writeAtomic(aliases, `${JSON.stringify(Object.fromEntries(kept), null, 2)}\n`);
+        }),
+      replace: (removed, added) =>
+        withLock(aliases, () => {
+          const current = aliasEntries() ?? fail(`${damaged}, so no alias was changed. Fix or remove it.`);
+          const kept = current.filter(([name, target]) => !removed.some(([old, key]) => name === old && target === key));
+          const next = added.reduce<[string, unknown][]>((entries, [old, key]) => (needsAlias(entries, old, key, aliases) ? [...entries, [old, key]] : entries), kept);
+          if (kept.length < current.length || next.length > kept.length) writeAtomic(aliases, `${JSON.stringify(Object.fromEntries(next), null, 2)}\n`);
         }),
     },
   };

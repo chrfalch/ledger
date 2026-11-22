@@ -414,7 +414,7 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
       byWorktree: (folder) => {
         if (readOnly && !supportsActive(recordsSchema)) return undefined;
         const resolved = resolvedWorktree(folder);
-        const select = "SELECT repo, name AS slug, worktree FROM records WHERE place = 'active' AND worktree";
+        const select = "SELECT repo, name AS slug, worktree FROM records WHERE place = 'active' AND json_extract(record, '$.lost') IS NULL AND worktree";
         type Candidate = { repo: string; slug: string; worktree: string };
         const candidates = resolved === undefined ? all<Candidate>(select + ' = ?', folder) : all<Candidate>(select + ' IS NOT NULL');
         return findWorktree(folder, resolved, candidates);
@@ -500,6 +500,11 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
           if (needsAlias(storedAliases(), old, repo, file)) run('INSERT INTO aliases VALUES (?, ?)', old, repo);
         }),
       remove: (old, repo) => transaction(() => void run('DELETE FROM aliases WHERE old = ? AND repo = ?', old, repo)),
+      replace: (removed, added) =>
+        transaction(() => {
+          for (const [old, repo] of removed) run('DELETE FROM aliases WHERE old = ? AND repo = ?', old, repo);
+          for (const [old, repo] of added) if (needsAlias(storedAliases(), old, repo, file)) run('INSERT INTO aliases VALUES (?, ?)', old, repo);
+        }),
     },
     close: () => db.close(),
   };

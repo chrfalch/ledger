@@ -8,9 +8,12 @@ import {
   isParkedMarker,
   isReadableSlug,
   isRepoKeyShape,
+  lostMark,
+  lostText,
   parseClaim,
   parseDependencies,
   parseLedger,
+  parseLost,
   parseOrder,
   parseRef,
   plainLine,
@@ -19,6 +22,7 @@ import {
   type ChildMark,
   type Claim,
   type Dependency,
+  type Lost,
   type Section,
   type TaskRef,
 } from './format.js';
@@ -59,6 +63,7 @@ export type TaskRecord = {
   /** 'none' is a task that touches no LLP; unset is a ledger with no design refs line, as in a repo without llp/. */
   designRefs?: string[] | 'none';
   parked?: { date: string; reason: string };
+  lost?: Lost;
   goal: string;
   /** `exampleRow` is false for a plan without steps that lacks the template's example row too, which the plugin reads as a step. */
   plan: { approved?: string; steps: Step[]; exampleRow?: false };
@@ -95,6 +100,7 @@ const FIELDS = [
   'main',
   'designRefs',
   'parked',
+  'lost',
   'goal',
   'plan',
   'decisions',
@@ -147,7 +153,7 @@ function tidy(lines: readonly string[]): string[] {
   return kept;
 }
 
-type LocationKey = 'main' | 'worktree' | 'host' | 'branch' | 'base' | 'designRefs' | 'parent' | 'title' | 'kind' | 'state' | 'stage' | 'order' | 'dependencies' | 'claim' | 'pr' | 'repo';
+type LocationKey = 'main' | 'worktree' | 'host' | 'branch' | 'base' | 'designRefs' | 'parent' | 'title' | 'kind' | 'state' | 'stage' | 'order' | 'dependencies' | 'claim' | 'pr' | 'repo' | 'lost';
 
 /**
  * A `- <name>: <value>` bullet under ## Location. `template` is the value ledger.template.md gives it, which reads as
@@ -200,6 +206,16 @@ function parseBase(value: string): TaskRecord['base'] {
 const BULLETS: Bullet[] = [
   bullet('main', 'main', asText, asText),
   bullet('worktree', 'worktree', asText, asText, { template: '<path>' }),
+  {
+    name: 'lost',
+    written: true,
+    read: (record, value) => {
+      const lost = record.lost === undefined ? parseLost(value, record.worktree) : undefined;
+      if (lost !== undefined) record.lost = lost;
+      return lost !== undefined;
+    },
+    write: (record) => (record.lost === undefined ? undefined : lostText(record.lost, record.worktree)),
+  },
   bullet('host', 'host', asText, asText),
   bullet('branch', 'branch', asText, asText, { template: '<name>' }),
   bullet('base', 'base', parseBase, ({ ref, commit }) => (commit === undefined ? ref : `${ref} @ ${commit}`), { template: '<branch/commit>' }),
@@ -224,14 +240,20 @@ const READ_BY_PLUGIN = ['main', 'worktree', 'branch', 'base', 'parent'];
 
 /** Reads the Location bullets into `record`; gives the lines that fit none. A value parseLedger skips is kept as such a line. */
 function readLocation(record: TaskRecord, lines: string[]): string[] {
-  return lines.filter((line) => {
+  const fitsNone = (line: string): boolean => {
     const [, name, raw = ''] = FIELD.exec(line.trim()) ?? [];
     const field = BULLETS.find((each) => each.name === name);
     const value = raw.trim();
     if (field === undefined || value === '') return true;
+    if (field.name === 'lost' && lostMark(line, record.worktree) === undefined) return true;
     if (value === field.template) return false;
     return (READ_BY_PLUGIN.includes(field.name) && value.startsWith('<')) || !field.read(record, value);
-  });
+  };
+  // A lost mark names the worktree, so it is read after the worktree bullet, wherever that stands.
+  const isLost = (line: string): boolean => FIELD.exec(line.trim())?.[1] === 'lost';
+  const order = [...lines.keys()].sort((a, b) => Number(isLost(lines[a])) - Number(isLost(lines[b])));
+  const left = new Set(order.filter((index) => fitsNone(lines[index])));
+  return lines.filter((_, index) => left.has(index));
 }
 
 const writeLocation = (record: TaskRecord): string[] =>
@@ -566,6 +588,7 @@ const isRecord = shape(
     base: shape({ ref: isText }, { commit: isText }),
     designRefs: isDesignRefs,
     parked: shape({ date: isText, reason: isText }),
+    lost: shape({ date: isText }),
   },
 );
 

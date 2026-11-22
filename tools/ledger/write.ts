@@ -97,8 +97,8 @@ export function updateActive(context: Context, { repo, name }: { repo: string; n
   const { host, ownHosts } = context.store;
   let restamped = false;
   const written = context.store.active.update(repo, name, (text) => {
-    const { host: owner, worktree } = parseLedger(text).location;
-    if (owner !== undefined && host !== undefined && owner !== host && !(ownHosts?.has(owner) ?? false)) fail(notOnThisMachine({ slug: name, worktree, host: owner }));
+    const refused = otherMachineRecord(context.store, name, text);
+    if (refused !== undefined) fail(refused);
     const changed = change(text);
     if (changed === undefined || host === undefined) return changed;
     const named = parseLedger(changed).location.host;
@@ -107,6 +107,13 @@ export function updateActive(context: Context, { repo, name }: { repo: string; n
   });
   if (restamped) noteStamped(context);
   return written;
+}
+
+/** Why updateActive refuses the active record `name` with `text`: it names a host that is none of this machine's. */
+export function otherMachineRecord({ host, ownHosts }: LedgerStore, name: string, text: string): string | undefined {
+  const { host: owner, worktree } = parseLedger(text).location;
+  const others = owner !== undefined && host !== undefined && owner !== host && !(ownHosts?.has(owner) ?? false);
+  return others ? notOnThisMachine({ slug: name, worktree, host: owner }) : undefined;
 }
 
 /** Why a slug an active task has names no other task: a slug is one task in every clone of a repo, as in the backlog. */

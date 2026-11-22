@@ -40,9 +40,15 @@ A task has one ledger at a time. Where the ledger is tells the task's status:
 |---|---|
 | Backlog, in the store | `backlog` |
 | Active, in the store, naming its worktree | `active`, or `parked` with a parked mark |
+| Active, in the store, with a lost mark | `lost` |
 | Archive, in the store | `retired` |
 
-`toTask` in `tools/ledger/tasks.ts` sets the status this way.
+`toTask` in `tools/ledger/tasks.ts` sets the status this way. A lost mark wins
+over a parked mark. `ledger store repair <slug> --lost` writes the mark, a
+Location line `- lost: <date> — folder <path> not found`, or `- lost: <date>`
+for a task that records no worktree. A `- lost:` line counts as the mark only
+in the exact form written for the recorded worktree. Any other `- lost:` line
+is a note and is kept as it is.
 
 ## Components
 
@@ -153,11 +159,14 @@ five parts:
 
 - `backlog`: ledgers of tasks not started yet, named by slug.
 - `active`: ledgers of started tasks, named by slug. Each names its worktree,
-  and `byWorktree` finds the task of a worktree folder.
+  and `byWorktree` finds the task of a worktree folder. It skips a lost task,
+  so a new folder at a lost task's old path is free.
 - `archive`: copies of retired ledgers, named `<YYYY-MM-DD>-<slug>`, with the
   files of their evidence.
 - `registry`: the text of the task list.
-- `aliases`: old repo keys, each with the key that replaced it.
+- `aliases`: old repo keys, each with the key that replaced it. `replace`
+  removes some aliases and adds others in one write, so a stop between the
+  two cannot lose an alias.
 
 Each ledger is filed under its repo's key. `repoKey` in
 `tools/ledger/repo-key.ts` gives it: the address of the remote `origin`, else
@@ -236,6 +245,51 @@ into an active record that names the worktree, and deletes the file;
 is, for a person to merge. Until it runs, `session-start` says how many are
 left.
 
+`repairStore` in `tools/ledger/repair.ts` runs `ledger store repair`. It takes
+flags only and never prompts:
+
+- With no task, it reports two kinds of problem in every repo of the store. The
+  first is an active task of this machine, neither parked nor lost, whose
+  recorded folder is gone. The second is a repo key whose tasks name a main
+  checkout that has another key now, as after a renamed remote. It prints the
+  command that fixes each, and exits 1 when it finds one.
+- `--search <folder...>` adds, for each missing task, the linked worktrees of
+  its repo on its branch. It looks only in the named folders, 6 levels down,
+  and follows no symbolic link. It is the only command that searches the disk
+  for a task's folder.
+- `<slug> --to <folder>` points the task at a new folder and runs
+  `git worktree repair` there. It refuses a parked task, also one marked lost.
+  It refuses a main checkout, a folder on another branch, a folder another
+  record names, and a checkout whose repo key differs from the task's after
+  aliases are resolved.
+- `<slug> --lost` marks the task lost. It refuses a parked task, and it
+  refuses while the folder exists.
+- `--to` and `--lost` both refuse a task whose record names a host that is
+  none of this machine's.
+- `--remote <old-key>` moves the active, backlog and archive tasks of the old
+  key to this repo's key, as `migrateRepoIds` does. A task stays under the old
+  key when its main checkout is gone or is a checkout of another repo, or when
+  it names no main checkout and no old → new alias exists yet. An active or
+  backlog task also stays when the new key already has a live task with its
+  slug, the slug of its title. An archive task stays when the new key already
+  has an archive copy of that name, as an archive copy is never replaced. It
+  refuses, moving nothing, when an alias of the old key files a live task
+  whose slug the new key has: once re-pointed, the alias would hide one of the
+  two. It also refuses, moving nothing, when this repo's key is itself an
+  alias of a third key, so no alias chain forms. Otherwise, on git storage, it
+  commits the moves; a failed commit exits 1 and writes no alias. When every task moved, it
+  records old → new as an alias and re-points each alias of the old key to the
+  new one. It also removes a new → old alias, so a rename back leaves no
+  cycle. All alias changes go through one `aliases.replace`. While a readable task is
+  left, it writes no alias.
+- `--dry-run` with `--to`, `--lost` or `--remote` prints what would change and
+  changes nothing. It runs the same checks, so it refuses, and exits 1,
+  wherever the command itself would refuse.
+- Every check reads a read-only store. The store opens for writing only once
+  the checks pass, so the report, a dry run and a refusal make no SQLite
+  database and repair no git hook. Before a SQLite store's database exists,
+  the report prints "No problems found." and exits 0.
+
 ### The registry
 
 `tools/ledger/registry.ts` keeps the registry, a JSON list of every task. The
@@ -309,7 +363,7 @@ because its turn end does not clear the session.
 - `session-start`: injects the ledgers of the session's folder, read from the
   store, with the status of their parent and child tasks. With git storage it pulls first, and
   a sync problem adds one line above the ledgers. The whole hook has one
-  five-second deadline.
+  five-second deadline. In a main checkout it skips lost tasks.
 - `prompt-submit`: titles the session when the prompt is exactly
   `go <slug>`.
 - `pre-compact`: tells the compaction to keep the task's slug, worktree path
