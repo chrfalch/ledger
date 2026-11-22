@@ -150,11 +150,16 @@ export type GoFields = {
   picked?: string[]
   marked?: string
   warnings?: string[]
+  /** The operator types `go <slug>` after the clear, as nothing sends it. */
+  typed?: true
 }
+
+/** The line that tells go.md and next.md the operator types `go <slug>` after the clear. */
+export const CONTINUE_TYPED = 'continue: typed'
 
 // One field per line, because a path can hold spaces. go.md reads this format. `ledger` names the session's own task as
 // `ledger notes --task` takes it.
-export function goArgs(target: string, ledger: string | undefined, { isNew, held, unparked, parent, children = [], promoted, picked, marked, warnings = [] }: GoFields): string {
+export function goArgs(target: string, ledger: string | undefined, { isNew, held, unparked, parent, children = [], promoted, picked, marked, warnings = [], typed }: GoFields): string {
   return [
     `task: ${target}`,
     `ledger: ${ledger ?? 'none'}`,
@@ -167,6 +172,7 @@ export function goArgs(target: string, ledger: string | undefined, { isNew, held
     ...(picked ? [`picked: ${picked.join(' > ')}`] : []),
     ...(marked ? [`marked: ${marked}`] : []),
     ...warnings.map(warning => `warning: ${warning}`),
+    ...(typed ? [CONTINUE_TYPED] : []),
   ].join('\n')
 }
 

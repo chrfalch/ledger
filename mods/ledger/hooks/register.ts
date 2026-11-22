@@ -4,6 +4,7 @@ import { ledgerBin, ledgerJson, ledgerSucceeded, ledgerText, LONG_TIMEOUT_MS, me
 import {
   claimFailedMessage,
   CLEAR_POINT_OPTION,
+  CONTINUE_TYPED,
   clearPointReminder,
   descriptionMessage,
   formatLedgers,
@@ -60,6 +61,7 @@ const clearPoint = { plugin: 'ledger', key: 'clearPoint' } as const
 const touched = { plugin: 'ledger', key: 'touched' } as const
 const heldTask = { plugin: 'ledger', key: 'heldTask' } as const
 const handover = { plugin: 'ledger', key: 'handover' } as const
+const sessionStart = { plugin: 'ledger', key: 'sessionStart' } as const
 
 /** `ledger go` exits 2 when no task has the slug. */
 const NO_SUCH_TASK = 2
@@ -92,6 +94,22 @@ const previousOf = ({ slug, worktree, main, parent }: OwnTask): PreviousTask => 
 
 /** The session's own task as `ledger notes --task` takes it, for the `ledger:` line of a command's markdown. */
 const ownName = ({ slug, main }: OwnTask, here: string | undefined): string => (main === undefined ? slug : taskName({ slug, main }, here))
+
+/**
+ * `{ typed: true }` when no person was at the prompt as this session started: an Agent SDK host cuts the turn of a
+ * prompt the mod submits, so the operator types `go <slug>`. A start not recorded for this session counts as a person's.
+ */
+async function typing($: EngineInterface): Promise<{ typed?: true }> {
+  try {
+    const { value } = await $.state.get(sessionStart)
+    return value?.interactive === false && value.sessionId === (await $.session.id()) ? { typed: true } : {}
+  } catch {
+    return {}
+  }
+}
+
+/** next.md takes no argument of its own, so the continue line replaces whatever was passed. */
+const withNextArgs = <E extends { args?: string }>(e: E, { typed }: NextArm): E => (typed ? { ...e, args: CONTINUE_TYPED } : e)
 
 /** The fields go.md reads from what `ledger go` did, each task named as the operator types it in the repo at `here`. */
 function goFields({ worktree, promoted, chain, parent, children = [], unparked, marked, warnings }: Started, here: string): GoFields {
@@ -138,19 +156,20 @@ async function startGo(
     const own = ownTask(session)
     const here = session.main
     const sessionId = await $.session.id()
+    const typed = await typing($)
     const started = await ledgerJson<Started>($, [...goCommand(target), '--session', sessionId, ...(takeOver ? [TAKE_OVER] : [])], LONG_TIMEOUT_MS)
     let arm: GoArm
     let fields: GoFields
     if (started.ok) {
       if (started.main !== here) return { text: startedElsewhereMessage(started) }
-      arm = { mode: 'go', slug: started.slug, sessionId, ...(own === undefined || (own.slug === started.slug && own.main === started.main) ? {} : { previous: previousOf(own) }) }
-      fields = goFields(started, here)
+      arm = { mode: 'go', slug: started.slug, sessionId, ...typed, ...(own === undefined || (own.slug === started.slug && own.main === started.main) ? {} : { previous: previousOf(own) }) }
+      fields = { ...goFields(started, here), ...typed }
     } else if (started.held !== undefined) {
       await recordHeld($, sessionId, target)
       return { heldArgs: goArgs(target, own && ownName(own, here), { held: started.held }) }
     } else if (started.exitCode === NO_SUCH_TASK && isNewSlug(target) && here !== undefined) {
-      arm = { mode: 'go', slug: target, sessionId, isNew: true, main: here, ...(own === undefined ? {} : { previous: previousOf(own) }) }
-      fields = { isNew: true }
+      arm = { mode: 'go', slug: target, sessionId, ...typed, isNew: true, main: here, ...(own === undefined ? {} : { previous: previousOf(own) }) }
+      fields = { isNew: true, ...typed }
     } else if (started.exitCode === INSTALL_FAILED) {
       return { text: installFailedMessage(target, started.error) }
     } else {
@@ -173,7 +192,7 @@ async function armNext($: EngineInterface): Promise<{ arm: NextArm } | { text: s
   if (session.removed) return { text: removedFolderMessage(session.folder) }
   const own = ownTask(session)
   if (own === undefined) return { text: noLedgerMessage(session.folder) }
-  const arm: NextArm = { mode: 'next', slug: own.slug, previous: previousOf(own) }
+  const arm: NextArm = { mode: 'next', slug: own.slug, previous: previousOf(own), ...(await typing($)) }
   await $.state.set(armed, arm)
   return { arm }
 }
@@ -476,6 +495,10 @@ export const register: Register = (on, options) => {
   const clearPointTokens = typeof options.clearPointTokens === 'number' ? options.clearPointTokens : 0
 
   on('session.start', async ($, e, next) => {
+    // A failed write leaves the session counted as a person's, which is today's behaviour.
+    try {
+      await $.state.set(sessionStart, { sessionId: await $.session.id(), interactive: e.isInteractive })
+    } catch {}
     await $.command.register({
       name: 'ledger',
       description: 'Show the goal, current step and next step of each task ledger this session works on. /ledger <name> shows those whose slug holds it.',
@@ -497,7 +520,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: ['ledger:close', 'ledger:next'] }, async ($, e, next) => {
     if (e.command === 'ledger:next') {
       const nextArmed = await armNext($)
-      return 'text' in nextArmed ? nextArmed : next(e)
+      return 'text' in nextArmed ? nextArmed : next(withNextArgs(e, nextArmed.arm))
     }
     const session = await readSession($)
     if (!session.ok) return { text: lookupFailedMessage(session.error) }
@@ -569,7 +592,7 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return { deny: NEXT_FROM_SUBAGENT }
     const started = await startNext($, e.args ?? '')
     if ('text' in started) return { deny: started.text }
-    const ran = await disarmedOnFailure($, started.arm, next(e))
+    const ran = await disarmedOnFailure($, started.arm, next(withNextArgs(e, started.arm)))
     // A person's No at the permission prompt comes back as an error result, not as a deny.
     if (ran.isError === true || ran.deny !== undefined) await disarm($, started.arm)
     return ran
@@ -680,6 +703,7 @@ export const register: Register = (on, options) => {
     }
     if (value.mode === 'next' || value.mode === 'go') {
       if (value.previous) await showRetireHint($, value.previous, value.mode === 'next')
+      if (value.typed) return next(e)
       try {
         await $.prompt.submit({ text: go })
       } catch (error) {

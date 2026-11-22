@@ -5,6 +5,15 @@ description: Write the latest results to this task's ledger, clear the session, 
 Update the ledger of the task of the current working directory. It exists:
 the command checked that before this prompt ran. Do not start a task.
 
+The ledger hook may pass one line, `continue: typed`:
+
+```
+$ARGUMENTS
+```
+
+`continue: typed` means the new session cannot start by itself: the operator
+types `go <slug>` after the clear.
+
 1. Read the ledger with `ledger show` in this session's folder. Change it with
    `ledger notes`, one item per command; `ledger notes --help` lists the
    commands. Never edit the files of the ledger store.
@@ -27,4 +36,7 @@ the command checked that before this prompt ran. Do not start a task.
    clears automatically after this turn, and the new session then continues
    from the next step by itself, so the operator types nothing. Do not show
    `go <slug>` or any other command for the operator to type. Do not ask the
-   operator to run `/clear`.
+   operator to run `/clear`. If there is a `continue: typed` line, the line
+   instead says the ledger is updated, the session clears after this turn,
+   and the operator then types `go <slug>`, with this task's slug, to
+   continue from the next step.

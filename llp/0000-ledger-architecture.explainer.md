@@ -268,7 +268,10 @@ a session. When one of them runs, `register.ts` arms a clear in the plugin's
 state. The agent then writes the ledger in its turn. At the end of that turn,
 the plugin clears the session. After `/ledger:next`, the new session continues
 from the ledger's next step with no typing. After `/ledger:go`, it continues in
-the other task. After `/ledger:close`, nothing starts.
+the other task. After `/ledger:close`, nothing starts. In a session with no
+person at the prompt, such as one an Agent SDK host like T3 Code drives, the
+plugin clears but does not send `go <slug>`: such a host cuts that turn off
+at once. The agent's last line asks the operator to type `go <slug>` instead.
 
 **Claims.** A claim marks the one session that works on a task
 (`tools/ledger/claims.ts`, [LLP 0001
