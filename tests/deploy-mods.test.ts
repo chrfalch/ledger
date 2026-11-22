@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 
 import { parseDeployArguments } from '../tools/deploy.js';
-import { claudeCalls, claudeLists, failClaude, freshHome, REPO, run, runWithoutClaude } from './helpers.js';
+import { claudeCalls, claudeConfig, claudeInstallPath, claudeLists, failClaude, freshHome, REPO, run, runWithoutClaude } from './helpers.js';
 
 const DEPLOY = [path.join(REPO, 'bin/deploy')] as const;
 const REPO_ARGUMENT = REPO.replace(/\/+$/, '');
@@ -110,7 +110,7 @@ const registeredAt = (location: string): string =>
   JSON.stringify([{ name: 'ledger', source: 'directory', path: location, installLocation: location }]);
 
 const installed = (...plugins: { id: string; scope: string }[]): string => JSON.stringify(plugins);
-const LEDGER_AT_USER = { id: 'ledger@ledger', scope: 'user' };
+const LEDGER_AT_USER = { id: 'ledger@ledger', scope: 'user', installPath: path.join(REPO, 'mods/ledger') };
 
 test('deploy reports the ledger mod as already installed', (t) => {
   const home = freshHome(t);
@@ -225,3 +225,70 @@ for (const [list, command] of [['marketplaces', LIST_MARKETPLACES], ['plugins', 
     assert.ok(!result.stderr.includes('TypeError'), result.stderr);
   });
 }
+
+const UNINSTALL_LEDGER = 'plugin uninstall ledger@ledger --scope user --keep-data';
+const CONFIGURE_LEDGER = 'plugin configure ledger@ledger --json';
+
+const deployWithStaleCopy = (t: TestContext): string => {
+  const home = freshHome(t);
+  run(home, DEPLOY);
+  appendFileSync(path.join(claudeInstallPath(home, 'ledger@ledger'), '.claude-plugin/plugin.json'), '\n');
+  return home;
+};
+
+test('deploy reinstalls the ledger mod when its installed copy differs from mods/ledger', (t) => {
+  const home = deployWithStaleCopy(t);
+  const before = claudeCalls(home).length;
+
+  const result = run(home, DEPLOY);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(claudeCalls(home).slice(before), [LIST_MARKETPLACES, LIST_PLUGINS, CONFIGURE_LEDGER, UNINSTALL_LEDGER, INSTALL_LEDGER]);
+  assert.match(result.stdout, /^mods {5}reinstalled ledger@ledger \(installed copy differed from mods\/ledger\)$/m);
+  assert.equal(readFileSync(path.join(claudeInstallPath(home, 'ledger@ledger'), '.claude-plugin/plugin.json'), 'utf8'),
+    readFileSync(path.join(REPO, 'mods/ledger/.claude-plugin/plugin.json'), 'utf8'));
+});
+
+test('deploy reinstalls the ledger mod when its installed copy is missing', (t) => {
+  const home = freshHome(t);
+  const missing = { ...LEDGER_AT_USER, installPath: path.join(home, 'no-such-copy') };
+  claudeLists(home, { marketplaces: registeredAt(REPO_ARGUMENT), plugins: installed(missing) });
+
+  const result = run(home, DEPLOY);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(claudeCalls(home), [LIST_MARKETPLACES, LIST_PLUGINS, CONFIGURE_LEDGER, UNINSTALL_LEDGER, INSTALL_LEDGER]);
+  assert.match(result.stdout, /^mods {5}reinstalled ledger@ledger /m);
+});
+
+test('a reinstall carries each saved config value to the new install', (t) => {
+  const home = deployWithStaleCopy(t);
+  claudeConfig(home, 'ledger@ledger', { clearPointTokens: '12345' });
+
+  const result = run(home, DEPLOY);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(claudeCalls(home).at(-1), `${INSTALL_LEDGER} --config clearPointTokens=12345`);
+});
+
+test('--dry-run with a stale installed copy names the reinstall and makes no change', (t) => {
+  const home = deployWithStaleCopy(t);
+  const before = claudeCalls(home).length;
+
+  const result = run(home, DEPLOY, '--dry-run');
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(claudeCalls(home).slice(before).filter(changesState), []);
+  assert.match(result.stdout, /^mods {5}would reinstall ledger@ledger \(installed copy differs from mods\/ledger\)$/m);
+});
+
+test('a failing install after the uninstall tells the operator to run deploy again', (t) => {
+  const home = deployWithStaleCopy(t);
+  failClaude(home, 'install');
+
+  const result = run(home, DEPLOY);
+
+  assert.equal(result.status, 1, result.stdout);
+  assert.ok(claudeCalls(home).includes(UNINSTALL_LEDGER));
+  assert.match(result.stderr, /run deploy again/);
+});
