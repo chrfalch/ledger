@@ -6,13 +6,14 @@ export type PreviousTask = { slug: string; worktree: string; main?: string; pare
  * After /ledger:next and /ledger:go, the new session continues with `go <slug>`. When `previous` is finished, a line on how
  * to retire it is shown first. /ledger:park first parks `slug` with `reason`. `isNew` means /ledger:go asked go.md to
  * create the task in the repo at `main`, so the clear waits until a ledger of that repo has its slug. `sessionId` is the
- * session that ran `ledger go`, whose claim the new session takes over.
+ * session that ran `ledger go`, whose claim the new session takes over. `typed` means no person was at the prompt when the
+ * session started, as under the Agent SDK, whose host cuts the turn of a submitted prompt: the operator types `go <slug>`.
  */
 export type LedgerArmed =
   | { mode: 'close'; slug: string }
-  | { mode: 'next'; slug: string; previous: PreviousTask }
-  | { mode: 'go'; slug: string; sessionId: string; previous?: PreviousTask }
-  | { mode: 'go'; slug: string; sessionId: string; previous?: PreviousTask; isNew: true; main: string }
+  | { mode: 'next'; slug: string; previous: PreviousTask; typed?: true }
+  | { mode: 'go'; slug: string; sessionId: string; previous?: PreviousTask; typed?: true }
+  | { mode: 'go'; slug: string; sessionId: string; previous?: PreviousTask; typed?: true; isNew: true; main: string }
   | { mode: 'park'; slug: string; reason: string }
 
 declare module 'claude-code' {
@@ -27,7 +28,8 @@ declare module 'claude-code' {
      * session `sessionId` last found one held. `takeOverApproved`: that task's slug, when the operator's last answer in a
      * question box picked "Take over", so the model may start /ledger:go <slug> --take-over for it once. `handover`: the
      * task an armed /ledger:go cleared the session for, and the session `from` that claimed it, for the next `go <slug>`
-     * prompt. A StateRead gives undefined when the value was never written.
+     * prompt. `sessionStart`: whether a person was at the prompt when session `sessionId` started. A StateRead gives
+     * undefined when the value was never written.
      */
     ledger: {
       armed: LedgerArmed | null
@@ -39,6 +41,7 @@ declare module 'claude-code' {
       handover: { slug: string; from: string } | null
       clearPoint: { sessionId: string; threshold: number; pending: number | null }
       touched: { sessionId: string; at: number }
+      sessionStart: { sessionId: string; interactive: boolean }
     }
   }
 }

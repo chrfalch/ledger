@@ -1281,3 +1281,81 @@ test('a /rename that fails is tried again at the next turn end', async ($, on) =
 
   expect(w.events).toEqual(['rename: epic'])
 })
+
+// a host with no person at the prompt, where a submitted prompt gets no turn
+
+const sdkStart = { cwd: CWD, surface: null, isInteractive: false } as const
+
+test('/ledger:go in a session with no person at the prompt tells go.md the operator types go <slug>, and the turn end clears without sending it', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
+
+  await $.session.start(sdkStart)
+  await $.command.run({ command: 'ledger:go', args: 'kid' })
+  await $.turn.complete(turnEnd)
+
+  expect(w.markdown()).toEqual({ command: 'ledger:go', args: 'task: kid\nledger: epic\ncontinue: typed' })
+  expect(w.armed).toEqual([{ mode: 'go', slug: 'kid', sessionId: 'session-1', previous: { slug: 'epic', worktree: CWD, main: MAIN }, typed: true }])
+  expect(w.events).toEqual(['clear'])
+})
+
+test('/ledger:go through the Skill tool with no person at the prompt hands go.md the same continue line', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
+
+  await $.session.start(sdkStart)
+  await $.tool.call({ tool: 'Skill', skill: 'ledger:go', args: 'kid' })
+  await $.turn.complete(turnEnd)
+
+  expect(w.skills).toEqual([{ skill: 'ledger:go', args: 'task: kid\nledger: epic\ncontinue: typed' }])
+  expect(w.events).toEqual(['clear'])
+})
+
+test('/ledger:next with no person at the prompt tells next.md the operator types go <slug>, and the turn end clears without sending it', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
+
+  await $.session.start(sdkStart)
+  await $.command.run({ command: 'ledger:next', args: '' })
+  await $.turn.complete(turnEnd)
+
+  expect(w.markdown()).toEqual({ command: 'ledger:next', args: 'continue: typed' })
+  expect(w.armed).toEqual([{ ...NEXT_ARM, typed: true }])
+  expect(w.events).toEqual(['clear'])
+})
+
+test('/ledger:next through the Skill tool with no person at the prompt hands next.md the continue line', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
+  w.answerQuestion({ answers: { [CLEAR_POINT]: 'Save, clear and continue (Recommended)' } })
+
+  await $.session.start(sdkStart)
+  await $.tool.call(askClearPoint)
+  await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
+  await $.turn.complete(turnEnd)
+
+  expect(w.skills).toEqual([{ skill: 'ledger:next', args: 'continue: typed' }])
+  expect(w.events).toEqual(['clear'])
+})
+
+test('/ledger:go and /ledger:next in an interactive session still send go <slug> after the clear', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
+
+  await $.session.start({ ...sdkStart, surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'ledger:go', args: 'kid' })
+  await $.turn.complete(turnEnd)
+  expect(w.markdown()).toEqual({ command: 'ledger:go', args: 'task: kid\nledger: epic' })
+  await $.command.run({ command: 'ledger:next', args: '' })
+  await $.turn.complete({ ...turnEnd, turnId: 't2' })
+
+  expect(w.markdown()).toEqual({ command: 'ledger:next', args: '' })
+  expect(w.events).toEqual(['clear', 'submit: go kid', 'clear', 'submit: go epic'])
+})
+
+test('a start with no person at the prompt counts only for its own session: a later session sends go <slug> again', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
+
+  await $.session.start(sdkStart)
+  w.newSession('session-2')
+  await $.command.run({ command: 'ledger:next', args: '' })
+  await $.turn.complete(turnEnd)
+
+  expect(w.markdown()).toEqual({ command: 'ledger:next', args: '' })
+  expect(w.events).toEqual(['clear', 'submit: go epic'])
+})

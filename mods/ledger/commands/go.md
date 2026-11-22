@@ -31,6 +31,8 @@ $ARGUMENTS
 - `marked:`, when present, names the ledger in which the hook just marked the
   task started under `## Children`.
 - Each `warning:` line says what the hook could not do.
+- `continue: typed`, when present, means the new session cannot start by
+  itself: the operator types `go <task>` after the clear.
 
 If there is a `held:` line, change no files and skip the rest of this command.
 Ask the operator with AskUserQuestion what to do. Name the task, the session
@@ -126,7 +128,10 @@ task with these ledger steps. `<task>` in them is the `ledger:` value:
    session clears automatically after this turn, and that the new session
    then continues by itself in the task that the `task:` value names, so the
    operator types nothing. Do not show `go <task>` or any other command for
-   the operator to type. Do not ask the operator to run `/clear`. If there is a `new:` line, add one line
+   the operator to type. Do not ask the operator to run `/clear`. If there is
+   a `continue: typed` line, the last line instead says the session clears
+   after this turn, and that the operator then types `go <task>`, with the
+   `task:` value, to continue. If there is a `new:` line, add one line
    before it: the task was made, and its worktree is at the path on the
    `worktree` line that `ledger go` printed. If `ledger go` failed with any
    exit but 5, say instead that the task is in the backlog. If there is a `parked:` line, add

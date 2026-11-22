@@ -91,6 +91,8 @@ export function world(on: On, replies: Record<string, Reply>, { cwd: startCwd, m
 
   on('session.cwd', async () => ({ value: cwd }))
   on('session.id', async () => ({ value: sessionId }))
+  on('session.start', async (_, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_, e) => ({ value: { command: e.name } }))
   on('session.usage', async () => {
     breakIfBroken('usage')
     return { value: { startedAt: 0, context: { tokens: contextTokens, window: 1_000_000 }, rateLimits: [] } }
