@@ -1,5 +1,6 @@
 // @ref LLP 0001#4-storage — D29: existing Markdown ledgers are converted once; text that fits no list goes to general notes.
 import { parseLedger } from './format.js';
+import type { OnMove } from './pending.js';
 import { parseRecord, recordToWrite } from './record.js';
 import { repoLabel } from './repo-key.js';
 import type { LedgerCollection, LedgerStore } from './store.js';
@@ -27,10 +28,10 @@ function convert(collection: LedgerCollection, repo: string, name: string, dryRu
  * Rewrites each backlog ledger and archive copy the store still keeps as Markdown as a task record. A second run finds
  * none left. A task kept both as a record and as Markdown is a conflict: it stays as it is, for a person to merge.
  * `store` is undefined for a database that is not there. Prints one line per ledger to `line`, with how many of its
- * lines went to the general notes, and returns how many conflicts it left, which a dry run counts the same. A ledger
+ * lines went to the general notes, gives each to `onMove` as it prints it, and returns how many conflicts it left, which a dry run counts the same. A ledger
  * whose record would not read back the same stops it with a Failure, a dry run too.
  */
-export function migrateRecords(store: LedgerStore | undefined, { dryRun }: { dryRun: boolean }, line: (text: string) => void): number {
+export function migrateRecords(store: LedgerStore | undefined, { dryRun }: { dryRun: boolean }, line: (text: string) => void, onMove?: OnMove): number {
   line(`Convert backlog and archive ledgers to task records${dryRun ? ' · dry run, nothing changed' : ''}`);
   let converted = 0;
   let conflicts = 0;
@@ -38,14 +39,18 @@ export function migrateRecords(store: LedgerStore | undefined, { dryRun }: { dry
     const collection = store?.[place];
     if (collection === undefined) continue;
     for (const repo of collection.repos()) {
+      const from = (name: string): string => `Markdown ${place} ${repoLabel(repo)} ${name}`;
       for (const name of collection.markdownNames?.(repo) ?? []) {
         const ledger = collection.read(repo, name);
         if (ledger === undefined || !convert(collection, repo, name, dryRun)) continue;
         line(`${dryRun ? 'would convert' : 'converted'} ${place} ${repoLabel(repo)} ${name}: ${plural(notedLines(ledger.text), 'line')} to general notes`);
+        onMove?.({ kind: 'records', from: from(name), to: 'task record', auto: true });
         converted++;
       }
       for (const name of collection.hiddenMarkdown?.(repo) ?? []) {
-        line(`left ${place} ${repoLabel(repo)} ${name}: it has both a record and Markdown from before records, at ${collection.location(repo, name)}. Merge the two by hand, then remove the Markdown.`);
+        const reason = `it has both a record and Markdown from before records, at ${collection.location(repo, name)}. Merge the two by hand, then remove the Markdown.`;
+        line(`left ${place} ${repoLabel(repo)} ${name}: ${reason}`);
+        onMove?.({ kind: 'records', from: from(name), to: 'task record', auto: false, reason });
         conflicts++;
       }
     }

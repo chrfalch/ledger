@@ -4,7 +4,10 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
+import { fileStore } from '../tools/ledger/file-store.js';
+import { ledgerPaths } from '../tools/ledger/paths.js';
 import { freshHome, REPO, snapshot } from './helpers.js';
+import { git, home as fixtureHome, ledgerText, noSqlite, repoKeyOf, repository, worktreeOf } from './ledger-core-fixtures.js';
 
 const EXPECT = '/usr/bin/expect';
 const skip = existsSync(EXPECT) ? false : `${EXPECT} is missing, and these tests need it to drive the wizard through a terminal`;
@@ -170,8 +173,151 @@ test('a deploy that fails after the preview reports the error and its status', {
 test('a preview that throws is reported, and the wizard says nothing was written', { skip }, (t) => {
   const home = freshHome(t);
   writeFileSync(path.join(home, '.claude/backups'), 'a file where revert expects a directory\n');
-  const { status, output } = wizard(home, [answer('What do you want to do?', DOWN, ENTER)]);
+  const { status, output } = wizard(home, [answer('What do you want to do?', DOWN, DOWN, ENTER)]);
   assert.equal(status, 1, output);
   assert.match(output, /ENOTDIR/);
   assert.match(output, /Nothing was written\./);
+});
+
+/**
+ * A HOME whose registry names the .claude/ledger.md of a linked worktree of ~/repos/app, from before active records, and
+ * with `markdown` a backlog ledger kept as Markdown, from before task records.
+ */
+function homeWithUnmovedLedger(t: Parameters<typeof freshHome>[0], markdown = false): { home: string; app: string; file: string; markdownFile: string } {
+  const home = fixtureHome(t);
+  const app = repository(home, path.join(home, 'repos/app'));
+  const folder = worktreeOf(app, 'task');
+  git(home, app, 'worktree', 'add', '--quiet', '-b', 'me/task', folder);
+  mkdirSync(path.join(folder, '.claude'));
+  const file = path.join(folder, '.claude/ledger.md');
+  writeFileSync(file, ledgerText({ slug: 'task' }));
+  const entry = { repo: repoKeyOf(app), slug: 'task', path: file, branch: 'me/task', status: 'active', main: app, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' };
+  writeFileSync(path.join(home, '.claude/ledgers.json'), JSON.stringify([entry]));
+  const backlog = fileStore(ledgerPaths(home)).backlog.repoLocation(repoKeyOf(app));
+  const markdownFile = path.join(backlog, 'stray.md');
+  if (markdown) {
+    mkdirSync(backlog, { recursive: true });
+    writeFileSync(markdownFile, ledgerText({ slug: 'stray', main: app }));
+  }
+  return { home, app, file, markdownFile };
+}
+
+const MIGRATE = answer('What do you want to do?', DOWN, ENTER);
+/** The Migrate screen asks "What do you want to do?" as the first screen does, so the wait is for an option of its own. */
+const MIGRATE_CHOICE = 'Switch the store type';
+const settings = (home: string): string => path.join(home, '.claude/ledger-settings.json');
+
+test('after a deploy, the wizard moves the .claude/ledger.md files without asking, and asks nothing when no other move is pending', { skip }, (t) => {
+  const { home, file } = homeWithUnmovedLedger(t);
+  const { status, output } = wizard(home, [...DEFAULT_SELECTIONS, answer('Apply these changes?', ENTER)]);
+  assert.equal(status, 0, output);
+  assert.match(output, /ledgers +moved .* to active app task/);
+  assert.doesNotMatch(output, /Run these moves now\?/);
+  assert.equal(existsSync(file), false);
+});
+
+test('after a deploy, the wizard lists the other pending moves and yes runs them', { skip }, (t) => {
+  const { home, file, markdownFile } = homeWithUnmovedLedger(t, true);
+  const { status, output } = wizard(home, [
+    ...DEFAULT_SELECTIONS,
+    answer('Apply these changes?', ENTER),
+    answer('Run these moves now?', ENTER),
+  ]);
+  assert.equal(status, 0, output);
+  assert.match(output, /Markdown backlog app stray → task record/);
+  assert.match(output, /ledgers +converted backlog app stray/);
+  assert.equal(existsSync(file), false);
+  assert.equal(existsSync(markdownFile), false);
+});
+
+test('after a deploy, no leaves the other pending moves as they are and names deploy --migrate', { skip }, (t) => {
+  const { home, file, markdownFile } = homeWithUnmovedLedger(t, true);
+  const { status, output } = wizard(home, [
+    ...DEFAULT_SELECTIONS,
+    answer('Apply these changes?', ENTER),
+    answer('Run these moves now?', 'n'),
+  ]);
+  assert.equal(status, 0, output);
+  assert.doesNotMatch(output, /ledgers +converted/);
+  assert.match(output, /deploy --migrate to move them\./);
+  assert.equal(existsSync(file), false);
+  assert.ok(existsSync(markdownFile));
+});
+
+test('Migrate lists the pending moves and runs them, without deploying files', { skip }, (t) => {
+  const { home, file } = homeWithUnmovedLedger(t);
+  const { status, output } = wizard(home, [MIGRATE, answer(MIGRATE_CHOICE, ENTER)]);
+  assert.equal(status, 0, output);
+  assert.match(output, /Run the pending moves/);
+  assert.doesNotMatch(output, /What should migrate do\?/);
+  assert.match(output, /ledgers +moved .* to active app task/);
+  assert.equal(existsSync(file), false);
+  assert.equal(existsSync(path.join(home, '.local/bin/ledger')), false);
+});
+
+test('Migrate with nothing to move offers only the store switch, and a store switch whose preview fails changes nothing', { skip }, (t) => {
+  const home = freshHome(t);
+  const before = snapshot(home);
+  const { status, output } = wizard(home, [
+    MIGRATE,
+    answer('Nothing to move.'),
+    answer(MIGRATE_CHOICE, ENTER),
+    answer('Which store should they move to?', DOWN, ENTER),
+  ]);
+  assert.notEqual(status, 0, output);
+  assert.doesNotMatch(output, /Run the pending moves/);
+  assert.match(output, /Git storage is not set up/);
+  assert.doesNotMatch(output, /Move the ledgers to/);
+  assert.deepEqual(snapshot(home), before);
+});
+
+test('Migrate whose check fails shows only the warning, and still offers the store switch and Cancel', { skip }, (t) => {
+  const home = freshHome(t);
+  writeFileSync(settings(home), '{ not json');
+  const { status, output } = wizard(home, [MIGRATE, answer(MIGRATE_CHOICE, DOWN, ENTER)]);
+  assert.equal(status, 1, output);
+  assert.match(output, /Could not check for stored task data to move: .*not valid JSON/);
+  assert.doesNotMatch(output, /Nothing to move\./);
+  assert.doesNotMatch(output, /Run the pending moves/);
+  assert.match(output, /Cancel/);
+  assert.match(output, /Nothing was written\./);
+});
+
+test('a store switch shows what the move would copy, and no leaves the store as it is', { skip: skip || noSqlite }, (t) => {
+  const home = freshHome(t);
+  const before = snapshot(home);
+  const { status, output } = wizard(home, [
+    MIGRATE,
+    answer(MIGRATE_CHOICE, ENTER),
+    answer('Which store should they move to?', ENTER),
+    answer('Move the ledgers to SQLite?', 'n'),
+  ]);
+  assert.equal(status, 1, output);
+  assert.match(output, /would switch "storage" from "file" to "sqlite"/);
+  assert.deepEqual(snapshot(home), before);
+});
+
+test('a store switch that is confirmed moves the ledgers and sets the storage', { skip: skip || noSqlite }, (t) => {
+  const home = freshHome(t);
+  const { status, output } = wizard(home, [
+    MIGRATE,
+    answer(MIGRATE_CHOICE, ENTER),
+    answer('Which store should they move to?', ENTER),
+    answer('Move the ledgers to SQLite?', ENTER),
+  ]);
+  assert.equal(status, 0, output);
+  assert.deepEqual(JSON.parse(readFileSync(settings(home), 'utf8')), { storage: 'sqlite' });
+});
+
+test('after a deploy, the wizard shows the tasks that stay, with why, and asks nothing when none can move', { skip }, (t) => {
+  const { home, app } = homeWithUnmovedLedger(t);
+  const stuck = worktreeOf(app, 'stuck');
+  git(home, app, 'worktree', 'add', '--quiet', '-b', 'me/stuck', stuck);
+  mkdirSync(path.join(stuck, '.claude'));
+  writeFileSync(path.join(stuck, '.claude/ledger.md'), '## Goal\nA ledger whose heading names no slug.\n');
+  const { status, output } = wizard(home, [...DEFAULT_SELECTIONS, answer('Apply these changes?', ENTER)]);
+  assert.equal(status, 0, output);
+  assert.match(output, /Left for you to move/);
+  assert.match(output, / stays: its heading/);
+  assert.doesNotMatch(output, /Run these moves now\?/);
 });

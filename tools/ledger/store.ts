@@ -101,6 +101,8 @@ export interface Backlog extends LedgerCollection {
   move(repo: string, slug: string, to: string): boolean;
   /** Whether `move` would move the ledger now, by the checks it makes, without moving anything. */
   canMove(repo: string, slug: string, to: string): boolean;
+  /** Whether `move` would rename the ledger onto another disk, where the rename fails with EXDEV; absent where a move is no rename. */
+  acrossDisks?(repo: string, slug: string, to: string): boolean;
 }
 
 type ActiveKey = { repo: string; slug: string };
@@ -195,6 +197,8 @@ export interface Archive extends LedgerCollection {
   move(repo: string, name: string, to: string): boolean;
   /** Whether `move` would move the copy now, by the checks it makes, without moving anything. */
   canMove(repo: string, name: string, to: string): boolean;
+  /** Whether `move` would rename the copy or its evidence onto another disk, as `Backlog.acrossDisks`. */
+  acrossDisks?(repo: string, name: string, to: string): boolean;
   /** Evidence kept under a name that has no archive copy, in any repo, such as what a move or a hand left behind. */
   orphanEvidence(): { repo: string; name: string }[];
 }

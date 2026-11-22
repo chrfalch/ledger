@@ -86,7 +86,8 @@ each:
 - `worktrees`: shows the linked worktrees. `prune` and `prune-orphans` delete
   their build folders.
 - `go`, `list`, `show`: short forms of the `task` commands of the same names.
-- `deploy`: runs `bin/deploy`.
+- `deploy`: runs `bin/deploy`, which installs the files and offers the
+  one-time moves that `ledger store migrate --pending` lists.
 
 Two commands are for Claude Code and stay out of the help. `session` prints
 the ledgers a session in a folder works on. `hook` answers a Claude Code hook
@@ -244,6 +245,28 @@ into an active record that names the worktree, and deletes the file;
 `.claude/evidence/` stays. A ledger whose slug or worktree is taken stays as it
 is, for a person to merge. Until it runs, `session-start` says how many are
 left.
+
+Each of `migrateRepoIds`, `migrateActive` and `migrateRecords` takes a callback
+that it calls once per item, with the item's source, its target, and whether
+the move takes it or leaves it, with the reason. `pendingMoves` in
+`tools/ledger/pending.ts` runs the three as dry runs, in that order, and
+collects the items. `ledger store migrate --pending` prints them, or with
+`--json` prints them as JSON. The list comes from the moves' own dry runs, so
+it follows their rules with no second copy of them. A dry run of `--repo-ids`
+asks the file store whether a rename would cross onto another disk
+(`acrossDisks`), so such a ledger is listed as one to move by hand, as the run
+reports it. The list is still a preview: each move checks again when it runs,
+so it can leave a task the list showed as movable, for example one whose name
+another command took in between.
+
+`bin/deploy` reads that JSON to offer the moves. A list it showed earlier is
+only for display: `runMoves` in `tools/deploy.ts` checks again before each kind
+of move, runs the kind only when that check lists an item it can move, and
+checks once more at the end. It never runs an item the move
+would leave; that item waits for a person. Such an item is not a failure:
+`bin/deploy --migrate` prints it with its reason and still exits 0. It exits 1
+only when a check fails, a move cannot start, is stopped by a signal or exits
+above 1, or the last check still lists a move it could have made.
 
 `repairStore` in `tools/ledger/repair.ts` runs `ledger store repair`. It takes
 flags only and never prompts:
@@ -429,6 +452,18 @@ taken.
 `bin/deploy` links both into `~/.claude/`. With flags such as `--no-codex`,
 `tools/build-rules.ts` filters the rules by their `needs:` markers, and deploy
 writes the result instead of links.
+
+After the files, deploy handles the one-time moves of stored task data. Every
+deploy, from the wizard or not, runs `ledger store migrate --active` without
+asking, because the ledger it just installed reads active ledgers only from the
+store. A plain `bin/deploy` then lists the other pending moves and names
+`bin/deploy --migrate`, which runs them and deploys no files. The wizard
+(`tools/wizard.ts`) has a Migrate entry beside Deploy and Revert. After Deploy
+it lists the other pending moves and asks whether to run them; with none
+pending it asks nothing. Migrate runs them, or switches the store type with
+`ledger store migrate --to`: it shows the dry run first and never removes the
+old copy. Deploy runs `bin/ledger` as a separate process and never imports the
+ledger code. Deploy supports Node 20.12, and the SQLite store needs Node 22.13.
 
 `rules/10-operating-model.md` holds the ledger workflow: when a task needs a
 ledger, when to update it, the clear point and the end of a task. The rules

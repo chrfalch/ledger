@@ -21,7 +21,7 @@ import { test, type TestContext } from 'node:test';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { freshHome, REPO, run, runWithoutClaude, snapshot } from './helpers.js';
-import { git, home as fixtureHome, ledgerText, repository, worktreeOf } from './ledger-core-fixtures.js';
+import { git, home as fixtureHome, ledgerText, repoKeyOf, repository, worktreeOf } from './ledger-core-fixtures.js';
 
 const DEPLOY = [path.join(REPO, 'bin/deploy')] as const;
 
@@ -669,7 +669,7 @@ function homeWithUnmovedLedger(t: TestContext, markdown = ledgerText({ slug: 'ta
   writeFileSync(file, markdown);
   const entry = { repo: 'x', slug: 'task', path: file, branch: 'me/task', status: 'active', main: app, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' };
   writeFileSync(path.join(home, '.claude/ledgers.json'), JSON.stringify([entry]));
-  return { home, file, folder };
+  return { home, file, folder, app };
 }
 
 test('deploy moves each .claude/ledger.md into the ledger store once, and prints what moved', (t) => {
@@ -701,4 +701,169 @@ test('a deploy whose move of the ledgers leaves one says so, names the command t
   assert.match(deployed.stdout, /^ledgers +left .*its heading names no task slug/m);
   assert.match(deployed.stdout, /ledger store migrate --active/);
   assert.ok(existsSync(file));
+});
+
+/** Adds a backlog ledger kept as Markdown, from before task records, to the store of `home`, for the repo at `app`. */
+function addMarkdownBacklogLedger(home: string, app: string): string {
+  const location = fileStore(ledgerPaths(home)).backlog.repoLocation(repoKeyOf(app));
+  mkdirSync(location, { recursive: true });
+  const file = path.join(location, 'stray.md');
+  writeFileSync(file, ledgerText({ slug: 'stray', main: app }));
+  return file;
+}
+
+test('--migrate runs each pending move, prints what moved, and deploys no files', (t) => {
+  const { home, file, folder, app } = homeWithUnmovedLedger(t);
+  const markdown = addMarkdownBacklogLedger(home, app);
+
+  const migrated = runWithoutClaude(home, DEPLOY, '--migrate');
+
+  assert.equal(migrated.status, 0, migrated.stderr);
+  assert.match(migrated.stdout, /^ledgers +moved .*\.claude\/ledger\.md to active app task/m);
+  assert.match(migrated.stdout, /^ledgers +converted backlog .* stray/m);
+  assert.equal(existsSync(file), false);
+  assert.equal(existsSync(markdown), false);
+  assert.ok(fileStore(ledgerPaths(home)).active.byWorktree(folder), 'no active record names the worktree');
+  assert.equal(existsSync(path.join(home, '.local/bin/ledger')), false);
+  assert.equal(existsSync(path.join(home, '.claude/.ledger-manifest')), false);
+});
+
+test('--migrate --dry-run prints the pending moves and changes nothing', (t) => {
+  const { home, file } = homeWithUnmovedLedger(t);
+  const before = snapshot(home);
+
+  const migrated = runWithoutClaude(home, DEPLOY, '--migrate', '--dry-run');
+
+  assert.equal(migrated.status, 0, migrated.stderr);
+  assert.ok(migrated.stdout.split('\n').some((line) => line.includes(`${file} → active app task`)), migrated.stdout);
+  assert.doesNotMatch(migrated.stdout, /^ledgers +moved/m);
+  assert.deepEqual(snapshot(home), before);
+});
+
+test('--migrate with nothing pending says so and exits 0', (t) => {
+  const home = freshHome(t);
+  const migrated = runWithoutClaude(home, DEPLOY, '--migrate');
+  assert.equal(migrated.status, 0, migrated.stderr);
+  assert.match(migrated.stdout, /^Nothing to move\.$/m);
+});
+
+test('--migrate exits 0 when every task it can move moved, names each task that stays and why, and never runs a move with nothing it can do', (t) => {
+  const { home, app, file } = homeWithUnmovedLedger(t);
+  const stuck = worktreeOf(app, 'stuck');
+  git(home, app, 'worktree', 'add', '--quiet', '-b', 'me/stuck', stuck);
+  mkdirSync(path.join(stuck, '.claude'));
+  writeFileSync(path.join(stuck, '.claude/ledger.md'), '## Goal\nA ledger whose heading names no slug.\n');
+  const registry = path.join(home, '.claude/ledgers.json');
+  const stale = { repo: 'app', slug: 'ghost', path: fileStore(ledgerPaths(home)).backlog.location('app', 'ghost'), branch: 'ghost', status: 'backlog', main: app, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' };
+  writeFileSync(registry, JSON.stringify([...JSON.parse(readFileSync(registry, 'utf8')), stale]));
+
+  const migrated = runWithoutClaude(home, DEPLOY, '--migrate');
+
+  assert.equal(migrated.status, 0, migrated.stdout);
+  assert.equal(existsSync(file), false);
+  assert.match(migrated.stdout, /^ledgers +moved .* to active app task/m);
+  assert.match(migrated.stdout, /^moves +active +.*stuck.* stays: its heading names no task slug/m);
+  assert.match(migrated.stdout, /^moves +repo-ids +registry entry app\/ghost stays: its ledger is gone/m);
+  assert.doesNotMatch(migrated.stdout, /Convert (repo keys|backlog and archive)/);
+});
+
+/**
+ * Runs deploy --migrate against a stub bin/ledger: --pending lists one records move, and the move exits `status`. After
+ * the move, --pending lists nothing, unless `sticky`; with `once`, it lists nothing after its first answer.
+ */
+function migrateWithStubLedger(t: TestContext, status: number, { sticky = false, once = false } = {}) {
+  const repo = mkdtempSync(path.join(tmpdir(), 'ledger-stub-repo-'));
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  mkdirSync(path.join(repo, 'bin'));
+  const move = { kind: 'records', from: 'Markdown backlog app stray', to: 'task record', auto: true };
+  writeFileSync(path.join(repo, 'bin/pending.json'), JSON.stringify({ moves: [move] }));
+  writeFileSync(path.join(repo, 'bin/status'), String(status));
+  if (sticky) writeFileSync(path.join(repo, 'bin/sticky'), '');
+  if (once) writeFileSync(path.join(repo, 'bin/once'), '');
+  const nothing = `echo '{"moves":[]}' > "$here/pending.json"`;
+  writeFileSync(
+    path.join(repo, 'bin/ledger'),
+    [
+      '#!/bin/sh',
+      'here=$(dirname "$0")',
+      'case "$*" in',
+      `  *--pending*) cat "$here/pending.json"; if [ -e "$here/once" ]; then ${nothing}; fi ;;`,
+      `  *) echo "ran $*"; if [ ! -e "$here/sticky" ]; then ${nothing}; fi; exit "$(cat "$here/status")" ;;`,
+      'esac',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  const deployModule = JSON.stringify(path.join(REPO, 'tools/deploy.ts'));
+  const ran = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `const { main } = await import(${deployModule}); main(['--migrate']);`], {
+    cwd: REPO,
+    env: { ...process.env, HOME: freshHome(t), DEPLOY_REPO: repo },
+    encoding: 'utf8',
+  });
+  return { ...ran, moved: /^ledgers +ran store migrate --records$/m.test(ran.stdout) };
+}
+
+test('--migrate exits 0 when a move exits 1 and leaves nothing it could move', (t) => {
+  const ran = migrateWithStubLedger(t, 1);
+  assert.equal(ran.status, 0, ran.stdout);
+  assert.ok(ran.moved, ran.stdout);
+});
+
+test('--migrate exits 1 when a move exits above 1, and says so', (t) => {
+  const ran = migrateWithStubLedger(t, 2);
+  assert.equal(ran.status, 1, ran.stdout);
+  assert.ok(ran.moved, ran.stdout);
+  assert.match(ran.stdout, /ledger store migrate --records exited 2/);
+});
+
+test('--migrate exits 1 when a move it ran is still to do after the run', (t) => {
+  const ran = migrateWithStubLedger(t, 0, { sticky: true });
+  assert.equal(ran.status, 1, ran.stdout);
+  assert.ok(ran.moved, ran.stdout);
+  assert.match(ran.stdout, /^moves +records +Markdown backlog app stray → task record$/m);
+});
+
+test('--migrate checks again before each kind, and runs no move the fresh check no longer lists', (t) => {
+  const ran = migrateWithStubLedger(t, 0, { once: true });
+  assert.equal(ran.status, 0, ran.stdout);
+  assert.ok(!ran.moved, ran.stdout);
+});
+
+for (const flag of [['--revert'], ['--force'], ['--no-codex'], ['--codex'], ['--agents', 'runner'], ['--models', 'opus-5.5']]) {
+  test(`--migrate refuses ${flag[0]}`, (t) => {
+    const migrated = runWithoutClaude(freshHome(t), DEPLOY, '--migrate', ...flag);
+    assert.equal(migrated.status, 1);
+    assert.match(migrated.stderr, new RegExp(`--migrate .*${flag[0]}`));
+  });
+}
+
+test('plain deploy moves the .claude/ledger.md files, then names the other pending moves and how to run them', (t) => {
+  const { home, file, app } = homeWithUnmovedLedger(t);
+  const markdown = addMarkdownBacklogLedger(home, app);
+
+  const deployed = runWithoutClaude(home, DEPLOY, '--no-codex');
+
+  assert.equal(deployed.status, 0, deployed.stderr);
+  assert.equal(existsSync(file), false);
+  assert.ok(existsSync(markdown), 'deploy converted the Markdown ledger without being asked');
+  assert.ok(deployed.stdout.split('\n').some((line) => line.includes('Markdown backlog app stray → task record')), deployed.stdout);
+  assert.doesNotMatch(deployed.stdout, /\.claude\/ledger\.md → /);
+  assert.match(deployed.stdout, /deploy --migrate to move them\./);
+});
+
+test('plain deploy with no other pending moves gives no --migrate hint', (t) => {
+  const { home } = homeWithUnmovedLedger(t);
+  const deployed = runWithoutClaude(home, DEPLOY, '--no-codex');
+  assert.equal(deployed.status, 0, deployed.stderr);
+  assert.doesNotMatch(deployed.stdout, /--migrate/);
+});
+
+test('deploy --dry-run lists the moves still to do', (t) => {
+  const { home, file } = homeWithUnmovedLedger(t);
+
+  const deployed = runWithoutClaude(home, DEPLOY, '--dry-run', '--no-codex');
+
+  assert.equal(deployed.status, 0, deployed.stderr);
+  assert.match(deployed.stdout, /^moves +still to do:$/m);
+  assert.ok(deployed.stdout.split('\n').some((line) => line.includes(`${file} → active app task`)), deployed.stdout);
 });

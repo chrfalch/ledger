@@ -367,6 +367,10 @@ Only then does it write `"storage": "sqlite"` to
 The files stay where they are. Add `--remove-source` to remove them after the
 check. To go back to files, run `ledger store migrate --to file`.
 
+The wizard of `bin/deploy` can make the same switch. Choose Migrate, then
+Switch the store type, then the new store. It shows the dry run and asks before
+it copies anything. It never removes the old copy.
+
 When the database already has a ledger of the same name, the command lists
 each one, exits 1, and changes nothing. A ledger with identical text counts
 too.

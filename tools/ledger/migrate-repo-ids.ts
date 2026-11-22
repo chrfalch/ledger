@@ -5,6 +5,7 @@ import { mainCheckout } from './git.js';
 import { mainOfTaskWorktree, realPath, samePath } from './paths.js';
 import { parseRegistry, type RegistryEntry } from './registry.js';
 import { repoKey, repoLabel } from './repo-key.js';
+import type { OnMove } from './pending.js';
 import type { LedgerStore, StoredLedger } from './store.js';
 import { joined, plural } from './views.js';
 
@@ -55,12 +56,12 @@ const taken = (key: string, name: string): string => `${shown(key)} already has 
  */
 export function moveLedger(store: LedgerStore, place: Place, { old, name, to }: { old: string; name: string; to: string }, dryRun: boolean): string | undefined {
   if (!store[place].canMove(old, name, to)) return taken(to, name);
-  if (dryRun) return undefined;
+  const byHand = `on another disk, move by hand to ${store[place].location(to, name)}`;
+  if (dryRun) return store[place].acrossDisks?.(old, name, to) ? byHand : undefined;
   try {
     return store[place].move(old, name, to) ? undefined : taken(to, name);
   } catch (error) {
-    const otherDisk = (error as NodeJS.ErrnoException).code === 'EXDEV';
-    return otherDisk ? `on another disk, move by hand to ${store[place].location(to, name)}` : `the move failed: ${messageOf(error)}`;
+    return (error as NodeJS.ErrnoException).code === 'EXDEV' ? byHand : `the move failed: ${messageOf(error)}`;
   }
 }
 
@@ -119,11 +120,14 @@ export function conversionHint(store: LedgerStore): string | undefined {
  * gets the key of its own ledger that moved, also in an earlier run; an active entry gets the key of its checkout, while its
  * ledger is there. An alias map that cannot be read stops the run before anything moves, in a dry run too.
  *
- * `store` is undefined for a database that is not there. Prints one line per step to `line`, and returns how many
- * ledgers, registry entries, evidence folders and alias conflicts it left, or with `dryRun` would leave, under a folder name.
+ * `store` is undefined for a database that is not there. Prints one line per step to `line`, gives `onMove` each ledger,
+ * evidence folder, registry entry it re-keys or leaves on its own, and alias conflict, and returns how many ledgers,
+ * registry entries, evidence folders and alias conflicts it left, or with `dryRun` would leave, under a folder name.
  */
-export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dryRun: boolean }, line: (text: string) => void): number {
+export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dryRun: boolean }, line: (text: string) => void, onMove?: OnMove): number {
   line(`Convert repo keys from folder names to repo addresses${dryRun ? ' · dry run, nothing changed' : ''}`);
+  const report = (from: string, to: string, reason?: string): void =>
+    onMove?.({ kind: 'repo-ids', from, to, auto: reason === undefined, ...(reason === undefined ? {} : { reason }) });
   const act = (done: string, planned: string): string => (dryRun ? `would ${planned}` : done);
   const nothing = (): number => (line(`${dryRun ? 'Would move' : 'Moved'} 0 ledgers; nothing uses a folder name.`), 0);
   if (store === undefined) return nothing();
@@ -141,6 +145,7 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
   const aliasProblem = store.aliases.problem();
   if (aliasProblem !== undefined) {
     line(`Stopped before any move, as each move records an alias: ${aliasProblem}`);
+    report(`folder names ${olds.join(', ')}`, 'repo addresses', aliasProblem);
     return [...filed.values()].flat().length + legacyEntries.length + orphans.length;
   }
 
@@ -244,6 +249,7 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
   const leave = (what: string, why: string): void => {
     left++;
     line(`left ${what}: ${why}`);
+    report(what, 'repo address', why);
   };
   /** Moves `name` of `place` from `old` to `to`, or in a dry run checks that it would, by the store's own checks; says why not. */
   const moves = (place: Place, old: string, name: string, to: string, what: string): boolean => {
@@ -270,6 +276,7 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
         moved++;
         movedTo.set(ledger.location, { repo: outcome.to, location: store[place].location(outcome.to, ledger.name) });
         line(`${act('moved', 'move')} ${what} to ${shown(outcome.to)}`);
+        report(what, shown(outcome.to));
       }
     }
     for (const { name, outcome } of strays.filter(({ repo }) => repo === old)) {
@@ -278,6 +285,7 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
       else if (moves('archive', old, name, outcome.to, what)) {
         movedTo.set(store.archive.location(old, name), { repo: outcome.to, location: store.archive.location(outcome.to, name) });
         line(`${act('moved', 'move')} ${what} to ${shown(outcome.to)}, where a stopped run moved its archive copy`);
+        report(what, shown(outcome.to));
       }
     }
 
@@ -289,6 +297,7 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
     if (saved !== undefined && elsewhere !== undefined) {
       left++;
       line(`kept the alias ${old} of ${shown(saved)} as it is, though a task of ${old} is in ${shown(elsewhere)}; an alias is never changed`);
+      report(`alias ${old}`, shown(elsewhere), `it is an alias of ${shown(saved)}, and an alias is never changed`);
     } else if (saved === undefined && movedKeys.size > 0) {
       if (ledgers.some(({ outcome }) => 'left' in outcome)) line(`kept no alias for ${old}: the repo of a ledger left under it is not known`);
       else if (targets.size > 1) line(`kept no alias for ${old}: its tasks are in ${plural(targets.size, 'repo')}`);
@@ -298,10 +307,8 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
       }
     }
 
-    for (const why of registry.left) {
-      left++;
-      line(`left registry entry ${why}`);
-    }
+    for (const { what, why } of registry.left) leave(what, why);
+    for (const { what, to } of registry.rekeyed) report(what, shown(to));
     if (registry.count > 0) {
       if (!dryRun) store.registry.update(registry.change);
       updated += registry.count;
@@ -317,7 +324,8 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
  * the next load keeps its created time; so does one whose ledger an earlier run moved, by `earlier`, which `resumed`
  * lists. An active entry gets the key `actives` gives it. An entry whose ledger stays under `old` stays as it is.
  * Everything is decided before the registry is held, as git must not run then; `left` names each entry that cannot be
- * converted, such as a stale one, whose ledger is nowhere: no key is right for it.
+ * converted, such as a stale one, whose ledger is nowhere: no key is right for it. `rekeyed` names each entry that gets a
+ * key with no ledger of this run's moves behind it.
  */
 function registryChange(
   store: LedgerStore,
@@ -326,22 +334,32 @@ function registryChange(
   earlier: Map<string, Moved>,
   actives: Map<string, Outcome>,
   entries: RegistryEntry[],
-): { count: number; left: string[]; resumed: string[]; change: (current: string | undefined) => string | undefined } {
+): {
+  count: number;
+  left: { what: string; why: string }[];
+  rekeyed: { what: string; to: string }[];
+  resumed: string[];
+  change: (current: string | undefined) => string | undefined;
+} {
   const decided = new Map<string, Partial<RegistryEntry>>();
-  const left: string[] = [];
+  const left: { what: string; why: string }[] = [];
+  const rekeyed: { what: string; to: string }[] = [];
   const resumed: string[] = [];
   for (const entry of entries.filter(({ repo }) => repo === old)) {
+    const what = `registry entry ${old}/${entry.slug}`;
     const location = entryLocation(entry);
     if (location === undefined) {
-      left.push(`${old}/${entry.slug}: it is archived, but names no archive copy`);
+      left.push({ what, why: 'it is archived, but names no archive copy' });
       continue;
     }
     const place: Place = entry.status === 'archived' ? 'archive' : 'backlog';
     const relocated = (to: Moved): Partial<RegistryEntry> => ({ repo: to.repo, ...(place === 'archive' ? { archivePath: to.location } : { path: to.location }) });
     const outcome = actives.get(location);
     if (entry.status === 'active') {
-      if (outcome !== undefined && 'to' in outcome) decided.set(location, { repo: outcome.to });
-      else left.push(`${old}/${entry.slug}: ${outcome?.left ?? 'it names no ledger'}`);
+      if (outcome !== undefined && 'to' in outcome) {
+        decided.set(location, { repo: outcome.to });
+        rekeyed.push({ what, to: outcome.to });
+      } else left.push({ what, why: outcome?.left ?? 'it names no ledger' });
       continue;
     }
     const moved = movedTo.get(location);
@@ -355,7 +373,8 @@ function registryChange(
     if (resumes !== undefined) {
       decided.set(location, relocated(resumes));
       resumed.push(resumes.repo);
-    } else left.push(`${old}/${entry.slug}: its ledger is gone, so the next ledger command drops it`);
+      rekeyed.push({ what, to: resumes.repo });
+    } else left.push({ what, why: 'its ledger is gone, so the next ledger command drops it' });
   }
   const change = (current: string | undefined): string | undefined => {
     const now = parseRegistry(current ?? '');
@@ -367,5 +386,5 @@ function registryChange(
     });
     return `${JSON.stringify(next, null, 2)}\n`;
   };
-  return { count: decided.size, left, resumed, change };
+  return { count: decided.size, left, rekeyed, resumed, change };
 }
