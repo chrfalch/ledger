@@ -37,9 +37,10 @@ repo. A repo with no `origin` and not exactly one other remote files them under
 the path of its main checkout instead, and a new path starts a new set.
 
 Ledgers written before this were filed under the folder name of the checkout.
-`ledger store migrate --repo-ids --dry-run` lists how it would move them to the
-repo's address, and `ledger store migrate --repo-ids` moves them, once. Run it
-before you rename or move the folder. It finds the repo of each ledger through
+`ledger store migrate --repo-ids` moves them to the repo's address, once. Deploy
+offers this move when it finds such ledgers (see
+[Moving stored task data](#moving-stored-task-data)). Run it before you rename
+or move the folder. It finds the repo of each ledger through
 the checkout's folder, so it leaves the ledgers of a checkout that has moved
 where they are. Run it while no other ledger command runs, in this or any other session.
 
@@ -51,21 +52,24 @@ nothing is left.
 
 Active ledgers used to be files inside each task's worktree. They now live in
 the ledger store, like the backlog. Each deploy runs
-`ledger store migrate --active` once: it moves each active ledger that is still
-a file in a worktree into the store, and deletes the file. The
-`.claude/evidence/` folder stays in the worktree. Deploy prints each ledger it
-moved or left. A ledger it left stays a file and the deploy still finishes. Fix
-what it names, then run `ledger store migrate --active` yourself, from any repo;
-`--dry-run` lists what it would move. Until every ledger is moved, each session
-start in a repo with such a worktree says how many are left.
+`ledger store migrate --active` without asking: it moves each active ledger that
+is still a file in a worktree into the store, and deletes the file. The
+`.claude/evidence/` folder stays in the worktree. Until every ledger
+is moved, each session start in a repo with such a worktree says how many are
+left.
 
 Run the dry run first. It tells you which files would be linked, which policy
 keys would change, and whether any file of your own would be replaced.
 
 Run `bin/deploy` with no flags in a terminal to start an interactive wizard.
-You choose deploy or revert, then the components, agents and models. The wizard
-shows a dry-run preview and asks you to confirm before it writes anything. Flags
-work as before and skip the wizard.
+You choose Deploy, Migrate, or Revert the last deploy. For Deploy you then pick
+the components, agents and models. The wizard shows a dry-run preview and asks
+you to confirm before it writes anything. Migrate lists the pending moves and
+offers to run them, or to switch the store type between files, SQLite and git.
+Before a switch it shows the dry run of `ledger store migrate --to`, and the old
+copy stays where it is. That dry run moves no ledger, but a switch to or from
+git storage opens the clone in `~/.claude/ledger-data` and puts back its
+pre-push hook if it was changed. Flags work as before and skip the wizard.
 
 Deploy also links the `ledger` command into `~/.local/bin`. If that folder is
 not on your `PATH`, deploy prints the line to add to your shell profile. After
@@ -86,6 +90,7 @@ through. `ledger --help` lists its commands: `deploy`, and the read-only
 | `--models a,b` | Keep only these models in the routing rules. |
 | `--force` | Replace a file of your own without asking. |
 | `--revert` | Remove this repo's symlinks and restore the newest backup. |
+| `--migrate` | Run the pending moves of stored task data, and deploy no files. With `--dry-run`, only list them. |
 | `--help` | Print the flag list. |
 
 Examples:
@@ -95,6 +100,47 @@ bin/deploy --no-codex                    # Claude-only fleet
 bin/deploy --models opus-5.5,sonnet-5.5  # drop models your plan lacks
 bin/deploy --agents runner,reviewer      # a minimal two-agent setup
 ```
+
+### Moving stored task data
+
+Older versions kept task data in older formats. Three one-time moves bring it
+up to date: `--repo-ids`, `--active` and `--records` of `ledger store migrate`.
+They run in that order. `ledger store migrate --pending` lists what each one
+would move, from where to where, and changes nothing. It prints
+`Nothing to move.` when everything is up to date.
+
+After it installs the files, every deploy runs the `--active` move without
+asking, as the installed ledger reads active ledgers only from the store. Then
+it checks for the other moves:
+
+- In the wizard, deploy lists the moves still pending and asks
+  "Run these moves now?". If you say no, it names the command to run later. It
+  also lists each task that needs a person, with the reason. When nothing is
+  pending, or only such tasks are left, it asks nothing.
+- Without the wizard, deploy lists the moves still pending and tells you to run
+  `bin/deploy --migrate`.
+- `bin/deploy --dry-run` lists every pending move under `moves still to do:`.
+
+```sh
+bin/deploy --migrate --dry-run   # list the pending moves, move nothing
+bin/deploy --migrate             # run them; deploy no files
+```
+
+A move never takes a task it cannot move safely, such as one whose name is
+already taken. The list marks each such task with the reason, and the task stays
+as it is for you to fix by hand. A failed move does not undo the deploy; fix
+what it names, then run the move again.
+
+`bin/deploy --migrate` runs the pending moves without asking. It does not check
+for new upstream commits first, so it never asks to pull and never changes the
+checkout. The list is a preview: before each kind of move, it checks again and
+runs the move only when that check still lists a task it can take. A task a move
+leaves, for the reason it names, is printed with that reason and is not a
+failure. The command exits 1 only in these cases:
+
+- the check for pending moves fails;
+- a move cannot start, is stopped by a signal, or exits with a status above 1;
+- the last check still lists a move it could have made.
 
 ## Ledger storage
 

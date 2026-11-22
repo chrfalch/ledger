@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
@@ -26,11 +26,27 @@ interface DeployOptions {
   codex?: boolean;
   agents?: string;
   models?: string;
+  migrate?: boolean;
+  /** Set by the wizard, which asks about the other moves itself: after the move of each .claude/ledger.md, name none. */
+  asksAboutMoves?: boolean;
 }
 
 export class DeployError extends Error {
   constructor(message: string, readonly status = 1) { super(message); }
 }
+
+const NOT_WITH_MIGRATE: [keyof DeployOptions, string][] = [
+  ['revert', '--revert'],
+  ['force', '--force'],
+  ['noArgent', '--no-argent'],
+  ['noStacks', '--no-stacks'],
+  ['noGithooks', '--no-githooks'],
+  ['noCodex', '--no-codex'],
+  ['noMods', '--no-mods'],
+  ['codex', '--codex'],
+  ['agents', '--agents'],
+  ['models', '--models'],
+];
 
 export function parseDeployArguments(argv: string[]): { options: DeployOptions; help: boolean } {
   const opts: DeployOptions = {};
@@ -46,10 +62,11 @@ export function parseDeployArguments(argv: string[]): { options: DeployOptions; 
       case '--no-codex': opts.noCodex = true; break;
       case '--no-mods': opts.noMods = true; break;
       case '--codex': opts.codex = true; break;
+      case '--migrate': opts.migrate = true; break;
       case '--agents':
       case '--models': {
         const value = argv[++index];
-        if (!value) throw new DeployError(`${arg} needs a comma-separated list`);
+        if (!value || value.startsWith('-')) throw new DeployError(`${arg} needs a comma-separated list`);
         opts[arg === '--agents' ? 'agents' : 'models'] = value;
         break;
       }
@@ -61,6 +78,8 @@ export function parseDeployArguments(argv: string[]): { options: DeployOptions; 
         else throw new DeployError(`unknown flag: ${arg}   (try --help)`);
     }
   }
+  const conflict = opts.migrate ? NOT_WITH_MIGRATE.find(([key]) => opts[key] !== undefined) : undefined;
+  if (conflict) throw new DeployError(`--migrate only moves stored task data and deploys no files, so it cannot go with ${conflict[1]}`);
   return { options: opts, help: false };
 }
 
@@ -199,18 +218,141 @@ function reinstall(mod: string, name: string): void {
   console.log(`mods     reinstalled ${mod} (installed copy differed from mods/${name})`);
 }
 
+// Run as a command, never imported: deploy runs on Node 20.12, and the ledger's SQLite storage needs 22.13.
+const LEDGER = path.join(REPO, 'bin/ledger');
+
+// A copy of MOVE_KINDS and Move in tools/ledger/pending.ts, which deploy must not import (see LEDGER); keep them in step.
+const MOVE_KINDS = ['repo-ids', 'active', 'records'] as const;
+type MoveKind = (typeof MOVE_KINDS)[number];
+
+/** One item of `ledger store migrate --pending --json`: `auto` is false for a task the move leaves, for `reason`. */
+export interface PendingMove {
+  kind: MoveKind;
+  from: string;
+  to: string;
+  auto: boolean;
+  reason?: string;
+}
+
+export const MIGRATE_HINT = 'Run bin/deploy --migrate to move them.';
+
+/** Runs bin/ledger from HOME, not this repo: the repo's own worktrees are found only through the registry, as every other repo's are. */
+export function runLedger(home: string, args: string[]): SpawnSyncReturns<string> {
+  return spawnSync(LEDGER, args, { cwd: home, encoding: 'utf8' });
+}
+
+export const printedLines = (ran: SpawnSyncReturns<string>): string[] => `${ran.stdout ?? ''}${ran.stderr ?? ''}`.split('\n').filter((line) => line.trim() !== '');
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
+
+const isMove = (value: unknown): value is PendingMove =>
+  isRecord(value)
+  && MOVE_KINDS.some((kind) => kind === value.kind)
+  && typeof value.from === 'string'
+  && typeof value.to === 'string'
+  && typeof value.auto === 'boolean';
+
+/** What `ledger store migrate --pending` finds still to move, or why it could not check. */
+export function pendingMoves(home: string): { moves: PendingMove[] } | { error: string } {
+  const ran = runLedger(home, ['store', 'migrate', '--pending', '--json']);
+  if (ran.error) return { error: ran.error.message };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(ran.stdout);
+  } catch {
+    parsed = undefined;
+  }
+  const moves = isRecord(parsed) ? parsed.moves : undefined;
+  if (ran.status === 0 && Array.isArray(moves) && moves.every(isMove)) return { moves };
+  const error = isRecord(parsed) && typeof parsed.error === 'string' ? parsed.error : `${ran.stderr}${ran.stdout}`.trim();
+  return { error: error || `ledger store migrate --pending exited ${ran.status ?? 'on a signal'}` };
+}
+
+/** The moves still to do, or undefined, reported, when the check fails. */
+function checkMoves(home: string, what = 'moves'): PendingMove[] | undefined {
+  const found = pendingMoves(home);
+  if (!('error' in found)) return found.moves;
+  console.log(`moves    could not check for ${what}: ${found.error}`);
+  return undefined;
+}
+
+export const moveText = ({ from, to, auto, reason }: PendingMove): string => (auto ? `${from} → ${to}` : `${from} stays: ${reason ?? 'the move leaves it'}`);
+
+const printMoves = (moves: PendingMove[]): void => {
+  for (const move of moves) console.log(`moves    ${move.kind.padEnd(8)} ${moveText(move)}`);
+};
+
+const canMove = (moves: PendingMove[], kind?: MoveKind): boolean => moves.some((move) => move.auto && (kind === undefined || move.kind === kind));
+
+function runMove(home: string, kind: MoveKind): SpawnSyncReturns<string> {
+  const moved = runLedger(home, ['store', 'migrate', `--${kind}`]);
+  for (const line of printedLines(moved)) console.log(`ledgers  ${line}`);
+  return moved;
+}
+
 /**
- * Moves each .claude/ledger.md the registry names into the ledger store, as the ledger now installed reads only the
- * store. A ledger it leaves, or a run that fails, is reported and does not fail the deploy: the rest is installed.
+ * Runs each kind of move, in order, when a check made just before it lists a task it can take: a list shown earlier may
+ * be out of date, and a move may make a task of a later kind movable. A move exits 1 for any task it leaves, also one the
+ * check named already, so the run fails only when a move could not run or exited above 1, or a task a last check names
+ * can still move. Prints each task that stays, with why, and gives 1 for a failed run.
  */
-function moveActiveLedgers(home: string): void {
+export function runMoves(home: string): number {
+  let broken = false;
+  for (const kind of MOVE_KINDS) {
+    const moves = checkMoves(home);
+    if (moves === undefined) return 1;
+    if (!canMove(moves, kind)) continue;
+    const moved = runMove(home, kind);
+    const rerun = `ledger store migrate --${kind}`;
+    if (moved.error) console.log(`ledgers  could not run ${rerun}: ${moved.error.message}`);
+    else if (moved.status === null || moved.status > 1) console.log(`ledgers  ${rerun} exited ${moved.status ?? 'on a signal'}`);
+    broken ||= moved.error !== undefined || moved.status === null || moved.status > 1;
+  }
+  const moves = checkMoves(home);
+  if (moves === undefined) return 1;
+  printMoves(moves.filter(({ auto }) => !auto));
+  if (canMove(moves)) {
+    console.log('moves    still to do after the run:');
+    printMoves(moves.filter(({ auto }) => auto));
+  }
+  return broken || canMove(moves) ? 1 : 0;
+}
+
+function migrate(home: string, dry: boolean): number {
+  const moves = checkMoves(home);
+  if (moves === undefined) return 1;
+  if (moves.length === 0) {
+    console.log('Nothing to move.');
+    return 0;
+  }
+  if (!dry && canMove(moves)) return runMoves(home);
+  printMoves(moves);
+  if (!dry) console.log('Nothing deploy can move: each task above stays for the reason it names.');
+  return 0;
+}
+
+/**
+ * After a deploy: moves each .claude/ledger.md into the ledger store, as the ledger now installed reads only the store,
+ * then, unless `named` is false, names the other moves still to do. A ledger it leaves, a run that fails, or a check that
+ * fails is reported and does not fail the deploy: the rest is installed.
+ */
+function moveAfterDeploy(home: string, named: boolean): void {
   const rerun = 'ledger store migrate --active';
-  // From HOME, not this repo: the repo's own worktrees are found only through the registry, as every other repo's are.
-  const moved = spawnSync(path.join(REPO, 'bin/ledger'), ['store', 'migrate', '--active'], { cwd: home, encoding: 'utf8' });
-  const lines = `${moved.stdout ?? ''}${moved.stderr ?? ''}`.split('\n').filter((line) => line.trim() !== '');
-  for (const line of lines) console.log(`ledgers  ${line}`);
+  const moved = runMove(home, 'active');
   if (moved.error) console.log(`ledgers  could not run ${rerun}: ${moved.error.message}. Run it by hand.`);
   else if (moved.status !== 0) console.log(`ledgers  ${rerun} exited ${moved.status ?? 'on a signal'}; the deploy is done. Fix what it names above, then run ${rerun} again.`);
+  if (!named) return;
+  const other = checkMoves(home, 'other moves')?.filter(({ auto }) => auto) ?? [];
+  if (other.length === 0) return;
+  printMoves(other);
+  console.log(`moves    ${MIGRATE_HINT}`);
+}
+
+function listMovesStillToDo(home: string): void {
+  const moves = checkMoves(home) ?? [];
+  if (moves.length === 0) return;
+  console.log('moves    still to do:');
+  printMoves(moves);
 }
 
 const isFile = (filename: string): boolean => existsSync(filename) && statSync(filename).isFile();
@@ -249,6 +391,7 @@ function readReply(): string {
 
 export function deploy(opts: DeployOptions): number {
   const home = homedir();
+  if (opts.migrate) return migrate(home, Boolean(opts.dry));
   const claude = path.join(home, '.claude');
   const rules = path.join(claude, 'rules');
   const hooks = path.join(claude, 'hooks');
@@ -448,7 +591,8 @@ export function deploy(opts: DeployOptions): number {
   const status = policy.status ?? 1;
   if (status !== 0) return status;
   deployMods(opts);
-  if (!opts.dry) moveActiveLedgers(home);
+  if (opts.dry) listMovesStillToDo(home);
+  else moveAfterDeploy(home, !opts.asksAboutMoves);
   if (opts.dry) console.log('\nDRY RUN -- nothing was written.');
   else if (existsSync(backup) && statSync(backup).isDirectory()) console.log(`backup   ${short(backup)}`);
   return 0;
@@ -474,8 +618,17 @@ Deploy links the ledger command into ~/.local/bin.
   bin/deploy --models a,b     keep only these models in the routing rules
   bin/deploy --force          replace a file of your own without asking
   bin/deploy --revert         undo the last deploy
+  bin/deploy --migrate        move stored task data to its newest format; deploy no files
+  bin/deploy --migrate --dry-run
+                              list what --migrate would move, and move nothing
 
 Run --dry-run first against a config you care about.
+
+After the files, deploy moves each .claude/ledger.md into the ledger store, then
+names any other stored task data still in an older format. --migrate moves it,
+and does not offer to pull new commits first. Each move is a ledger store
+migrate command, which checks again as it runs. A task a move cannot take
+safely is left as it is and named with the reason, after the wizard's Deploy too.
 
 The contract ships as rule files in ~/.claude/rules/, which Claude Code loads
 for every project. Your own ~/.claude/CLAUDE.md is never touched.

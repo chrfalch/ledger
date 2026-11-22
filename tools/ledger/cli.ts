@@ -19,6 +19,7 @@ import { migrateStorage } from './migrate.js';
 import { migrateActive } from './migrate-active.js';
 import { migrateRecords } from './migrate-records.js';
 import { migrateRepoIds } from './migrate-repo-ids.js';
+import { pendingMoves, pendingText } from './pending.js';
 import { repairStore, SEARCH_DEPTH, type RepairContext } from './repair.js';
 import {
   addConstraint,
@@ -623,7 +624,7 @@ export async function main(argv: string[]): Promise<number> {
   storeGroup
     .command('migrate')
     .description(
-      'Move the backlog ledgers, the archive with its evidence, and the registry from one storage to the storage --to names. It copies everything, reads every copy back, and then sets "storage" in ~/.claude/ledger-settings.json. Exits 1, with nothing changed, when the target already has a name to copy. A move into or out of git storage commits and pushes; a failed push is reported, and ledger store sync pushes later. With --repo-ids instead, it files the ledgers kept under the folder name of a repo under its address, once. With --records instead, it rewrites each backlog and archive ledger still kept as Markdown as a task record, once; a line that fits no field of the record goes to its general notes. With --active instead, it moves the .claude/ledger.md of each linked worktree into an active record for that worktree, once, and deletes the file; .claude/evidence/ stays. Exits 1, with that ledger left as it is, when its slug or worktree is taken.',
+      'Move the backlog ledgers, the archive with its evidence, and the registry from one storage to the storage --to names. It copies everything, reads every copy back, and then sets "storage" in ~/.claude/ledger-settings.json. Exits 1, with nothing changed, when the target already has a name to copy. A move into or out of git storage commits and pushes; a failed push is reported, and ledger store sync pushes later. With --repo-ids instead, it files the ledgers kept under the folder name of a repo under its address, once. With --records instead, it rewrites each backlog and archive ledger still kept as Markdown as a task record, once; a line that fits no field of the record goes to its general notes. With --active instead, it moves the .claude/ledger.md of each linked worktree into an active record for that worktree, once, and deletes the file; .claude/evidence/ stays. Exits 1, with that ledger left as it is, when its slug or worktree is taken. With --pending instead, it lists what --repo-ids, --active and --records would move, in the order they run, and changes nothing.',
     )
     .addOption(new Option('--to <storage>', 'the storage to move the ledgers to').choices(STORAGES))
     .addOption(new Option('--from <storage>', 'the storage to move the ledgers from; by default the one "storage" names, and when that is --to, the other of file and sqlite').choices(STORAGES))
@@ -634,6 +635,10 @@ export async function main(argv: string[]): Promise<number> {
     .addOption(new Option('--active', 'move the .claude/ledger.md of each linked worktree into an active record').conflicts(['to', 'from', 'repoIds', 'records']))
     .addOption(new Option('--remove-source', 'remove what was copied from the other storage, after the check').conflicts(['repoIds', 'records', 'active']))
     .option('--dry-run', 'print what would be copied, moved, switched and removed, and change nothing')
+    .addOption(
+      new Option('--pending', 'list each task --repo-ids, --active and --records would move, or would leave and why').conflicts(['to', 'from', 'repoIds', 'records', 'active', 'removeSource', 'dryRun']),
+    )
+    .option('--json', 'with --pending, print one JSON object: {"moves":[{"kind","from","to","auto","reason"},...]}')
     .addHelpText(
       'after',
       [
@@ -647,6 +652,7 @@ export async function main(argv: string[]): Promise<number> {
         '  ledger store migrate --repo-ids --dry-run       show which ledgers would move to their repo address',
         '  ledger store migrate --records --dry-run        show which ledgers would become task records, and their lines left to notes',
         '  ledger store migrate --active --dry-run         show which .claude/ledger.md files would move into active records',
+        '  ledger store migrate --pending                  show what each of the three moves above would do',
       ].join('\n'),
     )
     .action(
@@ -658,6 +664,7 @@ export async function main(argv: string[]): Promise<number> {
         active = false,
         removeSource = false,
         dryRun = false,
+        pending = false,
       }: {
         to?: Storage;
         from?: Storage;
@@ -666,14 +673,22 @@ export async function main(argv: string[]): Promise<number> {
         active?: boolean;
         removeSource?: boolean;
         dryRun?: boolean;
+        pending?: boolean;
       }) => {
-        if (repoIds || records || active) {
+        if (json && !pending) fail('ledger store migrate takes --json only with --pending.');
+        if (pending || repoIds || records || active) {
           // A dry run reads the store as it is: on SQLite it makes no database and adds no table; on git it repairs no hook
           // and commits and pushes nothing.
+          const readOnly = dryRun || pending;
           const storage = readStorage(paths.home);
-          const dryStore = dryRun && (storage !== 'sqlite' || exists(sqliteFile(paths.home))) ? openStore(paths, storage, { readOnly: true }) : undefined;
-          const store = dryRun ? dryStore : context.store;
+          const dryStore = readOnly && (storage !== 'sqlite' || exists(sqliteFile(paths.home))) ? openStore(paths, storage, { readOnly: true }) : undefined;
+          const store = readOnly ? dryStore : context.store;
           try {
+            if (pending) {
+              const moves = pendingMoves(store, { cwd, home: paths.home });
+              print(json ? JSON.stringify({ moves }, null, 2) : pendingText(moves));
+              return;
+            }
             const conflicts = active ? migrateActive(store, { dryRun, cwd, home: paths.home }, print) : (records ? migrateRecords : migrateRepoIds)(store, { dryRun }, print);
             if (conflicts > 0) exitCode = 1;
           } finally {

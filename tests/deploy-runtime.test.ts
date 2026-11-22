@@ -299,3 +299,13 @@ test('bin/deploy aborts without deploying when fast-forward pull fails', (t) => 
   assert.ok(result.stderr.includes('deploy: git pull --ff-only failed; nothing deployed\n'), result.stderr);
   assert.ok(!result.stdout.includes(deployed), result.stdout);
 });
+
+for (const args of [['--migrate'], ['--migrate', '--dry-run']]) {
+  test(`bin/deploy ${args.join(' ')} neither checks upstream nor asks to pull`, (t) => {
+    const { repo, git, initialHead, deploy, deployed } = pullCheckRepo(t);
+    const result = deploy('y\n', args);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, `${deployed}${args.join('\n')}\n`);
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), initialHead);
+  });
+}

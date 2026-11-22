@@ -1,4 +1,4 @@
-import { cpSync, lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, utimesSync } from 'node:fs';
+import { cpSync, lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, utimesSync } from 'node:fs';
 import path from 'node:path';
 import { fail } from './failure.js';
 import { createFile, folderEntries, holdsAnything, isEntryName, isFolder, isReadableFile, isTaken, moveAside, putBack, readText, readTimedText, sameTree, treeEntries, writeAtomic, type TimedText } from './files.js';
@@ -192,8 +192,8 @@ function collection(root: string, legacyMarkdown = true): FileCollection {
  */
 export type FileRoots = { backlog: string; active: string; archive: string; evidence: string; registry: string; aliases: string };
 
-/** A move between repo folders is a rename on one disk; `rename` is for tests, to act out a folder on another disk. */
-export type FileStoreOptions = { rename?: (from: string, to: string) => void };
+/** A move between repo folders is a rename on one disk; `rename` and `device` are for tests, to act out a folder on another disk. */
+export type FileStoreOptions = { rename?: (from: string, to: string) => void; device?: (file: string) => number };
 
 /**
  * The ledger store as files under ~/.claude, in the layout the ledger plugin and the old scripts read: evidence sits next
@@ -210,9 +210,16 @@ export function fileStore({ home }: LedgerPaths, options: FileStoreOptions = {})
  * The ledger store as files under `roots`. A backlog write over a ledger that is a symbolic link replaces the link with
  * a file; the file it pointed to keeps its old text.
  */
-export function fileStoreAt(roots: FileRoots, { rename = renameSync }: FileStoreOptions = {}): LedgerStore {
+export function fileStoreAt(roots: FileRoots, { rename = renameSync, device = (file) => statSync(file).dev }: FileStoreOptions = {}): LedgerStore {
   const archive = collection(roots.archive);
   const evidenceRoot = collection(roots.evidence);
+  /** The disk of `folder`, else of the nearest folder above it that exists, where a move makes the missing ones. */
+  const diskOf = (folder: string): number => (isTaken(folder) || path.dirname(folder) === folder ? device(folder) : diskOf(path.dirname(folder)));
+  const acrossDisks = (files: string[], folder: string): boolean => files.some((file) => isTaken(file) && device(file) !== diskOf(folder));
+  const filesOf = (ledgers: FileCollection, repo: string, name: string, legacyMarkdown = true): string[] => {
+    const { record, markdown } = ledgers.files(repo, name);
+    return legacyMarkdown ? [record, markdown] : [record];
+  };
   const { registry, aliases } = roots;
   const damaged = `${aliases} is not a JSON object of repo aliases`;
   /** The entries of the alias map, none without one; undefined for a map that cannot be read. */
@@ -345,6 +352,7 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync }: FileStore
           withExisting(repo, slug, () => !isTaken(ledgers.location(to, slug)) && into(ledgers.repoLocation(to), () => (moveFiles(ledgers, repo, slug, to, legacyMarkdown), true))),
         ),
       canMove: (repo, slug, to) => ledgers.has(repo, slug) && !isTaken(ledgers.location(to, slug)),
+      acrossDisks: (repo, slug, to) => acrossDisks(filesOf(ledgers, repo, slug, legacyMarkdown), ledgers.repoLocation(to)),
     };
   }
   const active = writable(roots.active, false);
@@ -442,6 +450,7 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync }: FileStore
         return leaving(archive.repoLocation(repo), moved);
       },
       canMove: archiveCanMove,
+      acrossDisks: (repo, name, to) => acrossDisks(filesOf(archive, repo, name), archive.repoLocation(to)) || acrossDisks([evidenceOf(repo, name)], evidenceRoot.repoLocation(to)),
       orphanEvidence: () =>
         evidenceRoot.repos().flatMap((repo) =>
           folderEntries(evidenceRoot.repoLocation(repo))

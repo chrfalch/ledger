@@ -651,6 +651,29 @@ Decided 2026-11-19:
 - **D47** The plan stage reads the design refs; a lasting design decision goes
   into an LLP in the same PR; the reviewer checks it (step 3). Replaces the
   LLP line in the operating-model rule.
+- **D48** Deploy runs the one-time moves of stored task data, so the operator
+  does not have to remember them. The `bin/deploy` wizard has a Migrate entry
+  beside Deploy and Revert. Every deploy runs the `--active` move without
+  asking, because the installed ledger reads active ledgers only from the
+  store. After that the wizard asks whether to run the other pending moves,
+  and asks nothing when none are left; it shows the tasks that need a person,
+  with the reason, either way. A plain `bin/deploy` names the other moves.
+  `bin/deploy --migrate` runs them without asking and deploys no files; with
+  `--dry-run` it only lists them. It skips the check for new upstream commits,
+  so it never asks to pull. The list comes from
+  `ledger store migrate --pending`: the existing `--repo-ids`, `--active` and
+  `--records` moves report each item through a callback during a dry run.
+  Reason: one implementation, so the list follows the moves' own rules. The
+  list is a preview: each move checks again when it runs, and can leave a task
+  the list showed as movable, so deploy checks again before each kind it
+  runs. Deploy runs `bin/ledger` as a separate process, because deploy supports
+  Node 20.12 and the SQLite store needs Node 22.13. An item a move would leave,
+  such as one whose name is taken, is never run automatically; it waits for a
+  person, and is not a failure: `--migrate` exits 1 only when a check fails, a
+  move cannot start or breaks, or a move it could have made is still left.
+  A store switch from the wizard previews the `--to` dry run and keeps the
+  source; a preview that opens git storage may put back the clone's pre-push
+  hook (LLP 0000).
 
 ## 15. From today to this spec
 
@@ -673,6 +696,7 @@ Decided 2026-11-19:
 | LLP 0000 upkeep (D12) | the rule in `CONTRIBUTING.md`; the reviewer check in `agents/reviewer.md`; the `npm run llp` warning (`llp0000Warnings` in `tools/llp-refs.ts`) | none |
 | Design refs (D46) | `designRefs`, a field of the task record (`tools/ledger/record.ts`), set by `ledger task new --design-refs` with the LLPs that `/ledger:task` and `/ledger:go` pick | none |
 | LLP decisions (D47) | the Plan gate in `rules/10-operating-model.md` reads the design refs before the plan and puts lasting decisions in an LLP in the same PR; `agents/reviewer.md` checks that they reached one | none |
+| Deploy migration (D48) | `ledger store migrate --pending` lists the one-time moves from their own dry runs (`tools/ledger/pending.ts`); `bin/deploy` offers them after Deploy, has a Migrate menu entry, and runs them with `--migrate` (`tools/deploy.ts`, `tools/wizard.ts`) | none |
 | Task kinds (D14) | none; every task is treated as code | `--kind`; stages per kind |
 | Claims (D5, D17) | `ledger task claim` with expiry; `ledger go` claims on start | none |
 | Clear points (D13) | rule text; operator types `/ledger:next` | offer after review and on size; agent starts `/ledger:next` after the widget choice |

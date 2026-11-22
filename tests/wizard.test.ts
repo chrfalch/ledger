@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { ALL_AGENTS, CODEX_AGENTS, MODELS, parseDeployArguments, shouldRunWizard } from '../tools/deploy.js';
+import { ALL_AGENTS, CODEX_AGENTS, DeployError, MODELS, parseDeployArguments, shouldRunWizard } from '../tools/deploy.js';
 import { answersToArgs, detectedComponents, detectEnvironment, type Components } from '../tools/wizard.js';
 
 const allModels = MODELS.split(',');
@@ -153,4 +153,39 @@ test('detected components pass the other findings through', () => {
     detectedComponents({ codex: true, argent: false, stacks: true, claude: true, hooksPath: '/elsewhere/hooks' }),
     { codex: true, argent: false, stacks: true, githooks: false, mods: true },
   );
+});
+
+test('--migrate parses alone and with --dry-run', () => {
+  assert.deepEqual(parseDeployArguments(['--migrate']).options, { migrate: true });
+  assert.deepEqual(parseDeployArguments(['--migrate', '--dry-run']).options, { migrate: true, dry: true });
+  assert.deepEqual(parseDeployArguments(['--dry-run', '--migrate']).options, { migrate: true, dry: true });
+});
+
+test('--migrate refuses every flag that shapes a deploy of files, and names it', () => {
+  for (const flag of [['--revert'], ['--force'], ['--no-argent'], ['--no-stacks'], ['--no-githooks'], ['--no-codex'], ['--no-mods'], ['--codex'], ['--agents', 'runner'], ['--agents=runner'], ['--models', 'opus-5.5']]) {
+    for (const args of [['--migrate', ...flag], [...flag, '--migrate']]) {
+      assert.throws(
+        () => parseDeployArguments(args),
+        (error: unknown) => error instanceof DeployError && error.message.includes('--migrate') && error.message.includes(flag[0].split('=')[0]),
+        args.join(' '),
+      );
+    }
+  }
+});
+
+test('migrate maps to --migrate, plus --dry-run for a preview', () => {
+  assert.deepEqual(answersToArgs({ action: 'migrate' }), ['--migrate']);
+  assert.deepEqual(answersToArgs({ action: 'migrate', dryRun: true }), ['--migrate', '--dry-run']);
+});
+
+test('--agents and --models refuse a flag in place of their value', () => {
+  for (const flag of ['--agents', '--models']) {
+    for (const args of [[flag, '--migrate'], [flag, '--dry-run'], [flag, '-h'], [flag]]) {
+      assert.throws(
+        () => parseDeployArguments(args),
+        (error: unknown) => error instanceof DeployError && error.message === `${flag} needs a comma-separated list`,
+        args.join(' '),
+      );
+    }
+  }
 });

@@ -25,7 +25,8 @@ function checkUpstream() {
   const args = process.argv.slice(2);
   // Not process.stdin.isTTY: creating process.stdin makes fd 0 non-blocking, and the
   // readSync below then fails with EAGAIN before the answer arrives.
-  if ((!isatty(0) && process.env.DEPLOY_PULL_CHECK !== '1') || args.includes('-h') || args.includes('--help')) return;
+  // --migrate deploys no files and only moves stored task data, so it neither pulls nor asks to.
+  if ((!isatty(0) && process.env.DEPLOY_PULL_CHECK !== '1') || args.includes('-h') || args.includes('--help') || args.includes('--migrate')) return;
   const upstreamResult = spawnSync('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], { encoding: 'utf8' });
   if (upstreamResult.status !== 0) return;
   const upstream = upstreamResult.stdout.trim();

@@ -7,6 +7,7 @@ import { checkoutRoot, inMainCheckout, mainCheckout, worktrees } from './git.js'
 import { withLock } from './lock.js';
 import { notedLines } from './migrate-records.js';
 import { realPath, samePath } from './paths.js';
+import type { OnMove } from './pending.js';
 import { recordToWrite, renderRecord } from './record.js';
 import { parseRegistry } from './registry.js';
 import { repoKey, repoLabel } from './repo-key.js';
@@ -69,7 +70,7 @@ function takenReason(store: LedgerStore, repo: string, slug: string, folder: str
 }
 
 /** What became of one ledger: the task it moved to, with its lines to general notes, or why it stays. */
-type Outcome = { moved: string } | { left: string };
+type Outcome = { task: string; notes: string } | { left: string };
 
 type Run = { dryRun: boolean; home: string; reserved: Set<string> };
 
@@ -87,8 +88,8 @@ function moveLedger(store: LedgerStore | undefined, { file, folder, main }: Lega
   const taken = writtenBefore ? undefined : ((store && takenReason(store, repo, slug, folder)) ?? (reserved.has(name) ? `another ledger this run moves takes the slug ${slug} first.` : undefined));
   if (taken !== undefined) return { left: `${taken} Keep one of the two: merge them by hand and remove the other, then run this again.` };
   reserved.add(name);
-  const moved = `${repoLabel(repo)} ${slug}: ${plural(notedLines(found.text), 'line')} to general notes`;
-  if (dryRun || store === undefined) return { moved };
+  const moved = { task: `${repoLabel(repo)} ${slug}`, notes: `${plural(notedLines(found.text), 'line')} to general notes` };
+  if (dryRun || store === undefined) return moved;
   const location = store.active.location(repo, slug);
   if (!writtenBefore) {
     if (!store.active.create(repo, slug, text)) return { left: `another command made the active task ${slug} while this one ran.` };
@@ -116,7 +117,7 @@ function moveLedger(store: LedgerStore | undefined, { file, folder, main }: Lega
   if (!unchanged) {
     return { left: `it changed after its active record ${location} was written, so it was kept. Merge the two by hand and remove the other, then run this again.` };
   }
-  return { moved };
+  return moved;
 }
 
 /**
@@ -124,11 +125,16 @@ function moveLedger(store: LedgerStore | undefined, { file, folder, main }: Lega
  * `migrateRecords` converts a Markdown ledger, then deletes the file once the store has committed the record and the
  * file is still what was moved; .claude/evidence/ stays. A second run finds none left, and one after a run that stopped
  * between the record and the delete finishes the move. A ledger whose slug or worktree is taken stays as it is, for a
- * person to merge. `store` is undefined for a database that is not there. Prints one line per ledger to `line` and
- * returns how many it left, which a dry run counts the same. A ledger whose record would not read back the same stops it
+ * person to merge. `store` is undefined for a database that is not there. Prints one line per ledger to `line`, gives
+ * each to `onMove` as it prints it, and returns how many it left, which a dry run counts the same. A ledger whose record would not read back the same stops it
  * with a Failure, a dry run too.
  */
-export function migrateActive(store: LedgerStore | undefined, { dryRun, cwd, home }: { dryRun: boolean; cwd: string; home: string }, line: (text: string) => void): number {
+export function migrateActive(
+  store: LedgerStore | undefined,
+  { dryRun, cwd, home }: { dryRun: boolean; cwd: string; home: string },
+  line: (text: string) => void,
+  onMove?: OnMove,
+): number {
   line(`Move the .claude/ledger.md of each linked worktree into an active record${dryRun ? ' · dry run, nothing changed' : ''}`);
   let moved = 0;
   let left = 0;
@@ -137,9 +143,11 @@ export function migrateActive(store: LedgerStore | undefined, { dryRun, cwd, hom
     const outcome = moveLedger(store, ledger, run);
     if ('left' in outcome) {
       line(`left ${ledger.file}: ${outcome.left}`);
+      onMove?.({ kind: 'active', from: ledger.file, to: 'active record', auto: false, reason: outcome.left });
       left++;
     } else {
-      line(`${dryRun ? 'would move' : 'moved'} ${ledger.file} to active ${outcome.moved}`);
+      line(`${dryRun ? 'would move' : 'moved'} ${ledger.file} to active ${outcome.task}: ${outcome.notes}`);
+      onMove?.({ kind: 'active', from: ledger.file, to: `active ${outcome.task}`, auto: true });
       moved++;
     }
   }
