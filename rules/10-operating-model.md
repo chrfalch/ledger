@@ -20,6 +20,10 @@ assumptions. **Ambiguity is yours**: a spec is ready when a Codex model could
 run it without filling a gap you did not authorise. Ambiguity about *intent* →
 ask; about technique → resolve at raised effort.
 
+Before you write the plan, read the LLPs in the ledger's design refs. With
+`llp/` in the repo, a lasting design decision goes in an LLP document in the
+same PR. It may be an existing LLP or a new one. Review checks that the LLP records it.
+
 **Split work gets a parent task first.** This is a hard rule. When the
 approved plan has two or more parts that ship separately, make the parent task
 and each child task. Then attach each child task to the parent task. Put the
@@ -125,8 +129,7 @@ The **task ledger** records the task. See `ledger --help`.
   2. `ExitWorktree` with `keep`, if a retire removes this session's worktree.
   3. Retire each ticked task, this task first.
   4. Start the next task, if ticked.
-- With `llp/` in the repo, durable design decisions go in an LLP document in
-  the same PR. Never commit a ledger.
+- Never commit a ledger.
 
 ### Archiving a ledger
 Never pass `--force`. Retire a parent

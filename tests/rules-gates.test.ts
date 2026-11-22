@@ -186,12 +186,24 @@ test('rule 10 states each ledger rule in exact words', () => {
     'Keep the ledger under ~4k tokens.',
     'Never pass `--force`.',
     'Never remove or delete a worktree whose ledger is unarchived.',
-    'With `llp/` in the repo, durable design decisions go in an LLP document in the same PR.',
     "A ticked option is the operator's approval to run it.",
   ]) {
     assert.ok(rule.includes(sentence), `rule 10 lacks: ${sentence}`);
   }
   assert.ok(ruleSource('10-operating-model.md').split('\n').includes('## Compact Instructions'));
+});
+
+test('the Plan gate of rule 10 reads the design refs and puts lasting decisions in an LLP the reviewer checks (D47)', () => {
+  const rule = ruleSource('10-operating-model.md');
+  const plan = section(rule, '### Plan gate').replace(/\s+/g, ' ');
+  for (const sentence of [
+    "Before you write the plan, read the LLPs in the ledger's design refs.",
+    'With `llp/` in the repo, a lasting design decision goes in an LLP document in the same PR.',
+    'Review checks that the LLP records it.',
+  ]) {
+    assert.ok(plan.includes(sentence), `the Plan gate lacks: ${sentence}`);
+  }
+  assert.doesNotMatch(section(rule, '### Checkpoint gate'), /LLP/);
 });
 
 test('rule 10 writes every /ledger:go, /ledger:parent, /ledger:task and /ledger:retire with its argument', () => {
