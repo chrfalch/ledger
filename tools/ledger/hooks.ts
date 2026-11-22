@@ -83,14 +83,17 @@ export type SessionLedgers = { tasks: Task[]; own: boolean };
 
 /**
  * The ledgers of a session in `cwd`. In a main checkout: the active tasks of its linked worktrees, wherever they live,
- * never one of its own, as an active task lives only in a linked worktree. In a linked worktree: its own active task.
- * Outside a git repository: none.
+ * never one of its own, as an active task lives only in a linked worktree, and none that is lost. In a linked worktree:
+ * its own active task. Outside a git repository: none.
  */
 export function sessionLedgers(store: LedgerStore, cwd: string): SessionLedgers {
   const root = checkoutRoot(cwd);
   const main = mainCheckout(cwd);
   if (root === undefined || main === undefined) return { tasks: [], own: false };
-  if (inMainCheckout(cwd)) return { tasks: activeTasks(store, repoKey(main)).filter(({ worktree }) => worktree === undefined || !samePath(worktree, main)), own: false };
+  if (inMainCheckout(cwd)) {
+    const tasks = activeTasks(store, repoKey(main)).filter(({ worktree, status }) => status !== 'lost' && (worktree === undefined || !samePath(worktree, main)));
+    return { tasks, own: false };
+  }
   const task = activeTask(store, root);
   // Two machines can see one disk, so a record of another machine can name this folder; it is never the session's own.
   return { tasks: task === undefined ? [] : [task], own: task !== undefined && !task.elsewhere };

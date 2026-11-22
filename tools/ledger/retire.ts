@@ -89,7 +89,7 @@ export type Blocker =
   | { kind: 'missing-child'; name: string }
   | { kind: 'dirty'; count: number }
   | { kind: 'unmerged' }
-  | { kind: 'elsewhere'; worktree?: string }
+  | { kind: 'elsewhere'; worktree?: string; lost?: string }
   | { kind: 'evidence'; name: string; copy: string; evidenceLocation: string; evidence: string }
   | EvidenceProblem;
 
@@ -194,7 +194,10 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
   const active = named('live');
   if (active.length > 0) blockers.push({ kind: 'children', names: active });
   for (const name of named('missing')) blockers.push({ kind: 'missing-child', name });
-  if (task.elsewhere && facts.removedWorktree === undefined) blockers.push({ kind: 'elsewhere', ...(task.worktree === undefined ? {} : { worktree: task.worktree }) });
+  if (task.elsewhere && facts.removedWorktree === undefined) {
+    const { lost } = task.ledger.location;
+    blockers.push({ kind: 'elsewhere', ...(task.worktree === undefined ? {} : { worktree: task.worktree }), ...(lost === undefined ? {} : { lost: lost.date }) });
+  }
   if (worktree !== undefined) {
     if (worktree.state.dirty > 0) blockers.push({ kind: 'dirty', count: worktree.state.dirty });
     if (!isMerged(worktree.state)) blockers.push({ kind: 'unmerged' });
@@ -299,7 +302,8 @@ const NOTHING = 'Nothing was retired.';
 function findTarget(tasks: Task[], cwd: string, main: string, slug: string | undefined): Task {
   if (slug === undefined) {
     const root = checkoutRoot(cwd);
-    const own = root === undefined ? [] : tasks.filter(({ worktree }) => worktree !== undefined && samePath(worktree, root));
+    // A lost task's old path may hold another task's worktree now.
+    const own = root === undefined ? [] : tasks.filter(({ worktree, status }) => status !== 'lost' && worktree !== undefined && samePath(worktree, root));
     if (own.length > 1) fail(`${own.length} active tasks name the worktree ${root}: ${own.map(({ slug }) => slug).join(', ')}. ${NOTHING} Give the slug of the one to retire: ${ledgerCommand} task retire <slug>.`);
     return own[0] ?? fail(`No task ledger in or above ${cwd}. Give a slug: ${ledgerCommand} task retire <slug>.`);
   }
@@ -474,7 +478,9 @@ function reasonOf(blocker: Blocker): string {
     case 'unmerged':
       return 'its branch is not merged';
     case 'elsewhere':
-      return `its worktree${blocker.worktree === undefined ? '' : ` ${blocker.worktree}`} is not on this machine, so the task may be live on another machine`;
+      return blocker.lost === undefined
+        ? `its worktree${blocker.worktree === undefined ? '' : ` ${blocker.worktree}`} is not on this machine, so the task may be live on another machine`
+        : `it is marked lost since ${blocker.lost}, as its worktree is gone`;
     case 'evidence':
       return `${blocker.copy} is archived already, but its evidence differs from ${blocker.evidence}`;
     case 'evidence-link':

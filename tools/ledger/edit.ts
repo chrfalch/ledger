@@ -1,4 +1,4 @@
-import { claimText, findSection, isPlaceholder, parseLedger, plainLine as plain, serializeLedger, type Child, type Claim, type Ledger, type Section } from './format.js';
+import { claimText, findSection, isPlaceholder, LOST_BULLET, lostMark, lostText, parseLedger, plainLine as plain, serializeLedger, type Child, type Claim, type Ledger, type Lost, type Section } from './format.js';
 
 /**
  * Line edits of a ledger. Each one returns the new text, changes only the lines it names, and gives every line it adds
@@ -140,6 +140,25 @@ export function setLocationBullet(text: string, name: string, value: string | un
   const lines = [...ledger.lines];
   lines[named[0]] = replaced(lines[named[0]], `- ${name}: ${value}`);
   return lines.join('\n');
+}
+
+/**
+ * `text` with its lost mark set to `lost`, for the worktree it records, or dropped for undefined: only the `- lost:`
+ * line lostMark reads is the mark, so every other one, a person's note, stays as it is. Undefined without ## Location.
+ */
+export function setLostMark(text: string, lost: Lost | undefined): string | undefined {
+  const ledger = parseLedger(text);
+  const location = findSection(ledger.sections, 'Location');
+  if (location === undefined) return undefined;
+  const { worktree } = ledger.location;
+  const isMark = (line: string, index: number): boolean => index > location.start && index < location.end && lostMark(plain(line), worktree) !== undefined;
+  const [first, ...more] = ledger.lines.flatMap((line, index) => (isMark(line, index) ? [index] : []));
+  if (lost === undefined) return first === undefined ? text : without(ledger, (index) => index === first || more.includes(index));
+  const bullet = `${LOST_BULLET}${lostText(lost, worktree)}`;
+  if (first === undefined) return insert(ledger, afterLastText(ledger, location), [bullet]);
+  const lines = [...ledger.lines];
+  lines[first] = replaced(lines[first], bullet);
+  return lines.filter((_, index) => !more.includes(index)).join('\n');
 }
 
 /** `text` with the lines of `children` in the order given, in the places those lines take now; every other line stays. */

@@ -158,6 +158,12 @@ export function removeLinkedWorktree(main: string, folder: string, force: boolea
   return result.ok ? undefined : result.stderr || 'git worktree remove failed';
 }
 
+/** undefined when git repaired its link to the worktree `folder`, else git's error text. */
+export function repairWorktree(main: string, folder: string): string | undefined {
+  const result = run(main, ['worktree', 'repair', folder]);
+  return result.ok ? undefined : result.stderr || 'git worktree repair failed';
+}
+
 /** Drops what git keeps of each worktree whose folder is gone; undefined when it did, else git's error text. */
 export function pruneWorktrees(main: string): string | undefined {
   const result = run(main, ['worktree', 'prune']);

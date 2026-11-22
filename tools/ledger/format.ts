@@ -43,7 +43,11 @@ export type Location = {
   state?: string;
   order?: number;
   dependencies?: Dependency[];
+  lost?: Lost;
 };
+
+/** An active task whose folder is gone for good, by `ledger store repair --lost`. */
+export type Lost = { date: string };
 
 export type ChildMark = { kind: 'retired' | 'started'; date: string };
 
@@ -104,6 +108,23 @@ export function parseClaim(text: string): Claim | undefined {
 }
 
 export const claimText = ({ session, since, active }: Claim): string => `session ${session} since ${since}, active ${active}`;
+
+/**
+ * The value of a `- lost:` bullet that is exactly what `lostText` writes for the recorded `worktree`, so rendering the
+ * mark gives the same line back. Any other `- lost:` line is a person's note, kept as it is.
+ */
+export function parseLost(text: string, worktree: string | undefined): Lost | undefined {
+  const date = /^\d{4}-\d\d-\d\d/.exec(text)?.[0];
+  return date !== undefined && text === lostText({ date }, worktree) ? { date } : undefined;
+}
+
+export const lostText = ({ date }: Lost, worktree: string | undefined): string => (worktree === undefined ? date : `${date} — folder ${worktree} not found`);
+
+export const LOST_BULLET = '- lost: ';
+
+/** The lost mark a Location line is: only the exact line setLostMark writes, with no other spacing or indent. */
+export const lostMark = (line: string, worktree: string | undefined): Lost | undefined =>
+  line.startsWith(LOST_BULLET) ? parseLost(line.slice(LOST_BULLET.length), worktree) : undefined;
 
 /** The value of an `- order:` bullet: a whole number. */
 export const parseOrder = (text: string): number | undefined => (ORDER.test(text) ? Number(text) : undefined);
@@ -218,6 +239,7 @@ function findSections(plain: string[]): Section[] {
 
 function parseLocation(plain: string[], range: number[]): Location {
   const location: Location = {};
+  const lost: string[] = [];
   for (const index of range) {
     const [, name, raw] = FIELD.exec(plain[index].trim()) ?? [];
     const value = raw?.trim();
@@ -237,8 +259,11 @@ function parseLocation(plain: string[], range: number[]): Location {
     } else if (name === 'depends on' && location.dependencies === undefined) {
       const dependencies = parseDependencies(value);
       if (dependencies !== undefined) location.dependencies = dependencies;
-    }
+    } else if (name === 'lost') lost.push(plain[index]);
   }
+  // Read once the worktree is known, as a lost mark names it.
+  const mark = lost.flatMap((line) => lostMark(line, location.worktree) ?? [])[0];
+  if (mark !== undefined) location.lost = mark;
   return location;
 }
 

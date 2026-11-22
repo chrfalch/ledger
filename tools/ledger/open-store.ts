@@ -1,8 +1,9 @@
 import { fileStore } from './file-store.js';
+import { exists } from './files.js';
 import { gitStore } from './git-store.js';
 import type { LedgerPaths } from './paths.js';
 import type { Storage } from './settings.js';
-import { sqliteStore } from './sqlite-store.js';
+import { sqliteFile, sqliteStore } from './sqlite-store.js';
 import type { LedgerStore } from './store.js';
 
 /**
@@ -20,3 +21,7 @@ export function openStore(paths: LedgerPaths, storage: Storage, { backgroundSync
       return gitStore(paths, { backgroundSync, readOnly });
   }
 }
+
+/** The store of `storage` opened `readOnly`; undefined while it holds nothing yet, as SQLite storage before its database exists. */
+export const openToRead = (paths: LedgerPaths, storage: Storage): LedgerStore | undefined =>
+  storage === 'sqlite' && !exists(sqliteFile(paths.home)) ? undefined : openStore(paths, storage, { readOnly: true });

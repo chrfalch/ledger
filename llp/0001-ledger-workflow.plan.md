@@ -117,9 +117,11 @@ general notes.
 **Decision D9 (2026-11-19):** the store records each task's repo and worktree
 path. The task list is a view of the store; the tool no longer scans folders
 such as `~/repos` and `~/issues` to rebuild it. `ledger store repair` finds tasks
-whose recorded folder is gone or moved, and asks whether to point the task to
-a new folder or mark it lost. Only this command searches the disk, in folders
-the operator names.
+whose recorded folder is gone or moved, and prints the command that fixes each.
+`--to <folder>` points the task to a new folder, and `--lost` marks it lost.
+A lost task keeps its active record, and its old folder is free for another
+task. Only this command searches the disk, with `--search`, in folders the
+operator names.
 
 **Decision D10 (2026-11-19):** the store identifies a repo by its remote
 address, such as `github.com/chrfalch/ledger`, not by its folder name. The
@@ -141,8 +143,9 @@ same disk, and records the folder name as an alias once a task moved there. It
 moves nothing it is not sure of. A task whose main checkout is gone or not
 known for sure, a task whose name the address already has, and a task on
 another disk stay where they are. The command lists each such conflict and
-exits 1, and a person fixes it by hand. Detecting a renamed remote and keeping its old address as an
-alias lands with `ledger store repair` (D9).
+exits 1, and a person fixes it by hand. `ledger store repair` detects a renamed
+remote (D9). `ledger store repair --remote <old-key>` moves its tasks the same
+way and keeps the old address as an alias.
 
 **Decision D1 (2026-11-19):** the store is a technical setting, outside this
 spec. The tool supports Markdown files and SQLite, and GitHub support is in
@@ -155,8 +158,9 @@ progress. Every rule in this spec must work the same with each store.
 | State | Meaning | Next states |
 |---|---|---|
 | backlog | Defined, not started. No worktree. | active, retired |
-| active | Work in progress in a worktree. | parked, blocked, waiting, done |
+| active | Work in progress in a worktree. | parked, lost, blocked, waiting, done |
 | parked | Stopped on purpose, with a date and a reason. | active |
+| lost | Its worktree folder is gone, marked by `ledger store repair` (D9). | active (pointed to a new folder), retired (today `ledger task retire` still needs `--force` for a lost task) |
 | blocked | Cannot continue: waits for an operator answer or another task. Names what it waits for. | active |
 | waiting | PR open; waits for checks, review or merge. | active (fixes needed), done |
 | done | PR merged, or no PR and the goal is met. | retired |
@@ -652,7 +656,7 @@ Decided 2026-11-19:
 
 | Area | Today | Work |
 |---|---|---|
-| States | backlog, active, parked, retired | add blocked, waiting, done; transitions in the tool |
+| States | backlog, active, parked, lost, retired | add blocked, waiting, done; transitions in the tool |
 | Stages | free text in the plan table | `ledger notes stage`, ordered and checked |
 | Child order (D16) | `ledger tree order` and `ledger tree depends` set the order and dependency fields; a dependency may name a task in another repo as `<slug>@<address>`; `ledger tree next` and `ledger go <parent>` pick the first child in order whose dependencies are retired or done (`firstToStart` in `tools/ledger/write.ts`) | none |
 | Ledger writes (D38) | hand edits | write commands + hook that blocks Edit/Write and shell writes to the store |
@@ -661,10 +665,10 @@ Decided 2026-11-19:
 | Finalize (D21) | rule text; retire updates parent | finalize action list; up-the-tree step |
 | PR waiting (D19, D20, D39) | not tracked | `ledger task pr`; waiting state refused without a PR link; GitHub check at session start |
 | Proof (D40–D42) | unit tests; the rule in `rules/10-operating-model.md` that a run of zero tests is not a pass | scripted agent runs: full lifecycle, failed review, Close-then-resume; run on demand and before release |
-| State storage (D7) | location only; parked line | tool-written `- status:` line; GitHub check |
+| State storage (D7) | location only; parked line; lost line (`- lost: <date> — folder <path> not found`, or `- lost: <date>` when no worktree is recorded; any other `- lost:` line is a note) | tool-written `- status:` line; GitHub check |
 | Task records (D8, D29) | Markdown files are the source; task list is a cache parsed from them; active ledger only in the worktree | one structured record per task in the store; Markdown rendered by `ledger show`; no worktree copy; one-time conversion |
-| Task list (D9) | a view of the store: `loadTasks` in `tools/ledger/registry.ts` reads every task from it and scans no folders; each active record names its repo and worktree | `ledger store repair` |
-| Repo identity (D10) | remote address, normalized by `remoteKey` in `tools/ledger/repo-key.ts`, else the main checkout's path; `ledger store migrate --repo-ids` converts old tasks once and keeps an alias map | a renamed remote's old address as an alias, with `ledger store repair` (D9) |
+| Task list (D9) | a view of the store: `loadTasks` in `tools/ledger/registry.ts` reads every task from it and scans no folders; each active record names its repo and worktree; `ledger store repair` (`tools/ledger/repair.ts`) points a task whose folder moved to its new folder, or marks it lost | remove the registry cache |
+| Repo identity (D10) | remote address, normalized by `remoteKey` in `tools/ledger/repo-key.ts`, else the main checkout's path; `ledger store migrate --repo-ids` converts old tasks once and keeps an alias map; `ledger store repair --remote` files a renamed remote's tasks under the new key and keeps the old address as an alias; a task stays under the old key when its main checkout is gone or belongs to another repo, when it names no main and no alias exists yet, or when the new key has a live task with its title's slug; it refuses the whole command, moving nothing, when an alias of the old key files a live task whose slug the new key has, or when the new key is an alias of a third key already, as that would chain two aliases; while any readable record stays under the old key, it writes and re-points no alias; on git storage the alias is written only after the commit succeeds, and a failed commit exits 1 | none |
 | Hook failures (D11) | allowed, error not visible | failure log at session start |
 | LLP 0000 upkeep (D12) | the rule in `CONTRIBUTING.md`; the reviewer check in `agents/reviewer.md`; the `npm run llp` warning (`llp0000Warnings` in `tools/llp-refs.ts`) | none |
 | Design refs (D46) | `designRefs`, a field of the task record (`tools/ledger/record.ts`), set by `ledger task new --design-refs` with the LLPs that `/ledger:task` and `/ledger:go` pick | none |

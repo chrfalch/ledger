@@ -10,8 +10,8 @@ import { joined, plural } from './views.js';
 
 // @ref LLP 0001#4-storage — D10: the one-time conversion from folder-name keys to repo addresses.
 
-const places = ['backlog', 'active', 'archive'] as const;
-type Place = (typeof places)[number];
+export const places = ['backlog', 'active', 'archive'] as const;
+export type Place = (typeof places)[number];
 /** Where a ledger goes, or why it stays: no key for it is sure. */
 type Outcome = { to: string } | { left: string };
 type Moved = { repo: string; location: string };
@@ -20,7 +20,7 @@ type Moved = { repo: string; location: string };
 const isFolderName = (repo: string): boolean => !repo.includes('/');
 
 /** The main checkout a ledger names: its `- main:` line, else the repo of its worktree under .claude/worktrees. */
-function namedMain(text: string): string | undefined {
+export function namedMain(text: string): string | undefined {
   const { main, worktree } = parseLedger(text).location;
   return main ?? (worktree === undefined ? undefined : mainOfTaskWorktree(worktree));
 }
@@ -37,7 +37,7 @@ function activeFolder(entry: RegistryEntry): { folder: string; main: string } {
 /** Where an entry says its ledger is: an archive copy's location, else its path. */
 const entryLocation = (entry: RegistryEntry): string | undefined => (entry.status === 'archived' ? entry.archivePath : entry.path);
 
-const shown = (key: string): string => `${repoLabel(key)} (${key})`;
+export const shown = (key: string): string => `${repoLabel(key)} (${key})`;
 
 /** The name whose ledger of `place` under `repo` is at `location`, if any: a file store adds .json, or .md before task records, to a name; SQLite adds nothing. */
 function nameAt(store: LedgerStore, place: Place, repo: string, location: string): string | undefined {
@@ -46,6 +46,23 @@ function nameAt(store: LedgerStore, place: Place, repo: string, location: string
 }
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+const taken = (key: string, name: string): string => `${shown(key)} already has ${name}`;
+
+/**
+ * Moves the ledger `name` of `place` from the repo key `old` to `to`, with an archive copy's evidence, or with `dryRun`
+ * checks that it would, by the store's own checks. Gives why it stays where it is, or undefined when it moved.
+ */
+export function moveLedger(store: LedgerStore, place: Place, { old, name, to }: { old: string; name: string; to: string }, dryRun: boolean): string | undefined {
+  if (!store[place].canMove(old, name, to)) return taken(to, name);
+  if (dryRun) return undefined;
+  try {
+    return store[place].move(old, name, to) ? undefined : taken(to, name);
+  } catch (error) {
+    const otherDisk = (error as NodeJS.ErrnoException).code === 'EXDEV';
+    return otherDisk ? `on another disk, move by hand to ${store[place].location(to, name)}` : `the move failed: ${messageOf(error)}`;
+  }
+}
 
 /** `message`, with the conversion hint after it when the store needs one: a task may be missing only because of its key. */
 export function withHint(store: LedgerStore, message: string): string {
@@ -231,19 +248,13 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
   /** Moves `name` of `place` from `old` to `to`, or in a dry run checks that it would, by the store's own checks; says why not. */
   const moves = (place: Place, old: string, name: string, to: string, what: string): boolean => {
     const slot = `${place}\0${to}\0${name}`;
-    let done = !reserved.has(slot) && store[place].canMove(old, name, to);
-    if (done && !dryRun) {
-      try {
-        done = store[place].move(old, name, to);
-      } catch (error) {
-        const otherDisk = (error as NodeJS.ErrnoException).code === 'EXDEV';
-        leave(what, otherDisk ? `on another disk, move by hand to ${store[place].location(to, name)}` : `the move failed: ${messageOf(error)}`);
-        return false;
-      }
+    const why = reserved.has(slot) ? taken(to, name) : moveLedger(store, place, { old, name, to }, dryRun);
+    if (why !== undefined) {
+      leave(what, why);
+      return false;
     }
-    if (!done) leave(what, `${shown(to)} already has ${name}`);
-    else reserved.add(slot);
-    return done;
+    reserved.add(slot);
+    return true;
   };
 
   for (const old of olds) {

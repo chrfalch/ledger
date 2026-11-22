@@ -19,6 +19,7 @@ import { migrateStorage } from './migrate.js';
 import { migrateActive } from './migrate-active.js';
 import { migrateRecords } from './migrate-records.js';
 import { migrateRepoIds } from './migrate-repo-ids.js';
+import { repairStore, SEARCH_DEPTH, type RepairContext } from './repair.js';
 import {
   addConstraint,
   addConstraintText,
@@ -51,7 +52,7 @@ import {
   TAGS,
   type Tag,
 } from './notes.js';
-import { openStore } from './open-store.js';
+import { openStore, openToRead } from './open-store.js';
 import { loadTasks } from './registry.js';
 import { retireTask, retireText } from './retire.js';
 import { readStorage, STORAGES, type Storage } from './settings.js';
@@ -116,6 +117,7 @@ function listed(task: Task) {
     next: ledger.next,
     ...planProgress(ledger),
     ...(ledger.parked === undefined ? {} : { parked: { date: ledger.parked.date, reason: ledger.parked.reason } }),
+    ...(ledger.location.lost === undefined ? {} : { lost: ledger.location.lost }),
     ...(task.archived === undefined ? {} : { archived: task.archived }),
   };
 }
@@ -687,6 +689,50 @@ export async function main(argv: string[]): Promise<number> {
         );
       },
     );
+  storeGroup
+    .command('repair')
+    .description(
+      'Find the active tasks whose recorded folder is gone, and the repo keys whose remote was renamed, and print the command that fixes each; it searches the disk only with --search, and only in the folders named. With a task, point it at the folder it moved to, or mark it lost. With --remote, file every task of an old repo key under the key of this repo. Exits 1 when it finds a problem, or leaves one.',
+    )
+    .argument('[slug]', 'the task to repair, or <slug>@<path> for the repo at <path>')
+    .addOption(new Option('--search <folder...>', `look in these folders, ${SEARCH_DEPTH} levels down, for a checkout on the branch of each task whose folder is gone`))
+    .addOption(new Option('--to <folder>', "point <slug> at <folder>, a checkout on its branch, and run git worktree repair there").conflicts('search'))
+    .addOption(new Option('--lost', 'mark <slug> lost: its folder is gone for good').conflicts(['to', 'search']))
+    .addOption(new Option('--remote <old-key>', 'file every task of the repo key <old-key> under the key of this repo, and keep <old-key> as its alias').conflicts(['to', 'lost', 'search']))
+    .option('--dry-run', 'print what --to, --lost or --remote would change, and change nothing')
+    .addHelpText(
+      'after',
+      [
+        '',
+        'Examples:',
+        '  ledger store repair                                   list the problems and the command for each',
+        '  ledger store repair --search ~/repos ~/issues         also look there for each folder that is gone',
+        '  ledger store repair fix-login --to ../wt/fix-login    point fix-login at the folder it moved to',
+        '  ledger store repair fix-login@../lib --lost           mark the task fix-login of the repo at ../lib lost',
+        '  ledger store repair --remote github.com/me/old --dry-run',
+        '                                                        show which tasks of the old key would move to this repo',
+      ].join('\n'),
+    )
+    .action((slug: string | undefined, options: { to?: string; lost?: boolean; remote?: string; search?: string[]; dryRun?: boolean }) => {
+      const repair = { ...options, lost: options.lost ?? false, dryRun: options.dryRun ?? false };
+      // Every check reads a read-only store, so the report, a dry run and a refusal make no SQLite database, repair no
+      // git hook, and commit nothing.
+      let reading: LedgerStore | undefined;
+      const repairContext: RepairContext = {
+        paths,
+        cwd,
+        get store() {
+          reading ??= openToRead(paths, readStorage(paths.home));
+          return reading;
+        },
+        writable: () => context.store,
+      };
+      try {
+        if (repairStore(repairContext, slug, repair, print) > 0) exitCode = 1;
+      } finally {
+        reading?.close?.();
+      }
+    });
   const sync = storeGroup
     .command('sync')
     .description(
