@@ -297,8 +297,9 @@ flags only and never prompts:
   and follows no symbolic link. It is the only command that searches the disk
   for a task's folder.
 - `<slug> --to <folder>` points the task at a new folder and runs
-  `git worktree repair` there. It refuses a parked task, also one marked lost.
-  It refuses a main checkout, a folder on another branch, a folder another
+  `git worktree repair` there. It accepts an active or a lost task, and it
+  removes a lost mark. It refuses a parked task, even one that is also marked
+  lost. It refuses a main checkout, a folder on another branch, a folder another
   record names, and a checkout whose repo key differs from the task's after
   aliases are resolved.
 - `<slug> --lost` marks the task lost. It refuses a parked task, and it
@@ -365,6 +366,13 @@ the other task. After `/ledger:close`, nothing starts. In a session with no
 person at the prompt, such as one an Agent SDK host like T3 Code drives, the
 plugin clears but does not send `go <slug>`: such a host cuts that turn off
 at once. The agent's last line asks the operator to type `go <slug>` instead.
+
+For `/ledger:go`, `startGo` in `register.ts` runs
+`ledger go <slug> --session <id>` before the prompt expands. It arms the clear
+only when that succeeds, or when the slug names a task that does not exist
+yet. A task that started in another repo returns before the clear is armed.
+`go.md` runs `ledger go` itself only for a task that does not exist yet,
+after `ledger task new`.
 
 `/ledger:park <reason>` arms a clear too. At the end of its turn, the plugin
 runs `ledger task park <slug> --reason <reason>` for the session's task, then
@@ -495,16 +503,16 @@ runs through `hooks/logged.sh`, except the status line:
 
 ### Worktree layout
 
-`tools/ledger/paths.ts` sets the layout:
-
-- A task's worktree is `<main>/.claude/worktrees/<folder>`.
-- Its evidence is `<worktree>/.claude/evidence/`.
+- A task's worktree is `<main>/.claude/worktrees/<folder>`. `taskWorktree` in
+  `tools/ledger/paths.ts` builds this path. `mainOfTaskWorktree` there finds
+  the main checkout from it.
+- Its evidence is `<worktree>/.claude/evidence/`, as `tools/ledger/retire.ts`
+  names it.
 - The file store, and the git store in its clone, name each repo folder by its
-  repo key, URI-encoded, such as `github.com%2Fchrfalch%2Fledger`. A folder from
-  before the repo key, named after the main checkout's folder, keeps that name
-  until the conversion moves its ledgers.
-
-`mainOfTaskWorktree` finds the main checkout from a worktree path.
+  repo key, such as `github.com%2Fchrfalch%2Fledger`. `folderOf` in
+  `tools/ledger/file-store.ts` URI-encodes the key. A folder from before the
+  repo key, named after the main checkout's folder, keeps that name until the
+  conversion moves its ledgers.
 
 ### Retire and archive
 
