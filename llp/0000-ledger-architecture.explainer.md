@@ -61,6 +61,11 @@ each:
 
 - `task`: makes, starts, claims, parks, retires and reads tasks.
   - `new`: writes a backlog ledger from `~/.claude/ledger.template.md`.
+    With `--stack`, it makes the worktree and branch at once, on top of the
+    current branch, and the task is active. With `--here`, it adds an active
+    ledger to the linked worktree it runs in (`hereTask` in
+    `tools/ledger/write.ts`). It refuses a main checkout. With no slug given,
+    the slug is the last part of the branch name, else the folder name.
   - `go`: starts a task. It makes the worktree and branch of a backlog task
     and moves its ledger from the backlog to the active ledgers, naming that
     worktree. For a parent task, it starts the first child task, in order,
@@ -72,6 +77,11 @@ each:
   - `retire`: archives the ledger (see [Retire and archive](#retire-and-archive)).
   - `show`, `list`, `archive`: print a task's ledger, list the live tasks, or
     list the archived ledgers.
+    `list` covers the live tasks of every known repo. `show` prints the
+    active ledger, else the backlog ledger, else the newest archive copy, and
+    can also give an archive copy's evidence files. `archive` lists this
+    repo's archive, newest first, and can keep only the ledgers that contain
+    a term.
   - `gate`: prints the question for a gate, such as plan approval, as JSON
     the question widget takes. `tools/ledger/gates.ts` defines each gate.
 - `notes`: writes one item of a task's ledger (see
@@ -80,6 +90,12 @@ each:
   `add`, `remove`, `start`, `order` and `depends` change its children, their
   order and what each waits for. `next` prints the child task that starts
   next.
+  A child task may live in another repo. The commands name it as
+  `<slug>@<path>`, such as `part@../lib`, and `depends` also takes
+  `<slug>@<address>`, such as `api@github.com/acme/api`. When `ledger go`
+  starts a backlog child of a backlog parent, it writes the main checkout of
+  the clone the child started in on the child's line in the parent
+  (`nameChildClone` in `tools/ledger/write.ts`).
 - `store`: `migrate` moves the ledgers between file, SQLite and git storage.
   `sync` pushes and pulls the ledgers of git storage, and `sync init` makes
   its clone.
@@ -350,6 +366,45 @@ person at the prompt, such as one an Agent SDK host like T3 Code drives, the
 plugin clears but does not send `go <slug>`: such a host cuts that turn off
 at once. The agent's last line asks the operator to type `go <slug>` instead.
 
+`/ledger:park <reason>` arms a clear too. At the end of its turn, the plugin
+runs `ledger task park <slug> --reason <reason>` for the session's task, then
+clears, and nothing starts. When the park fails, the plugin says so and does
+not clear. When the first word is the slug of another live task of the repo,
+the plugin parks that task at once and does not clear.
+
+**After a clear.** The plugin looks at the task the session worked on after
+`/ledger:next`, and after a `/ledger:go` that leaves it for another task. It
+runs `ledger worktrees auto-prune` on that task's worktree, which deletes its
+build folders once its plan is finished. For a finished task, it then shows a
+retire hint. The hint uses `ledger task retire --dry-run` to say whether the
+branch is merged, whether a check still blocks the retire, and whether its PR
+is still open. After `/ledger:next`, the plugin also names the parent's next
+child, from `ledger tree next` (`showRetireHint` in `register.ts`).
+
+**A task in another repo.** When `/ledger:go` names a task of another repo,
+`ledger go` starts it in that repo, and the plugin does not clear. Its message
+gives the worktree, and says to send a subagent there by its absolute path, or
+to open a session there and type `go <slug>` (`startedElsewhereMessage` in
+`ledger.ts`).
+
+**Starting a task in the session.** `/ledger:task` with no current ledger, or
+in a main checkout, starts the new task in the same session, with no clear
+(`mods/ledger/commands/task.md`). Without `--stack`, it runs
+`ledger go <slug>`; with `--stack`, the worktree exists already. It then moves
+the session into the new worktree with the `EnterWorktree` tool and reads the
+ledger with `ledger show`, as the session-start hook does not inject it. Then
+it goes on with the operator's request. With a current ledger, the new task
+stays in the backlog: `ledger task new` adds a line under the current task's
+Decisions that names it, and the reply is the command that starts it.
+`tests/ledger-task-command.test.ts` pins both cases.
+
+**Commands answered as text.** The plugin answers `/ledger:all` with
+`ledger list --archived`, `/ledger:archive` with `ledger task archive`, and
+`/ledger:parent`, `/ledger:worktrees` and `/ledger:retire` with their own
+commands. `/ledger:help` answers with its help text. The output is the answer,
+with no model turn. When the agent starts one through the `Skill` tool, it
+gets the same text (`answerOf` in `register.ts`).
+
 **Claims.** A claim marks the one session that works on a task
 (`tools/ledger/claims.ts`, [LLP 0001
 section 5.4](0001-ledger-workflow.plan.md#54-claims)). `ledger go --session`
@@ -365,7 +420,12 @@ no held question.
 
 Only the operator may type `/ledger:close` and `/ledger:park` (`TYPED_ONLY` in
 `register.ts`). The plugin refuses them when the agent starts them through the
-`Skill` tool. The agent may start `/ledger:next` once, right after the operator
+`Skill` tool. `isTypedOnly` in `register.ts` refuses three more commands from
+the agent: `/ledger:retire` with `--force`, `/ledger:worktrees prune` or
+`prune-orphans` without `--dry-run`, and `/ledger:parent` with an action other
+than `next`, such as `add` or `remove`. The refusal names the command for the
+operator to type.
+The agent may start `/ledger:next` once, right after the operator
 picks "Save, clear and continue" (`CLEAR_POINT_OPTION` in `ledger.ts`) in the
 clear-point question. Otherwise the plugin refuses it too.
 
@@ -411,6 +471,27 @@ the first, above the ledgers.
 `settings.policy.json` registers the four events. Each entry runs
 `"$HOME"/.claude/bin/ledger hook <event>`. Deploy merges these keys into
 `~/.claude/settings.json`.
+
+`settings.policy.json` also registers the shell scripts of `hooks/`. Each
+runs through `hooks/logged.sh`, except the status line:
+
+- `statusline.sh` is the status line. It prints the folder, the git branch,
+  the model and the five-hour and seven-day usage percentages. It writes those
+  rate limits to `~/.claude/state/usage-snapshot.json`. It reads no ledger.
+- `usage-pace.sh` runs on each prompt, and only when the Sol or Astra
+  implementer agent is deployed. It reads that snapshot and adds a routing
+  hint to the prompt when Claude usage runs ahead of an even pace. When Codex
+  usage is high too, the hint says to ask the operator instead.
+- `deploy-drift.sh` runs at session start. It warns when a rule, agent or hook
+  of the repo is not linked into `~/.claude`, or links elsewhere, and when a
+  key of `settings.policy.json` differs in `~/.claude/settings.json`. The
+  warning says to run `bin/deploy`. It writes nothing.
+- `denied-read-retry.sh` runs when a permission is denied. It lets the agent
+  retry a denied `Read`, `Grep`, `Glob` or `NotebookRead`. It also lets it
+  retry a Bash command whose every part is a read-only command from a fixed
+  list, with no redirect and no command substitution. Any other denial stands.
+- `derived-data-gate.sh` runs before each Bash call and denies an Xcode build
+  folder other than the one LLP 0001 D44 names.
 
 ### Worktree layout
 
@@ -476,6 +557,87 @@ from that command, not from the rule text. The agent writes any other gate
 itself, by the same rules: one to three actions, the recommended one first, and
 Close last.
 `rules/20-writing.md` says how to ask everything else.
+
+`rules/40-model-routing.md` ranks each model by cost, intelligence and taste.
+It gives each agent of `agents/` an engine, an effort range, what it answers
+and what it never does. `rules/10-operating-model.md` sends every subagent
+result to a fresh `reviewer`. On critical work, `astra-reviewer` reviews after
+it, blind: its Codex prompt holds the spec, the criteria and the diff, but not
+the first verdict (`agents/astra-reviewer.md`).
+
+`sol-implementer`, `astra-implementer`, `astra-reviewer` and `codex-runner`
+are thin Claude agents, on `claude-haiku-5-5` at low effort, that run Codex.
+Each writes a self-contained prompt and starts `codex exec`, or
+`codex review`, in the background. The command writes the output and the exit
+code of Codex to files, then makes a done-file. The agent waits for the
+done-file with `Monitor` and relays the result.
+`rules/60-subagent-mechanics.md` sends every Codex run through such an agent.
+`tests/codex-wrappers.test.ts` pins the wait steps of all four.
+
+`rules/80-ui-automation.md` sends all device UI automation through the argent
+MCP server to `ui-runner`, so no view hierarchy reaches the orchestrator.
+`ui-runner` runs the flow and reports the steps, a verdict (pass, fail,
+blocked or inconclusive), what it saw for each criterion, the failures, and
+the paths of saved screenshots and hierarchies.
+
+`rules/30-stacked-prs.md` applies where the `gh stack` extension is
+installed. Implementers and reviewers never run `gh stack`; the orchestrator
+does. It links each PR to its parent, syncs after a parent branch moves,
+rebases a child onto its parent and merges bottom-up. Each stacked PR is a
+child task with its own ledger, under one parent task.
+
+### Deploy
+
+`bin/deploy` checks for Node 20.12 or later and runs `tools/deploy.ts`. In a
+terminal with no arguments, an interactive wizard (`runWizard` in
+`tools/wizard.ts`) picks the components and flags, previews a dry run, and
+runs deploy.
+
+A deploy does these steps:
+
+1. Links the rules, agents, `hooks/*.sh`, the ledger template and
+   `notes/model-routing-rationale.md` into `~/.claude`. With a filter flag, it
+   copies generated rules instead (see [Rules and agents](#rules-and-agents)).
+   It asks before it replaces a file of the operator's own, and backs that
+   file up in `~/.claude/backups/deploy-<time>/`. With no terminal, it
+   refuses unless `--force`.
+2. Links `bin/ledger` to `~/.local/bin/ledger` and `~/.claude/bin/ledger`. The
+   settings hooks run the second path, so they need no `PATH`.
+3. Sets up the git hook chain (see below).
+4. Removes a rule no longer selected and a hook link no longer in the repo.
+5. Writes every path it placed to `~/.claude/.ledger-manifest`.
+6. Runs `tools/apply-policy.ts`. It merges the keys of `settings.policy.json`
+   into `~/.claude/settings.json` and keeps the operator's other settings,
+   hooks and allowed commands. When `~/.codex/config.toml` exists, it sets the
+   keys of `codex/policy.toml` there in the same way.
+7. Adds this repo as the plugin marketplace `ledger` and installs the plugin
+   at user scope. It reinstalls the plugin when the installed copy differs
+   from `mods/ledger/`, and passes back its saved settings. It installs
+   nothing while the marketplace points at another folder.
+8. Runs `ledger store migrate --active`.
+
+`--dry-run` prints every change and writes nothing. `--revert` removes each
+path in the manifest and restores the files of the newest backup. It leaves
+the plugin and `core.hooksPath` in place, and prints the commands that remove
+them.
+
+**Git hook chain.** Unless `--no-githooks`, deploy links `githooks/_chain`
+into `~/.config/git/hooks/`, once under its own name and once for each git
+hook name. When `core.hooksPath` is not set, it sets it globally to that
+folder. When it names another folder, deploy leaves it and says so. For
+`commit-msg`, `_chain` removes AI attribution trailers: a `Co-Authored-By:`
+line that names Claude or anthropic.com, a line with
+`Generated with [Claude Code]` and a `Claude-Session:` line. Then it runs the
+repo's own hook of the same name, from the git common folder, so the hooks of
+a worktree are the main repository's.
+
+### Checks
+
+- `npm run llp` checks the names and header fields of the LLP documents, and
+  that each `@ref LLP` comment in the source names an LLP and one of its
+  headings (`tools/llp-refs.ts`).
+- `npm test` runs `tests/*.test.ts`. The plugin's own tests, in
+  `mods/ledger/hooks/`, run with `claude plugin test`.
 
 ## Data and storage
 

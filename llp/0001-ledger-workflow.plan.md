@@ -5,7 +5,7 @@
 **Systems:** ledger CLI, ledger plugin, hooks, rules, subagents
 **Author:** Christian Falch / Claude
 **Date:** 2026-11-19
-**Revised:** 2026-11-21
+**Revised:** 2026-11-22
 **Related:** LLP 0000
 
 Some decisions are built. Section 14 lists the decisions; none is open.
@@ -540,6 +540,11 @@ Decided 2026-11-19:
   path as fallback; `ledger store migrate --repo-ids` converts existing tasks
   once and keeps each folder name in an alias map; renamed remotes come with
   `ledger store repair` (section 4).
+  Result (2026-11-22): the normalization is built. `remoteKey` drops the
+  scheme, the user, a `.git` suffix and a trailing slash, lowercases a network
+  address, and keeps a port that is not the scheme's default. A remote that is
+  a local path or a `file://` address gives its absolute path, with its case
+  kept.
 - **D11** (revised) Hooks still let actions through when they fail; a hook
   failure log reports them at session start (section 10).
 - **D12** LLP 0000 stays current: a PR that changes how the system works
@@ -687,13 +692,13 @@ Decided 2026-11-19:
 | Awareness (D26–D28) | current ledgers at session start | ordered report under ~20 lines; outside-task prompt; store-only status line |
 | Finalize (D21) | rule text; retire updates parent | finalize action list; up-the-tree step |
 | PR waiting (D19, D20, D39) | not tracked | `ledger task pr`; waiting state refused without a PR link; GitHub check at session start |
-| Proof (D40–D42) | unit tests; the rule in `rules/10-operating-model.md` that a run of zero tests is not a pass | scripted agent runs: full lifecycle, failed review, Close-then-resume; run on demand and before release |
+| Proof (D40–D42) | unit tests (see [LLP 0000, Checks](0000-ledger-architecture.explainer.md#checks)); the rule in `rules/10-operating-model.md` that a run of zero tests is not a pass | scripted agent runs: full lifecycle, failed review, Close-then-resume; run on demand and before release |
 | State storage (D7) | location only; parked line; lost line (`- lost: <date> — folder <path> not found`, or `- lost: <date>` when no worktree is recorded; any other `- lost:` line is a note) | tool-written `- status:` line; GitHub check |
 | Task records (D8, D29) | Markdown files are the source; task list is a cache parsed from them; active ledger only in the worktree | one structured record per task in the store; Markdown rendered by `ledger show`; no worktree copy; one-time conversion |
 | Task list (D9) | a view of the store: `loadTasks` in `tools/ledger/registry.ts` reads every task from it and scans no folders; each active record names its repo and worktree; `ledger store repair` (`tools/ledger/repair.ts`) points a task whose folder moved to its new folder, or marks it lost | remove the registry cache |
-| Repo identity (D10) | remote address, normalized by `remoteKey` in `tools/ledger/repo-key.ts`, else the main checkout's path; `ledger store migrate --repo-ids` converts old tasks once and keeps an alias map; `ledger store repair --remote` files a renamed remote's tasks under the new key and keeps the old address as an alias; a task stays under the old key when its main checkout is gone or belongs to another repo, when it names no main and no alias exists yet, or when the new key has a live task with its title's slug; it refuses the whole command, moving nothing, when an alias of the old key files a live task whose slug the new key has, or when the new key is an alias of a third key already, as that would chain two aliases; while any readable record stays under the old key, it writes and re-points no alias; on git storage the alias is written only after the commit succeeds, and a failed commit exits 1 | none |
+| Repo identity (D10) | remote address, normalized by `remoteKey` in `tools/ledger/repo-key.ts` as D10 says, else the main checkout's path; a remote that is a local path keeps its case; `ledger store migrate --repo-ids` converts old tasks once and keeps an alias map; `ledger store repair --remote` files a renamed remote's tasks under the new key and keeps the old address as an alias; a task stays under the old key when its main checkout is gone or belongs to another repo, when it names no main and no alias exists yet, or when the new key has a live task with its title's slug; it refuses the whole command, moving nothing, when an alias of the old key files a live task whose slug the new key has, or when the new key is an alias of a third key already, as that would chain two aliases; while any readable record stays under the old key, it writes and re-points no alias; on git storage the alias is written only after the commit succeeds, and a failed commit exits 1 | none |
 | Hook failures (D11) | allowed, error not visible | failure log at session start |
-| LLP 0000 upkeep (D12) | the rule in `CONTRIBUTING.md`; the reviewer check in `agents/reviewer.md`; the `npm run llp` warning (`llp0000Warnings` in `tools/llp-refs.ts`) | none |
+| LLP 0000 upkeep (D12) | the rule in `CONTRIBUTING.md`; the reviewer check in `agents/reviewer.md`; the `npm run llp` warning (`llp0000Warnings` in `tools/llp-refs.ts`); the other `npm run llp` checks, in [LLP 0000, Checks](0000-ledger-architecture.explainer.md#checks) | none |
 | Design refs (D46) | `designRefs`, a field of the task record (`tools/ledger/record.ts`), set by `ledger task new --design-refs` with the LLPs that `/ledger:task` and `/ledger:go` pick | none |
 | LLP decisions (D47) | the Plan gate in `rules/10-operating-model.md` reads the design refs before the plan and puts lasting decisions in an LLP in the same PR; `agents/reviewer.md` checks that they reached one | none |
 | Deploy migration (D48) | `ledger store migrate --pending` lists the one-time moves from their own dry runs (`tools/ledger/pending.ts`); `bin/deploy` offers them after Deploy, has a Migrate menu entry, and runs them with `--migrate` (`tools/deploy.ts`, `tools/wizard.ts`) | none |
