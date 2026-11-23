@@ -5,12 +5,13 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { Failure } from '../tools/ledger/failure.js';
+import { limitLockWaits, withLockIfFree } from '../tools/ledger/lock.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { conversionHint, migrateRepoIds } from '../tools/ledger/migrate-repo-ids.js';
 import { migrateStorage } from '../tools/ledger/migrate.js';
 import { ledgerPaths, type LedgerPaths } from '../tools/ledger/paths.js';
 import type { Move } from '../tools/ledger/pending.js';
-import { storedText } from '../tools/ledger/record.js';
+import { recordJson, recordToWrite, storedText } from '../tools/ledger/record.js';
 import { repoLabel } from '../tools/ledger/repo-key.js';
 import { sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
@@ -118,15 +119,33 @@ test('notes left under a folder name whose ledger an earlier run moved before it
 
 // --- 2. File-store moves rename on one disk, onto nothing ---
 
-test('file store: a backlog move onto a hard link of the ledger is refused, and both stay', (t) => {
+test('file store: a backlog move onto a hard link of the ledger, as a move stopped after its link leaves it, finishes the move', (t) => {
   const { store } = appWorld(t);
   store.backlog.write('app', 'x', 'same\n');
   mkdirSync(store.backlog.repoLocation('github.com/me/app'), { recursive: true });
   linkSync(store.backlog.location('app', 'x'), store.backlog.location('github.com/me/app', 'x'));
-  assert.equal(store.backlog.canMove('app', 'x', 'github.com/me/app'), false);
-  assert.equal(store.backlog.move('app', 'x', 'github.com/me/app'), false);
-  assert.equal(store.backlog.read('app', 'x')?.text, storedText('same\n'));
+  assert.equal(store.backlog.canMove('app', 'x', 'github.com/me/app'), true);
+  assert.equal(store.backlog.move('app', 'x', 'github.com/me/app'), true);
+  assert.equal(store.backlog.has('app', 'x'), false);
   assert.equal(store.backlog.read('github.com/me/app', 'x')?.text, storedText('same\n'));
+});
+
+test('file store: a move between two keys kept in one repo folder, such as a key and its encoding, moves and removes nothing', (t) => {
+  const { store } = appWorld(t);
+  store.backlog.write(OTHER, 'x', 'mine\n');
+  store.active.write(OTHER, 'x', 'mine\n');
+  store.archive.write(OTHER, '2026-01-01-old', 'old\n');
+  const variants = [encodeURIComponent(OTHER), ...(existsSync(store.backlog.repoLocation(OTHER.toUpperCase())) ? [OTHER.toUpperCase()] : [])];
+  for (const variant of variants) {
+    assert.equal(store.sharesFolder?.(variant, OTHER), true, variant);
+    for (const place of ['backlog', 'active', 'archive'] as const) {
+      const name = place === 'archive' ? '2026-01-01-old' : 'x';
+      assert.equal(store[place].canMove(variant, name, OTHER), false, `${place} from ${variant}: a dry run would move it`);
+      assert.equal(store[place].move(variant, name, OTHER), false, `${place} from ${variant}`);
+      assert.equal(store[place].read(OTHER, name)?.text, storedText(place === 'archive' ? 'old\n' : 'mine\n'), `${place} from ${variant}: the ledger is gone`);
+    }
+  }
+  assert.equal(store.sharesFolder?.('app', OTHER), false);
 });
 
 /** An archive copy app/2026-01-01-old with the evidence file red.txt. */
@@ -148,14 +167,15 @@ test('file store: an archive move onto evidence the target has, with the copy st
   assert.deepEqual(store.archive.evidenceFiles(OTHER, '2026-01-01-old'), ['red.txt']);
 });
 
-test('file store: an archive move onto a hard link of the copy is refused, and neither the copy nor its evidence moves', (t) => {
+test('file store: an archive move onto a hard link of the copy, as a move stopped after its link leaves it, finishes the move with the evidence', (t) => {
   const { h, store } = appWorld(t);
   archivedWithEvidence(h, store);
   mkdirSync(store.archive.repoLocation(OTHER), { recursive: true });
   linkSync(store.archive.location('app', '2026-01-01-old'), store.archive.location(OTHER, '2026-01-01-old'));
-  assert.equal(store.archive.move('app', '2026-01-01-old', OTHER), false);
-  assert.equal(store.archive.has('app', '2026-01-01-old'), true);
-  assert.deepEqual(store.archive.evidenceFiles('app', '2026-01-01-old'), ['red.txt']);
+  assert.equal(store.archive.move('app', '2026-01-01-old', OTHER), true);
+  assert.equal(store.archive.has('app', '2026-01-01-old'), false);
+  assert.deepEqual(store.archive.evidenceFiles('app', '2026-01-01-old'), []);
+  assert.deepEqual(store.archive.evidenceFiles(OTHER, '2026-01-01-old'), ['red.txt']);
 });
 
 for (const storage of ['file', 'sqlite'] as const) {
@@ -527,7 +547,7 @@ test('file store: a move to another disk leaves the ledger, its evidence and no 
   const { h, store } = appWorld(t);
   store.backlog.write('app', 'x', 'x\n');
   archivedWithEvidence(h, store);
-  const otherDisk = fileStore(ledgerPaths(h), { rename: failed('EXDEV') });
+  const otherDisk = fileStore(ledgerPaths(h), { link: failed('EXDEV'), rename: failed('EXDEV') });
   assert.throws(() => otherDisk.backlog.move('app', 'x', OTHER), /EXDEV/);
   assert.throws(() => otherDisk.archive.move('app', '2026-01-01-old', OTHER), /EXDEV/);
   assert.equal(store.backlog.read('app', 'x')?.text, storedText('x\n'));
@@ -542,7 +562,7 @@ test('a conversion reports a ledger on another disk as one to move by hand, reco
   const { h, app, store } = appWorld(t);
   store.backlog.write('app', 'x', ledgerText({ slug: 'x', main: app }));
   const lines: string[] = [];
-  const left = migrateRepoIds(fileStore(ledgerPaths(h), { rename: failed('EXDEV') }), { dryRun: false }, (line) => lines.push(line));
+  const left = migrateRepoIds(fileStore(ledgerPaths(h), { link: failed('EXDEV'), rename: failed('EXDEV') }), { dryRun: false }, (line) => lines.push(line));
   assert.equal(left, 1);
   assert.match(lineWith(lines.join('\n'), 'backlog app/x'), /^left .*on another disk, move by hand/);
   assert.equal(store.backlog.has('app', 'x'), true);
@@ -553,13 +573,191 @@ test('file store: a move that fails leaves no target folder behind', (t) => {
   const { h, store } = appWorld(t);
   store.backlog.write('app', 'x', 'x\n');
   archivedWithEvidence(h, store);
-  const failing = fileStore(ledgerPaths(h), { rename: failed('EIO') });
+  const failing = fileStore(ledgerPaths(h), { link: failed('EIO'), rename: failed('EIO') });
   assert.throws(() => failing.backlog.move('app', 'x', OTHER), /EIO/);
   assert.throws(() => failing.archive.move('app', '2026-01-01-old', OTHER), /EIO/);
   assert.equal(existsSync(store.backlog.repoLocation(OTHER)), false);
   assert.equal(existsSync(store.archive.repoLocation(OTHER)), false);
   assert.equal(store.backlog.has('app', 'x'), true);
   assert.deepEqual(store.archive.evidenceFiles('app', '2026-01-01-old'), ['red.txt']);
+});
+
+/** Makes the record `name` of `place` at OTHER as a program that takes no ledger lock would, such as a person by hand. */
+function madeWithoutLock(store: LedgerStore, place: 'backlog' | 'active' | 'archive', name: string, text: string): void {
+  const file = path.join(store[place].repoLocation(OTHER), `${name}.json`);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, recordJson(recordToWrite(text, file)), { flag: 'wx' });
+}
+
+test('file store: a move refuses, replacing nothing, when a program that takes no lock makes a ledger of that name in the target just before the move', (t) => {
+  const { h, store } = appWorld(t);
+  store.backlog.write('app', 'x', 'mine\n');
+  store.active.write('app', 'x', 'mine\n');
+  archivedWithEvidence(h, store);
+  const theirs = 'theirs\n';
+  let makeFirst: (() => void) | undefined;
+  const afterFirst = (move: (from: string, to: string) => void) => (from: string, to: string) => {
+    makeFirst?.();
+    makeFirst = undefined;
+    move(from, to);
+  };
+  const racing = fileStore(ledgerPaths(h), { rename: afterFirst(renameSync), link: afterFirst(linkSync) });
+  const raced = [
+    { place: 'backlog', make: () => madeWithoutLock(store, 'backlog', 'x', theirs) },
+    { place: 'active', make: () => madeWithoutLock(store, 'active', 'x', theirs) },
+    { place: 'archive', make: () => madeWithoutLock(store, 'archive', '2026-01-01-old', theirs) },
+  ] as const;
+  for (const { place, make } of raced) {
+    const name = place === 'archive' ? '2026-01-01-old' : 'x';
+    makeFirst = make;
+    assert.equal(racing[place].move('app', name, OTHER), false, `${place}: the move replaced a ledger made just before it`);
+    assert.equal(store[place].read(OTHER, name)?.text, storedText(theirs), `${place}: the ledger made first is not intact`);
+    assert.equal(store[place].read('app', name)?.text, storedText(place === 'archive' ? 'old\n' : 'mine\n'), `${place}: the moved ledger is gone`);
+  }
+  assert.deepEqual(store.archive.evidenceFiles('app', '2026-01-01-old'), ['red.txt']);
+});
+
+test('file store: a move stopped right after it linked a ledger at the target leaves the ledger under both repos and nothing else at the target', (t) => {
+  const { h, store } = appWorld(t);
+  store.backlog.write('app', 'x', 'mine\n');
+  store.active.write('app', 'x', 'mine\n');
+  archivedWithEvidence(h, store);
+  const stopped = fileStore(ledgerPaths(h), {
+    link: (from, to) => {
+      linkSync(from, to);
+      throw new Error('the process was killed');
+    },
+  });
+  for (const place of ['backlog', 'active', 'archive'] as const) {
+    const name = place === 'archive' ? '2026-01-01-old' : 'x';
+    const text = storedText(place === 'archive' ? 'old\n' : 'mine\n');
+    assert.throws(() => stopped[place].move('app', name, OTHER), /killed/);
+    assert.equal(store[place].read('app', name)?.text, text, `${place}: the ledger is gone from the old repo`);
+    assert.equal(store[place].read(OTHER, name)?.text, text, `${place}: the ledger is not at the target`);
+    assert.deepEqual(readdirSync(store[place].repoLocation(OTHER)), [`${name}.json`], place);
+  }
+});
+
+test('file store: a move that fails at the Markdown a record hides takes its link back and leaves the source record as another command wrote it meanwhile', (t) => {
+  const { h, store } = appWorld(t);
+  store.backlog.write('app', 'x', 'mine\n');
+  const { record, markdown } = { record: store.backlog.location('app', 'x'), markdown: path.join(store.backlog.repoLocation('app'), 'x.md') };
+  writeFileSync(markdown, 'hidden\n');
+  const failing = fileStore(ledgerPaths(h), {
+    link: (from, to) => {
+      if (from === markdown) {
+        writeFileSync(`${record}.theirs`, readFileSync(record, 'utf8').replace('mine', 'theirs'));
+        renameSync(`${record}.theirs`, record);
+        throw Object.assign(new Error('EIO: the link failed'), { code: 'EIO' });
+      }
+      linkSync(from, to);
+    },
+  });
+  assert.throws(() => failing.backlog.move('app', 'x', OTHER), /EIO/);
+  assert.equal(store.backlog.read('app', 'x')?.text, storedText('theirs\n'));
+  assert.equal(readFileSync(markdown, 'utf8'), 'hidden\n');
+  assert.equal(existsSync(store.backlog.repoLocation(OTHER)), false);
+});
+
+test('file store: a move of a ledger kept as Markdown refuses when a program that takes no lock makes a record of that name at the target just before the move', (t) => {
+  const { h, store } = appWorld(t);
+  const markdownOf = (place: 'backlog' | 'archive', name: string) => {
+    mkdirSync(store[place].repoLocation('app'), { recursive: true });
+    const file = path.join(store[place].repoLocation('app'), `${name}.md`);
+    writeFileSync(file, 'mine\n');
+    return file;
+  };
+  const raced = [
+    { place: 'backlog', name: 'x', make: () => madeWithoutLock(store, 'backlog', 'x', 'theirs\n') },
+    { place: 'archive', name: '2026-01-01-old', make: () => madeWithoutLock(store, 'archive', '2026-01-01-old', 'theirs\n') },
+  ] as const;
+  for (const { place, name, make } of raced) {
+    const source = markdownOf(place, name);
+    let makeFirst: (() => void) | undefined = make;
+    const afterFirst = (move: (from: string, to: string) => void) => (from: string, to: string) => {
+      makeFirst?.();
+      makeFirst = undefined;
+      move(from, to);
+    };
+    const racing = fileStore(ledgerPaths(h), { rename: afterFirst(renameSync), link: afterFirst(linkSync) });
+    assert.equal(racing[place].move('app', name, OTHER), false, `${place}: the record made first hides the moved Markdown`);
+    assert.equal(readFileSync(source, 'utf8'), 'mine\n', `${place}: the Markdown left its repo`);
+    assert.equal(store[place].read(OTHER, name)?.text, storedText('theirs\n'), place);
+    assert.deepEqual(readdirSync(store[place].repoLocation(OTHER)), [`${name}.json`], place);
+  }
+});
+
+/** Runs `work` while every lock wait of this process ends at once, as when the process holding the lock runs on. */
+function withoutLockWaits<T>(work: () => T): T {
+  limitLockWaits(Date.now());
+  try {
+    return work();
+  } finally {
+    limitLockWaits(Infinity);
+  }
+}
+
+test('file store: a move holds the locks of the ledger under both repos, so a create or archive copy of that name at the target waits for it', (t) => {
+  const { h, store } = appWorld(t);
+  store.backlog.write('app', 'x', 'mine\n');
+  store.active.write('app', 'x', 'mine\n');
+  archivedWithEvidence(h, store);
+  const lockedFiles = (place: 'backlog' | 'active' | 'archive', repo: string, name: string): string[] => {
+    const base = path.join(store[place].repoLocation(repo), name);
+    return place === 'active' ? [`${base}.json`] : [`${base}.json`, `${base}.md`];
+  };
+  let during: (() => void) | undefined;
+  const moving = fileStore(ledgerPaths(h), {
+    link: (from, to) => {
+      during?.();
+      during = undefined;
+      linkSync(from, to);
+    },
+  });
+  for (const place of ['backlog', 'active', 'archive'] as const) {
+    const name = place === 'archive' ? '2026-01-01-old' : 'x';
+    during = () => {
+      for (const file of [...lockedFiles(place, 'app', name), ...lockedFiles(place, OTHER, name)]) {
+        assert.equal(withLockIfFree(file, () => undefined), 'busy', `${place}: ${file} is not locked while the move runs`);
+      }
+      withoutLockWaits(() =>
+        assert.throws(() => (place === 'archive' ? store.archive.write(OTHER, name, 'theirs\n') : store[place].create(OTHER, name, 'theirs\n')), /Gave up waiting for the lock/, place),
+      );
+    };
+    assert.equal(moving[place].move('app', name, OTHER), true, place);
+    assert.equal(during, undefined, `${place}: the move linked nothing`);
+    assert.equal(store[place].read(OTHER, name)?.text, storedText(place === 'archive' ? 'old\n' : 'mine\n'), place);
+  }
+});
+
+test('file store: a move refuses a ledger whose record hides Markdown that is a symbolic link, and moves nothing', (t) => {
+  const { h, store } = appWorld(t);
+  const elsewhere = path.join(h, 'elsewhere.md');
+  writeFileSync(elsewhere, 'hidden\n');
+  store.backlog.write('app', 'x', 'mine\n');
+  store.archive.write('app', '2026-01-01-old', 'mine\n');
+  for (const [place, name] of [['backlog', 'x'], ['archive', '2026-01-01-old']] as const) {
+    const markdown = path.join(store[place].repoLocation('app'), `${name}.md`);
+    symlinkSync(elsewhere, markdown);
+    assert.throws(() => store[place].move('app', name, OTHER), new RegExp(`${markdown}.*symbolic link`), place);
+    assert.ok(lstatSync(markdown).isSymbolicLink(), `${place}: the link left its repo`);
+    assert.equal(store[place].read('app', name)?.text, storedText('mine\n'), place);
+    assert.equal(existsSync(store[place].repoLocation(OTHER)), false, `${place}: the move left a target folder`);
+  }
+  assert.equal(readFileSync(elsewhere, 'utf8'), 'hidden\n');
+});
+
+test('file store: an evidence folder whose name ends in .md or .json is no ledger', (t) => {
+  const { h, store } = appWorld(t);
+  const evidence = path.join(h, 'evidence');
+  mkdirSync(evidence);
+  writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
+  for (const name of ['2026-01-01-notes.md', '2026-01-02-data.json']) store.archive.write('app', name, 'old\n', evidence);
+  assert.deepEqual(store.archive.unreadable('app'), []);
+  assert.deepEqual(
+    store.archive.list('app').map(({ name }) => name),
+    ['2026-01-01-notes.md', '2026-01-02-data.json'],
+  );
 });
 
 // --- 22. A rerun places a ledger by the alias an earlier run saved ---

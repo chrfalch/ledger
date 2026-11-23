@@ -49,7 +49,7 @@ function nameAt(store: LedgerStore, place: Place, repo: string, location: string
   return [base, base.replace(/\.(md|json)$/, '')].find((name) => isEntryName(name) && store[place].location(repo, name) === location);
 }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+export const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 const taken = (key: string, name: string): string => `${shown(key)} already has ${name}`;
 
@@ -80,13 +80,13 @@ function statError(file: string): string | undefined {
  * checks that it would, by the store's own checks. Gives why it stays where it is, or undefined when it moved.
  */
 export function moveLedger(store: LedgerStore, place: Place, { old, name, to }: { old: string; name: string; to: string }, dryRun: boolean): string | undefined {
-  if (!store[place].canMove(old, name, to)) return taken(to, name);
   const byHand = `on another disk, move by hand to ${store[place].location(to, name)}`;
-  if (dryRun) return store[place].acrossDisks?.(old, name, to) ? byHand : undefined;
   try {
+    if (!store[place].canMove(old, name, to)) return taken(to, name);
+    if (dryRun) return store[place].acrossDisks?.(old, name, to) ? byHand : undefined;
     return store[place].move(old, name, to) ? undefined : taken(to, name);
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EXDEV' ? byHand : `the move failed: ${messageOf(error)}`;
+    return (error as NodeJS.ErrnoException).code === 'EXDEV' ? byHand : `the move ${dryRun ? 'would fail' : 'failed'}: ${messageOf(error)}`;
   }
 }
 

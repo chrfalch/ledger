@@ -1,18 +1,23 @@
 import assert from 'node:assert/strict';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { clonePaths } from '../tools/ledger/clone.js';
 import { setLocationBullet, setLostMark } from '../tools/ledger/edit.js';
 import { fileStore } from '../tools/ledger/file-store.js';
+import { Failure } from '../tools/ledger/failure.js';
 import { parseLedger } from '../tools/ledger/format.js';
-import { namedMain } from '../tools/ledger/migrate-repo-ids.js';
+import { limitLockWaits, withLock } from '../tools/ledger/lock.js';
+import { namedMain, places } from '../tools/ledger/migrate-repo-ids.js';
 import { openStore } from '../tools/ledger/open-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { parseRecord, renderRecord } from '../tools/ledger/record.js';
+import { repairStore, type RepairContext, type RepairOptions } from '../tools/ledger/repair.js';
 import { sqliteFile } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { REPO } from './helpers.js';
-import { archivedTask, git, home, ledger, ledgerText, noSqlite, ok, repoKeyOf, repository, type Ran } from './ledger-core-fixtures.js';
+import { archivedTask, asCli, git, home, ledger, ledgerText, noSqlite, ok, repoKeyOf, repository, type Ran } from './ledger-core-fixtures.js';
 import { APP_KEY, machine, remote, run, setUp, today } from './ledger-git-fixtures.js';
 
 type Storage = 'file' | 'sqlite';
@@ -680,12 +685,12 @@ test('store repair --remote leaves a task whose main checkout is gone or has a t
   assert.equal(fileStore(ledgerPaths(h)).aliases.read().get(key), undefined);
 });
 
-test('git store: store repair --remote exits 1, says so on stderr and records no alias when the store commit fails, and a retry does not exit 0', (t) => {
+test('git store: store repair --remote exits 1 and says to run ledger store sync when the store commit fails, keeps the alias, and so does a rerun while the commit still fails', (t) => {
   const m = machine(t, remote(t));
   setUp(m);
   const repair: Run = (cwd, ...args) => run(m, args, { cwd });
   start(repair, m.app, 'fix-login');
-  renameOrigin(m.h, m.app);
+  const newKey = renameOrigin(m.h, m.app);
   writeFileSync(path.join(m.clone, 'stray.txt'), 'no ledger');
   git(m.h, m.clone, 'add', '--force', 'stray.txt');
   const aliases = () => {
@@ -701,10 +706,13 @@ test('git store: store repair --remote exits 1, says so on stderr and records no
   assert.equal(ran.status, 1, ran.stdout);
   assert.match(ran.stderr, /store commit failed/i);
   assert.ok(ran.stderr.includes(APP_KEY), ran.stderr);
+  assert.match(ran.stderr, /Fix the problem below, then run ledger store sync\./);
   assert.doesNotMatch(ran.stdout, /^Moved /m);
-  assert.doesNotMatch(ran.stdout, /recorded .* as an alias/);
-  assert.deepEqual(aliases(), {});
-  assert.notEqual(repair(m.app, 'store', 'repair', '--remote', APP_KEY).status, 0, 'a retry after a failed commit exited 0');
+  assert.deepEqual(aliases(), { [APP_KEY]: newKey });
+  const again = repair(m.app, 'store', 'repair', '--remote', APP_KEY);
+  assert.equal(again.status, 1, `${again.stdout}${again.stderr}`);
+  assert.ok(again.stdout.includes(`Nothing is left under ${APP_KEY} to move.`), again.stdout);
+  assert.match(again.stderr, /Fix the problem below, then run ledger store sync\./);
 });
 
 test('store repair --remote leaves a task whose slug any place of the current key has, active too', (t) => {
@@ -1262,4 +1270,743 @@ test('store repair --remote refuses, moving nothing, when the key of this repo i
   }
   assert.deepEqual({ old: filed(h, key), now: filed(h, newKey) }, before);
   assert.deepEqual(Object.fromEntries(fileStore(ledgerPaths(h)).aliases.read()), { [newKey]: third });
+});
+
+/** Runs ledger store repair in this process on `store`, as the CLI does, so a test can make one store call fail. */
+function repairWith(store: LedgerStore, h: string, cwd: string, options: Partial<RepairOptions>, { slug, writable = () => store }: { slug?: string; writable?: () => LedgerStore } = {}): Ran {
+  const lines: string[] = [];
+  const context: RepairContext = { paths: ledgerPaths(h), cwd, store, writable };
+  try {
+    const left = repairStore(context, slug, { lost: false, dryRun: false, ...options }, (text) => lines.push(text));
+    return { status: left > 0 ? 1 : 0, stdout: lines.join('\n'), stderr: '' };
+  } catch (error) {
+    return { status: error instanceof Failure ? error.exitCode : 1, stdout: lines.join('\n'), stderr: error instanceof Error ? error.message : String(error) };
+  } finally {
+    store.close?.();
+  }
+}
+
+const failingAliasWrite = (store: LedgerStore): LedgerStore => ({
+  ...store,
+  aliases: {
+    ...store.aliases,
+    replace: () => {
+      throw Object.assign(new Error('EIO: the alias write failed'), { code: 'EIO' });
+    },
+  },
+});
+
+/** HOME, the repo app, its key and how to run ledger there, for each storage. */
+function worldOf(t: TestContext, storage: Storage | 'git'): { h: string; app: string; key: string; repair: Run } {
+  if (storage !== 'git') {
+    const world = setup(t, storage);
+    return { ...world, repair: forStorage(world.h) };
+  }
+  const m = machine(t, remote(t));
+  setUp(m);
+  return { h: m.h, app: m.app, key: APP_KEY, repair: (cwd, ...args) => run(m, args, { cwd }) };
+}
+
+for (const storage of ['file', 'sqlite', 'git'] as const) {
+  test(`${storage} store: store repair --remote run again after the alias write failed moves what is left and records the alias`, { skip: storage === 'sqlite' && noSqlite }, (t) => {
+    const { h, app, key, repair } = worldOf(t, storage);
+    start(repair, app, 'fix-login');
+    ok(repair(app, 'task', 'new', 'idea', '--goal', 'Later.'));
+    const newKey = renameOrigin(h, app);
+    asCli(t, h);
+    const store = () => openStore(ledgerPaths(h), storage, { backgroundSync: false });
+
+    const first = repairWith(failingAliasWrite(store()), h, app, { remote: key });
+    assert.notEqual(first.status, 0, first.stdout);
+    assert.match(first.stderr, /alias write failed/);
+
+    const again = repair(app, 'store', 'repair', '--remote', key);
+    assert.equal(again.status, 0, `${again.stdout}${again.stderr}`);
+    assert.deepEqual(filedIn(store(), newKey), { active: ['fix-login'], backlog: ['idea'], archive: [] });
+    assert.deepEqual(filedIn(store(), key), { active: [], backlog: [], archive: [] });
+    const opened = store();
+    try {
+      assert.equal(opened.aliases.read().get(key), newKey);
+    } finally {
+      opened.close?.();
+    }
+  });
+
+  test(`${storage} store: store repair --remote of the encoding of this repo's key, one repo folder in a file store, refuses and removes no task`, { skip: storage === 'sqlite' && noSqlite }, (t) => {
+    const { h, app, key, repair } = worldOf(t, storage);
+    start(repair, app, 'fix-login');
+    ok(repair(app, 'task', 'new', 'idea', '--goal', 'Later.'));
+    asCli(t, h);
+    const store = () => openStore(ledgerPaths(h), storage, { backgroundSync: false });
+    const encoded = encodeURIComponent(key);
+
+    for (const dryRun of [['--dry-run'], []]) {
+      const ran = repair(app, 'store', 'repair', '--remote', encoded, ...dryRun);
+      assert.equal(ran.status, 1, `${ran.stdout}${ran.stderr}`);
+      // A database keeps each key apart, so it finds no task under the encoding.
+      assert.ok(ran.stderr.includes(storage === 'sqlite' ? `No task is filed under ${encoded}` : `${encoded} and ${key}, the key of this repo, are the same repository folder in the store`), ran.stderr);
+    }
+    assert.deepEqual(filedIn(store(), key), { active: ['fix-login'], backlog: ['idea'], archive: [] });
+    const opened = store();
+    try {
+      assert.equal(opened.aliases.read().get(encoded), undefined);
+    } finally {
+      opened.close?.();
+    }
+  });
+}
+
+test('store repair --remote of a key that never had a task or an alias still refuses with its message', (t) => {
+  const { h, app } = setup(t);
+  start(forStorage(h), app, 'fix-login');
+  fails(ledger(h, app, 'store', 'repair', '--remote', 'github.com/nobody/nothing'), 'No task is filed under github.com/nobody/nothing, so nothing was moved.');
+});
+
+test('store repair --remote run again after the evidence of an archive copy failed to move moves that evidence and records the alias', (t) => {
+  const { h, app, key, newKey, repair } = renamedRemote(t);
+  asCli(t, h);
+  const name = '2026-01-02-done-one';
+  const evidence = fileStore(ledgerPaths(h)).archive.evidenceLocation(key, name);
+  mkdirSync(evidence);
+  writeFileSync(path.join(evidence, 'red.txt'), 'the failing run\n');
+  const failing = fileStore(ledgerPaths(h), {
+    rename: (from, to) => {
+      if (from === evidence) throw Object.assign(new Error('EIO: the evidence move failed'), { code: 'EIO' });
+      renameSync(from, to);
+    },
+  });
+
+  const first = repairWith(failing, h, app, { remote: key });
+  assert.equal(first.status, 1, `${first.stdout}${first.stderr}`);
+  assert.equal(fileStore(ledgerPaths(h)).aliases.read().get(key), undefined, 'an alias was recorded while evidence is left under the old key');
+
+  const again = ok(repair(app, 'store', 'repair', '--remote', key));
+  assert.match(again, new RegExp(`^moved the evidence of archive ${name}$`, 'm'));
+  assert.match(again, /^recorded .* as an alias/m);
+  const store = fileStore(ledgerPaths(h));
+  assert.deepEqual(store.archive.evidenceFiles(newKey, name), ['red.txt']);
+  assert.equal(existsSync(evidence), false);
+  assert.equal(store.aliases.read().get(key), newKey);
+});
+
+test('store repair --remote leaves a record under the old key that cannot be read, names it, records no alias and exits 1', (t) => {
+  const { h, app, key, newKey, repair } = renamedRemote(t);
+  const broken = path.join(fileStore(ledgerPaths(h)).backlog.repoLocation(key), 'broken.json');
+  writeFileSync(broken, '{ "no": "record"');
+
+  const ran = repair(app, 'store', 'repair', '--remote', key);
+  assert.equal(ran.status, 1, `${ran.stdout}${ran.stderr}`);
+  assert.match(`${ran.stdout}${ran.stderr}`, /broken/);
+  assert.equal(fileStore(ledgerPaths(h)).aliases.read().get(key), undefined);
+  assert.equal(readFileSync(broken, 'utf8'), '{ "no": "record"');
+  assert.deepEqual(filed(h, newKey), { active: ['fix-login'], backlog: ['idea'], archive: ['2026-01-02-done-one'] });
+});
+
+test('tree next counts a dependency on a task of another repo by its old key as done once --remote filed that repo under its new key and the task retired', (t) => {
+  const { h, app } = setup(t);
+  const repair = forStorage(h);
+  const lib = repository(h, path.join(h, 'repos', 'lib'));
+  writeFileSync(path.join(lib, '.git/info/exclude'), '.claude/\n');
+  const libKey = repoKeyOf(lib);
+  start(repair, app, 'epic');
+  ok(repair(app, 'task', 'new', 'part', '--goal', 'Part of epic.'));
+  ok(repair(app, 'tree', 'add', 'epic', 'part'));
+  ok(repair(lib, 'task', 'new', 'build', '--goal', 'Build it.'));
+  ok(repair(app, 'tree', 'depends', 'part', `build@${lib}`));
+  assert.match(shown(repair, app, 'part'), new RegExp(`depends on: build @ ${libKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  const renamed = path.join(h, 'remotes', 'lib-renamed.git');
+  git(h, h, 'init', '--quiet', '--bare', '-b', 'main', renamed);
+  git(h, lib, 'remote', 'set-url', 'origin', renamed);
+  ok(repair(lib, 'store', 'repair', '--remote', libKey));
+  const store = fileStore(ledgerPaths(h));
+  const newKey = repoKeyOf(lib);
+  const build = store.backlog.read(newKey, 'build') ?? assert.fail('build was not filed under the new key');
+  assert.ok(store.backlog.remove(newKey, 'build', build.text));
+  archivedTask(h, lib, '2026-01-03', { slug: 'build' });
+
+  assert.equal(ok(repair(app, 'tree', 'next', 'epic')), 'epic part\n');
+});
+
+test('store repair --search refuses a folder named by a symbolic link, and finds nothing in a named node_modules or .claude/worktrees/.build folder', (t) => {
+  const { h, app } = setup(t);
+  const repair = forStorage(h);
+  const { worktree, branch } = start(repair, app, 'fix-login');
+  const moved = path.join(h, 'moved');
+  mkdirSync(moved);
+  renameSync(worktree, path.join(moved, 'fix-login'));
+  const link = path.join(h, 'link');
+  symlinkSync(moved, link);
+  const modules = path.dirname(worktreeAt(h, app, path.join(h, 'pkgs', 'node_modules', 'pkg'), branch));
+  const builds = path.dirname(worktreeAt(h, app, path.join(h, 'repos', 'lib', '.claude', 'worktrees', '.build', 'x'), branch));
+
+  fails(repair(h, 'store', 'repair', '--search', link), new RegExp(`${link}.*symbolic link`));
+  for (const root of [modules, builds]) {
+    const ran = repair(h, 'store', 'repair', '--search', root);
+    assert.equal(ran.status, 1, ran.stderr);
+    assert.doesNotMatch(ran.stdout, /found /, `${root} was searched:\n${ran.stdout}`);
+  }
+});
+
+test('store repair --search finds nothing in a named folder inside a node_modules or .claude/worktrees/.build folder of any case, at any depth', (t) => {
+  const { h, app } = setup(t);
+  const repair = forStorage(h);
+  const { worktree, branch } = start(repair, app, 'fix-login');
+  rmSync(worktree, { recursive: true, force: true });
+  git(h, app, 'worktree', 'prune');
+  const modules = worktreeAt(h, app, path.join(h, 'pkgs', 'Node_Modules', 'pkg', 'fix-login'), branch);
+  const builds = worktreeAt(h, app, path.join(h, 'repos', 'lib', '.Claude', 'Worktrees', '.Build', 'x', 'deeper', 'fix-login'), branch);
+
+  for (const root of [modules, path.dirname(modules), builds, path.dirname(path.dirname(builds))]) {
+    const ran = repair(h, 'store', 'repair', '--search', root);
+    assert.equal(ran.status, 1, ran.stderr);
+    assert.doesNotMatch(ran.stdout, /found /, `${root} was searched:\n${ran.stdout}`);
+  }
+});
+
+test('store repair --remote passes over evidence under the old key whose archive copy is under neither key, and records the alias', (t) => {
+  const { h, app, key, newKey, repair } = renamedRemote(t);
+  const evidence = fileStore(ledgerPaths(h)).archive.evidenceLocation(key, '2025-12-01-gone');
+  mkdirSync(evidence);
+  writeFileSync(path.join(evidence, 'red.txt'), 'no copy anywhere\n');
+
+  ok(repair(app, 'store', 'repair', '--remote', key));
+  assert.equal(fileStore(ledgerPaths(h)).aliases.read().get(key), newKey);
+  assert.ok(existsSync(path.join(evidence, 'red.txt')), 'the evidence moved or went away');
+});
+
+test('store repair --remote run again after a run that recorded the alias and stopped before every move moves what is left', (t) => {
+  const { h, app, key, newKey, repair } = renamedRemote(t);
+  const store = fileStore(ledgerPaths(h));
+  store.aliases.add(key, newKey);
+  assert.ok(store.backlog.move(key, 'idea', newKey));
+
+  ok(repair(app, 'store', 'repair', '--remote', key));
+  assert.deepEqual(filed(h, key), { active: [], backlog: [], archive: [] });
+  assert.deepEqual(filed(h, newKey), { active: ['fix-login'], backlog: ['idea'], archive: ['2026-01-02-done-one'] });
+  assert.equal(fileStore(ledgerPaths(h)).aliases.read().get(key), newKey);
+});
+
+/** A file store of HOME `h` whose link of the ledger file `file` fails, so the move of that ledger fails. */
+const failingLinkOf = (h: string, file: string): LedgerStore =>
+  fileStore(ledgerPaths(h), {
+    link: (from, to) => {
+      if (path.basename(from) === file) throw Object.assign(new Error(`EIO: the move of ${file} failed`), { code: 'EIO' });
+      linkSync(from, to);
+    },
+  });
+
+test('store repair --remote keeps the alias it recorded when a move and the store commit both fail, and says to run ledger store sync', (t) => {
+  const { h, app, key, newKey } = renamedRemote(t);
+  asCli(t, h);
+  const store: LedgerStore = {
+    ...failingLinkOf(h, 'idea.json'),
+    commit: () => {
+      throw new Error('the commit failed');
+    },
+  };
+
+  const ran = repairWith(store, h, app, { remote: key });
+  assert.notEqual(ran.status, 0, ran.stdout);
+  assert.match(ran.stderr, /the commit failed/);
+  assert.ok(ran.stderr.includes(`${key} is recorded as an alias of`), ran.stderr);
+  assert.match(ran.stderr, /then run ledger store sync\./);
+  assert.equal(fileStore(ledgerPaths(h)).aliases.read().get(key), newKey);
+});
+
+test('store repair --remote run again after the alias was recorded says it keeps that alias when a move fails', (t) => {
+  const { h, app, key, newKey } = renamedRemote(t);
+  asCli(t, h);
+  fileStore(ledgerPaths(h)).aliases.add(key, newKey);
+
+  const ran = repairWith(failingLinkOf(h, 'idea.json'), h, app, { remote: key });
+  assert.equal(ran.status, 1, `${ran.stdout}${ran.stderr}`);
+  assert.doesNotMatch(ran.stdout, /kept no alias/);
+  assert.ok(ran.stdout.includes(`kept the alias ${key} of`), ran.stdout);
+  assert.equal(fileStore(ledgerPaths(h)).aliases.read().get(key), newKey);
+});
+
+test('store repair --search refuses a folder whose path goes through a symbolic link', (t) => {
+  const { h, app } = setup(t);
+  const repair = forStorage(h);
+  const { worktree } = start(repair, app, 'fix-login');
+  const moved = path.join(h, 'moved');
+  mkdirSync(path.join(moved, 'sub'), { recursive: true });
+  renameSync(worktree, path.join(moved, 'sub', 'fix-login'));
+  const link = path.join(h, 'link');
+  symlinkSync(moved, link);
+
+  fails(repair(h, 'store', 'repair', '--search', path.join(link, 'sub')), new RegExp(`${path.join(link, 'sub')}.*symbolic link.*${path.join(moved, 'sub')}`));
+});
+
+test('sqlite store: store repair --remote leaves a record under the old key that cannot be read, names it, records no alias and exits 1', { skip: noSqlite }, (t) => {
+  const { h, app, key } = setup(t, 'sqlite');
+  const repair = forStorage(h);
+  start(repair, app, 'fix-login');
+  const newKey = renameOrigin(h, app);
+  const db = new (createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')).DatabaseSync(sqliteFile(h));
+  try {
+    db.prepare('INSERT INTO records (place, repo, name, record, mtime, birthtime) VALUES (?, ?, ?, ?, ?, ?)').run('backlog', key, 'broken', '{"no":"record"}', Date.now(), Date.now());
+  } finally {
+    db.close();
+  }
+
+  const ran = repair(app, 'store', 'repair', '--remote', key);
+  assert.equal(ran.status, 1, `${ran.stdout}${ran.stderr}`);
+  assert.match(ran.stdout, /left backlog broken: .*cannot be read/);
+  const store = openStore(ledgerPaths(h), 'sqlite');
+  try {
+    assert.equal(store.aliases.read().get(key), undefined);
+    assert.deepEqual(store.active.list(newKey).map(({ name }) => name), ['fix-login']);
+  } finally {
+    store.close?.();
+  }
+});
+
+/** Runs `work` while every lock wait of this process ends at `until`, as when another process holds the lock throughout. */
+function withLockWaitsEndingAt<T>(until: number, work: () => T): T {
+  limitLockWaits(until);
+  try {
+    return work();
+  } finally {
+    limitLockWaits(Infinity);
+  }
+}
+
+const repairLock = (h: string): string => path.join(h, '.claude', 'ledger-repair');
+
+test('store repair --remote holds the repair lock from its first read, so a second run cannot take back the alias the first records', (t) => {
+  const { h, app, key, newKey } = renamedRemote(t);
+  asCli(t, h);
+  const store = fileStore(ledgerPaths(h));
+  let second: Ran | undefined;
+  const first = repairWith(store, h, app, { remote: key }, {
+    writable: () => {
+      // The second run starts once the first has read the store and planned its moves.
+      second ??= withLockWaitsEndingAt(Date.now() + 200, () => repairWith(fileStore(ledgerPaths(h)), h, app, { remote: key }));
+      return store;
+    },
+  });
+
+  assert.equal(first.status, 0, `${first.stdout}${first.stderr}`);
+  assert.ok(second?.stderr.includes(`${repairLock(h)}.lock`), second?.stderr ?? 'no second run started');
+  assert.deepEqual(filed(h, newKey), { active: ['fix-login'], backlog: ['idea'], archive: ['2026-01-02-done-one'] });
+  assert.equal(fileStore(ledgerPaths(h)).aliases.read().get(key), newKey);
+});
+
+test('store repair <slug> --lost waits for the repair lock, and marks nothing while another repair holds it', (t) => {
+  const { h, app, key } = setup(t);
+  asCli(t, h);
+  const { worktree } = start(forStorage(h), app, 'fix-login');
+  rmSync(worktree, { recursive: true, force: true });
+
+  const ran = withLock(repairLock(h), () => withLockWaitsEndingAt(Date.now() + 200, () => repairWith(fileStore(ledgerPaths(h)), h, app, { lost: true }, { slug: 'fix-login' })));
+  assert.ok(ran.stderr.includes(`${repairLock(h)}.lock`), `${ran.stdout}${ran.stderr}`);
+  assert.equal(parseLedger(fileStore(ledgerPaths(h)).active.read(key, 'fix-login')?.text ?? '').location.lost, undefined);
+});
+
+test('store repair --remote keeps waiting for a repair lock older than a minute while the process that holds it still runs', (t) => {
+  const { h, app, key, newKey } = renamedRemote(t);
+  asCli(t, h);
+  const lock = `${repairLock(h)}.lock`;
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, since: new Date(Date.now() - 2 * 60_000).toISOString() }));
+
+  const ran = withLockWaitsEndingAt(Date.now() + 200, () => repairWith(fileStore(ledgerPaths(h)), h, app, { remote: key }));
+  assert.ok(ran.stderr.includes(lock), `${ran.stdout}${ran.stderr}`);
+  assert.deepEqual(filed(h, newKey), { active: [], backlog: [], archive: [] });
+  assert.equal(fileStore(ledgerPaths(h)).aliases.read().get(key), undefined);
+});
+
+test('store repair --remote run again after a run that recorded the alias and stopped between an archive copy and its evidence moves that evidence', (t) => {
+  const { h, app, key, newKey, repair } = renamedRemote(t);
+  const store = fileStore(ledgerPaths(h));
+  const name = '2026-01-02-done-one';
+  const evidence = store.archive.evidenceLocation(key, name);
+  mkdirSync(evidence);
+  writeFileSync(path.join(evidence, 'red.txt'), 'the failing run\n');
+  store.aliases.add(key, newKey);
+  assert.ok(store.active.move(key, 'fix-login', newKey));
+  assert.ok(store.backlog.move(key, 'idea', newKey));
+  mkdirSync(store.archive.repoLocation(newKey), { recursive: true });
+  const copy = store.archive.location(key, name);
+  renameSync(copy, path.join(store.archive.repoLocation(newKey), path.basename(copy)));
+
+  const again = ok(repair(app, 'store', 'repair', '--remote', key));
+  assert.match(again, new RegExp(`^moved the evidence of archive ${name}$`, 'm'));
+  assert.deepEqual(store.archive.evidenceFiles(newKey, name), ['red.txt']);
+  assert.equal(existsSync(evidence), false);
+  assert.equal(store.aliases.read().get(key), newKey);
+});
+
+test('store repair --search refuses a folder named through a symbolic link and .., by the folder the path leads to', (t) => {
+  const { h } = setup(t);
+  const inner = path.join(h, 'real', 'inner');
+  mkdirSync(inner, { recursive: true });
+  const link = path.join(h, 'link');
+  symlinkSync(inner, link);
+
+  fails(ledger(h, h, 'store', 'repair', '--search', `${link}${path.sep}..`), `Name the folder it leads to: ${path.join(h, 'real')}`);
+});
+
+test('store repair --search finds nothing in a .git folder it is given by name', (t) => {
+  const { h, app } = setup(t);
+  const repair = forStorage(h);
+  const { worktree, branch } = start(repair, app, 'fix-login');
+  rmSync(worktree, { recursive: true, force: true });
+  const dotGit = path.dirname(worktreeAt(h, app, path.join(h, 'x', '.git', 'fix-login'), branch));
+
+  const ran = repair(h, 'store', 'repair', '--search', dotGit);
+  assert.equal(ran.status, 1, ran.stderr);
+  assert.ok(ran.stdout.includes(`no checkout on ${branch} in ${dotGit}`), ran.stdout);
+});
+
+test('sqlite store: store repair --remote of a key with no task says so before the database exists', { skip: noSqlite }, (t) => {
+  const { h, app, key } = setup(t, 'sqlite');
+  for (const dryRun of [[], ['--dry-run']]) {
+    fails(ledger(h, app, 'store', 'repair', '--remote', 'github.com/nobody/nothing', ...dryRun), 'No task is filed under github.com/nobody/nothing, so nothing was moved.');
+  }
+  fails(ledger(h, app, 'store', 'repair', '--remote', key), `${key} is the key of this repo now.`);
+  assert.equal(existsSync(sqliteFile(h)), false);
+});
+
+test('git store: store repair --remote run again after a run that recorded the alias and stopped between an archive copy and its evidence moves that evidence', (t) => {
+  const { h, app, key, repair } = worldOf(t, 'git');
+  start(repair, app, 'fix-login');
+  const newKey = renameOrigin(h, app);
+  asCli(t, h);
+  const name = '2026-01-02-done-one';
+  const from = path.join(h, 'evidence');
+  mkdirSync(from);
+  writeFileSync(path.join(from, 'red.txt'), 'the failing run\n');
+  const store = openStore(ledgerPaths(h), 'git', { backgroundSync: false });
+  try {
+    store.archive.write(key, name, ledgerText({ slug: 'done-one', main: app }), from);
+    store.aliases.add(key, newKey);
+    assert.ok(store.active.move(key, 'fix-login', newKey));
+    const copy = store.archive.location(key, name);
+    mkdirSync(store.archive.repoLocation(newKey), { recursive: true });
+    renameSync(copy, path.join(store.archive.repoLocation(newKey), path.basename(copy)));
+    store.commit?.();
+  } finally {
+    store.close?.();
+  }
+
+  ok(repair(app, 'store', 'repair', '--remote', key));
+  const after = openStore(ledgerPaths(h), 'git', { backgroundSync: false });
+  try {
+    assert.deepEqual(after.archive.evidenceFiles(newKey, name), ['red.txt']);
+    assert.deepEqual(after.archive.evidenceFiles(key, name), []);
+    assert.equal(after.aliases.read().get(key), newKey);
+  } finally {
+    after.close?.();
+  }
+});
+
+test('store repair --remote keeps the alias when a repo folder it emptied cannot be removed, and a rerun finishes', (t) => {
+  const { h, app, key, newKey, repair } = renamedRemote(t);
+  const store = fileStore(ledgerPaths(h));
+  const roots = places.map((place) => {
+    mkdirSync(store[place].repoLocation(newKey), { recursive: true });
+    return path.dirname(store[place].repoLocation(key));
+  });
+  for (const root of roots) chmodSync(root, 0o555);
+  try {
+    ok(repair(app, 'store', 'repair', '--remote', key));
+    assert.equal(store.aliases.read().get(key), newKey);
+    assert.deepEqual(filed(h, newKey), { active: ['fix-login'], backlog: ['idea'], archive: ['2026-01-02-done-one'] });
+    assert.ok(ok(repair(app, 'store', 'repair', '--remote', key)).includes(`Nothing is left under ${key} to move.`));
+  } finally {
+    // Here, not in t.after, which would run after HOME is removed.
+    for (const root of roots) chmodSync(root, 0o755);
+  }
+});
+
+test('store repair --remote moves an archive copy whose name ends in .md with its evidence, and records the alias', (t) => {
+  const { h, app, key, newKey, repair } = renamedRemote(t);
+  const from = path.join(h, 'evidence');
+  mkdirSync(from);
+  writeFileSync(path.join(from, 'red.txt'), 'the failing run\n');
+  const name = '2026-01-03-notes.md';
+  fileStore(ledgerPaths(h)).archive.write(key, name, ledgerText({ slug: 'notes', main: app }), from);
+
+  ok(repair(app, 'store', 'repair', '--remote', key));
+  const store = fileStore(ledgerPaths(h));
+  assert.equal(store.aliases.read().get(key), newKey);
+  assert.deepEqual(store.archive.evidenceFiles(newKey, name), ['red.txt']);
+  assert.ok(filed(h, newKey).archive.includes(name), JSON.stringify(filed(h, newKey)));
+});
+
+test('git store: store repair --remote run again after a run that stopped between its moves and their commit commits the moves', (t) => {
+  const { h, app, key, repair } = worldOf(t, 'git');
+  start(repair, app, 'fix-login');
+  ok(repair(app, 'task', 'new', 'idea', '--goal', 'Later.'));
+  const newKey = renameOrigin(h, app);
+  asCli(t, h);
+  // Neither commit nor close, as a run killed after its last move.
+  const stopped = openStore(ledgerPaths(h), 'git', { backgroundSync: false });
+  stopped.aliases.add(key, newKey);
+  assert.ok(stopped.active.move(key, 'fix-login', newKey));
+  assert.ok(stopped.backlog.move(key, 'idea', newKey));
+
+  const again = repair(app, 'store', 'repair', '--remote', key);
+  assert.equal(again.status, 0, `${again.stdout}${again.stderr}`);
+  const { clone } = clonePaths(ledgerPaths(h));
+  const committed = git(h, clone, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n');
+  for (const file of [`active/${encodeURIComponent(newKey)}/fix-login.json`, `backlog/${encodeURIComponent(newKey)}/idea.json`]) assert.ok(committed.includes(file), `${file} is not committed:\n${committed.join('\n')}`);
+  assert.equal(git(h, clone, 'status', '--porcelain', '--', 'active', 'backlog'), '');
+});
+
+test('store repair --search finds nothing in a node_modules or .claude/worktrees/.build folder named in another case, on a disk that ignores case', (t) => {
+  const { h, app } = setup(t);
+  const repair = forStorage(h);
+  const { worktree, branch } = start(repair, app, 'fix-login');
+  rmSync(worktree, { recursive: true, force: true });
+  worktreeAt(h, app, path.join(h, 'pkgs', 'node_modules', 'pkg'), branch);
+  worktreeAt(h, app, path.join(h, 'repos', 'lib', '.claude', 'worktrees', '.build', 'x'), branch);
+  const roots = [path.join(h, 'pkgs', 'NODE_MODULES'), path.join(h, 'repos', 'lib', '.claude', 'worktrees', '.BUILD')];
+  if (!existsSync(roots[0])) return t.skip('this disk tells case apart');
+
+  for (const root of roots) {
+    const ran = repair(h, 'store', 'repair', '--search', root);
+    assert.equal(ran.status, 1, ran.stderr);
+    assert.doesNotMatch(ran.stdout, /found /, `${root} was searched:\n${ran.stdout}`);
+  }
+});
+
+test('tree depends refuses a dependency on the task itself, or a cycle, named by the old key of a renamed remote', (t) => {
+  const { h, app, key } = setup(t);
+  const repair = forStorage(h);
+  ok(repair(app, 'task', 'new', 'build', '--goal', 'Build it.'));
+  ok(repair(app, 'task', 'new', 'ship', '--goal', 'Ship it.'));
+  renameOrigin(h, app);
+  ok(repair(app, 'store', 'repair', '--remote', key));
+  // A remote that is a local path keys the repo by that path; once it is gone, the key names no folder.
+  rmSync(key, { recursive: true, force: true });
+
+  fails(repair(app, 'tree', 'depends', 'build', `build@${key}`), 'cannot wait for itself');
+  ok(repair(app, 'tree', 'depends', 'ship', `build@${key}`));
+  fails(repair(app, 'tree', 'depends', 'build', 'ship'), 'would make a cycle');
+});
+
+test('store repair --remote run again after a run killed between linking each ledger under the new key and removing it from the old one finishes the moves', (t) => {
+  const { h, app, key, newKey, repair } = renamedRemote(t);
+  const store = fileStore(ledgerPaths(h));
+  store.aliases.add(key, newKey);
+  for (const [place, name] of [['backlog', 'idea'], ['active', 'fix-login'], ['archive', '2026-01-02-done-one']] as const) {
+    mkdirSync(store[place].repoLocation(newKey), { recursive: true });
+    const file = store[place].location(key, name);
+    linkSync(file, path.join(store[place].repoLocation(newKey), path.basename(file)));
+  }
+
+  assert.match(ok(repair(app, 'store', 'repair', '--remote', key, '--dry-run')), /^would move backlog idea$/m);
+  ok(repair(app, 'store', 'repair', '--remote', key));
+  assert.deepEqual(filed(h, key), { active: [], backlog: [], archive: [] });
+  assert.deepEqual(filed(h, newKey), { active: ['fix-login'], backlog: ['idea'], archive: ['2026-01-02-done-one'] });
+  assert.equal(fileStore(ledgerPaths(h)).aliases.read().get(key), newKey);
+});
+
+test('store repair --remote run again after a run killed between the two links, or the two removals, of a record and the Markdown it hides finishes the moves', (t) => {
+  const { h, app, key, newKey, repair } = renamedRemote(t);
+  const store = fileStore(ledgerPaths(h));
+  assert.ok(store.backlog.create(key, 'plan', ledgerText({ slug: 'plan', main: app })));
+  const [from, to] = [store.backlog.repoLocation(key), store.backlog.repoLocation(newKey)];
+  for (const name of ['idea', 'plan']) writeFileSync(path.join(from, `${name}.md`), ledgerText({ slug: name, main: app }));
+  store.aliases.add(key, newKey);
+  mkdirSync(to, { recursive: true });
+  linkSync(path.join(from, 'plan.json'), path.join(to, 'plan.json'));
+  for (const file of ['idea.json', 'idea.md']) linkSync(path.join(from, file), path.join(to, file));
+  rmSync(path.join(from, 'idea.json'));
+
+  ok(repair(app, 'store', 'repair', '--remote', key));
+  assert.deepEqual(existsSync(from) ? readdirSync(from) : [], []);
+  assert.deepEqual(readdirSync(to).sort(), ['idea.json', 'idea.md', 'plan.json', 'plan.md']);
+});
+
+test('store repair --remote run again after a run killed between removing a record and the Markdown it hid removes that Markdown, though it names a checkout that is gone', (t) => {
+  const { h, app, key, newKey, repair } = renamedRemote(t);
+  const store = fileStore(ledgerPaths(h));
+  const [from, to] = [store.backlog.repoLocation(key), store.backlog.repoLocation(newKey)];
+  writeFileSync(path.join(from, 'idea.md'), ledgerText({ slug: 'idea', main: path.join(h, 'repos', 'gone') }));
+  store.aliases.add(key, newKey);
+  mkdirSync(to, { recursive: true });
+  for (const file of ['idea.json', 'idea.md']) linkSync(path.join(from, file), path.join(to, file));
+  rmSync(path.join(from, 'idea.json'));
+
+  const again = repair(app, 'store', 'repair', '--remote', key);
+  assert.equal(again.status, 0, `${again.stdout}${again.stderr}`);
+  assert.deepEqual(existsSync(from) ? readdirSync(from) : [], []);
+  assert.deepEqual(readdirSync(to).sort(), ['idea.json', 'idea.md']);
+  assert.deepEqual(filed(h, newKey), { active: ['fix-login'], backlog: ['idea'], archive: ['2026-01-02-done-one'] });
+});
+
+test('store repair --remote leaves old Markdown that names a checkout that is gone when the record of its name under the new key is no move of it', (t) => {
+  const { h, app, key, newKey, repair } = renamedRemote(t);
+  const store = fileStore(ledgerPaths(h));
+  const gone = path.join(h, 'repos', 'gone');
+  writeFileSync(path.join(store.backlog.repoLocation(key), 'plan.md'), ledgerText({ slug: 'plan', main: gone }));
+  assert.ok(store.backlog.create(newKey, 'plan', ledgerText({ slug: 'plan', main: app })));
+
+  const ran = repair(app, 'store', 'repair', '--remote', key);
+  assert.equal(ran.status, 1, `${ran.stdout}${ran.stderr}`);
+  assert.ok(ran.stdout.includes(`left backlog plan: its main checkout ${gone} is not one any more`), ran.stdout);
+  assert.ok(existsSync(path.join(store.backlog.repoLocation(key), 'plan.md')));
+});
+
+test('store repair --remote run again with nothing left to move opens no store to write when the store has no commit to finish', (t) => {
+  const { h, app, key, repair } = renamedRemote(t);
+  asCli(t, h);
+  ok(repair(app, 'store', 'repair', '--remote', key));
+
+  const ran = repairWith(fileStore(ledgerPaths(h)), h, app, { remote: key }, { writable: () => assert.fail('the store was opened to write') });
+  assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
+  assert.ok(ran.stdout.includes(`Nothing is left under ${key} to move.`), ran.stdout);
+});
+
+test('git store: store repair --remote run again after a run that moved another machine’s record and stopped before its commit commits that move', (t) => {
+  const { h, app, key, repair } = worldOf(t, 'git');
+  start(repair, app, 'fix-login');
+  const store = openStore(ledgerPaths(h), 'git', { backgroundSync: false });
+  try {
+    store.active.update(key, 'fix-login', (text) => setLocationBullet(text, 'host', 'other-machine') ?? text);
+  } finally {
+    store.close?.();
+  }
+  const newKey = renameOrigin(h, app);
+  const { clone } = clonePaths(ledgerPaths(h));
+  const [from, to] = [key, newKey].map((each) => `active/${encodeURIComponent(each)}/fix-login.json`);
+  // As a run killed after the move and before its commit leaves the clone.
+  openStore(ledgerPaths(h), 'git', { backgroundSync: false }).aliases.add(key, newKey);
+  mkdirSync(path.dirname(path.join(clone, to)), { recursive: true });
+  renameSync(path.join(clone, from), path.join(clone, to));
+
+  const again = repair(app, 'store', 'repair', '--remote', key);
+  assert.equal(again.status, 0, `${again.stdout}${again.stderr}`);
+  const committed = git(h, clone, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n');
+  assert.ok(committed.includes(to) && !committed.includes(from), committed.join('\n'));
+  assert.ok(existsSync(path.join(clone, to)), 'the moved record is gone');
+  assert.equal(existsSync(path.join(clone, from)), false, 'the record is back under the old key');
+});
+
+test('git store: store repair --remote run again after a run whose removal git could not commit, as the old record is marked assume-unchanged, exits 1 and names it', (t) => {
+  const { h, app, key, repair } = worldOf(t, 'git');
+  start(repair, app, 'fix-login');
+  ok(repair(app, 'task', 'new', 'idea', '--goal', 'Later.'));
+  const newKey = renameOrigin(h, app);
+  const { clone } = clonePaths(ledgerPaths(h));
+  const from = `backlog/${encodeURIComponent(key)}/idea.json`;
+  git(h, clone, 'update-index', '--assume-unchanged', from);
+  const stopped = openStore(ledgerPaths(h), 'git', { backgroundSync: false });
+  stopped.aliases.add(key, newKey);
+  assert.ok(stopped.backlog.move(key, 'idea', newKey));
+
+  for (let run = 0; run < 2; run++) {
+    const again = repair(app, 'store', 'repair', '--remote', key);
+    assert.equal(again.status, 1, `run ${run}: ${again.stdout}${again.stderr}`);
+    assert.ok(again.stderr.includes(from), again.stderr);
+  }
+});
+
+test('store repair <slug> --to records the main checkout of its folder, though another --to pointed the task into another clone after this one read the record', (t) => {
+  const { h, app, key } = setup(t);
+  asCli(t, h);
+  const { worktree, branch } = start(forStorage(h), app, 'fix-login');
+  rmSync(worktree, { recursive: true, force: true });
+  const folder = worktreeAt(h, app, path.join(h, 'moved', 'fix-login'), branch);
+  const real = fileStore(ledgerPaths(h));
+  real.active.update(key, 'fix-login', (text) => setLocationBullet(text, 'main', app) ?? text);
+  const intoOtherClone = (text: string): string => {
+    const withMain = setLocationBullet(text, 'main', path.join(h, 'clones', 'app')) ?? text;
+    return setLocationBullet(withMain, 'worktree', path.join(h, 'clones', 'fix-login')) ?? withMain;
+  };
+  const racing: LedgerStore = {
+    ...real,
+    active: {
+      ...real.active,
+      update: (...args: Parameters<LedgerStore['active']['update']>) => {
+        real.active.update(key, 'fix-login', intoOtherClone);
+        return real.active.update(...args);
+      },
+    },
+  };
+
+  const ran = repairWith(real, h, app, { to: folder }, { slug: 'fix-login', writable: () => racing });
+  assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
+  const { location } = parseLedger(real.active.read(key, 'fix-login')?.text ?? '');
+  assert.deepEqual({ worktree: location.worktree, main: location.main }, { worktree: folder, main: app });
+});
+
+test('store repair --search finds nothing in a node_modules or .claude/worktrees/.build folder whose name on disk is in mixed case', (t) => {
+  const { h, app } = setup(t);
+  const repair = forStorage(h);
+  const { worktree, branch } = start(repair, app, 'fix-login');
+  rmSync(worktree, { recursive: true, force: true });
+  const [pkgs, lib] = [path.join(h, 'pkgs'), path.join(h, 'repos', 'lib')];
+  const modules = path.dirname(worktreeAt(h, app, path.join(pkgs, 'Node_Modules', 'pkg'), branch));
+  const builds = path.dirname(worktreeAt(h, app, path.join(lib, '.Claude', 'Worktrees', '.Build', 'x'), branch));
+
+  for (const root of [pkgs, lib, modules, builds]) {
+    const ran = repair(h, 'store', 'repair', '--search', root);
+    assert.equal(ran.status, 1, ran.stderr);
+    assert.doesNotMatch(ran.stdout, /found /, `${root} was searched:\n${ran.stdout}`);
+  }
+});
+
+test('store repair --remote --dry-run leaves a ledger whose hidden Markdown is a symbolic link, as the move does, also one that leads nowhere', (t) => {
+  const { h, app, key, repair } = renamedRemote(t);
+  const store = fileStore(ledgerPaths(h));
+  assert.ok(store.backlog.create(key, 'plan', ledgerText({ slug: 'plan', main: app })));
+  const folder = store.backlog.repoLocation(key);
+  const elsewhere = path.join(h, 'elsewhere.md');
+  writeFileSync(elsewhere, ledgerText({ slug: 'idea', main: app }));
+  symlinkSync(elsewhere, path.join(folder, 'idea.md'));
+  symlinkSync(path.join(h, 'nowhere.md'), path.join(folder, 'plan.md'));
+
+  for (const args of [['--dry-run'], []]) {
+    const ran = repair(app, 'store', 'repair', '--remote', key, ...args);
+    assert.equal(ran.status, 1, `${args.join(' ')}: ${ran.stdout}${ran.stderr}`);
+    for (const name of ['idea', 'plan']) assert.match(ran.stdout, new RegExp(`^left backlog ${name}: .*${name}\\.md is a symbolic link`, 'm'), `${args.join(' ')}: ${ran.stdout}${ran.stderr}`);
+  }
+});
+
+test('store repair --remote stops, moving nothing and recording no alias, when a repo folder of the old key cannot be read', (t) => {
+  const { h, app, key, newKey, repair } = renamedRemote(t);
+  const folder = fileStore(ledgerPaths(h)).active.repoLocation(key);
+  chmodSync(folder, 0o000);
+  try {
+    const ran = repair(app, 'store', 'repair', '--remote', key);
+    assert.notEqual(ran.status, 0, ran.stdout);
+    assert.ok(ran.stderr.includes(folder), ran.stderr);
+  } finally {
+    chmodSync(folder, 0o755);
+  }
+  assert.equal(fileStore(ledgerPaths(h)).aliases.read().get(key), undefined);
+  assert.deepEqual(filed(h, newKey), { active: [], backlog: [], archive: [] });
+});
+
+test('a repo folder of the store that cannot be read is passed over by ledger list and ledger show, so it stops no command of another repo', (t) => {
+  const { h, app } = setup(t);
+  const repair = forStorage(h);
+  start(repair, app, 'fix-login');
+  const other = fileStore(ledgerPaths(h)).active.repoLocation('github.com/someone/other');
+  mkdirSync(other, { recursive: true });
+  chmodSync(other, 0o000);
+  try {
+    assert.deepEqual(listed(repair, app).map(({ slug }) => slug), ['fix-login']);
+    assert.match(shown(repair, app, 'fix-login'), /fix-login/);
+  } finally {
+    chmodSync(other, 0o755);
+  }
+});
+
+test('tree depends keeps one dependency on a task named by both the old and the new key of a renamed remote', (t) => {
+  const { h, app, key } = setup(t);
+  const repair = forStorage(h);
+  ok(repair(app, 'task', 'new', 'build', '--goal', 'Build it.'));
+  ok(repair(app, 'task', 'new', 'ship', '--goal', 'Ship it.'));
+  renameOrigin(h, app);
+  ok(repair(app, 'store', 'repair', '--remote', key));
+  rmSync(key, { recursive: true, force: true });
+
+  ok(repair(app, 'tree', 'depends', 'ship', `build@${key}`, 'build'));
+  const line = shown(repair, app, 'ship').match(/depends on: (.*)/)?.[1] ?? assert.fail('ship depends on nothing');
+  assert.equal(line.split(', ').length, 1, line);
 });

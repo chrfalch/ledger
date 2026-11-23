@@ -97,7 +97,11 @@ each:
   next.
   A child task may live in another repo. The commands name it as
   `<slug>@<path>`, such as `part@../lib`, and `depends` also takes
-  `<slug>@<address>`, such as `api@github.com/acme/api`. When `ledger go`
+  `<slug>@<address>`, such as `api@github.com/acme/api`. A dependency keeps
+  the address it was written with. `dependencyTask` in `tools/ledger/tasks.ts`
+  finds the task under any key of its repo, so a dependency written before
+  `ledger store repair --remote` filed that repo under its new key, and the
+  old key became an alias, still names the task. When `ledger go`
   starts a backlog child of a backlog parent, it writes the main checkout of
   the clone the child started in on the child's line in the parent
   (`nameChildClone` in `tools/ledger/write.ts`).
@@ -254,7 +258,9 @@ reported, and the setting still switches.
 
 `migrateRepoIds` in `tools/ledger/migrate-repo-ids.ts` runs once for stores
 that filed ledgers under the main checkout's folder name. It moves each such
-ledger to its repo key with a plain rename on the same disk, and records the
+ledger to its repo key on the same disk, by a store move that links the file at
+the target and then removes it from the source (see
+[Data and storage](#data-and-storage)), and records the
 folder name as an alias only for tasks it moved. A ledger whose main checkout it
 cannot find, that lies on another disk, or whose target name is taken stays
 where it is. In git storage the moves are committed and pushed like any other
@@ -307,7 +313,7 @@ the move takes it or leaves it, with the reason. `pendingMoves` in
 collects the items. `ledger store migrate --pending` prints them, or with
 `--json` prints them as JSON. The list comes from the moves' own dry runs, so
 it follows their rules with no second copy of them. A dry run of `--repo-ids`
-asks the file store whether a rename would cross onto another disk
+asks the file store whether a move's link would cross onto another disk
 (`acrossDisks`), so such a ledger is listed as one to move by hand, as the run
 reports it. The list is still a preview: each move checks again when it runs,
 so it can leave a task the list showed as movable, for example one whose name
@@ -343,8 +349,17 @@ flags only and never prompts:
   command that fixes each, and exits 1 when it finds one.
 - `--search <folder...>` adds, for each missing task, the linked worktrees of
   its repo on its branch. It looks only in the named folders, 6 levels down,
-  and follows no symbolic link. It is the only command that searches the disk
-  for a task's folder.
+  and follows no symbolic link. It refuses a named folder whose path, part by
+  part as named, goes through a symbolic link, and names the folder the path
+  leads to, as searching nothing there would read as "no checkout". It checks
+  the parts before it drops any `..`: `/tmp/..` leads to `/private` on macOS,
+  not to `/`. It skips a `.git` or `node_modules` folder and a
+  `.claude/worktrees/.build` folder, also one it is given by name and any
+  folder it is given inside one, such as `/r/node_modules/pkg`, so such a
+  name finds nothing. It compares these names in any case, and reads a given
+  name as the folder is named on disk, so `Node_Modules` and
+  `.Claude/Worktrees/.Build` are skipped too. It is the only command that
+  searches the disk for a task's folder.
 - `<slug> --to <folder>` points the task at a new folder and runs
   `git worktree repair` there. It accepts an active or a lost task, and it
   removes a lost mark. It refuses a parked task, even one that is also marked
@@ -353,6 +368,24 @@ flags only and never prompts:
   aliases are resolved.
 - `<slug> --lost` marks the task lost. It refuses a parked task, and it
   refuses while the folder exists.
+- The checks of `--to` and `--lost` read the store first, so a refusal opens
+  nothing to write. Each write checks again in its update, under the record's
+  lock: `--lost` that the record names no folder that is there, and `--to`
+  that no other record names the folder. `--to` also records the main
+  checkout of the folder by the record as it reads it there, so a `--to` that
+  pointed the task into another clone of its repo in between cannot leave its
+  main checkout behind. A record's lock covers one record,
+  so each write of `ledger store repair` also holds
+  `~/.claude/ledger-repair.lock`: `--to` and `--lost` while they write,
+  `--remote` from before it lists the old key's ledgers to its last write, as
+  it plans its moves by what it lists. Of two `--to` runs that point two tasks at one folder, the
+  second sees the first's record and refuses. Of two `--remote` runs, the
+  second waits up to five seconds for the lock. When the first is done by
+  then, the second finds nothing left to move; otherwise it stops with
+  "Gave up waiting for the lock", moves nothing and exits 1. Without the lock
+  it would find each move gone and take back the alias the first recorded.
+  The lock is kept, however old, while the process that holds it runs, as a
+  `--remote` run may take longer than a minute. A dry run takes no lock. Other commands that set a task's folder take no such lock.
 - `--to` and `--lost` both refuse a task whose record names a host that is
   none of this machine's.
 - `--remote <old-key>` moves the active, backlog and archive tasks of the old
@@ -365,12 +398,61 @@ flags only and never prompts:
   refuses, moving nothing, when an alias of the old key files a live task
   whose slug the new key has: once re-pointed, the alias would hide one of the
   two. It also refuses, moving nothing, when this repo's key is itself an
-  alias of a third key, so no alias chain forms. Otherwise, on git storage, it
-  commits the moves; a failed commit exits 1 and writes no alias. When every task moved, it
-  records old → new as an alias and re-points each alias of the old key to the
-  new one. It also removes a new → old alias, so a rename back leaves no
-  cycle. All alias changes go through one `aliases.replace`. While a readable task is
-  left, it writes no alias.
+  alias of a third key, so no alias chain forms. It refuses before it writes
+  anything, also as a dry run, and exits 1 when the old key and this repo's
+  key are the same repository folder in the store (`sharesFolder`), as a key
+  and its URI encoding are in a file or git store, or two keys that differ
+  only in case on a disk that ignores case: the tasks are filed under the
+  new key already, and a move between them would remove them. A SQLite store
+  keeps each key apart, so it has no such check. It also moves evidence left
+  under the old key whose archive copy is under the new key already, as after
+  an evidence rename that failed or a run that stopped between the two; it
+  does so on a rerun that finds old → new recorded already, too. Evidence under the old key whose archive
+  copy is under neither key stays where it is, and keeps no alias from being
+  recorded. A repo folder of the old key that cannot be read stops the run
+  before anything moves, as its ledgers would pass for none; every other
+  command passes such a folder over, so it stops no other repo. A record under
+  the old key that cannot be read stays, and the run names it and exits 1; a folder in a repo folder, such as the evidence of an
+  archive copy whose name ends in `.md`, is no record. When the plan moves every
+  task, it records old → new as an alias, re-points each alias of the old key
+  to the new one, and removes a new → old alias, so a rename back leaves no
+  cycle. It writes these before the moves, in one `aliases.replace`. A run
+  that stops after the moves therefore leaves old → new, and a rerun finds
+  the key by it and finishes. A repo folder a move emptied but cannot remove,
+  as under a read-only folder, stays and fails no move. When a move fails, it
+  takes the aliases it recorded back in one more `aliases.replace`; an alias
+  recorded before the run stays, and the run says it kept it. A run that is
+  killed before that, or whose take-back fails, leaves the aliases while
+  ledgers stay under the old key; a rerun moves them. A file store move stopped
+  between its links and its removals (see [Data and storage](#data-and-storage))
+  leaves the task under both keys, as two links of one file; a rerun finishes
+  the move, also one that stopped between the record and the Markdown it
+  hides. Markdown such a run left under the old key, with no record beside
+  it, while a link of it is the Markdown the moved record hides under the new
+  key, is moved without a look at the main checkout it names: the run that
+  stopped judged the task by its record, and the checkout may be gone since.
+  The move then only removes it, under the move's locks. Markdown under the
+  old key that is no such link is judged as any other ledger, also when the
+  new key has a record of its name. On git storage it
+  commits the moves. A failed commit exits 1 and keeps the aliases, which are
+  never committed, also when a move failed too; the message says to fix the
+  problem and then run `ledger store sync`. A rerun that finds old → new
+  recorded already also commits the moves a run left uncommitted
+  (`commitPending`), as the run that recorded it may have been killed between
+  its moves and their commit. A move it commits is a ledger that HEAD has
+  under the old key, that is gone from there on disk, and that is under the
+  new key. These paths are the repair's own, so a moved record of another
+  machine is committed, not put back as `ledger store sync` would put it
+  back; anything else uncommitted is committed as sync commits it. It then
+  checks HEAD holds each of these paths as the disk does, so a removal git
+  left out, as of a file marked `assume-unchanged`, exits 1 with the sync
+  message, on every rerun until it is fixed. Only git storage has
+  `commitPending`, so on a file or SQLite store a rerun opens nothing to
+  write. A rerun with nothing left under
+  the old key prints "Nothing is left under <old-key> to move." and exits 0,
+  or exits 1 with the sync message when that commit fails. A key that has no task and no alias,
+  also before a SQLite store's database exists, gives "No task is filed under
+  <old-key>, so nothing was moved." and exits 1.
 - `--dry-run` with `--to`, `--lost` or `--remote` prints what would change and
   changes nothing. It runs the same checks, so it refuses, and exits 1,
   wherever the command itself would refuse.
@@ -746,9 +828,12 @@ The git store also keeps a clone lock, `~/.claude/ledger-data.lock`, and the
 last sync problem, `~/.claude/ledger-data.status.json`, outside the clone.
 
 The file store writes backlog and active ledgers atomically. It holds a
-lock file, `<target>.lock`, during each such write. `withLock` in `tools/ledger/lock.ts` waits
+lock file, `<target>.lock`, during each such write. `ledger store repair`
+`--to`, `--lost` and `--remote` also hold `~/.claude/ledger-repair.lock`, with
+any storage (see [The store](#the-store)). `withLock` in `tools/ledger/lock.ts` waits
 up to five seconds for a lock. It takes over a lock whose process is gone or
-that is older than one minute.
+that is older than one minute, except the clone lock and the repair lock,
+which it keeps while their process runs.
 
 Every ledger in the store is a task record: JSON with one field or list
 per part of the ledger (LLP 0001 D29). `tools/ledger/record.ts` defines it.
@@ -778,6 +863,39 @@ Markdown, in a conversion or a write, the new file keeps the Markdown's mode,
 and the store keeps the Markdown's birth time as `created` beside the record,
 as a new file's birth time cannot be set. The Markdown does not show
 `created`, so it is no field of the record: each later write carries it over.
+
+A file store move holds the locks of the ledger under both repos, the record's
+and the Markdown's, for the whole move. It takes them in the order of their
+paths, which puts a record before its Markdown, as every write does, so two
+moves, or a move and a write, wait for each other but never in a cycle, so
+never forever. A lock that stays taken past the five-second wait of
+`withLock` fails the command, which lets go of the locks it holds. Every write, create,
+removal and archive copy of that name takes the same lock, so none comes
+between the move's checks and its last step. The move never replaces a
+ledger, as a rename would, not even one a program that takes no lock made at
+the target. It links each file of the ledger, the record and any Markdown the
+record hides, at the target with `link(from, to)`, which fails with `EEXIST`
+on any entry there. Only once every link is there does it remove the files
+from the source with `unlink(from)`. So a move that stops between the two steps leaves the ledger
+under both repos, never under neither. The next move of that ledger finishes
+it: a file at the target that is a link of the one at the source (the same
+device and inode) counts as linked, and when every file left at the source
+is linked so, the move only removes them. A link onto another disk fails with
+`EXDEV` at once, with nothing changed, and the move is left to do by hand.
+A move between two keys whose repo folders are one folder, the same device
+and inode, gives false before it takes a lock, and `canMove` gives false for
+it: each file at the target is the one at the source, which would pass for a
+link of it, so the move would remove the ledger, and the two spellings of one
+lock file would make it wait on itself.
+When a name at the target is taken, it removes the links it made and the move
+gives false. A link it finds replaced since stays. A ledger kept as Markdown
+also counts as taken when a record of its name is at the target, which would
+hide it. A file of the ledger that is a symbolic link fails the move, with
+nothing changed, as a link to it could lead elsewhere from the target;
+`canMove` fails for it too, so a dry run says the same. An
+evidence folder still moves by rename, which can replace only an empty folder.
+A source repo folder the move leaves empty is removed when it can be; one that
+stays fails nothing.
 
 A store still reads a ledger kept as Markdown from before records: a
 `<name>.md` file, or a row of the SQLite table `ledgers`. A write replaces

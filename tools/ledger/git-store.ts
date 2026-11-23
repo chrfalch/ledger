@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process';
 import { lstatSync } from 'node:fs';
 import path from 'node:path';
-import { checkCommitted, cloneEnv, cloneGit, clonePaths, commitChanges, otherOwner, recordProblem, removeLegacyCopies, repairHook, setUpClone, SyncProblem, upgradeFormat, withCloneLock } from './clone.js';
+import { checkCommitted, cloneEnv, cloneGit, clonePaths, commitChanges, must, nulSeparated, otherOwner, recordProblem, refExists, removeLegacyCopies, repairHook, setUpClone, SyncProblem, upgradeFormat, withCloneLock } from './clone.js';
 import { fail, Failure } from './failure.js';
 import { fileStoreAt, keptCreated } from './file-store.js';
-import { folderEntries } from './files.js';
+import { folderEntries, isTaken } from './files.js';
 import { ledgerBin, type LedgerPaths } from './paths.js';
 import { ownHosts, validHost } from './settings.js';
 import { parseRecord, recordJson } from './record.js';
@@ -134,6 +134,19 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
     const file = ledgerFiles(place, repo, name)[0];
     return [file, recordJson(parseRecord(text), keptCreated(path.join(clone, file)))];
   };
+  /**
+   * The clone paths of each ledger a move from `from` to `to` made and did not commit: in HEAD under `from`, gone from
+   * there on disk, and there under `to`.
+   */
+  const uncommittedMoves = (from: string, to: string): string[] => {
+    if (!refExists(clone, 'HEAD')) return [];
+    return (['backlog', 'active', 'archive'] as const).flatMap((place) => {
+      const folder = path.relative(clone, files[place].repoLocation(from));
+      const inHead = nulSeparated(must(cloneGit(clone, ['ls-tree', '-r', '-z', '--name-only', 'HEAD', '--', folder], { env: { GIT_LITERAL_PATHSPECS: '1' } })));
+      const names = new Set(inHead.filter((file) => !isTaken(path.join(clone, file))).map((file) => path.basename(file).replace(/\.(md|json)$/, '')));
+      return [...names].filter((name) => isTaken(files[place].location(to, name))).flatMap((name) => [...ledgerFiles(place, from, name), ...ledgerFiles(place, to, name)]);
+    });
+  };
   const commit = (expected: WrittenLedger[] = []): void => {
     if (!wrote && expected.length === 0) return;
     const texts = new Map(expected.map(keptRecord));
@@ -167,7 +180,13 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
     },
     oldTaskList: files.oldTaskList,
     aliases: files.aliases,
+    sharesFolder: files.sharesFolder,
     commit,
+    commitPending: (from, to) =>
+      withCloneLock(clone, () => {
+        for (const file of uncommittedMoves(from, to)) written.add(file);
+        commitWritten();
+      }),
     close: () => {
       if (readOnly) return;
       try {

@@ -1,15 +1,16 @@
 // @ref LLP 0001#4-storage — D9: only ledger store repair looks on disk for a task's folder, in folders the operator names; D10: a renamed remote.
-import { realpathSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { setLocationBullet, setLostMark } from './edit.js';
 import { fail } from './failure.js';
 import { folderEntries, isFolder } from './files.js';
 import { lostText, parseLedger } from './format.js';
 import { checkoutRoot, currentBranch, mainCheckout, repairWorktree } from './git.js';
-import { moveLedger, namedMain, places, shown, type Place } from './migrate-repo-ids.js';
+import { withLock } from './lock.js';
+import { messageOf, moveLedger, namedMain, places, shown, type Place } from './migrate-repo-ids.js';
 import { samePath } from './paths.js';
 import { isRepoKey, repoKey, repoLabel } from './repo-key.js';
-import { keyAndAliases, SharedWorktree, type Alias, type LedgerStore } from './store.js';
+import { keyAndAliases, readable, SharedWorktree, type Alias, type LedgerStore } from './store.js';
 import { activeTasks, taskRef, UNKNOWN_HOST, type Task } from './tasks.js';
 import { heading, plural } from './views.js';
 import { otherMachineRecord, readLedger, shellWord, today, updateActive, type Context } from './write.js';
@@ -71,7 +72,8 @@ function canonicalPath(folder: string): string {
 
 /**
  * Each checkout in `roots` and in their folders down to SEARCH_DEPTH, with its branch, by its canonical path and once,
- * as a root may hold another. No symbolic link is followed.
+ * as a root may hold another. No symbolic link is followed, and a root is skipped when it or a folder above it would be
+ * skipped in the search, by the names they have on disk.
  */
 function checkoutsIn(roots: string[]): Checkout[] {
   const found = new Map<string, Checkout>();
@@ -85,13 +87,22 @@ function checkoutsIn(roots: string[]): Checkout[] {
       if (entry.isDirectory() && !isSkipped(child)) visit(child, depth + 1);
     }
   };
-  for (const root of roots) visit(root, 0);
+  for (const root of roots) if (!isWithinSkipped(canonicalPath(root))) visit(root, 0);
   return [...found.values()];
 }
 
-const BUILD_FOLDERS = path.join('.claude', 'worktrees', '.build');
+const BUILD_FOLDERS = path.sep + path.join('.claude', 'worktrees', '.build');
 
-const isSkipped = (folder: string): boolean => ['.git', 'node_modules'].includes(path.basename(folder)) || folder.endsWith(path.sep + BUILD_FOLDERS);
+/** In any case, as a disk that ignores case may hold Node_Modules, and one that does not is searched the same way. */
+const isSkipped = (folder: string): boolean => {
+  const lower = folder.toLowerCase();
+  return ['.git', 'node_modules'].includes(path.basename(lower)) || lower.endsWith(BUILD_FOLDERS);
+};
+
+const isWithinSkipped = (folder: string): boolean => {
+  const parent = path.dirname(folder);
+  return isSkipped(folder) || (parent !== folder && isWithinSkipped(parent));
+};
 
 const resolved = (aliases: ReadonlyMap<string, string>, key: string): string => aliases.get(key) ?? key;
 
@@ -109,6 +120,20 @@ function otherHolder(store: LedgerStore, folder: string, { repo, name }: Task) {
   const holder = store.active.byWorktree(folder);
   return holder !== undefined && (holder.repo !== repo || holder.slug !== name) ? holder : undefined;
 }
+
+/** Fails when the active record of a task other than `task` names `folder`. */
+function refuseTaken(store: LedgerStore, folder: string, task: Task): void {
+  const holder = otherHolder(store, folder, task);
+  if (holder !== undefined) fail(`${holder.slug} of ${shown(holder.repo)} names ${folder} as its folder already.`);
+}
+
+/**
+ * Runs `write` while no other ledger store repair writes: --to, --lost and --remote each hold this lock. A record's lock
+ * covers one record, so two --to runs that point two tasks at one folder would both find it free, and two --remote runs
+ * would plan the same moves; under this lock the second finds what the first wrote. Kept while its process runs, as a
+ * --remote run with many moves and a store commit may hold it past the minute after which a lock counts as left over.
+ */
+const withRepairLock = <T>({ paths }: Context, write: () => T): T => withLock(path.join(paths.home, '.claude', 'ledger-repair'), write, { keepWhileRunning: true });
 
 /** Whether no active record but `task`'s names `folder`. A folder two records name counts as taken, so the report goes on. */
 function isUnclaimed(store: LedgerStore, folder: string, task: Task): boolean {
@@ -134,9 +159,18 @@ function refOf({ store, cwd }: Context, { slug, main, repo }: Task, found: reado
 }
 
 function searchRoots(cwd: string, search: string[] | undefined): string[] {
-  const roots = (search ?? []).map((folder) => path.resolve(cwd, folder));
-  for (const root of roots) if (!isFolder(root)) fail(`${root} is no folder, so it was not searched.`);
-  return roots;
+  return (search ?? []).map((folder) => {
+    // Each part as named, not resolved: path.resolve drops a `..` by the text, where the disk goes up from the folder a
+    // symbolic link before it leads to, so /tmp/.. is / to path.resolve and /private on macOS.
+    const named = path.isAbsolute(folder) ? folder : `${cwd}${path.sep}${folder}`;
+    if (!isFolder(named)) fail(`${named} is no folder, so it was not searched.`);
+    const parts = named.split(path.sep);
+    const isLink = (end: number): boolean => lstatSync(parts.slice(0, end + 1).join(path.sep) || path.sep).isSymbolicLink();
+    if (parts.some((_, end) => isLink(end))) {
+      fail(`${named} goes through a symbolic link, and the search follows none, so it was not searched. Name the folder it leads to: ${realpathSync.native(named)}`);
+    }
+    return path.resolve(named);
+  });
 }
 
 function report(context: Context, search: string[] | undefined, print: Print): number {
@@ -211,24 +245,29 @@ function pointTo(context: Context, writable: () => LedgerStore, name: string, to
   if (samePath(main, folder)) fail(`${folder} is the main checkout of its repo, and an active task lives in a linked worktree.`);
   const key = repoKey(main);
   if (!sameRepo(context.store.aliases.read(), key, task.repo)) fail(`${folder} is a checkout of ${shown(key)}, not of ${shown(task.repo)}, the repo of ${task.slug}.`);
-  const holder = otherHolder(context.store, folder, task);
-  if (holder !== undefined) fail(`${holder.slug} of ${shown(holder.repo)} names ${folder} as its folder already.`);
+  refuseTaken(context.store, folder, task);
   const branch = task.ledger.location.branch;
   const current = currentBranch(folder);
   if (current !== branch) fail(`${folder} is on ${current === undefined ? 'no branch' : `the branch ${current}`}, not on ${task.slug}'s branch ${branch ?? '(none recorded)'}.`);
   // The recorded main, not task.main, which may be inferred from the old folder: the next rename is found by the record.
-  const recordedMain = task.ledger.location.main;
-  const movedMain = recordedMain === undefined || !samePath(recordedMain, main) ? main : undefined;
+  let recordedMain = task.ledger.location.main;
+  const namesMain = (recorded: string | undefined): boolean => recorded !== undefined && samePath(recorded, main);
   const would = (done: string, planned: string): string => (dryRun ? `Would ${planned}` : done);
 
   if (!dryRun) {
-    // The lost mark names the old folder, so it goes before the worktree changes.
+    const store = writable();
+    // Checked again under the locks: the check above read the store before another repair may have written, such as
+    // a --to that pointed the task into another clone of its repo, whose main checkout this one replaces.
     const repoint = (text: string): string => {
+      refuseTaken(store, folder, task);
+      recordedMain = parseLedger(text).location.main;
+      // The lost mark names the old folder, so it goes before the worktree changes.
       const found = setLostMark(text, undefined) ?? text;
-      return withBullet(movedMain === undefined ? found : withBullet(found, 'main', movedMain), 'worktree', folder);
+      return withBullet(namesMain(recordedMain) ? found : withBullet(found, 'main', main), 'worktree', folder);
     };
-    updateActive({ ...context, store: writable() }, task, repoint);
+    withRepairLock(context, () => updateActive({ ...context, store }, task, repoint));
   }
+  const movedMain = namesMain(recordedMain) ? undefined : main;
   const lines = [
     `${would('Pointed', 'point')} ${task.slug} at ${folder}; it named ${task.worktree ?? 'no folder'}.`,
     ...(movedMain === undefined ? [] : [`${would('Recorded', 'record')} its main checkout ${movedMain}${recordedMain === undefined ? '' : `; it was ${recordedMain}`}.`]),
@@ -246,26 +285,43 @@ function markLost(context: Context, writable: () => LedgerStore, name: string, d
   const task = activeNamed(context, name);
   // A parked task goes back to active only; --to, which removes a lost mark, refuses it.
   if (task.ledger.parked !== undefined) fail(`${task.slug} is parked, so it was not marked lost: --lost marks only an active task.`);
+  const refuseThere = (worktree: string | undefined): void => {
+    if (worktree !== undefined && isFolder(worktree)) {
+      fail(`The folder of ${task.slug}, ${worktree}, is there, so it is not lost. If the task moved, point it at its new folder: ledger store repair ${refOf(context, task)} --to <folder>`);
+    }
+  };
   const { worktree, lost } = task.ledger.location;
-  if (worktree !== undefined && isFolder(worktree)) {
-    fail(`The folder of ${task.slug}, ${worktree}, is there, so it is not lost. If the task moved, point it at its new folder: ledger store repair ${refOf(context, task)} --to <folder>`);
-  }
+  refuseThere(worktree);
   if (lost !== undefined) return print(`${task.slug} is lost already, since ${lost.date}.`);
   const mark = { date: today() };
   const line = lostText(mark, worktree);
-  if (!dryRun) updateActive({ ...context, store: writable() }, task, (text) => setLostMark(text, mark) ?? text);
+  // Checked again on the record as it is under its lock, which a --to may have pointed at a folder since.
+  const markLostNow = (text: string): string => {
+    refuseThere(parseLedger(text).location.worktree);
+    return setLostMark(text, mark) ?? text;
+  };
+  if (!dryRun) withRepairLock(context, () => updateActive({ ...context, store: writable() }, task, markLostNow));
   print(`${dryRun ? 'Would mark' : 'Marked'} ${task.slug} lost: ${line}.`);
 }
 
 /** A ledger's slug as findTasks sees it: its title's, else its store name. */
 const slugOf = ({ name, text }: { name: string; text: string }): string => parseLedger(text).slug ?? name;
 
-/** `ledger store repair --remote <old-key>`: as ledger store migrate --repo-ids, it moves only what is sure. Gives how many ledgers it left. */
-function refileRemote({ store, cwd }: Context, writable: () => LedgerStore, old: string, dryRun: boolean, print: Print): number {
+/** The key of the repo that holds `cwd`, to file the tasks of `old` under; it fails unless `old` is another repo key. */
+function keyToFileUnder(cwd: string, old: string): string {
   const main = mainCheckout(cwd) ?? fail(`${cwd} is not inside a git repository. Run this in a checkout of the repo whose remote was renamed.`);
   const key = repoKey(main);
   if (!isRepoKey(old)) fail(`${old} is no repo key.`);
   if (old === key) fail(`${old} is the key of this repo now. Name the key it had before.`);
+  return key;
+}
+
+const nothingFiledUnder = (old: string): never => fail(`No task is filed under ${old}, so nothing was moved.`);
+
+/** `ledger store repair --remote <old-key>`: as ledger store migrate --repo-ids, it moves only what is sure. Gives how many ledgers it left. */
+function refileRemote({ store, cwd }: Context, writable: () => LedgerStore, old: string, dryRun: boolean, print: Print): number {
+  const key = keyToFileUnder(cwd, old);
+  if (store.sharesFolder?.(old, key) === true) fail(`${old} and ${key}, the key of this repo, are the same repository folder in the store, so its tasks are filed under ${key} already. Nothing was changed.`);
   const problem = store.aliases.problem();
   if (problem !== undefined) fail(`${problem} So nothing was moved.`);
   const aliases = store.aliases.read();
@@ -277,9 +333,15 @@ function refileRemote({ store, cwd }: Context, writable: () => LedgerStore, old:
     fail(`${key}, the key of this repo, is an alias of ${shown(third)} already: filing ${old} under it would chain two aliases, so nothing was moved. If this repo was renamed back from ${third}, run ledger store repair --remote ${shellWord(third)} first.`);
   }
   const ledgers = places.flatMap((place) => store[place].list(old).map(({ name, text }) => ({ place, name, text })));
-  if (ledgers.length === 0 && saved === undefined) fail(`No task is filed under ${old}, so nothing was moved.`);
+  const unreadable = places.flatMap((place) => store[place].unreadable(old).map((name) => ({ place, name })));
+  // Evidence whose archive copy moved to `key` without it, as when its rename failed. Other evidence with no copy stays.
+  const strays = store.archive.orphanEvidence().flatMap(({ repo, name }) => (repo === old ? (readable(() => store.archive.read(key, name)) ?? []) : []));
+  if (ledgers.length + unreadable.length + strays.length === 0 && saved === undefined) nothingFiledUnder(old);
+  // A ledger a run that stopped left under both keys is the one under old, which its move finishes.
+  const halfMoved = (place: 'backlog' | 'active', each: string, name: string): boolean => each === key && store[place].movedHalfway?.(old, name, key) === true;
   // findTasks hides a backlog task behind an active one of the same slug, so a slug in either place takes it in both.
-  const liveSlugsOf = (each: string): string[] => [...store.backlog.list(each), ...store.active.list(each)].map(slugOf);
+  const liveSlugsOf = (each: string): string[] =>
+    (['backlog', 'active'] as const).flatMap((place) => store[place].list(each).flatMap((ledger) => (halfMoved(place, each, ledger.name) ? [] : [slugOf(ledger)])));
   const liveSlugs = new Set(keyAndAliases(aliases, key).filter((each) => each !== old).flatMap(liveSlugsOf));
   const pointing = [...aliases].flatMap(([alias, target]) => (target === old && alias !== key ? [alias] : []));
   // The tasks of an alias stay filed under it, so a clash cannot be left under old as a move is: it refuses them all.
@@ -287,8 +349,15 @@ function refileRemote({ store, cwd }: Context, writable: () => LedgerStore, old:
   if (clashes.length > 0) {
     fail(`${shown(key)} has a live task with the slug of ${clashes.join(', ')}: re-pointing the aliases of ${old} would hide one task of each slug, so nothing was moved. Retire or rename one of each, then run this again.`);
   }
+  /**
+   * Markdown a run left under old when it stopped between removing the record and the Markdown it hid: a link of the
+   * Markdown its record hides under key. That run judged the record, so the move only removes it.
+   */
+  const leftByMove = (place: Place, name: string): boolean =>
+    store[place].markdownText?.(old, name) !== undefined && store[place].movedHalfway?.(old, name, key) === true && store[place].hiddenMarkdown?.(key).includes(name) === true;
   /** Why the ledger stays under `old`, decided before anything moves; the store's own checks come at the move. */
   const conflict = (place: Place, ledger: { name: string; text: string }): string | undefined => {
+    if (leftByMove(place, ledger.name)) return undefined;
     const main = namedMain(ledger.text);
     // As in ledger store migrate --repo-ids, an alias old → key already says where a ledger that names no main belongs.
     const now = main === undefined ? saved : keyNow(main);
@@ -298,39 +367,53 @@ function refileRemote({ store, cwd }: Context, writable: () => LedgerStore, old:
     return place !== 'archive' && liveSlugs.has(slug) ? `${shown(key)} already has ${slug}` : undefined;
   };
   // A move the read store already refuses, as a taken archive name, must not open the store to write.
-  const plan = ledgers.map((ledger) => ({ ...ledger, why: conflict(ledger.place, ledger) ?? moveLedger(store, ledger.place, { old, name: ledger.name, to: key }, true) }));
+  const planOf = (place: Place, name: string, why: string | undefined) => ({ place, name, why: why ?? moveLedger(store, place, { old, name, to: key }, true) });
+  const plan = [
+    ...ledgers.map((ledger) => ({ ...planOf(ledger.place, ledger.name, conflict(ledger.place, ledger)), what: `${ledger.place} ${ledger.name}` })),
+    ...unreadable.map(({ place, name }) => ({ place, name, what: `${place} ${name}`, why: `its record ${store[place].location(old, name)} cannot be read; fix or remove it` })),
+    ...strays.map((copy) => ({ ...planOf('archive', copy.name, conflict('archive', copy)), what: `the evidence of archive ${copy.name}` })),
+  ];
+  // A repo renamed back has key → old from the first rename; keeping it beside old → key would make a cycle.
+  const renamedBack = aliases.get(key) === old;
+  const removed: Alias[] = [...pointing.map((alias): Alias => [alias, old]), ...(renamedBack ? [[key, old] as const] : [])];
+  const added: Alias[] = [...(saved === undefined ? [[old, key] as const] : []), ...pointing.map((alias): Alias => [alias, key])];
+  // Before the moves, so a run that stops after them leaves the alias for a rerun to find; taken back when a ledger
+  // stays, unless the commit fails.
+  const aliasesFirst = !dryRun && removed.length + added.length > 0 && plan.every(({ why }) => why === undefined);
 
   print(`Move the tasks of ${shown(old)} to ${shown(key)}${dryRun ? ' · dry run, nothing changed' : ''}`);
+  if (plan.length === 0) print(`Nothing is left under ${old} to move.`);
   const act = (done: string, planned: string): string => (dryRun ? `would ${planned}` : done);
   let writer: LedgerStore | undefined;
   const target = (): LedgerStore => (dryRun ? store : (writer ??= writable()));
   let [moved, left] = [0, 0];
-  for (const { place, name, why: kept } of plan) {
+  if (aliasesFirst) target().aliases.replace(removed, added);
+  for (const { place, name, what, why: kept } of plan) {
     const why = kept ?? moveLedger(target(), place, { old, name, to: key }, dryRun);
     if (why === undefined) moved++;
     else left++;
-    print(why === undefined ? `${act('moved', 'move')} ${place} ${name}` : `left ${place} ${name}: ${why}`);
+    print(why === undefined ? `${act('moved', 'move')} ${what}` : `left ${what}: ${why}`);
   }
   try {
     writer?.commit?.();
+    // The run that recorded the alias may have stopped between its moves and their commit, which no plan shows.
+    if (!dryRun && saved !== undefined && store.commitPending !== undefined) target().commitPending?.(old, key);
   } catch (error) {
-    const why = error instanceof Error ? error.message : String(error);
-    fail(`The store commit failed, so no alias was recorded, and the tasks moved from ${old} to ${key} are on this machine only; other machines still find them under ${old}. ${why}`);
+    // An alias is never committed, so it stays: once the problem is fixed, the next sync commits the moves.
+    const alias = aliasesFirst || saved !== undefined ? ` ${old} is recorded as an alias of ${shown(key)} here.` : '';
+    fail(`The store commit failed, so the tasks moved from ${old} to ${key} are on this machine only; other machines still find them under ${old}.${alias} Fix the problem below, then run ledger store sync.\n${messageOf(error)}`);
   }
   if (left > 0) {
+    if (aliasesFirst) target().aliases.replace(added, removed);
     const repoints = pointing.length === 0 ? '' : `, and left ${plural(pointing.length, 'alias', 'aliases')} of it as ${pointing.length === 1 ? 'it is' : 'they are'}`;
-    print(`kept no alias for ${old}${repoints}: ${plural(left, 'ledger')} ${left === 1 ? 'is' : 'are'} still filed under it. Move or retire ${left === 1 ? 'it' : 'them'}, then run this again.`);
+    const alias = saved === undefined ? `kept no alias for ${old}` : `kept the alias ${old} of ${shown(key)}, recorded before`;
+    print(`${alias}${repoints}: ${plural(left, 'ledger')} ${left === 1 ? 'is' : 'are'} still filed under it. Move or retire ${left === 1 ? 'it' : 'them'}, then run this again.`);
   } else {
-    // A repo renamed back has key → old from the first rename; keeping it beside old → key would make a cycle.
-    const renamedBack = aliases.get(key) === old;
-    const removed: Alias[] = [...pointing.map((alias): Alias => [alias, old]), ...(renamedBack ? [[key, old] as const] : [])];
-    const added: Alias[] = [...(saved === undefined ? [[old, key] as const] : []), ...pointing.map((alias): Alias => [alias, key])];
-    if (!dryRun && removed.length + added.length > 0) target().aliases.replace(removed, added);
     if (saved === undefined) print(`${act('recorded', 'record')} ${old} as an alias of ${shown(key)}`);
     if (renamedBack) print(`${act('removed', 'remove')} the alias ${key} of ${shown(old)}, as ${key} is the key of this repo again`);
     for (const alias of pointing) print(`${act('re-pointed', 're-point')} the alias ${alias} from ${old} to ${shown(key)}`);
   }
-  print(`${dryRun ? 'Would move' : 'Moved'} ${plural(moved, 'ledger')}; ${dryRun ? 'would leave' : 'left'} ${left} as ${left === 1 ? 'it is' : 'they are'}.`);
+  if (plan.length > 0) print(`${dryRun ? 'Would move' : 'Moved'} ${plural(moved, 'ledger')}; ${dryRun ? 'would leave' : 'left'} ${left} as ${left === 1 ? 'it is' : 'they are'}.`);
   return left;
 }
 
@@ -343,7 +426,11 @@ export function repairStore(context: RepairContext, slug: string | undefined, { 
   if (dryRun && to === undefined && !lost && remote === undefined) fail('--dry-run goes with --to, --lost or --remote; the report alone changes nothing.');
   const { paths, cwd, store, writable } = context;
   if (store === undefined) {
-    if (slug !== undefined || remote !== undefined) fail('The store holds no task yet, so nothing was changed.');
+    if (remote !== undefined) {
+      keyToFileUnder(cwd, remote);
+      nothingFiledUnder(remote);
+    }
+    if (slug !== undefined) fail('The store holds no task yet, so nothing was changed.');
     searchRoots(cwd, search);
     print('No problems found.');
     return 0;
@@ -351,6 +438,10 @@ export function repairStore(context: RepairContext, slug: string | undefined, { 
   const reading: Context = { paths, cwd, store };
   if (slug !== undefined && to !== undefined) return (pointTo(reading, writable, slug, to, dryRun, print), 0);
   if (slug !== undefined) return (markLost(reading, writable, slug, dryRun, print), 0);
-  if (remote !== undefined) return refileRemote(reading, writable, remote, dryRun, print);
+  if (remote !== undefined) {
+    const refile = (): number => refileRemote(reading, writable, remote, dryRun, print);
+    // Before the old key's ledgers are listed, as a run plans its moves by what it lists.
+    return dryRun ? refile() : withRepairLock(reading, refile);
+  }
   return report(reading, search, print);
 }

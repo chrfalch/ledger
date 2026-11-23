@@ -1,4 +1,4 @@
-import { cpSync, lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, utimesSync } from 'node:fs';
+import { cpSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, utimesSync, type Dirent } from 'node:fs';
 import path from 'node:path';
 import { fail } from './failure.js';
 import { createFile, folderEntries, holdsAnything, isEntryName, isFolder, isReadableFile, isTaken, moveAside, putBack, readText, readTimedText, sameTree, treeEntries, writeAtomic, type TimedText } from './files.js';
@@ -61,8 +61,8 @@ function into(folder: string, move: () => boolean): boolean {
 function leaving(folder: string, moved: boolean): boolean {
   try {
     if (moved) rmdirSync(folder);
-  } catch (error) {
-    if (!['ENOTEMPTY', 'EEXIST', 'ENOENT', 'ENOTDIR'].includes(code(error) ?? '')) throw error;
+  } catch {
+    // The ledger moved all the same: a folder that stays, as one that is not empty or sits in a read-only folder, holds none.
   }
   return moved;
 }
@@ -109,6 +109,26 @@ function markdownToReplace(file: string): (TimedText & { created: string; mode: 
 const withLedgerLocks = <T>({ record, markdown }: { record: string; markdown: string }, work: () => T): T => withLock(record, () => withLock(markdown, work));
 
 /**
+ * Runs `work` holding the lock of each of `files`, in the order of their paths, which every caller keeps: a ledger's
+ * record comes before its Markdown, as in withLedgerLocks. Two moves, or a move and a write, wait for each other, and
+ * never in a cycle; a lock that stays taken past the wait of withLock fails the command, which lets go of the others.
+ */
+const withLocks = <T>(files: string[], work: () => T): T => [...new Set(files)].sort(byCodeUnit).reduceRight<() => T>((inner, file) => () => withLock(file, inner), work)();
+
+/**
+ * The entries of a repo folder, none when there is none; it fails for one that cannot be read, whose ledgers would pass
+ * for none. Only for `unreadable`: elsewhere such a folder is passed over, so it stops no command of another repo.
+ */
+function readableEntries(folder: string): Dirent[] {
+  try {
+    return readdirSync(folder, { withFileTypes: true });
+  } catch (error) {
+    if (code(error) === 'ENOENT' || code(error) === 'ENOTDIR') return [];
+    return fail(`${folder} cannot be read, so the ledgers in it are not known: ${(error as Error).message}`);
+  }
+}
+
+/**
  * A collection of ledger files, and the two files a ledger may be: its record, and its Markdown from before records,
  * which the record hides while both are there.
  */
@@ -142,9 +162,12 @@ function collection(root: string, legacyMarkdown = true): FileCollection {
     const { record, markdown } = files(repo, name);
     return legacyMarkdown && isTaken(record) && isTaken(markdown);
   };
-  // As before records, by <name>.md: fix-login comes before fix.
-  const names = (repo: string): string[] =>
-    [...new Set(folderEntries(repoLocation(repo)).flatMap(({ name }) => ledgerName(name, legacyMarkdown) ?? []))].sort((a, b) => byCodeUnit(`${a}${MARKDOWN}`, `${b}${MARKDOWN}`));
+  // As before records, by <name>.md: fix-login comes before fix. A folder is no ledger, such as the evidence of an
+  // archive copy whose name ends in .md.
+  const names = (repo: string, entries = folderEntries): string[] => {
+    const files = entries(repoLocation(repo)).filter((entry) => !entry.isDirectory());
+    return [...new Set(files.flatMap(({ name }) => ledgerName(name, legacyMarkdown) ?? []))].sort((a, b) => byCodeUnit(`${a}${MARKDOWN}`, `${b}${MARKDOWN}`));
+  };
   return {
     location,
     repoLocation,
@@ -157,6 +180,7 @@ function collection(root: string, legacyMarkdown = true): FileCollection {
         .map(repoOf)
         .sort(byCodeUnit),
     list: (repo) => names(repo).flatMap((name) => readable(() => read(repo, name)) ?? []),
+    unreadable: (repo) => names(repo, readableEntries).filter((name) => readable(() => read(repo, name)) === undefined),
     read,
     has: (repo, name) => isReadableFile(location(repo, name)),
     setModified: (repo, name, mtimeMs) => {
@@ -192,8 +216,11 @@ function collection(root: string, legacyMarkdown = true): FileCollection {
  */
 export type FileRoots = { backlog: string; active: string; archive: string; evidence: string; registry: string; aliases: string };
 
-/** A move between repo folders is a rename on one disk; `rename` and `device` are for tests, to act out a folder on another disk. */
-export type FileStoreOptions = { rename?: (from: string, to: string) => void; device?: (file: string) => number };
+/**
+ * A move between repo folders, on one disk, links a ledger file at the target and then removes it from the source, and
+ * renames an evidence folder. `link`, `rename` and `device` are for tests, to act out a folder on another disk.
+ */
+export type FileStoreOptions = { link?: (existing: string, to: string) => void; rename?: (from: string, to: string) => void; device?: (file: string) => number };
 
 /**
  * The ledger store as files under ~/.claude, in the layout the ledger plugin and the old scripts read: evidence sits next
@@ -210,7 +237,7 @@ export function fileStore({ home }: LedgerPaths, options: FileStoreOptions = {})
  * The ledger store as files under `roots`. A backlog write over a ledger that is a symbolic link replaces the link with
  * a file; the file it pointed to keeps its old text.
  */
-export function fileStoreAt(roots: FileRoots, { rename = renameSync, device = (file) => statSync(file).dev }: FileStoreOptions = {}): LedgerStore {
+export function fileStoreAt(roots: FileRoots, { link = linkSync, rename = renameSync, device = (file) => statSync(file).dev }: FileStoreOptions = {}): LedgerStore {
   const archive = collection(roots.archive);
   const evidenceRoot = collection(roots.evidence);
   /** The disk of `folder`, else of the nearest folder above it that exists, where a move makes the missing ones. */
@@ -219,6 +246,22 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync, device = (f
   const filesOf = (ledgers: FileCollection, repo: string, name: string, legacyMarkdown = true): string[] => {
     const { record, markdown } = ledgers.files(repo, name);
     return legacyMarkdown ? [record, markdown] : [record];
+  };
+  /** Fails when a file of the ledger is a symbolic link, whose link at another repo could lead elsewhere from there. */
+  const refuseSymbolic = (ledgers: FileCollection, repo: string, name: string, legacyMarkdown = true): void => {
+    const symbolic = filesOf(ledgers, repo, name, legacyMarkdown).find((file) => lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink());
+    if (symbolic !== undefined) fail(`${symbolic} is a symbolic link, so ${name} cannot be moved. Replace it with the file it leads to, then move it again.`);
+  };
+  /**
+   * Whether a move of the ledger to `to` stopped between linking its files there and removing them from `repo`: each
+   * file at `to` is a link of the one under `repo`, or each file left under `repo` is, as when it stopped between its
+   * removals. Anything else at `to` is another ledger.
+   */
+  const movedHalfway = (ledgers: FileCollection, repo: string, name: string, to: string, legacyMarkdown = true): boolean => {
+    const [from, target] = [filesOf(ledgers, repo, name, legacyMarkdown), filesOf(ledgers, to, name, legacyMarkdown)];
+    const linked = (index: number): boolean => linkOf(from[index], target[index]) !== undefined;
+    const [there, left] = [target, from].map((files) => files.flatMap((file, index) => (isTaken(file) ? [index] : [])));
+    return there.length > 0 && left.length > 0 && (there.every(linked) || left.every(linked));
   };
   const { registry, aliases } = roots;
   const damaged = `${aliases} is not a JSON object of repo aliases`;
@@ -252,11 +295,13 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync, device = (f
    */
   const archiveMove = (repo: string, name: string, to: string): 'copy' | 'evidence' | undefined => {
     if (isTaken(evidenceOf(to, name))) return undefined;
-    if (!isTaken(archive.location(to, name))) return 'copy';
+    if (!isTaken(archive.location(to, name)) || movedHalfway(archive, repo, name, to)) return 'copy';
     return !isTaken(archive.location(repo, name)) && isTaken(evidenceOf(repo, name)) ? 'evidence' : undefined;
   };
   const archiveCanMove = (repo: string, name: string, to: string): boolean => {
+    if (oneFolder(archive, repo, to) || oneFolder(evidenceRoot, repo, to)) return false;
     const move = archiveMove(repo, name, to);
+    if (move === 'copy' && archive.has(repo, name)) refuseSymbolic(archive, repo, name);
     return move === 'evidence' || (move === 'copy' && archive.has(repo, name));
   };
   const evidenceFiles = (repo: string, name: string): string[] => {
@@ -279,11 +324,67 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync, device = (f
       return 'differs';
     }
   };
-  /** Renames each file of the ledger `name` to `to`, the record and any Markdown it hides. */
-  const moveFiles = (collection: FileCollection, repo: string, name: string, to: string, legacyMarkdown = true): void => {
+  /** The inode `to` shares with `file`, when it is a link of it as a move makes; undefined otherwise. */
+  const linkOf = (file: string, to: string): number | undefined => {
+    const [a, b] = [file, to].map((each) => lstatSync(each, { throwIfNoEntry: false }));
+    return a !== undefined && b !== undefined && a.dev === b.dev && a.ino === b.ino ? b.ino : undefined;
+  };
+  /** Whether the folders `a` and `b` are one, by device and inode, so also through a link or in another case on a disk that ignores case. */
+  const isSameFolder = (a: string, b: string): boolean => {
+    const [x, y] = [a, b].map((folder) => statSync(folder, { throwIfNoEntry: false }));
+    return x !== undefined && y !== undefined && x.dev === y.dev && x.ino === y.ino;
+  };
+  /**
+   * Whether `repo` and `to` are one repo folder of `collection`. A move between them must not start: each file at `to`
+   * is the one under `repo`, which passes for a link of it, so the move would remove the ledger; and their locks are one
+   * file under two paths, which the move would wait for on itself.
+   */
+  const oneFolder = (collection: FileCollection, repo: string, to: string): boolean => isSameFolder(collection.repoLocation(repo), collection.repoLocation(to));
+  /** Links `file` at `to` and gives the inode linked; undefined when anything is at `to`, as a link never replaces. */
+  const linkFree = (file: string, to: string): number | undefined => {
+    try {
+      link(file, to);
+    } catch (error) {
+      if (code(error) === 'EEXIST') return undefined;
+      throw error;
+    }
+    return lstatSync(to).ino;
+  };
+  /** Runs `work` holding the locks of the ledger `name` under both `repo` and `to`, so no write of it in either comes between. */
+  const withMoveLocks = <T>(collection: FileCollection, repo: string, name: string, to: string, legacyMarkdown: boolean, work: () => T): T =>
+    withLocks([...filesOf(collection, repo, name, legacyMarkdown), ...filesOf(collection, to, name, legacyMarkdown)], work);
+  /**
+   * Moves the record and any Markdown it hides; false, with its links taken back, when a name at `to` is taken. A link,
+   * not a rename, as it never replaces a ledger made by a program that takes no lock. Call it under withMoveLocks.
+   */
+  const moveFiles = (collection: FileCollection, repo: string, name: string, to: string, legacyMarkdown = true): boolean => {
     const [from, target] = [collection.files(repo, name), collection.files(to, name)];
-    if (isTaken(from.record)) rename(from.record, target.record);
-    if (legacyMarkdown && isTaken(from.markdown)) rename(from.markdown, target.markdown);
+    const kinds = legacyMarkdown ? (['record', 'markdown'] as const) : (['record'] as const);
+    const moving = kinds.filter((kind) => isTaken(from[kind]));
+    refuseSymbolic(collection, repo, name, legacyMarkdown);
+    const finishing = moving.every((kind) => linkOf(from[kind], target[kind]) !== undefined);
+    const linked: { file: string; ino: number }[] = [];
+    // Only a link still there as made: a file another command put in its place since stays.
+    const takeBack = (): false => {
+      for (const { file, ino } of linked) if (lstatSync(file, { throwIfNoEntry: false })?.ino === ino) rmSync(file);
+      return false;
+    };
+    try {
+      for (const kind of moving) {
+        const ino = linkOf(from[kind], target[kind]) ?? linkFree(from[kind], target[kind]);
+        if (ino === undefined) return takeBack();
+        linked.push({ file: target[kind], ino });
+      }
+    } catch (error) {
+      takeBack();
+      throw error;
+    }
+    // A record made at `to` meanwhile would hide the moved Markdown, as Markdown made there would be hidden by the record.
+    // Not so when every file here is linked there already: a move that stopped between its removals left only the
+    // Markdown here, which the record at `to` hid before.
+    if (!finishing && kinds.some((kind) => !moving.includes(kind) && isTaken(target[kind]))) return takeBack();
+    for (const kind of moving) rmSync(from[kind]);
+    return true;
   };
   /** Fails when `root` is a symbolic link, as a new ledger made through it could land anywhere. */
   const checkRoot = (root: string): void => {
@@ -295,13 +396,14 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync, device = (f
       const files = ledgers.files(repo, slug);
       return legacyMarkdown ? withLedgerLocks(files, work) : withLock(files.record, work);
     };
+    const missing = (repo: string, slug: string): never => fail(`${ledgers.location(repo, slug)} does not exist.`);
+    const isFree = (repo: string, slug: string, to: string): boolean => !isTaken(ledgers.location(to, slug)) || movedHalfway(ledgers, repo, slug, to, legacyMarkdown);
     /**
      * Runs `work` with the current text under the ledger locks. Throws when the ledger does not exist.
      */
     const withExisting = <T>(repo: string, slug: string, work: (text: string) => T): T => {
-      const missing = (): never => fail(`${ledgers.location(repo, slug)} does not exist.`);
-      if (!ledgers.has(repo, slug)) missing();
-      return lock(repo, slug, () => work((ledgers.read(repo, slug) ?? missing()).text));
+      if (!ledgers.has(repo, slug)) missing(repo, slug);
+      return lock(repo, slug, () => work((ledgers.read(repo, slug) ?? missing(repo, slug)).text));
     };
     /**
      * Writes the record of `text` in place of the ledger's record, keeping its created time, or in place of its Markdown
@@ -322,7 +424,7 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync, device = (f
       create: (repo, slug, text) => {
         checkRoot(root);
         const { record, markdown } = ledgers.files(repo, slug);
-        return (!legacyMarkdown || !isTaken(markdown)) && createFile(record, recordJson(recordToWrite(text, record)));
+        return lock(repo, slug, () => (!legacyMarkdown || !isTaken(markdown)) && createFile(record, recordJson(recordToWrite(text, record))));
       },
       update: (repo, slug, change) =>
         withExisting(repo, slug, (current) => {
@@ -339,12 +441,24 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync, device = (f
           rmSync(ledgers.location(repo, slug));
           return true;
         }),
-      move: (repo, slug, to) =>
-        leaving(
-          ledgers.repoLocation(repo),
-          withExisting(repo, slug, () => !isTaken(ledgers.location(to, slug)) && into(ledgers.repoLocation(to), () => (moveFiles(ledgers, repo, slug, to, legacyMarkdown), true))),
-        ),
-      canMove: (repo, slug, to) => ledgers.has(repo, slug) && !isTaken(ledgers.location(to, slug)),
+      move: (repo, slug, to) => {
+        if (!ledgers.has(repo, slug)) missing(repo, slug);
+        if (oneFolder(ledgers, repo, to)) return false;
+        // The folder first, as the locks of the ledger under `to` are files in it.
+        const moved = into(ledgers.repoLocation(to), () =>
+          withMoveLocks(ledgers, repo, slug, to, legacyMarkdown, () => {
+            if (!ledgers.has(repo, slug)) missing(repo, slug);
+            return isFree(repo, slug, to) && moveFiles(ledgers, repo, slug, to, legacyMarkdown);
+          }),
+        );
+        return leaving(ledgers.repoLocation(repo), moved);
+      },
+      canMove: (repo, slug, to) => {
+        if (!ledgers.has(repo, slug) || oneFolder(ledgers, repo, to)) return false;
+        refuseSymbolic(ledgers, repo, slug, legacyMarkdown);
+        return isFree(repo, slug, to);
+      },
+      movedHalfway: (repo, slug, to) => movedHalfway(ledgers, repo, slug, to, legacyMarkdown),
       acrossDisks: (repo, slug, to) => acrossDisks(filesOf(ledgers, repo, slug, legacyMarkdown), ledgers.repoLocation(to)),
     };
   }
@@ -373,15 +487,17 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync, device = (f
           throw new NameTaken(`${taken} already exists. An archive copy is never replaced.`);
         };
         checkRoot(roots.archive);
-        if (evidenceFrom !== undefined && isTaken(evidence)) refuse(evidence);
-        if (isTaken(markdown)) refuse(markdown);
-        if (evidenceFrom !== undefined) evidenceToChange(repo, name);
-        if (!createFile(file, recordJson(recordToWrite(text, file)))) refuse(file);
-        noteCreated(file);
-        if (evidenceFrom === undefined) return;
-        // Verbatim, so a relative link keeps its text; one that stays inside the folder then points into the copy.
-        cpSync(evidenceFrom, evidence, { recursive: true, verbatimSymlinks: true });
-        if (!sameTree(evidenceFrom, evidence)) fail(`The evidence copy ${evidence}/ differs from ${evidenceFrom}/.`);
+        withLedgerLocks({ record: file, markdown }, () => {
+          if (evidenceFrom !== undefined && isTaken(evidence)) refuse(evidence);
+          if (isTaken(markdown)) refuse(markdown);
+          if (evidenceFrom !== undefined) evidenceToChange(repo, name);
+          if (!createFile(file, recordJson(recordToWrite(text, file)))) refuse(file);
+          noteCreated(file);
+          if (evidenceFrom === undefined) return;
+          // Verbatim, so a relative link keeps its text; one that stays inside the folder then points into the copy.
+          cpSync(evidenceFrom, evidence, { recursive: true, verbatimSymlinks: true });
+          if (!sameTree(evidenceFrom, evidence)) fail(`The evidence copy ${evidence}/ differs from ${evidenceFrom}/.`);
+        });
       },
       evidenceState,
       nameTaken: (repo, name) => isTaken(archive.location(repo, name)) || isTaken(evidenceOf(repo, name)),
@@ -427,22 +543,21 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync, device = (f
         const [file, evidence] = [archive.location(repo, name), evidenceOf(repo, name)];
         const missing = (): never => fail(`${file} does not exist.`);
         if (!isTaken(file) && !isTaken(evidence)) missing();
-        const moved = withLock(archive.files(repo, name).record, () => {
-          const move = archiveMove(repo, name, to);
-          if (move !== 'evidence' && !archive.has(repo, name)) missing();
-          return (
-            move !== undefined &&
-            into(archive.repoLocation(to), () => {
-              if (move === 'copy') moveFiles(archive, repo, name, to);
-              // The evidence root may be another folder than the archive's, as in git storage.
-              return !isTaken(evidence) || into(evidenceRoot.repoLocation(to), () => (rename(evidence, evidenceOf(to, name)), true));
-            })
-          );
-        });
+        if (oneFolder(archive, repo, to) || oneFolder(evidenceRoot, repo, to)) return false;
+        const moved = into(archive.repoLocation(to), () =>
+          withMoveLocks(archive, repo, name, to, true, () => {
+            const move = archiveMove(repo, name, to);
+            if (move !== 'evidence' && !archive.has(repo, name)) missing();
+            if (move === undefined || (move === 'copy' && !moveFiles(archive, repo, name, to))) return false;
+            // The evidence root may be another folder than the archive's, as in git storage.
+            return !isTaken(evidence) || into(evidenceRoot.repoLocation(to), () => (rename(evidence, evidenceOf(to, name)), true));
+          }),
+        );
         leaving(evidenceRoot.repoLocation(repo), moved);
         return leaving(archive.repoLocation(repo), moved);
       },
       canMove: archiveCanMove,
+      movedHalfway: (repo, name, to) => movedHalfway(archive, repo, name, to),
       acrossDisks: (repo, name, to) => acrossDisks(filesOf(archive, repo, name), archive.repoLocation(to)) || acrossDisks([evidenceOf(repo, name)], evidenceRoot.repoLocation(to)),
       orphanEvidence: () =>
         evidenceRoot.repos().flatMap((repo) =>
@@ -451,6 +566,7 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync, device = (f
             .map(({ name }) => ({ repo, name })),
         ),
     },
+    sharesFolder: (a, b) => [roots.backlog, roots.active, roots.archive, roots.evidence].some((root) => isSameFolder(path.join(root, folderOf(a)), path.join(root, folderOf(b)))),
     oldTaskList: () => {
       try {
         return readText(registry);

@@ -298,9 +298,12 @@ const keyOf = (task: Task): string => task.currentRepo ?? task.repo;
 /** The tasks `task` waits for, each with the key of its repo. */
 export const dependenciesOf = (task: Task): Required<Dependency>[] => (task.ledger.location.dependencies ?? []).map(({ slug, repo }) => ({ slug, repo: repo ?? keyOf(task) }));
 
-/** The ledger `dependency` names, by the rule of locateChild: an active task, then the backlog, then the archive; the newest of each. */
+/**
+ * The ledger `dependency` names, by the rule of locateChild: an active task, then the backlog, then the archive; the newest
+ * of each. A dependency written before its repo was renamed names the old key, an alias of the task's repo now.
+ */
 export function dependencyTask(tasks: Task[], { slug, repo }: Required<Dependency>): Task | undefined {
-  const named = tasks.filter((task) => task.slug === slug && keyOf(task) === repo).sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const named = tasks.filter((task) => task.slug === slug && task.repoKeys.includes(repo)).sort((a, b) => b.mtimeMs - a.mtimeMs);
   return PRECEDENCE.map((place) => named.find((task) => task.place === place)).find((task) => task !== undefined);
 }
 
