@@ -403,7 +403,8 @@ task the store holds.
   `go.md`, `retire.md` and `update.md`.
 - `mods/ledger/hooks/`: TypeScript that the plugin engine loads through
   `hooks.json`. `register.ts` registers the `/ledger` command and handlers for
-  session start, command runs, `Skill` tool calls and turn end.
+  session start, command runs, `Skill` and T3 `t3_thread_send` tool calls and
+  turn end.
 
 The plugin does not keep task state. `mods/ledger/hooks/cli.ts` runs
 `bin/ledger` from this checkout and reads its `--json` output.
@@ -417,6 +418,17 @@ the other task. After `/ledger:close`, nothing starts. In a session with no
 person at the prompt, such as one an Agent SDK host like T3 Code drives, the
 plugin clears but does not send `go <slug>`: such a host cuts that turn off
 at once. The agent's last line asks the operator to type `go <slug>` instead.
+In T3 Code, the agent first queues the new session itself. As its last tool
+call, it sends `go <slug>` to its own thread with `t3_thread_send`, in mode
+`queue` and with `freshContext`. T3 starts that message in a fresh session
+once the turn ends. A `tool.call` handler in `register.ts` marks the armed
+clear `queued` when that call goes through and matches the armed slug. The
+plugin does not detect T3 any other way: the tool call is the signal. At the
+end of a queued turn, the plugin releases the claims and writes the
+`handover` (see Claims), then shows the retire hint. That this finishes
+before T3 starts the queued run is not yet checked in T3 [inferred]. It
+neither clears nor sends `go <slug>`. When the tool is missing or
+the call fails, the agent falls back to asking the operator.
 
 For `/ledger:go`, `startGo` in `register.ts` runs
 `ledger go <slug> --session <id>` before the prompt expands. It arms the clear
@@ -475,7 +487,10 @@ armed `/ledger:go` clears, `register.ts` writes the state key `handover`: the
 task's slug and the session `from` that claimed it. The new session's first
 `go <slug>` prompt reads and empties it, and for that slug runs
 `ledger task claim --from <from>`, which takes that session's claim over with
-no held question.
+no held question. A T3 queued run (see Clearing the session) gets no clear,
+so the turn end does the same release and writes the same `handover` itself.
+The queued run then sends its `go <slug>`. That the release comes first is
+not yet checked in T3 [inferred].
 
 Only the operator may type `/ledger:close` and `/ledger:park` (`TYPED_ONLY` in
 `register.ts`). The plugin refuses them when the agent starts them through the

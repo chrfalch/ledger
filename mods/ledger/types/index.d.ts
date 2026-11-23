@@ -8,12 +8,14 @@ export type PreviousTask = { slug: string; worktree: string; main?: string; pare
  * create the task in the repo at `main`, so the clear waits until a ledger of that repo has its slug. `sessionId` is the
  * session that ran `ledger go`, whose claim the new session takes over. `typed` means no person was at the prompt when the
  * session started, as under the Agent SDK, whose host cuts the turn of a submitted prompt: the operator types `go <slug>`.
+ * `queued` means the model asked T3 to run `go <slug>` in a fresh run of its own thread once this turn ends, so the turn
+ * end releases the claims and hands the task over, but neither clears nor sends `go <slug>`.
  */
 export type LedgerArmed =
   | { mode: 'close'; slug: string }
-  | { mode: 'next'; slug: string; previous: PreviousTask; typed?: true }
-  | { mode: 'go'; slug: string; sessionId: string; previous?: PreviousTask; typed?: true }
-  | { mode: 'go'; slug: string; sessionId: string; previous?: PreviousTask; typed?: true; isNew: true; main: string }
+  | { mode: 'next'; slug: string; previous: PreviousTask; typed?: true; queued?: true }
+  | { mode: 'go'; slug: string; sessionId: string; previous?: PreviousTask; typed?: true; queued?: true }
+  | { mode: 'go'; slug: string; sessionId: string; previous?: PreviousTask; typed?: true; queued?: true; isNew: true; main: string }
   | { mode: 'park'; slug: string; reason: string }
 
 declare module 'claude-code' {

@@ -1359,3 +1359,132 @@ test('a start with no person at the prompt counts only for its own session: a la
   expect(w.markdown()).toEqual({ command: 'ledger:next', args: '' })
   expect(w.events).toEqual(['clear', 'submit: go epic'])
 })
+
+// a T3 thread that queues `go <slug>` in a fresh run of its own
+
+const T3_SEND = 'mcp__t3-code__t3_thread_send'
+const queueGo = (slug: string) => ({ tool: T3_SEND, threadId: 't', message: `go ${slug}`, mode: 'queue', freshContext: true }) as const
+
+/** Stands for T3's MCP server, which queues the message and answers at once. */
+const t3Thread = (on: Parameters<typeof world>[0]) => on('tool.call', { tool: T3_SEND }, async () => ({ result: {} }))
+
+test('/ledger:next with no person at the prompt, after the model queued go <slug> in a fresh T3 run, releases the claims at the turn end and neither clears nor sends go <slug>', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
+  t3Thread(on)
+
+  await $.session.start(sdkStart)
+  await $.command.run({ command: 'ledger:next', args: '' })
+  await $.tool.call(queueGo('epic'))
+  await $.turn.complete(turnEnd)
+
+  expect(w.armed).toEqual([{ ...NEXT_ARM, typed: true }, { ...NEXT_ARM, typed: true, queued: true }])
+  expect(w.argvs()).toEqual([
+    ['session', CWD, '--json'],
+    ['task', 'release', '--all', '--session', 'session-1'],
+    ['worktrees', 'auto-prune', CWD, '--json'],
+  ])
+  expect(w.events).toEqual([])
+})
+
+test('/ledger:go with no person at the prompt, after the model queued go <slug> in a fresh T3 run, hands the task over and does not clear', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
+  t3Thread(on)
+
+  await $.session.start(sdkStart)
+  await $.command.run({ command: 'ledger:go', args: 'kid' })
+  await $.tool.call(queueGo('kid'))
+  await $.turn.complete(turnEnd)
+
+  expect(w.armed.at(-1)).toEqual({ mode: 'go', slug: 'kid', sessionId: 'session-1', previous: { slug: 'epic', worktree: CWD, main: MAIN }, typed: true, queued: true })
+  expect(w.argvs()).toContainEqual(['task', 'release', '--all', '--session', 'session-1'])
+  expect(w.events).toEqual([])
+
+  w.newSession('session-2')
+  await $.prompt.submit({ text: 'go kid' })
+
+  expect(w.argvs().at(-1)).toEqual(['task', 'claim', 'kid', '--session', 'session-2', '--from', 'session-1', '--json'])
+})
+
+const notTheQueuedGo = {
+  'another slug': { ...queueGo('other') },
+  'no fresh context': { ...queueGo('epic'), freshContext: false },
+  'mode auto': { ...queueGo('epic'), mode: 'auto' },
+  'a subagent': { ...queueGo('epic'), agentId: 'a1' },
+} as const
+
+for (const [what, send] of Object.entries(notTheQueuedGo)) {
+  test(`a T3 send with ${what} is no queued go: /ledger:next with no person at the prompt still clears at the turn end`, async ($, on) => {
+    const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
+    t3Thread(on)
+
+    await $.session.start(sdkStart)
+    await $.command.run({ command: 'ledger:next', args: '' })
+    await $.tool.call(send)
+    await $.turn.complete(turnEnd)
+
+    expect(w.armed).toEqual([{ ...NEXT_ARM, typed: true }])
+    expect(w.events).toEqual(['clear'])
+  })
+}
+
+test('a queued go T3 refused leaves the arm as it was, so /ledger:next with no person at the prompt still clears', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
+  on('tool.call', { tool: T3_SEND }, async () => ({ deny: 'no such thread' }))
+
+  await $.session.start(sdkStart)
+  await $.command.run({ command: 'ledger:next', args: '' })
+  const answer = await $.tool.call(queueGo('epic'))
+  await $.turn.complete(turnEnd)
+
+  expect(answer.deny).toBe('no such thread')
+  expect(w.armed).toEqual([{ ...NEXT_ARM, typed: true }])
+  expect(w.events).toEqual(['clear'])
+})
+
+test('a T3 send with no arm passes through and arms nothing', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })
+  t3Thread(on)
+
+  const answer = await $.tool.call(queueGo('epic'))
+
+  expect(answer.deny).toBeUndefined()
+  expect(w.armed).toEqual([])
+})
+
+test('a turn cut short after the model queued go <slug> in a fresh T3 run still releases the claims, as the queued run starts anyway', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
+  t3Thread(on)
+
+  await $.session.start(sdkStart)
+  await $.command.run({ command: 'ledger:next', args: '' })
+  await $.tool.call(queueGo('epic'))
+  await $.turn.complete({ ...turnEnd, reason: 'aborted', isAborted: true })
+
+  expect(w.argvs()).toContainEqual(['task', 'release', '--all', '--session', 'session-1'])
+  expect(w.events).toEqual([])
+})
+
+test('a queued go that T3 answers with an error leaves the arm as it was, so /ledger:next with no person at the prompt still clears', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
+  on('tool.call', { tool: T3_SEND }, async () => ({ result: { error: 'thread busy' }, isError: true }))
+
+  await $.session.start(sdkStart)
+  await $.command.run({ command: 'ledger:next', args: '' })
+  await $.tool.call(queueGo('epic'))
+  await $.turn.complete(turnEnd)
+
+  expect(w.armed).toEqual([{ ...NEXT_ARM, typed: true }])
+  expect(w.events).toEqual(['clear'])
+})
+
+test('a T3 send in an interactive session is no queued go: /ledger:next still clears and sends go <slug>', async ($, on) => {
+  const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
+  t3Thread(on)
+
+  await $.session.start({ ...sdkStart, surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'ledger:next', args: '' })
+  await $.tool.call(queueGo('epic'))
+  await $.turn.complete(turnEnd)
+
+  expect(w.events).toEqual(['clear', 'submit: go epic'])
+})
