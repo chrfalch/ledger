@@ -24,8 +24,9 @@ export function parseArchiveName(name: string): { date: string; slug: string } |
   return date === undefined ? undefined : { date, slug };
 }
 
-/** The main checkout of a worktree at <main>/.claude/worktrees/<folder>. */
+/** The main checkout of a worktree at <main>/.claude/worktrees/<folder>; a relative path names none, as it would resolve against the cwd. */
 export function mainOfTaskWorktree(worktree: string): string | undefined {
+  if (!path.isAbsolute(worktree)) return undefined;
   const worktrees = path.dirname(worktree);
   const claude = path.dirname(worktrees);
   return path.basename(worktrees) === 'worktrees' && path.basename(claude) === '.claude' ? path.dirname(claude) : undefined;

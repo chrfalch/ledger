@@ -893,8 +893,8 @@ test('sqlite store: an alias row with a target that is no repo key refuses alias
 
 // --- 27. Old task list entries and evidence still under folder names ---
 
-const sessionStart = (h: string): string => {
-  const ran = spawnSync(LEDGER_BIN, ['hook', 'session-start'], { cwd: h, env: commandEnv(h), input: JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup', cwd: h }), encoding: 'utf8' });
+const sessionStart = (h: string, cwd = h): string => {
+  const ran = spawnSync(LEDGER_BIN, ['hook', 'session-start'], { cwd, env: commandEnv(h), input: JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup', cwd }), encoding: 'utf8' });
   assert.equal(ran.status, 0, ran.stderr);
   return ran.stdout === '' ? '' : (JSON.parse(ran.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext;
 };
@@ -1714,4 +1714,44 @@ test('the error of ledger show --repo of another repo names what it searched: th
   const ran = ledger(h, app, 'show', 'nothing', '--repo', OTHER);
   assert.equal(ran.status, 1);
   assert.equal(ran.stderr.trim(), 'No ledger named nothing is in the active tasks, the backlog or the archive of the repo me/app.');
+});
+
+// --- 29. A worktree path recorded relative to its repo names no repo ---
+
+/** An archive copy under the folder name expo whose ledger names only `.claude/worktrees/spm`, as early ledgers did. */
+function relativeWorktreeCopy(store: LedgerStore): void {
+  store.archive.write('expo', '2026-01-02-spm', ledgerText({ slug: 'spm', worktree: '.claude/worktrees/spm', branch: 'me/spm' }));
+}
+
+const pendingFrom = (h: string, cwd: string): Move[] => (JSON.parse(ok(ledger(h, cwd, 'store', 'migrate', '--pending', '--json'))) as { moves: Move[] }).moves;
+
+test('an archive copy whose worktree path is relative stays under its folder name, run from the main checkout of another repo', (t) => {
+  const { h, app, store } = appWorld(t);
+  relativeWorktreeCopy(store);
+  assert.deepEqual(pendingFrom(h, app), [
+    { kind: 'repo-ids', from: 'archive expo/2026-01-02-spm', to: 'repo address', auto: false, reason: 'its ledger does not say which repo folder it came from', accepted: true },
+  ]);
+  assert.match(ok(ledger(h, app, 'store', 'migrate', '--repo-ids', '--dry-run')), kept(1));
+  assert.match(ok(ledger(h, app, 'store', 'migrate', '--repo-ids')), kept(1));
+  assert.equal(store.archive.has('expo', '2026-01-02-spm'), true);
+});
+
+test('an archive copy whose worktree path is relative moves to the alias saved for its folder name, run from the main checkout of another repo', (t) => {
+  const { h, app, store } = appWorld(t);
+  store.aliases.add('expo', 'github.com/me/expo');
+  relativeWorktreeCopy(store);
+  assert.match(lineWith(ok(ledger(h, app, 'store', 'migrate', '--repo-ids')), '2026-01-02-spm'), /^moved archive expo\/2026-01-02-spm to /);
+  assert.equal(store.archive.has('github.com/me/expo', '2026-01-02-spm'), true);
+});
+
+test('evidence under the folder name of an archive copy whose worktree path is relative gets no hint naming the repo it is run from', (t) => {
+  const { h, app, key, store } = appWorld(t);
+  relativeWorktreeCopy(store);
+  const folder = store.archive.evidenceLocation('expo', '2026-01-01-old');
+  mkdirSync(folder, { recursive: true });
+  writeFileSync(path.join(folder, 'red.txt'), 'failing\n');
+  const evidence = pendingFrom(h, app).find(({ from }) => from === 'evidence expo/2026-01-01-old');
+  assert.deepEqual(evidence, { kind: 'repo-ids', from: 'evidence expo/2026-01-01-old', to: 'repo address', auto: false, reason: 'notes of a finished task whose ledger is not in the store', accepted: true });
+  assert.equal(sessionStart(h, app), '');
+  assert.doesNotMatch(ok(ledger(h, app, 'store', 'migrate', '--repo-ids')), new RegExp(key.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
