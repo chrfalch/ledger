@@ -298,6 +298,9 @@ not there. A value that is then no absolute path, such as `.`, names no main,
 and the worktree and the records decide instead, as for a ledger with no
 `- main:` line; `ledger go` still starts a backlog task filed under the repo's
 key that has such a line, and refuses only one with no `- main:` line at all.
+A worktree path that is not absolute, such as `.claude/worktrees/<slug>`, names
+no main either: it would resolve against the folder the command runs in. Such a
+ledger follows the folder-name rules, as one with no main.
 
 `migrateActive` in `tools/ledger/migrate-active.ts` runs once for ledgers from
 before active records. It moves the `.claude/ledger.md` of each linked worktree
