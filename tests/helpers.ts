@@ -95,6 +95,8 @@ mkdirSync(path.join(STUB_ROOT, 'bin'));
 writeFileSync(path.join(STUB_ROOT, 'bin/claude'), CLAUDE_STUB, { mode: 0o755 });
 // Set on process.env, not only in run(): tests that spawn bin/deploy themselves must never reach the real claude.
 process.env.PATH = `${path.join(STUB_ROOT, 'bin')}${path.delimiter}${PATH_WITHOUT_STUB}`;
+// Deploy refuses to run from a linked worktree, and the tests may run in one. Set here for the same reason as PATH.
+process.env.DEPLOY_FROM_WORKTREE = '1';
 
 function stubState(home: string): string {
   return path.join(STUB_ROOT, 'state', createHash('sha256').update(home.replace(/\/+$/, '')).digest('hex'));

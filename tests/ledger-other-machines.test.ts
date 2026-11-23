@@ -1043,7 +1043,8 @@ test('a plain rerun finishes the branch and the build folder of a retire that st
   const buildFolder = path.join(fs.realpathSync(a.app), '.claude/worktrees/.build', SLUG);
   mkdirSync(path.join(buildFolder, 'Debug-sim'), { recursive: true });
   // The retire stops for good there, as when its process is killed.
-  stubGit(a, '*"update-ref -d"*', 'kill -9 $PPID');
+  // exit: without it the stub outlives its parent and still runs the real git, racing the check below.
+  stubGit(a, '*"update-ref -d"*', 'kill -9 $PPID; exit 137');
   try {
     assert.notEqual(run(a, ['task', 'retire', SLUG]).status, 0, 'the first retire went through');
   } finally {

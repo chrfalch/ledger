@@ -20,7 +20,7 @@ import {
   pruneWorktrees,
   removeLinkedWorktree,
 } from './git.js';
-import { ledgerBin, samePath } from './paths.js';
+import { ledgerBin, realPath, samePath } from './paths.js';
 import { storedText } from './record.js';
 import { repoKey } from './repo-key.js';
 import type { Archive } from './store.js';
@@ -810,6 +810,21 @@ export type RetireResult = {
   hint?: string;
 };
 
+/** The warning for the installed ledger links that land inside `folder`, which a deploy from that worktree made; undefined for none. */
+function installedLinksWarning({ paths }: Context, { main, folder }: { main: string; folder: string }): string | undefined {
+  const inside = `${realPath(folder)}${path.sep}`;
+  const links = [path.join(paths.home, '.claude/bin/ledger'), path.join(paths.home, '.local/bin/ledger')].filter((link) => {
+    try {
+      return realpathSync(link).startsWith(inside);
+    } catch {
+      return false;
+    }
+  });
+  if (links.length === 0) return undefined;
+  const named = `${links.map(paths.tilde).join(' and ')} ${links.length === 1 ? 'points' : 'point'}`;
+  return `${named} into ${folder}, which retire removes, so the installed ledger command breaks. Run deploy from the main checkout to relink it: cd ${shellWord(main)} && bin/deploy`;
+}
+
 /**
  * `ledger task retire [<slug>] [--dry-run] [--force]`. Exit 0 when retired or planned; exit 1, with nothing changed, when a
  * blocker stops it or the task cannot be found; exit 1 after the archive copy when the worktree cannot be removed.
@@ -824,7 +839,8 @@ export function retireTask(context: Context, slug: string | undefined, { dryRun,
     line: (text) => (done.push(text), out.line(text)),
     warn: (text) => (warnings.push(text), out.warn(text)),
   };
-  for (const warning of plan.warnings) recorded.warn(warning);
+  const relink = plan.actions.flatMap((action) => (action.kind === 'remove-worktree' ? (installedLinksWarning(context, action) ?? []) : []));
+  for (const warning of [...plan.warnings, ...relink]) recorded.warn(warning);
   if (!dryRun) {
     if (plan.blocked) fail(refusal(plan, force));
     executeRetire(context, plan, recorded);

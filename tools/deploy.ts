@@ -27,6 +27,7 @@ interface DeployOptions {
   agents?: string;
   models?: string;
   migrate?: boolean;
+  fromWorktree?: boolean;
   /** Set by the wizard, which asks about the other moves itself: after the move of each .claude/ledger.md, name none. */
   asksAboutMoves?: boolean;
 }
@@ -46,6 +47,7 @@ const NOT_WITH_MIGRATE: [keyof DeployOptions, string][] = [
   ['codex', '--codex'],
   ['agents', '--agents'],
   ['models', '--models'],
+  ['fromWorktree', '--from-worktree'],
 ];
 
 export function parseDeployArguments(argv: string[]): { options: DeployOptions; help: boolean } {
@@ -63,6 +65,7 @@ export function parseDeployArguments(argv: string[]): { options: DeployOptions; 
       case '--no-mods': opts.noMods = true; break;
       case '--codex': opts.codex = true; break;
       case '--migrate': opts.migrate = true; break;
+      case '--from-worktree': opts.fromWorktree = true; break;
       case '--agents':
       case '--models': {
         const value = argv[++index];
@@ -631,6 +634,26 @@ export function deploy(opts: DeployOptions): number {
   return 0;
 }
 
+/** The main checkout of `repo` when `repo` is a linked worktree; undefined for a main checkout, or a folder git cannot read. */
+function mainCheckoutOfWorktree(repo: string): string | undefined {
+  const result = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'], { cwd: repo, encoding: 'utf8' });
+  if (result.error || result.status !== 0) return undefined;
+  const [gitDir, commonDir] = result.stdout.trim().split('\n');
+  return gitDir === commonDir ? undefined : path.dirname(commonDir);
+}
+
+/** Retiring a worktree's task deletes the folder, so every link a deploy from there makes would dangle. */
+function checkNotLinkedWorktree(opts: DeployOptions): void {
+  if (opts.migrate || process.env.DEPLOY_FROM_WORKTREE === '1') return;
+  const main = mainCheckoutOfWorktree(REPO);
+  if (main === undefined) return;
+  const restore = `cd ${main} && bin/deploy`;
+  if (!opts.fromWorktree) {
+    throw new DeployError(`deploy: ${REPO} is a linked worktree, and retiring its task deletes it along with every link deploy would make. Run deploy from the main checkout: ${restore}`);
+  }
+  console.error(`deploy: deploying from the linked worktree ${REPO}; retiring its task deletes it and breaks every link made here. To restore them: ${restore}`);
+}
+
 export function shouldRunWizard(argv: string[], stdinTTY: boolean | undefined, stdoutTTY: boolean | undefined): boolean {
   return argv.length === 0 && Boolean(stdinTTY) && Boolean(stdoutTTY);
 }
@@ -651,11 +674,18 @@ Deploy links the ledger command into ~/.local/bin.
   bin/deploy --models a,b     keep only these models in the routing rules
   bin/deploy --force          replace a file of your own without asking
   bin/deploy --revert         undo the last deploy
+  bin/deploy --from-worktree  deploy from a linked worktree anyway (see below)
   bin/deploy --migrate        move stored task data to its newest format; deploy no files
   bin/deploy --migrate --dry-run
                               list what --migrate would move, and move nothing
 
 Run --dry-run first against a config you care about.
+
+Deploy links into the checkout it runs from. In a linked worktree, retiring its
+task deletes that folder, and every link with it, so deploy refuses there and
+names the command to run in the main checkout. --from-worktree deploys anyway,
+for trying out a branch; run deploy from the main checkout again to restore the
+links. --help and --migrate link nothing and run anywhere.
 
 After the files, deploy moves each .claude/ledger.md into the ledger store, then
 names any other stored task data still in an older format. --migrate moves it,
@@ -688,18 +718,20 @@ export function main(argv: string[]): void {
     if (error instanceof Error && error.message) console.error(error.message);
     process.exitCode = error instanceof DeployError ? error.status : 1;
   };
-  if (shouldRunWizard(argv, process.stdin.isTTY, process.stdout.isTTY)) {
-    // Not awaited: wizard.ts imports this module, so a top-level await here deadlocks.
-    // Loaded on demand so scripted runs never load the prompt library.
-    import('./wizard.js').then(({ runWizard }) => runWizard()).then((status) => { process.exitCode = status; }, fail);
-  } else {
-    try {
-      const { options, help } = parseDeployArguments(argv);
-      if (help) process.stdout.write(HELP);
-      else process.exitCode = deploy(options);
-    } catch (error) {
-      fail(error);
+  try {
+    const { options, help } = parseDeployArguments(argv);
+    if (help) {
+      process.stdout.write(HELP);
+      return;
     }
+    checkNotLinkedWorktree(options);
+    if (shouldRunWizard(argv, process.stdin.isTTY, process.stdout.isTTY)) {
+      // Not awaited: wizard.ts imports this module, so a top-level await here deadlocks.
+      // Loaded on demand so scripted runs never load the prompt library.
+      import('./wizard.js').then(({ runWizard }) => runWizard()).then((status) => { process.exitCode = status; }, fail);
+    } else process.exitCode = deploy(options);
+  } catch (error) {
+    fail(error);
   }
 }
 

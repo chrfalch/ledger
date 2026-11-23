@@ -606,6 +606,45 @@ test('ledger retire warns when gh cannot tell about PRs, and decides on the comm
   assert.match(ran.stderr, /^warning: .*gh pr list/m);
 });
 
+/** A worktree task whose folder holds an untracked bin/ledger, as one that deploy ran from does. */
+function deployedFromWorktree(t: TestContext) {
+  const { h, app } = setup(t);
+  writeFileSync(path.join(app, '.git/info/exclude'), '.claude/\nbin/\n');
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const worktree = worktreeOf(app, 'fix-login');
+  mkdirSync(path.join(worktree, 'bin'));
+  writeFileSync(path.join(worktree, 'bin/ledger'), '');
+  mkdirSync(path.join(h, '.local/bin'), { recursive: true });
+  mkdirSync(path.join(h, '.claude/bin'), { recursive: true });
+  return { h, app, worktree };
+}
+
+const relinkWarning = (app: string, worktree: string): RegExp =>
+  new RegExp(`^warning: ~/\\.local/bin/ledger points into ${escapeRegExp(worktree)}, which retire removes.*cd ${escapeRegExp(shellWord(app))} && bin/deploy$`, 'm');
+
+test('ledger retire warns, in its dry run too, when the installed ledger links into the worktree it removes, and names the main checkout to deploy from', (t) => {
+  const { h, app, worktree } = deployedFromWorktree(t);
+  symlinkSync(path.join(worktree, 'bin/ledger'), path.join(h, '.local/bin/ledger'));
+  const dryRun = ledger(h, app, 'task', 'retire', 'fix-login', '--dry-run');
+  assert.equal(dryRun.status, 0, dryRun.stderr);
+  assert.match(dryRun.stderr, relinkWarning(app, worktree));
+  const ran = ledger(h, app, 'task', 'retire', 'fix-login');
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.match(ran.stderr, relinkWarning(app, worktree));
+  assert.equal(ran.stderr.split('\n').filter((line) => line.includes('bin/deploy')).length, 1);
+  assert.equal(existsSync(worktree), false);
+});
+
+test('ledger retire does not warn about the installed ledger when its links point elsewhere or nowhere', (t) => {
+  const { h, app, worktree } = deployedFromWorktree(t);
+  symlinkSync(LEDGER_BIN, path.join(h, '.claude/bin/ledger'));
+  symlinkSync(path.join(h, 'gone/bin/ledger'), path.join(h, '.local/bin/ledger'));
+  const ran = ledger(h, app, 'task', 'retire', 'fix-login');
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.doesNotMatch(ran.stderr, /bin\/deploy/);
+  assert.equal(existsSync(worktree), false);
+});
+
 test('ledger retire --dry-run prints the plan and changes nothing, blockers included', (t) => {
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'fix-login', parent: 'epic' });
