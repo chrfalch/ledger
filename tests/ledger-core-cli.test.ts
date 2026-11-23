@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import {
@@ -63,10 +63,9 @@ function world(t: TestContext) {
 type ListedTask = { slug: string; repo: string; main: string; status: string; worktree?: string; path?: string; branch: string; parent?: { slug: string; main: string }; updated: string; goal: string; next: string };
 type ShownChild = { slug: string; main: string; status: string; next: string; report: string[] };
 type Shown = { slug: string; main: string; goal: string; children: ShownChild[] };
-type RegistryEntry = { repo: string; slug: string; path: string; branch: string; parent?: string; parentMain?: string; status: string; main?: string; created: string; updated: string; archivePath?: string };
 
-const registryFile = (h: string): string => path.join(h, '.claude/ledgers.json');
-const readRegistry = (h: string): RegistryEntry[] => JSON.parse(readFileSync(registryFile(h), 'utf8'));
+/** Where older versions of file storage kept their task list, which nothing writes any more. */
+const oldTaskListFile = (h: string): string => path.join(h, '.claude/ledgers.json');
 const listJson = (h: string, cwd: string): ListedTask[] => JSON.parse(ok(ledger(h, cwd, 'list', '--json'))).tasks;
 
 test('each command has --help with its arguments and options', (t) => {
@@ -156,83 +155,31 @@ test('ledger list puts each child task under its parent, marked ↳ and indented
   assert.equal(arrow('step-a'), arrow('step-b'));
 });
 
-test('without ~/.claude/ledgers.json, list finds the repos of the stored ledgers from any folder and rebuilds the registry', (t) => {
-  const { h, app, files } = world(t);
-  assert.equal(existsSync(registryFile(h)), false);
+test('list finds the repos of the stored ledgers from any folder, and writes no ~/.claude/ledgers.json', (t) => {
+  const { h } = world(t);
   assert.deepEqual(listJson(h, h).map(({ slug }) => slug), ['epic', 'live-child', 'parked-child', 'idea', 'lib-part']);
-  const entries = readRegistry(h);
-  const live = entries.find(({ slug }) => slug === 'live-child');
-  assert.deepEqual(Object.keys(live ?? {}).sort(), ['branch', 'created', 'main', 'parent', 'path', 'repo', 'slug', 'status', 'updated']);
-  assert.equal(live?.path, files.live);
-  assert.equal(live?.status, 'active');
-  assert.equal(live?.main, app);
-  assert.equal(live?.parent, 'epic');
-  assert.equal(entries.find(({ slug }) => slug === 'parked-child')?.status, 'active', 'the registry keeps the old statuses; parked is computed on read');
-  assert.equal(entries.find(({ slug }) => slug === 'idea')?.status, 'backlog');
-  const oldD = entries.find(({ slug }) => slug === 'old-d');
-  assert.equal(oldD?.status, 'archived');
-  assert.equal(oldD?.archivePath, path.join(storeFolder(h, 'ledger-archive', app), '2026-10-21-feature-old-d.md'));
-  const libPart = entries.find(({ slug }) => slug === 'lib-part');
-  assert.equal(libPart?.parentMain, app);
-  const updated = entries.map((entry) => entry.updated);
-  assert.deepEqual(updated, [...updated].sort().reverse(), 'newest first');
+  assert.equal(existsSync(oldTaskListFile(h)), false);
 });
 
-test('a stale registry is rebuilt from disk: a gone ledger is dropped, a new one added, a known repo outside ~/repos kept', (t) => {
+test('a stale old task list changes nothing the list shows, and stays as it was: a gone ledger is not listed, a stored one outside ~/repos is', (t) => {
   const { h, app } = world(t);
   const elsewhere = repository(h, path.join(h, 'work/tool'));
-  const toolTask = worktreeTask(h, elsewhere, { slug: 'tool-task' });
+  worktreeTask(h, elsewhere, { slug: 'tool-task' });
   const created = '2020-01-01T00:00:00.000Z';
-  const stale: RegistryEntry[] = [
-    { repo: 'tool', slug: 'tool-task', path: toolTask, branch: 'me/tool-task', status: 'active', main: elsewhere, created, updated: created },
-    { repo: 'app', slug: 'gone', path: path.join(app, '.claude/worktrees/gone/.claude/ledger.md'), branch: 'me/gone', status: 'active', main: app, created, updated: created },
-  ];
-  writeFileSync(registryFile(h), `${JSON.stringify(stale, null, 2)}\n`);
+  const stale = `${JSON.stringify([{ repo: 'app', slug: 'gone', path: path.join(app, '.claude/worktrees/gone/.claude/ledger.md'), branch: 'me/gone', status: 'active', main: app, created, updated: created }], null, 2)}\n`;
+  writeFileSync(oldTaskListFile(h), stale);
   const slugs = listJson(h, h).map(({ slug }) => slug);
-  assert.ok(slugs.includes('tool-task'), 'a repo the registry names is still read');
-  assert.ok(slugs.includes('idea'), 'a backlog task missing from the registry is listed');
-  assert.ok(!slugs.includes('gone'), 'disk wins');
-  const entries = readRegistry(h);
-  assert.equal(entries.find(({ slug }) => slug === 'gone'), undefined);
-  assert.equal(entries.find(({ slug }) => slug === 'tool-task')?.created, created, 'a kept entry keeps its created time');
-  assert.ok(entries.some(({ slug }) => slug === 'old-a'));
+  assert.ok(slugs.includes('tool-task'), 'a stored task of a repo outside ~/repos is listed');
+  assert.ok(slugs.includes('idea'), 'a backlog task missing from the old task list is listed');
+  assert.ok(!slugs.includes('gone'), 'the store wins');
+  assert.equal(readFileSync(oldTaskListFile(h), 'utf8'), stale);
 });
 
-test('the active entries of the registry are the active records: one with no record is dropped, also of a repo git cannot read', (t) => {
+test('an unreadable old task list does not stop the list, and stays as it was', (t) => {
   const { h, app } = world(t);
-  const plain = path.join(h, 'plain');
-  mkdirSync(plain);
-  const created = '2020-01-01T00:00:00.000Z';
-  const stale: RegistryEntry[] = [
-    { repo: 'gone', slug: 'on-a-disk', path: path.join(h, 'gone/.claude/worktrees/on-a-disk/.claude/ledger.md'), branch: 'me/on-a-disk', status: 'active', main: path.join(h, 'gone'), created, updated: created },
-    { repo: 'plain', slug: 'kept', path: path.join(plain, '.claude/worktrees/kept/.claude/ledger.md'), branch: 'me/kept', status: 'active', main: plain, created, updated: created },
-    { repo: 'no-main', slug: 'old', path: path.join(h, 'unmounted/.claude/worktrees/old/.claude/ledger.md'), branch: 'me/old', status: 'active', created, updated: created },
-    { repo: 'app', slug: 'gone', path: path.join(app, '.claude/worktrees/gone/.claude/ledger.md'), branch: 'me/gone', status: 'active', main: app, created, updated: created },
-  ];
-  writeFileSync(registryFile(h), `${JSON.stringify(stale, null, 2)}\n`);
-  ok(ledger(h, app, 'list'));
-  const entries = readRegistry(h);
-  for (const { slug } of stale) assert.equal(entries.find((entry) => entry.slug === slug), undefined, slug);
-  assert.ok(entries.some(({ slug }) => slug === 'epic'));
-});
-
-test('an unreadable registry is rebuilt from disk', (t) => {
-  const { h, app } = world(t);
-  writeFileSync(registryFile(h), '{ not json');
+  writeFileSync(oldTaskListFile(h), '{ not json');
   assert.equal(listJson(h, app).length, 5);
-  assert.ok(Array.isArray(readRegistry(h)));
-  assert.ok(readRegistry(h).some(({ slug }) => slug === 'epic'));
-});
-
-test('an up-to-date registry is left as it is', (t) => {
-  const { h, app } = world(t);
-  ok(ledger(h, app, 'list'));
-  const before = readFileSync(registryFile(h), 'utf8');
-  const old = new Date('2020-01-01T00:00:00Z');
-  touch(registryFile(h), old.toISOString());
-  ok(ledger(h, app, 'list'));
-  assert.equal(readFileSync(registryFile(h), 'utf8'), before);
-  assert.equal(statSync(registryFile(h)).mtimeMs, old.getTime());
+  assert.equal(readFileSync(oldTaskListFile(h), 'utf8'), '{ not json');
 });
 
 test("ledger archive lists this repo's archived ledgers newest first, named by their title slug", (t) => {

@@ -11,7 +11,7 @@ import { limitLockWaits } from './lock.js';
 import { conversionHint } from './migrate-repo-ids.js';
 import { CITATION_ADVICE, realPath, samePath, SESSION_CITATION } from './paths.js';
 import { repoKey, repoLabel } from './repo-key.js';
-import { holdsUnmovedLedger, keepsUnmovedLedger, loadTasks } from './registry.js';
+import { holdsUnmovedLedger, keepsUnmovedLedger } from './unmoved.js';
 import { pullForSession, syncNotice } from './sync.js';
 import { keyAndAliases, type LedgerStore } from './store.js';
 import { activeTask, activeTasks, archivedTasks, findNamed, findTasks, locateChild, namedChildren, type Task } from './tasks.js';
@@ -176,14 +176,7 @@ function unmovedHint(store: LedgerStore, cwd: string): string | undefined {
   return count === 0 ? undefined : `${plural(count, 'ledger')} still kept in .claude/ledger.md; run \`ledger store migrate --active\`.`;
 }
 
-/** The registry is a cache: a session start that cannot write it still shows its ledgers. */
-function tasksOnDisk(context: HookContext): Task[] {
-  try {
-    return loadTasks(context);
-  } catch {
-    return findTasks(context.store);
-  }
-}
+const tasksOnDisk = ({ store }: HookContext): Task[] => findTasks(store);
 
 /**
  * With git storage it pulls first, and a sync problem adds one line before the ledgers. The pull, and every git call and
@@ -196,7 +189,7 @@ function sessionLedgerContext(input: HookInput, context: HookContext, deadline: 
   void context.store;
   pullForSession(context.paths, deadline - AFTER_PULL_MS);
   limitGitCalls(GIT_TIMEOUT_MS, deadline);
-  // After the pull, which may bring ledgers under folder names, and before the ledgers, whose registry rebuild re-keys the entries the hint counts.
+  // After the pull, which may bring ledgers under folder names.
   const conversion = conversionHint(context.store);
   const notice = syncNotice(context.paths);
   const cwd = folderOf(input, context);

@@ -41,7 +41,7 @@ import { withHint } from './migrate-repo-ids.js';
 import { isKind, KINDS, type Kind } from './kinds.js';
 import { storedText } from './record.js';
 import { remoteKey, repoKey } from './repo-key.js';
-import { holdsUnmovedLedger, loadTasks } from './registry.js';
+import { holdsUnmovedLedger } from './unmoved.js';
 import { hostProblem, noteOwnHost } from './settings.js';
 import { keyAndAliases, type Change, type LedgerStore } from './store.js';
 import { pauseForTest } from './wait.js';
@@ -50,6 +50,7 @@ import {
   childrenOf,
   dependenciesOf,
   dependencyTask,
+  findTasks,
   findNamed,
   inRepo,
   isDone,
@@ -154,9 +155,6 @@ export function currentTask(store: LedgerStore, cwd: string): Task | undefined {
   if (root === undefined || main === undefined || samePath(root, main)) return undefined;
   return activeTask(store, root);
 }
-
-/** The registry is a cache of the disk; rebuilding it after a write keeps it in line. */
-const refreshRegistry = (context: Context): void => void loadTasks(context);
 
 /** The ledger template; with `refs`, it holds a `- design refs:` bullet for fillLedger to fill. */
 function readTemplate(paths: LedgerPaths, refs: string | undefined): string {
@@ -322,7 +320,6 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
     updateLedger(context, current, (text) => addDecision(text, `- New task ${named}: separate work, not part of this goal. ${start} starts it.`));
     created.noted = current.file;
   }
-  refreshRegistry(context);
   return { ...created, start };
 }
 
@@ -349,7 +346,6 @@ function hereTask(context: Context, given: string | undefined, goal: string | un
   });
   noteStamped(context);
   excludeEvidence(main);
-  refreshRegistry(context);
   return { slug, main, status: 'active', ...started };
 }
 
@@ -379,7 +375,6 @@ function promote(context: Context, slug: string, main: string, repo: string): St
       }
     },
   );
-  refreshRegistry(context);
   return started;
 }
 
@@ -449,7 +444,7 @@ export function goTask(context: Context, slug: string, repo: string | undefined,
   const { cwd } = context;
   if (!isReadableSlug(slug)) fail(notASlug(slug));
   const named = { slug, main: repoOf(cwd, repo === undefined ? cwd : path.resolve(cwd, repo)) };
-  const tasks = loadTasks(context);
+  const tasks = findTasks(context.store);
   const task = liveLedger(tasks, named);
   if (task?.elsewhere) fail(notOnThisMachine(task));
   let chain: Ref[] = [];
@@ -497,7 +492,6 @@ export function goTask(context: Context, slug: string, repo: string | undefined,
       warnings.push(`${target.slug} is not marked started in ${parent.slug}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  refreshRegistry(context);
   const children = childrenOf(found, target.main, tasks).map(({ slug: child, main, status }) => ({ slug: child, main, status }));
   const again = inCwdRepo ? `ledger go ${target.slug}` : `ledger go ${target.slug} --repo ${shellWord(target.main)}`;
   const installed = installPackages(place.worktree, again);
@@ -531,7 +525,7 @@ export function goText(context: Context, { ledger, worktree, branch, base, chain
 
 export function liveTask(context: Context, name: string): Linked & { tasks: Task[] } {
   const ref = taskRef(context.cwd, name);
-  const tasks = loadTasks(context);
+  const tasks = findTasks(context.store);
   return { task: theTask(tasks, ref, { live: true }), ref, tasks };
 }
 
@@ -547,7 +541,6 @@ export function parkTask(context: Context, name: string, reason: string): ParkRe
   const { task, ref } = liveTask(context, name);
   const parked = { date: today(), reason: oneLine(reason) };
   updateLedger(context, task, (text) => park(withoutClaim(text), parkMarker(parked)));
-  refreshRegistry(context);
   return { ...ref, ledger: task.file, parked };
 }
 
@@ -560,7 +553,6 @@ export function unparkTask(context: Context, name: string): UnparkResult {
   const { parked } = task.ledger;
   if (parked === undefined) return { ...ref, ledger: task.file, unparked: false };
   updateLedger(context, task, unpark);
-  refreshRegistry(context);
   return { ...ref, ledger: task.file, unparked: true, parked: { date: parked.date, reason: parked.reason } };
 }
 
@@ -624,11 +616,10 @@ export function changeParent(context: Context, parentName: string, action: Paren
   if (childName === undefined) return fail(`ledger tree ${action} <parent> needs a child: ledger tree ${action} ${parentName} <child>`);
   const parentRef = taskRef(context.cwd, parentName);
   const childRef = taskRef(context.cwd, childName);
-  const tasks = loadTasks(context);
+  const tasks = findTasks(context.store);
   const parent = theTask(tasks, parentRef, { live: true });
   const change = { add: addChildTask, remove: removeChildTask, start: startChildTask }[action];
   const output = change(context, tasks, { task: parent, ref: parentRef }, childRef);
-  refreshRegistry(context);
   return output;
 }
 
@@ -652,7 +643,7 @@ const namesClone = (parent: Task, place: Place): boolean => parent.place === 'ba
  */
 function nameChildClone(context: Context, parentRef: Ref, child: Ref): void {
   if (/\s/.test(child.main)) return;
-  const tasks = loadTasks(context);
+  const tasks = findTasks(context.store);
   const parent = liveLedger(tasks, parentRef);
   if (parent === undefined || !namesClone(parent, 'active')) return;
   const hasWorktreeTask = (main: string): boolean => tasks.some((task) => task.place === 'active' && task.slug === child.slug && task.main !== undefined && samePath(task.main, main));
@@ -856,7 +847,7 @@ export function orderChildren(context: Context, parentName: string, childNames: 
   const { cwd } = context;
   const parentRef = taskRef(cwd, parentName);
   const named = childNames.map((childName) => taskRef(cwd, childName));
-  const tasks = loadTasks(context);
+  const tasks = findTasks(context.store);
   const parent = { task: theTask(tasks, parentRef, { live: true }), ref: parentRef };
   const current = listedChildren(parent.task, parentRef.main, tasks).filter(isLive);
   const name = nameFrom(cwd);
@@ -904,7 +895,6 @@ export function orderChildren(context: Context, parentName: string, childNames: 
     const sorted = sortChildLines(text, parent, tasks, orders);
     return sorted === text ? undefined : sorted;
   });
-  refreshRegistry(context);
   return { action: 'order', parent: parentRef, children: picked.map(({ ref }) => ref) };
 }
 
@@ -980,7 +970,7 @@ export function setDependencies(context: Context, childName: string, names: stri
   const key = repoKey(childRef.main);
   const given = names.map((each) => dependencyFrom(cwd, key, each));
   const dependencies = given.filter(({ slug, repo }, index) => given.findIndex((other) => other.slug === slug && other.repo === repo) === index).map(({ slug, repo }) => ({ slug, repo }));
-  const tasks = loadTasks(context);
+  const tasks = findTasks(context.store);
   const child = theTask(tasks, childRef, { live: true });
   const name = dependencyName(cwd);
   const self = { slug: childRef.slug, repo: key };
@@ -998,7 +988,6 @@ export function setDependencies(context: Context, childName: string, names: stri
     );
   }
   updateLedger(context, child, (text) => setLocationBullet(text, 'depends on', stored.length === 0 ? undefined : showDependencies(stored)) ?? fail(`${child.file} has no ## Location section.`));
-  refreshRegistry(context);
   return { action: 'depends', child: childRef, dependencies };
 }
 

@@ -10,7 +10,7 @@ import type { LedgerStore } from './store.js';
 export const MOVE_KINDS = ['repo-ids', 'active', 'records'] as const;
 export type MoveKind = (typeof MOVE_KINDS)[number];
 
-/** One task, registry entry or alias a move takes `from` → `to`; `auto` is false for one it leaves, with the `reason`. */
+/** One task, evidence folder or alias a move takes `from` → `to`; `auto` is false for one it leaves, with the `reason`. */
 export type Move = { kind: MoveKind; from: string; to: string; auto: boolean; reason?: string };
 export type OnMove = (move: Move) => void;
 

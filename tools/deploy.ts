@@ -236,7 +236,7 @@ export interface PendingMove {
 
 export const MIGRATE_HINT = 'Run bin/deploy --migrate to move them.';
 
-/** Runs bin/ledger from HOME, not this repo: the repo's own worktrees are found only through the registry, as every other repo's are. */
+/** Runs bin/ledger from HOME, not this repo: the repo's own worktrees are found through the task records, as every other repo's are. */
 export function runLedger(home: string, args: string[]): SpawnSyncReturns<string> {
   return spawnSync(LEDGER, args, { cwd: home, encoding: 'utf8' });
 }

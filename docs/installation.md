@@ -144,9 +144,8 @@ failure. The command exits 1 only in these cases:
 
 ## Ledger storage
 
-The backlog ledgers, the archive and the list of tasks are files under
-`~/.claude` by default: `ledger-backlog/`, `ledger-archive/` and
-`ledgers.json`. To keep them in one SQLite database instead,
+The backlog ledgers and the archive are files under `~/.claude` by default:
+`ledger-backlog/` and `ledger-archive/`. To keep them in one SQLite database instead,
 `~/.claude/ledgers.db`, write `~/.claude/ledger-settings.json`:
 
 ```json

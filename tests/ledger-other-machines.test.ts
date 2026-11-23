@@ -924,17 +924,6 @@ test('after "host" changes, ledger show --repo from a folder outside the repo pr
   assert.equal(ok(run(a, ['show', SLUG, '--repo', APP_KEY], { cwd: a.h })), shown);
 });
 
-test('after "host" changes, ledger show --repo from a folder outside the repo prints the ledger without the read-only line, also when the registry entry of the task has no "main"', (t) => {
-  const { a, shown } = renamedHost(t);
-  const registry = path.join(a.h, '.claude/ledgers-git.json');
-  ledgerOk(a, 'list');
-  const entries = JSON.parse(readFileSync(registry, 'utf8')) as Record<string, unknown>[];
-  assert.ok(entries.some((entry) => entry.slug === SLUG), 'the registry has no entry of the task');
-  writeFileSync(registry, JSON.stringify(entries.map(({ main: _main, ...entry }) => entry)));
-
-  assert.equal(ok(run(a, ['show', SLUG, '--repo', APP_KEY], { cwd: a.h })), shown);
-});
-
 test('after "host" changes, a task of this machine filed under an old repo key is listed as active here and shown without the read-only line', (t) => {
   const { a, shown } = renamedHost(t, (m) => {
     mkdirSync(path.join(m.clone, 'active/app'), { recursive: true });

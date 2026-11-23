@@ -7,10 +7,9 @@ import { exists, holdsAnything } from './files.js';
 import { parseLedger } from './format.js';
 import { openStore } from './open-store.js';
 import type { LedgerPaths } from './paths.js';
-import { parseRegistry, type RegistryEntry } from './registry.js';
 import { readStorage, shownSettingsFile, writeStorage, type Storage } from './settings.js';
 import { loadSqlite, sqliteFile, sqliteStore } from './sqlite-store.js';
-import { HiddenMarkdown, NameTaken, wasCreatedHere, type Change, type LedgerCollection, type LedgerStore, type StoredLedger, type WrittenLedger } from './store.js';
+import { HiddenMarkdown, NameTaken, wasCreatedHere, type LedgerCollection, type LedgerStore, type StoredLedger, type WrittenLedger } from './store.js';
 import { syncLedgers } from './sync.js';
 import { joined, plural } from './views.js';
 
@@ -55,29 +54,11 @@ function sharedWorktrees(records: StoredLedger[]): string[] {
   return [...byWorktree].filter(([, names]) => names.size > 1).map(([worktree, names]) => redacted(`  ${worktree}  ${[...names].join(', ')}`));
 }
 
-/** The ledger an entry stands for, as loadTasks matches entries to ledgers; undefined for an archived entry that names none. */
-const entryKey = (entry: RegistryEntry): string | undefined => (entry.status === 'archived' ? entry.archivePath : entry.path);
-
-/** `entry` with the store location it names moved to where the copy is, so the next load keeps its created time. */
-function relocated(entry: RegistryEntry, moved: Map<string, string>): RegistryEntry {
-  if (entry.status !== 'archived') return { ...entry, path: moved.get(entry.path) ?? entry.path };
-  return entry.archivePath === undefined ? entry : { ...entry, archivePath: moved.get(entry.archivePath) ?? entry.archivePath };
-}
-
-const parsed = (text: string | undefined): RegistryEntry[] => (text === undefined ? [] : (parseRegistry(text) ?? []));
-
-const registryText = (entries: RegistryEntry[]): string => `${JSON.stringify(entries, null, 2)}\n`;
-
-// parseRegistry checks only path and status, so `updated` may be missing.
-const updatedOf = ({ updated }: RegistryEntry): string => (typeof updated === 'string' ? updated : '');
-
-const newestFirst = (a: RegistryEntry, b: RegistryEntry): number => updatedOf(b).localeCompare(updatedOf(a));
-
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /**
  * `ledger store migrate --to <storage> [--from <storage>] [--remove-source] [--dry-run]`: copies backlog and active ledgers, the
- * archive copies with their evidence, and the registry from one storage to another, reads every copy back, and only then
+ * archive copies with their evidence, and the aliases from one storage to another, reads every copy back, and only then
  * switches the setting and, with `removeSource`, removes what was copied. Exits 1 with nothing changed when the target
  * has a name to copy, and when a copy fails or reads back different: then it removes every copy it made first. Prints
  * one line per step to `line`. When git storage changed, it then pushes, and a failed push is reported, not a failure.
@@ -165,28 +146,6 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
     if (refused !== undefined) fail(`ledger store migrate stopped, and nothing changed: the ${STORAGE_NAME[to]} takes no alias. ${refused} Fix or remove that alias first.`);
   }
 
-  const moved = new Map(
-    target === undefined
-      ? []
-      : places.flatMap((place) => ledgers[place].map((ledger) => [ledger.location, target[place].location(ledger.repo, ledger.name)] as const)),
-  );
-  const sourceRegistry = source?.registry.read();
-  const sourceAll = parsed(sourceRegistry);
-  // Such entries would all share one key, so they could neither be merged nor checked.
-  const sourceEntries = sourceAll.filter((entry) => entryKey(entry) !== undefined).map((entry) => relocated(entry, moved));
-  const skipped = sourceAll.length - sourceEntries.length;
-  const missingFrom = (entries: RegistryEntry[]): RegistryEntry[] => {
-    const taken = new Set(entries.map(entryKey));
-    return sourceEntries.filter((entry) => !taken.has(entryKey(entry)));
-  };
-  const added = missingFrom(parsed(target?.registry.read()));
-  // Merged with the registry as it is at the write, so an entry another command added since this read stays.
-  const mergeRegistry: Change<string | undefined> = (current) => {
-    const entries = parsed(current);
-    const adding = missingFrom(entries);
-    return adding.length > 0 ? registryText([...entries, ...adding].sort(newestFirst)) : undefined;
-  };
-
   const act = (done: string, planned: string): string => (dryRun ? `would ${planned}` : done);
   const writing = !dryRun && source !== undefined && target !== undefined;
   line(`Migrate from ${STORAGE_NAME[from]} to ${STORAGE_NAME[to]}${dryRun ? ' · dry run, nothing changed' : ''}`);
@@ -196,14 +155,11 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
       `ledger store migrate stopped: ${reason} ${undone} The setting stays "${setting}", and nothing was removed from the ${STORAGE_NAME[from]}.`;
     const kept = target.aliases.read();
     const aliases = [...source.aliases.read()].filter(([old]) => !kept.has(old));
-    copyChecked(source, target, { ...ledgers, aliases, evidenceRoot, entries: sourceEntries, mergeRegistry, targetName: STORAGE_NAME[to] }, stopped);
+    copyChecked(source, target, { ...ledgers, aliases, evidenceRoot, targetName: STORAGE_NAME[to] }, stopped);
   }
   line(`${act('copied', 'copy')} ${plural(backlog.length, 'backlog ledger')}`);
   line(`${act('copied', 'copy')} ${plural(active.length, 'active ledger')}`);
   line(`${act('copied', 'copy')} ${plural(archive.length, 'archive copy', 'archive copies')} with ${plural(evidenceCount, 'evidence file')}`);
-  const merge = [`${added.length} added`, `${sourceEntries.length - added.length} kept as the ${STORAGE_NAME[to]} has them`];
-  if (skipped > 0) merge.push(`${skipped} skipped as archived with no archive path`);
-  line(`${act('merged', 'merge')} ${plural(sourceEntries.length, 'registry entry', 'registry entries')}: ${merge.join(', ')}`);
   line(`${act('checked', 'check')} that every copy reads back the same, evidence bytes included`);
 
   const settings = shownSettingsFile(paths.home);
@@ -216,12 +172,7 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
   let removed = 'nothing';
   if (!removeSource) line(`kept the ${STORAGE_NAME[from]} as it was; --remove-source removes what was copied`);
   else {
-    const hadRegistry = sourceRegistry !== undefined;
-    removed = removedText(
-      writing
-        ? remove(source, { ...ledgers, evidenceRoot, entries: hadRegistry ? sourceAll : undefined }, line)
-        : { backlog: backlog.length, active: active.length, archive: archive.length, registry: hadRegistry ? sourceEntries.length : undefined },
-    );
+    removed = removedText(writing ? remove(source, { ...ledgers, evidenceRoot }, line) : { backlog: backlog.length, active: active.length, archive: archive.length });
     line(`${act('removed', 'remove')} ${removed} from the ${STORAGE_NAME[from]}`);
   }
 
@@ -230,7 +181,6 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
     plural(active.length, 'active ledger'),
     plural(archive.length, 'archive copy', 'archive copies'),
     plural(evidenceCount, 'evidence file'),
-    plural(added.length, 'registry entry', 'registry entries'),
   ]);
   line(`${dryRun ? 'Would copy' : 'Copied'} ${copied}; ${dryRun ? 'would remove' : 'removed'} ${removed}.`);
 }
@@ -246,41 +196,31 @@ type Planned = Written & { evidenceRoot: string };
 
 const evidenceFolder = (evidenceRoot: string, index: number): string => path.join(evidenceRoot, String(index));
 
-/** The registry text before and after this run's write; neither is set when it wrote none. */
-type RegistryWrite = { before?: string; after?: string };
-
 /**
- * Copies `planned` and merges its registry entries into `target` with `mergeRegistry`, reads it all back, and commits
- * it where the target commits. When any of that throws or reads back different, it removes each ledger and alias it
- * wrote, puts back the registry the target had, and fails.
+ * Copies `planned` into `target`, reads it all back, and commits it where the target commits. When any of that throws
+ * or reads back different, it removes each ledger and alias it wrote, and fails.
  */
 function copyChecked(
   source: LedgerStore,
   target: LedgerStore,
-  planned: Planned & { entries: RegistryEntry[]; mergeRegistry: Change<string | undefined>; targetName: string },
+  planned: Planned & { targetName: string },
   stopped: (reason: string, undone: string) => string,
 ): void {
   const written: Written = { backlog: [], active: [], archive: [], aliases: [] };
-  const registry: RegistryWrite = {};
   let differs: string[];
   try {
     copy(source, target, planned, written);
-    target.registry.update((current) => {
-      const merged = planned.mergeRegistry(current);
-      if (merged !== undefined) Object.assign(registry, { before: current, after: merged });
-      return merged;
-    });
     differs = check(source, target, planned);
     // Before the setting switches or --remove-source removes anything, so a commit git storage refuses changes neither.
     // It must hold the text read from the source, not only some text: another command may change a copy after the check.
     const expected = (place: WrittenLedger['place']) => ({ repo, name, text }: StoredLedger): WrittenLedger => ({ place, repo, name, text });
     if (differs.length === 0) target.commit?.(places.flatMap((place) => planned[place].map(expected(place))));
   } catch (error) {
-    return fail(redacted(stopped(`copying to the ${planned.targetName} failed: ${messageOf(error)}.`, undo(target, written, registry, planned.targetName))));
+    return fail(redacted(stopped(`copying to the ${planned.targetName} failed: ${messageOf(error)}.`, undo(target, written, planned.targetName))));
   }
   if (differs.length > 0) {
     const reason = `${plural(differs.length, 'copy', 'copies')} in the ${planned.targetName} read back different.`;
-    fail(redacted([stopped(reason, undo(target, written, registry, planned.targetName)), ...differs.map((what) => `  ${what}`)].join('\n')));
+    fail(redacted([stopped(reason, undo(target, written, planned.targetName)), ...differs.map((what) => `  ${what}`)].join('\n')));
   }
 }
 
@@ -333,11 +273,10 @@ function removal(remove: () => boolean): Removal {
 const KEPT_BECAUSE: Record<Exclude<Removal, 'removed'>, string> = { changed: 'it changed after the copy', hidden: 'its record hides Markdown from before records' };
 
 /**
- * Removes from `target` each ledger and alias in `written`, and puts back the registry it had while it is still what this
- * run wrote. A backlog or active ledger another command changed since the copy stays, and so does a copy whose record hides
- * Markdown. Says what it did, as a sentence.
+ * Removes from `target` each ledger and alias in `written`. A backlog or active ledger another command changed since the
+ * copy stays, and so does a copy whose record hides Markdown. Says what it did, as a sentence.
  */
-function undo(target: LedgerStore, written: Written, registry: RegistryWrite, targetName: string): string {
+function undo(target: LedgerStore, written: Written, targetName: string): string {
   try {
     const outcomes = [
       ...slugPlaces.flatMap((place) =>
@@ -348,12 +287,6 @@ function undo(target: LedgerStore, written: Written, registry: RegistryWrite, ta
     const kept = (outcome: Removal): string[] => outcomes.flatMap(([what, done]) => (done === outcome ? [what] : []));
     const [changed, hidden] = [kept('changed'), kept('hidden')];
     for (const [old, key] of written.aliases) target.aliases.remove(old, key);
-    const { before, after } = registry;
-    if (after !== undefined) {
-      // Update cannot remove, so a registry the target did not have is removed after a separate read.
-      if (before !== undefined) target.registry.update((current) => (current === after ? before : undefined));
-      else if (target.registry.read() === after) target.registry.remove();
-    }
     const except = [
       ...(changed.length > 0 ? [`${joined(changed)}, which another command changed after the copy`] : []),
       ...hidden.map((what) => `${what}, whose record hides Markdown from before records`),
@@ -365,10 +298,10 @@ function undo(target: LedgerStore, written: Written, registry: RegistryWrite, ta
   }
 }
 
-/** What reads back from `target` unlike the source: a ledger's text, an evidence tree or file, or a registry entry. */
-function check(source: LedgerStore, target: LedgerStore, planned: Planned & { entries: RegistryEntry[] }): string[] {
+/** What reads back from `target` unlike the source: a ledger's text, or an evidence tree or file. */
+function check(source: LedgerStore, target: LedgerStore, planned: Planned): string[] {
   const differs: string[] = [];
-  const { archive, evidenceRoot, entries } = planned;
+  const { archive, evidenceRoot } = planned;
   for (const place of slugPlaces) {
     for (const ledger of planned[place]) if (target[place].read(ledger.repo, ledger.name)?.text !== ledger.text) differs.push(`${place} ${shortName(ledger)}`);
   }
@@ -389,40 +322,25 @@ function check(source: LedgerStore, target: LedgerStore, planned: Planned & { en
       if (states.some((state) => state !== expected) || !sameFiles) differs.push(`evidence of ${shortName(ledger)}`);
     }
   });
-  const kept = new Set(parsed(target.registry.read()).map(entryKey));
-  for (const entry of entries) if (!kept.has(entryKey(entry))) differs.push(`registry entry ${entry.repo}/${entry.slug}`);
   return differs;
 }
 
-/** `registry` is undefined when the source had none. */
-type Removed = { backlog: number; active: number; archive: number; registry: number | undefined };
+type Removed = { backlog: number; active: number; archive: number };
 
-/**
- * Removes from `source` what was copied and checked. A ledger or archive copy that changed since the copy stays,
- * evidence included, and so does its registry entry, with each entry that was not copied.
- */
-function remove(
-  source: LedgerStore,
-  planned: Copied & { evidenceRoot: string; entries: RegistryEntry[] | undefined },
-  line: (text: string) => void,
-): Removed {
-  const kept = new Set<string>();
-  const { archive, evidenceRoot, entries } = planned;
+/** Removes from `source` what was copied and checked. A ledger or archive copy that changed since the copy stays, evidence included. */
+function remove(source: LedgerStore, planned: Copied & { evidenceRoot: string }, line: (text: string) => void): Removed {
+  const { archive, evidenceRoot } = planned;
   const removed = { backlog: 0, active: 0, archive: 0 };
   for (const place of slugPlaces) {
     for (const ledger of planned[place]) {
       // Another session may have written to it since the copy; that text is in no copy, so it stays.
       if (!source[place].has(ledger.repo, ledger.name)) {
         line(`${place} ${shortName(ledger)} is already gone from the source`);
-        kept.add(ledger.location);
         continue;
       }
       const done = removal(() => source[place].remove(ledger.repo, ledger.name, ledger.text));
       if (done === 'removed') removed[place]++;
-      else {
-        line(`kept ${place} ${shortName(ledger)} in the source: ${KEPT_BECAUSE[done]}`);
-        kept.add(ledger.location);
-      }
+      else line(`kept ${place} ${shortName(ledger)} in the source: ${KEPT_BECAUSE[done]}`);
     }
   }
   archive.forEach((copy, index) => {
@@ -430,34 +348,10 @@ function remove(
     // Checked against what was copied, as another command may have changed the copy or its evidence since.
     const done = removal(() => source.archive.remove(copy.repo, copy.name, { text: copy.text, evidence: evidenceFolder(evidenceRoot, index) }));
     if (done === 'removed') removed.archive++;
-    else {
-      line(`kept archive ${shortName(copy)} in the source: ${KEPT_BECAUSE[done]}`);
-      kept.add(copy.location);
-    }
+    else line(`kept archive ${shortName(copy)} in the source: ${KEPT_BECAUSE[done]}`);
   });
-  if (entries === undefined) return { ...removed, registry: undefined };
-  const copied = new Set(entries.flatMap((entry) => entryKey(entry) ?? []).filter((key) => !kept.has(key)));
-  let before = 0;
-  let stays: RegistryEntry[] = [];
-  // Filtered as the registry is at the write, so an entry another command added since the copy stays.
-  source.registry.update((current) => {
-    const now = parsed(current);
-    before = now.length;
-    stays = now.filter((entry) => {
-      const key = entryKey(entry);
-      return key === undefined || !copied.has(key);
-    });
-    return stays.length > 0 ? registryText(stays) : undefined;
-  });
-  // Update cannot remove; an empty registry goes, so the next load rebuilds it.
-  if (stays.length === 0) source.registry.remove();
-  return { ...removed, registry: before - stays.length };
+  return removed;
 }
 
-const removedText = ({ backlog, active, archive, registry }: Removed): string =>
-  joined([
-    plural(backlog, 'backlog ledger'),
-    plural(active, 'active ledger'),
-    plural(archive, 'archive copy', 'archive copies'),
-    ...(registry === undefined ? [] : [plural(registry, 'registry entry', 'registry entries')]),
-  ]);
+const removedText = ({ backlog, active, archive }: Removed): string =>
+  joined([plural(backlog, 'backlog ledger'), plural(active, 'active ledger'), plural(archive, 'archive copy', 'archive copies')]);

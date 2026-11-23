@@ -185,7 +185,7 @@ test('the worktree-removal guard denies a worktree an active record names, and o
   assert.match(JSON.parse(removalGate(h, app, loose)).hookSpecificOutput.permissionDecisionReason, new RegExp(`not yet moved into the ledger store: ${loose}`));
 });
 
-test('without a registry, a rebuild finds active tasks from the store records and no plain-folder ledger under the scan roots', (t) => {
+test('the task list finds active tasks from the store records and no plain-folder ledger under the scan roots', (t) => {
   const { h } = setup(t);
   const tool = repository(h, path.join(h, 'work/tool'));
   worktreeTask(h, tool, { slug: 'tool-task' });

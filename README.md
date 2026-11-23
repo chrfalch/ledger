@@ -120,8 +120,8 @@ ledgers; each edit changes only the lines it names.
 | `ledger task park <slug> --reason <text>` | Marks a task parked: `Parked: <date> — <reason>` becomes the first line under `## Next step`. The reason is required. |
 | `ledger task unpark <slug>` | Removes the parked mark. |
 | `ledger task retire [<slug>] [--dry-run] [--force]` | Retires a task. Without a slug, it retires the task of the worktree you are in. It copies the ledger to `~/.claude/ledger-archive/<repo>/<date>-<slug>.md`, and `.claude/evidence/` to the folder of the same name. Then it removes the worktree, or the backlog ledger. It marks the task `(retired <date>)` in its parent and copies its `## Report` to the parent's `## Child reports`. It deletes the branch when the branch is merged: no commits ahead of the default branch, or a merged PR that ends at HEAD. Uncommitted changes, an unmerged branch and child tasks that are not retired each need `--force`. Evidence that cannot be archived whole stops it even with `--force`: a `.claude/evidence` that is not a folder or cannot be read, a symbolic link in it that leaves it, or an archive copy whose evidence differs. `--dry-run` prints the checks and steps; it fetches origin's default branch and changes nothing else. It exits 1 when a check stops it. |
-| `ledger store migrate --to <file\|sqlite\|git> [--from <storage>] [--remove-source] [--dry-run]` | Moves the backlog ledgers, the archive with its evidence, the registry and the repo aliases from the storage the setting names, or from `--from`, to the one you name. It copies everything, reads each copy back, and then sets `"storage"` in `~/.claude/ledger-settings.json`. The other storage keeps its ledgers unless you add `--remove-source`. It exits 1, with nothing changed, when the target already has a ledger of the same name. A move into git storage commits and pushes; a failed push is reported, and the setting still switches. `--dry-run` prints the plan and changes nothing. |
-| `ledger store migrate --repo-ids [--dry-run]` | Once, for ledgers filed under the folder name of a checkout, as before repo keys: moves each to its repo's key, with its evidence and registry entry, and keeps the folder name as an alias. It only renames on the same disk. A ledger whose checkout is gone or cannot be told, that lies on another disk, or whose name the key already has, stays where it is for you to move by hand, and the command exits 1. With git storage, it commits and pushes the moves; the aliases stay on the machine that ran it. `--dry-run` prints the plan, changes nothing, and exits the same way. |
+| `ledger store migrate --to <file\|sqlite\|git> [--from <storage>] [--remove-source] [--dry-run]` | Moves the backlog ledgers, the archive with its evidence, and the repo aliases from the storage the setting names, or from `--from`, to the one you name. It copies everything, reads each copy back, and then sets `"storage"` in `~/.claude/ledger-settings.json`. The other storage keeps its ledgers unless you add `--remove-source`. It exits 1, with nothing changed, when the target already has a ledger of the same name. A move into git storage commits and pushes; a failed push is reported, and the setting still switches. `--dry-run` prints the plan and changes nothing. |
+| `ledger store migrate --repo-ids [--dry-run]` | Once, for ledgers filed under the folder name of a checkout, as before repo keys: moves each to its repo's key, with its evidence, and keeps the folder name as an alias. It only renames on the same disk. A ledger whose checkout is gone or cannot be told, that lies on another disk, or whose name the key already has, stays where it is for you to move by hand, and the command exits 1. With git storage, it commits and pushes the moves; the aliases stay on the machine that ran it. `--dry-run` prints the plan, changes nothing, and exits the same way. |
 | `ledger store migrate --pending [--json]` | Lists what `--repo-ids`, `--active` and `--records` would move, in the order they run: each task from where to where. A task a move would leave is marked with the reason. It prints `Nothing to move.` when nothing is left, and changes nothing. `--json` prints the list as one JSON object. `bin/deploy` reads this list to offer the moves. The list is a preview: each move checks again when it runs, so it can still leave a task the list showed as movable. |
 | `ledger store sync init <url>` | Sets up git storage in `~/.claude/ledger-data` from a private GitHub repository. It asks `gh` whether the repository is private, and stops when it is not, or when `gh` cannot tell. An empty repository gets its layout, pushed at once; a repository another machine set up keeps its contents; any other repository is refused. It does not change the storage setting. |
 | `ledger store sync [--quiet]` | With git storage: asks `gh` whether the repository is still private, commits the ledgers, pulls with a rebase, checks that the commits hold only ledgers and no secret-like text, and pushes. It exits 1, with nothing pushed, on a conflict, a check that fails, or a network failure, and names the file or `file:line`. `--quiet` prints nothing, asks `gh` once a day, and exits at once when another `--quiet` sync runs; the background push after each command uses it. |
@@ -135,8 +135,7 @@ ledgers; each edit changes only the lines it names.
 
 Every ledger is kept in the ledger store: the active ledgers, the backlog
 ledgers and the archive. Read a ledger with `ledger show`, and write it one item
-at a time with `ledger notes`. The ledgers and the registry,
-`~/.claude/ledgers.json`, are files by default, at the paths this README names.
+at a time with `ledger notes`. The ledgers are files by default, at the paths this README names.
 An active ledger is `~/.claude/ledger-active/<repo>/<slug>.json`. To keep them in one SQLite
 database, `~/.claude/ledgers.db`, write this to `~/.claude/ledger-settings.json`:
 
@@ -157,7 +156,7 @@ To share the backlog and the archive between machines, use git storage: a
 clone of a private GitHub repository at `~/.claude/ledger-data`. Run
 `ledger store sync init <url>` once on each machine, then `ledger store migrate --to git`.
 Each command that changes a ledger commits it and pushes in the background,
-and each session start pulls. Evidence and the registry stay on the
+and each session start pulls. Evidence stays on the
 machine. Your other machines list a task you started here as
 `active on <host>`, and read its ledger, but cannot change it. `"host"` in
 `~/.claude/ledger-settings.json` names the machine; without it, the host name
@@ -257,7 +256,7 @@ without a prompt box, such as SDK hosts, still show them.
 | `/ledger:worktrees prune --all --dry-run` | Lists the build folders of every linked worktree and their sizes. It deletes nothing. |
 | `/ledger:worktrees prune-orphans` | Deletes the Xcode build folders of worktrees that no longer exist. Each folder is named after its worktree, so a folder no worktree matches is an orphan. It never deletes `.main`, the folder of the main checkout. |
 | `/ledger:worktrees prune-orphans --dry-run` | Lists those folders. It deletes nothing. |
-| `/ledger:all` | Prints one table of every task ledger on the machine, from every repo, newest first, with its parent and next step. A status column gives each task's status: active, parked, backlog or retired. The title line counts the live tasks: active, parked and backlog. A child task follows its parent as `↳ <child>`, also when the parent is in another repo. `~/.claude/ledgers.json` names the repos to read; each run brings it in line with the ledgers on disk. |
+| `/ledger:all` | Prints one table of every task ledger on the machine, from every repo, newest first, with its parent and next step. A status column gives each task's status: active, parked, backlog or retired. The title line counts the live tasks: active, parked and backlog. A child task follows its parent as `↳ <child>`, also when the parent is in another repo. It reads the ledgers of every known repo from the store each time. |
 
 To remove a finished worktree, use `/ledger:retire <slug>` or
 `ledger task retire <slug>`. It archives the ledger first, then removes the
@@ -432,7 +431,7 @@ githooks/                 the git hook dispatcher that deploy installs
 tools/                    the deploy code, its wizard and CLI, the settings merge and the rule filter
 tests/                    the tests for tools/, bin/ and hooks/
 bin/deploy                installs everything above
-bin/ledger                the terminal command: lists tasks, the archive and parents; writes task, go, park, unpark and parent changes; retires tasks; shows and prunes worktrees; runs deploy; keeps the registry, the list of every task ledger
+bin/ledger                the terminal command: lists tasks, the archive and parents; writes task, go, park, unpark and parent changes; retires tasks; shows and prunes worktrees; runs deploy
 bin/cc-dd-path            prints and creates the Xcode build folder for a worktree and configuration
 CONTRIBUTING.md           forking, what to send back, what must never be committed
 ```

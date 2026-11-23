@@ -46,7 +46,7 @@ function hasUnpushed(clone: string): boolean {
 
 /**
  * The ledger store as files in the clone ~/.claude/ledger-data, with the evidence in ~/.claude/ledger-evidence, the
- * registry in ~/.claude/ledgers-git.json and the repo aliases in ~/.claude/ledger-aliases-git.json, none of which is
+ * old task list in ~/.claude/ledgers-git.json and the repo aliases in ~/.claude/ledger-aliases-git.json, none of which is
  * pushed. Each write holds the clone lock, so a sync never rebases a file a command is changing. Opening it puts back a
  * pre-push hook that changed. `commit` commits what the store wrote; `close` does so too, once, and starts the push
  * while the clone has commits the remote lacks.
@@ -165,7 +165,7 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
       move: locked('archive', files.archive.move, (moved) => moved, fromAndTo),
       toRecord: locked('archive', toRecordOf(files.archive), (converted) => converted),
     },
-    registry: files.registry,
+    oldTaskList: files.oldTaskList,
     aliases: files.aliases,
     commit,
     close: () => {

@@ -4,7 +4,7 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { parseLedger } from '../tools/ledger/format.js';
 import { REPO } from './helpers.js';
-import { activeFile, archivedTask, backlogTask, git, home, ledger, LEDGER_BIN, ledgerText, ok, putActive, readLedgerFile, recordFile, repoKeyOf, repository, spawn, storeFolder, THIS_HOST, worktreeOf, worktreeTask, writeLedgerFile } from './ledger-core-fixtures.js';
+import { activeFile, archivedTask, backlogTask, git, home, ledger, LEDGER_BIN, ledgerText, ok, putActive, readLedgerFile, repoKeyOf, repository, spawn, storeFolder, THIS_HOST, worktreeOf, worktreeTask, writeLedgerFile } from './ledger-core-fixtures.js';
 
 const TEMPLATE = readFileSync(path.join(REPO, 'ledger.template.md'), 'utf8');
 
@@ -19,8 +19,6 @@ function setup(t: TestContext) {
 const read = readLedgerFile;
 const backlogFile = (h: string, main: string, slug: string): string => path.join(storeFolder(h, 'ledger-backlog', main), `${slug}.json`);
 const short = (h: string, cwd: string, ref: string): string => git(h, cwd, 'rev-parse', '--short', ref);
-type RegistryEntry = { path: string; status: string; slug: string; parent?: string };
-const registry = (h: string): RegistryEntry[] => JSON.parse(readFileSync(path.join(h, '.claude/ledgers.json'), 'utf8'));
 
 function today(): string {
   const date = new Date();
@@ -81,10 +79,6 @@ test('ledger task writes a backlog ledger from ~/.claude/ledger.template.md and 
   const file = backlogFile(h, app, 'fix-login');
   assert.equal(stdout, `ledger:  ${file}\nstatus:  backlog\nstart:   /ledger:go fix-login\n`);
   assert.equal(read(file), backlogText('fix-login', 'Users cannot log in. Done when they can.', app));
-  assert.deepEqual(
-    registry(h).filter(({ path: entry }) => entry === file).map(({ slug, status }) => [slug, status]),
-    [['fix-login', 'backlog']],
-  );
 });
 
 test('ledger task in a repo with llp/ writes "design refs: none"; without --goal the goal stays a placeholder', (t) => {
@@ -167,7 +161,6 @@ test('ledger task --here adds a ledger to the current linked worktree, named aft
     .replace('- base: <branch/commit>', `- base: HEAD @ ${base}`)
     .replace(/^- design refs: .*\n/m, '- kind: code\n');
   assert.equal(read(file), expected);
-  assert.deepEqual(registry(h).filter(({ path: entry }) => entry === file).map(({ status }) => status), ['active']);
 });
 
 test('ledger task --here <slug> takes the slug given', (t) => {
@@ -253,9 +246,6 @@ test('ledger go moves a backlog ledger into a new worktree and branch from the d
   assert.equal(git(h, worktree, 'rev-parse', 'HEAD'), git(h, app, 'rev-parse', 'origin/main'));
   assert.equal(git(h, worktree, 'branch', '--show-current'), 'fix-login');
   assert.match(read(path.join(app, '.git/info/exclude')), /^\.claude\/evidence\/$/m);
-  const entries = registry(h);
-  assert.deepEqual(entries.filter(({ path: entry }) => entry === activeFile(h, app, 'fix-login')).map(({ status }) => status), ['active']);
-  assert.equal(entries.some(({ path: entry }) => entry === backlog), false);
 });
 
 test('ledger go --repo promotes a cross-repo child in its own repo', (t) => {
@@ -430,7 +420,6 @@ test('ledger parent add links a child in the same repo; remove restores both led
   assert.equal(read(parent), inserted(parentBefore, '- design refs: none', '', '## Children', '- idea'));
   const shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'epic', '--json'))) as { children: { slug: string; status: string }[] };
   assert.deepEqual(shown.children.map(({ slug, status }) => [slug, status]), [['idea', 'backlog']]);
-  assert.equal(registry(h).find(({ path: entry }) => entry === recordFile(child))?.parent, 'epic');
   ok(ledger(h, app, 'tree', 'remove', 'epic', 'idea'));
   assert.equal(read(parent), parentBefore);
   assert.equal(read(child), childBefore);
@@ -871,7 +860,7 @@ test('tree next finds a done dependency in a repo without remote that only the d
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'epic', children: ['- b'] });
   const b = backlogTask(h, app, { slug: 'b', parent: 'epic' });
-  assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic b\n', 'the registry is written before lib exists, so it does not name lib');
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic b\n', 'before lib exists');
   const lib = repository(h, path.join(h, 'elsewhere/lib'));
   git(h, lib, 'remote', 'remove', 'origin');
   located(worktreeTask(h, lib, { slug: 'shipped' }), '- state: done');

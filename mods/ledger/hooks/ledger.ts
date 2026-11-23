@@ -239,7 +239,7 @@ export function typedOnlyMessage(command: string, args: string): string {
   return `/${command} runs only when the operator types it. Ask the operator to type \`${typed}\`.`
 }
 
-export const SCAN_DROPPED = 'Ignored --scan: /ledger:all reads the ledgers of every known repo from disk each time, and brings ~/.claude/ledgers.json in line with them.'
+export const SCAN_DROPPED = 'Ignored --scan: /ledger:all reads the ledgers of every known repo from the store each time.'
 
 export const skillFailedMessage = (command: string, error: string): string => `/${command} failed: ${sentence(error)} Ask the operator to type it.`
 

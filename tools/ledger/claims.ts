@@ -3,10 +3,9 @@ import { withClaim, withoutClaim } from './edit.js';
 import { fail, Failure } from './failure.js';
 import { claimText, parseLedger, type Claim } from './format.js';
 import { checkoutRoot, mainCheckout } from './git.js';
-import { loadTasks } from './registry.js';
 import { repoKey } from './repo-key.js';
 import { readClaimExpiryMinutes } from './settings.js';
-import { activeTasks, activeTask as worktreeTask, findNamed, notOnThisMachine, taskRef, theTask, type Task } from './tasks.js';
+import { activeTasks, activeTask as worktreeTask, findNamed, findTasks, notOnThisMachine, taskRef, theTask, type Task } from './tasks.js';
 import { updateActive, type Context } from './write.js';
 
 /** How old the activity of a claim must be before touch writes it again, so a hook that touches at every turn rarely writes. */
@@ -66,7 +65,7 @@ function activeTask(context: Context, name: string | undefined): Task {
 
 function namedTask(context: Context, name: string): Task {
   const ref = taskRef(context.cwd, name);
-  const tasks = loadTasks(context);
+  const tasks = findTasks(context.store);
   const task = findNamed(tasks, ref).find(({ place }) => place === 'active') ?? theTask(tasks, ref);
   if (task.place === 'active') return task;
   return fail(`${task.slug} is not active: ${task.place === 'backlog' ? `it is in the backlog. ledger go ${task.slug} starts it.` : 'it is retired.'}`, 2);

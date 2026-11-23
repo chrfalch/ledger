@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { FORMAT } from '../tools/ledger/clone.js';
@@ -10,6 +11,7 @@ import { openStore } from '../tools/ledger/open-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { parseRecord, renderRecord } from '../tools/ledger/record.js';
 import type { Storage } from '../tools/ledger/settings.js';
+import { sqliteFile } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { REPO } from './helpers.js';
 import { asCli, git, home, ledger, ledgerText, lineWith, noSqlite, ok, repoKeyOf, repository, THIS_HOST, touch, worktreeOf } from './ledger-core-fixtures.js';
@@ -137,7 +139,7 @@ for (const storage of ['file', 'sqlite', 'git'] as const) {
   });
 }
 
-test('migrate --active finds the worktrees of every main checkout the registry names, and a ledger a registry entry names, from outside any repo', (t) => {
+test('migrate --active finds the worktrees of every main checkout the old task list names, and a ledger an entry of it names, from outside any repo', (t) => {
   const { h, app, key, read } = setup(t, 'file');
   const listed = legacyWorktree(h, app, 'listed');
   const lib = repository(h, path.join(h, 'repos/lib'));
@@ -154,36 +156,62 @@ test('migrate --active finds the worktrees of every main checkout the registry n
   assert.deepEqual(read((store) => store.active.byWorktree(named.folder)), { repo: repoKeyOf(lib), slug: 'named' });
 });
 
-test('a registry rebuild from another repo keeps the entry of an unmoved .claude/ledger.md, so migrate --active from there moves it, and the next rebuild drops it', (t) => {
+/** Writes `entries` where older versions kept their task list: ~/.claude/ledgers.json, or the registry table of the database. */
+function writeOldTaskList(h: string, storage: 'file' | 'sqlite', entries: object[]): void {
+  const text = JSON.stringify(entries);
+  if (storage === 'file') return writeFileSync(path.join(h, '.claude/ledgers.json'), text);
+  const db = new (createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')).DatabaseSync(sqliteFile(h));
+  db.exec('CREATE TABLE IF NOT EXISTS registry (id INTEGER PRIMARY KEY CHECK (id = 1), text TEXT NOT NULL) STRICT');
+  db.prepare('INSERT INTO registry VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET text = excluded.text').run(text);
+  db.close();
+}
+
+for (const storage of ['file', 'sqlite'] as const) {
+  test(`${storage} store: migrate --active --dry-run from HOME finds the worktrees of a repo only the old task list names, and of one only a stored task names`, { skip: storage === 'sqlite' && noSqlite }, (t) => {
+    const { h, app } = setup(t, storage);
+    const listed = legacyWorktree(h, app, 'listed');
+    const lib = repository(h, path.join(h, 'repos/lib'));
+    const stored = legacyWorktree(h, lib, 'stored');
+    writeOldTaskList(h, storage, [{ repo: 'x', slug: 'gone', path: '/nowhere/x.json', branch: '', status: 'active', main: app, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' }]);
+    const store = openStore(ledgerPaths(h), storage, { backgroundSync: false });
+    store.backlog.write(repoKeyOf(lib), 'idea', ledgerText({ slug: 'idea', main: lib }));
+    store.close?.();
+
+    const out = ok(migrate(h, h, '--dry-run'));
+
+    assert.match(lineWith(out, listed.file), /^would move .* to active app listed:/);
+    assert.match(lineWith(out, stored.file), /^would move .* to active lib stored:/);
+    assert.match(out, /^Would move 2 ledgers\.$/m);
+  });
+}
+
+test('a task list read leaves the old task list as it was, so migrate --active from another repo still moves the .claude/ledger.md it names', (t) => {
   const { h, app, key, read } = setup(t, 'file');
   const unmoved = legacyWorktree(h, app, 'unmoved');
   const lib = repository(h, path.join(h, 'repos/lib'));
-  const registry = path.join(h, '.claude/ledgers.json');
-  const entry = { repo: key, slug: 'unmoved', path: unmoved.file, branch: 'me/unmoved', status: 'active', main: app, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' };
-  writeFileSync(registry, JSON.stringify([entry]));
-  const paths = (): string[] => (JSON.parse(readFileSync(registry, 'utf8')) as { path: string }[]).map(({ path }) => path);
+  const oldList = path.join(h, '.claude/ledgers.json');
+  const text = JSON.stringify([{ repo: key, slug: 'unmoved', path: unmoved.file, branch: 'me/unmoved', status: 'active', main: app, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' }]);
+  writeFileSync(oldList, text);
 
   ok(ledger(h, lib, 'list'));
-  assert.deepEqual(paths(), [unmoved.file]);
+  assert.equal(readFileSync(oldList, 'utf8'), text);
 
   assert.match(lineWith(ok(migrate(h, lib)), unmoved.file), /^moved .* to active app unmoved:/);
   assert.deepEqual(read((store) => store.active.byWorktree(unmoved.folder)), { repo: key, slug: 'unmoved' });
-
-  ok(ledger(h, lib, 'list'));
-  assert.equal(paths().includes(unmoved.file), false);
+  assert.equal(readFileSync(oldList, 'utf8'), text);
 });
 
-test("a registry rebuild drops the entry of a main checkout's own .claude/ledger.md, which migrate --active never moves", (t) => {
+test("migrate --active never moves a main checkout's own .claude/ledger.md, though the old task list names it", (t) => {
   const { h, app, key } = setup(t, 'file');
   const own = path.join(app, '.claude/ledger.md');
   mkdirSync(path.dirname(own), { recursive: true });
   writeFileSync(own, ledgerText({ slug: 'own' }));
-  const registry = path.join(h, '.claude/ledgers.json');
-  writeFileSync(registry, JSON.stringify([{ repo: key, slug: 'own', path: own, branch: 'main', status: 'active', main: app, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' }]));
+  writeFileSync(path.join(h, '.claude/ledgers.json'), JSON.stringify([{ repo: key, slug: 'own', path: own, branch: 'main', status: 'active', main: app, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' }]));
 
-  ok(ledger(h, app, 'list'));
+  const out = ok(migrate(h, h));
 
-  assert.deepEqual(JSON.parse(readFileSync(registry, 'utf8')), []);
+  assert.match(out, /^Moved 0 ledgers\.$/m);
+  assert.equal(existsSync(own), true);
 });
 
 test('migrate --active leaves a ledger whose heading names no slug', (t) => {
@@ -301,8 +329,8 @@ test('migrate --active --dry-run reports the second of two ledgers with one slug
   git(h, lib, 'remote', 'set-url', 'origin', path.join(h, 'remotes/shared.git'));
   const first = legacyWorktree(h, app, 'fix');
   const second = legacyWorktree(h, lib, 'fix');
-  const registry = (main: string) => ({ repo: 'x', slug: 'fix', branch: '', status: 'active', main, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' });
-  writeFileSync(path.join(h, '.claude/ledgers.json'), JSON.stringify([{ ...registry(app), path: first.file }, { ...registry(lib), path: second.file }]));
+  const entry = (main: string) => ({ repo: 'x', slug: 'fix', branch: '', status: 'active', main, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' });
+  writeFileSync(path.join(h, '.claude/ledgers.json'), JSON.stringify([{ ...entry(app), path: first.file }, { ...entry(lib), path: second.file }]));
 
   const dry = migrate(h, h, '--dry-run');
   const real = migrate(h, h);
@@ -313,7 +341,7 @@ test('migrate --active --dry-run reports the second of two ledgers with one slug
   }
 });
 
-test('migrate --active leaves, and reports, a .claude/ledger.md a registry entry names in a folder that is no linked worktree', (t) => {
+test('migrate --active leaves, and reports, a .claude/ledger.md an old task list entry names in a folder that is no linked worktree', (t) => {
   const { h, app, key, read } = setup(t, 'file');
   const folder = worktreeOf(app, 'pruned');
   mkdirSync(path.join(folder, '.claude'), { recursive: true });

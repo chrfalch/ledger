@@ -658,7 +658,7 @@ test('the drift hook reports a deployed hook link whose hook left the repo', (t)
   assert.match(run(home, [drift]).stdout, /stale link: \.claude\/hooks\/retired-gate\.sh/);
 });
 
-/** A HOME whose registry names the .claude/ledger.md of a linked worktree of ~/repos/app, from before active records. */
+/** A HOME whose old task list names the .claude/ledger.md of a linked worktree of ~/repos/app, from before active records. */
 function homeWithUnmovedLedger(t: TestContext, markdown = ledgerText({ slug: 'task' })) {
   const home = fixtureHome(t);
   const app = repository(home, path.join(home, 'repos/app'));
@@ -753,9 +753,6 @@ test('--migrate exits 0 when every task it can move moved, names each task that 
   git(home, app, 'worktree', 'add', '--quiet', '-b', 'me/stuck', stuck);
   mkdirSync(path.join(stuck, '.claude'));
   writeFileSync(path.join(stuck, '.claude/ledger.md'), '## Goal\nA ledger whose heading names no slug.\n');
-  const registry = path.join(home, '.claude/ledgers.json');
-  const stale = { repo: 'app', slug: 'ghost', path: fileStore(ledgerPaths(home)).backlog.location('app', 'ghost'), branch: 'ghost', status: 'backlog', main: app, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' };
-  writeFileSync(registry, JSON.stringify([...JSON.parse(readFileSync(registry, 'utf8')), stale]));
 
   const migrated = runWithoutClaude(home, DEPLOY, '--migrate');
 
@@ -763,7 +760,6 @@ test('--migrate exits 0 when every task it can move moved, names each task that 
   assert.equal(existsSync(file), false);
   assert.match(migrated.stdout, /^ledgers +moved .* to active app task/m);
   assert.match(migrated.stdout, /^moves +active +.*stuck.* stays: its heading names no task slug/m);
-  assert.match(migrated.stdout, /^moves +repo-ids +registry entry app\/ghost stays: its ledger is gone/m);
   assert.doesNotMatch(migrated.stdout, /Convert (repo keys|backlog and archive)/);
 });
 

@@ -22,10 +22,6 @@ const openStore = (h: string, storage: Storage): LedgerStore => (storage === 'sq
 
 const useSqlite = (h: string): void => writeFileSync(path.join(h, '.claude/ledger-settings.json'), JSON.stringify({ storage: 'sqlite' }));
 
-const registryEntries = (store: LedgerStore): { repo: string; slug: string; path: string; created: string }[] => JSON.parse(store.registry.read() ?? '[]');
-
-const writeRegistry = (store: LedgerStore, entries: object[]): void => store.registry.write(`${JSON.stringify(entries, null, 2)}\n`);
-
 const failedWith = (ran: Ran): string => {
   assert.equal(ran.status, 1, `exit 1 expected:\n${ran.stdout}\n${ran.stderr}`);
   return `${ran.stdout}${ran.stderr}`;
@@ -36,6 +32,19 @@ const convert = (h: string, ...args: string[]): Ran => ledger(h, h, 'store', 'mi
 const OTHER = 'github.com/me/app';
 
 const sqliteDb = (h: string) => new (createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')).DatabaseSync(sqliteFile(h));
+
+/** Writes `entries` where older versions of `storage` kept their task list, which a conversion only reads; gives the text. */
+function writeOldTaskList(h: string, entries: object[], storage: Storage = 'file'): string {
+  const text = `${JSON.stringify(entries, null, 2)}\n`;
+  if (storage === 'file') writeFileSync(path.join(h, '.claude/ledgers.json'), text);
+  else {
+    const db = sqliteDb(h);
+    db.exec('CREATE TABLE IF NOT EXISTS registry (id INTEGER PRIMARY KEY CHECK (id = 1), text TEXT NOT NULL) STRICT');
+    db.prepare('INSERT INTO registry VALUES (1, ?)').run(text);
+    db.close();
+  }
+  return text;
+}
 
 const failure = (needle: string) => (error: unknown): boolean => error instanceof Failure && error.message.includes(needle);
 
@@ -51,7 +60,7 @@ function appWorld(t: TestContext, storage: Storage = 'file') {
 
 const created = '2025-12-01T00:00:00.000Z';
 
-/** A linked worktree of `main` with a .claude/ledger.md, as an active task was kept before the store held it, for a registry entry from then. */
+/** A linked worktree of `main` with a .claude/ledger.md, as an active task was kept before the store held it, for an old task list entry from then. */
 function legacyWorktreeLedger(h: string, main: string, slug: string): string {
   const worktree = path.join(main, '.claude/worktrees', slug);
   git(h, main, 'worktree', 'add', '--quiet', '-b', `me/${slug}`, worktree, 'main');
@@ -73,14 +82,13 @@ const backlogEntry = (store: LedgerStore, repo: string, slug: string, main?: str
 
 // --- 1. A run that stops partway can be finished ---
 
-test('a rerun records the alias and moves the registry entry of a ledger an earlier run moved before it stopped', (t) => {
+test('a rerun records the alias of a ledger an earlier run moved before it stopped, and leaves the old task list as it was', (t) => {
   const { h, app, key, store } = appWorld(t);
   store.backlog.write(key, 'fix-login', ledgerText({ slug: 'fix-login', main: app }));
-  writeRegistry(store, [backlogEntry(store, 'app', 'fix-login', app)]);
+  const oldList = writeOldTaskList(h, [backlogEntry(store, 'app', 'fix-login', app)]);
   ok(convert(h));
   assert.deepEqual([...store.aliases.read()], [['app', key]]);
-  const [entry] = registryEntries(store);
-  assert.deepEqual([entry.repo, entry.path, entry.created], [key, store.backlog.location(key, 'fix-login'), created]);
+  assert.equal(store.oldTaskList(), oldList);
 });
 
 test('a folder whose move fails gets no alias, and the run exits 1', (t) => {
@@ -261,7 +269,7 @@ test('sqlite store: a dry run on a database from before the alias table adds no 
 test('an archive copy that names no main is left as ambiguous when its folder name fits a checkout that is gone too', (t) => {
   const { h, app, store } = appWorld(t);
   store.archive.write('app', '2026-01-01-bare', ledgerText({ slug: 'bare' }));
-  writeRegistry(store, [
+  writeOldTaskList(h, [
     { ...backlogEntry(store, 'app', 'one', app), status: 'active', path: path.join(app, '.claude/worktrees/one/.claude/ledger.md') },
     { ...backlogEntry(store, 'app', 'two', path.join(h, 'issues/app')), status: 'active', path: path.join(h, 'issues/app/.claude/worktrees/two/.claude/ledger.md') },
   ]);
@@ -270,44 +278,44 @@ test('an archive copy that names no main is left as ambiguous when its folder na
   assert.equal(store.archive.has('app', '2026-01-01-bare'), true);
 });
 
-// --- 8. Registry entries with no ledger in the store ---
+// --- 8. Old task list entries with no ledger in the store ---
 
-test('an active entry of a folder in no git repo, with no main, gets that folder as its key, and no alias as nothing moved', (t) => {
+test('an active entry of a folder in no git repo, with no main, makes no alias as nothing moved, and the old task list stays as it was', (t) => {
   const h = home(t);
   const folder = path.join(h, 'work/disk-watcher');
   mkdirSync(path.join(folder, '.claude'), { recursive: true });
   const file = path.join(folder, '.claude/ledger.md');
   writeFileSync(file, ledgerText({ slug: 'scan' }));
   const store = fileStore(ledgerPaths(h));
-  writeRegistry(store, [{ repo: 'disk-watcher', slug: 'scan', path: file, branch: '', status: 'active', created, updated: created }]);
+  const oldList = writeOldTaskList(h, [{ repo: 'disk-watcher', slug: 'scan', path: file, branch: '', status: 'active', created, updated: created }]);
   ok(convert(h));
-  assert.equal(registryEntries(store)[0].repo, folder);
+  assert.equal(store.oldTaskList(), oldList);
   assert.deepEqual([...store.aliases.read()], []);
 });
 
-test('an active entry whose ledger is there gets the new key, and no alias as nothing moved', (t) => {
-  const { h, app, key, store } = appWorld(t);
-  const live = legacyWorktreeLedger(h, app, 'live');
-  writeRegistry(store, [{ ...backlogEntry(store, 'app', 'live', app), status: 'active', path: live }]);
-  ok(convert(h));
-  assert.deepEqual([...store.aliases.read()], []);
-  assert.equal(registryEntries(store)[0].repo, key);
-});
-
-test('an active entry whose ledger is missing is reported and keeps its key, and the run exits 1', (t) => {
+test('an active entry whose ledger is there makes no alias as nothing moved, and the old task list stays as it was', (t) => {
   const { h, app, store } = appWorld(t);
-  writeRegistry(store, [{ ...backlogEntry(store, 'app', 'live', app), status: 'active', path: path.join(app, '.claude/worktrees/live/.claude/ledger.md') }]);
-  assert.match(lineWith(failedWith(convert(h)), 'live'), /^left registry entry app\/live/);
+  const live = legacyWorktreeLedger(h, app, 'live');
+  const oldList = writeOldTaskList(h, [{ ...backlogEntry(store, 'app', 'live', app), status: 'active', path: live }]);
+  ok(convert(h));
   assert.deepEqual([...store.aliases.read()], []);
-  assert.equal(registryEntries(store)[0].repo, 'app');
+  assert.equal(store.oldTaskList(), oldList);
 });
 
-test('an active entry whose main checkout is gone is reported, and the run exits 1', (t) => {
-  const h = home(t);
-  const store = fileStore(ledgerPaths(h));
+test('old task list entries whose ledgers are gone, missing or named by no archive copy are neither reported nor changed, and the run exits 0', (t) => {
+  const { h, app, key, store } = appWorld(t);
+  store.aliases.add('app', key);
   const gone = path.join(h, 'repos/gone');
-  writeRegistry(store, [{ repo: 'gone', slug: 'live', path: path.join(gone, '.claude/worktrees/live/.claude/ledger.md'), branch: 'live', status: 'active', main: gone, created, updated: created }]);
-  assert.match(lineWith(failedWith(convert(h)), 'live'), /^left registry entry gone\/live/);
+  const oldList = writeOldTaskList(h, [
+    { ...backlogEntry(store, 'app', 'live', app), status: 'active', path: path.join(app, '.claude/worktrees/live/.claude/ledger.md') },
+    { repo: 'gone', slug: 'far', path: path.join(gone, '.claude/worktrees/far/.claude/ledger.md'), branch: 'far', status: 'active', main: gone, created, updated: created },
+    backlogEntry(store, 'app', 'ghost', app),
+    { ...backlogEntry(store, 'app', 'old', app), status: 'archived' },
+  ]);
+  const out = ok(convert(h));
+  assert.doesNotMatch(out, /^left /m);
+  assert.equal(store.oldTaskList(), oldList);
+  assert.deepEqual([...store.aliases.read()], [['app', key]]);
 });
 
 // --- 9. A damaged alias map ---
@@ -552,7 +560,7 @@ test('a rerun files an archive copy that names no main under the alias an earlie
   assert.equal(store.archive.has(key, '2026-01-02-bare'), true);
 });
 
-// --- 23. Aliases are never changed, and registry entries are re-keyed only with their ledger ---
+// --- 23. Aliases are never changed ---
 
 for (const storage of ['file', 'sqlite'] as const) {
   test(`${storage} store: an alias is never pointed at another key`, { skip: storage === 'sqlite' && noSqlite }, (t) => {
@@ -570,20 +578,6 @@ test('a conversion keeps an alias that names another key, reports the conflict, 
   store.backlog.write('app', 'x', ledgerText({ slug: 'x', main: app }));
   assert.match(lineWith(failedWith(convert(h)), 'alias'), /github\.com\/me\/other/);
   assert.deepEqual([...store.aliases.read()], [['app', 'github.com/me/other']]);
-});
-
-test('a registry entry whose ledger is gone is reported and keeps its key, and the run exits 1', (t) => {
-  const { h, app, key, store } = appWorld(t);
-  store.aliases.add('app', key);
-  writeRegistry(store, [backlogEntry(store, 'app', 'ghost', app)]);
-  assert.match(lineWith(failedWith(convert(h)), 'ghost'), /^left registry entry app\/ghost: its ledger is gone/);
-  assert.equal(registryEntries(store)[0].repo, 'app');
-});
-
-test('an archived registry entry that names no archive copy is reported, and the run exits 1', (t) => {
-  const { h, app, store } = appWorld(t);
-  writeRegistry(store, [{ ...backlogEntry(store, 'app', 'old', app), status: 'archived' }]);
-  assert.match(lineWith(failedWith(convert(h)), 'app/old'), /^left registry entry app\/old/);
 });
 
 // --- 24. Which tasks a clone has ---
@@ -687,7 +681,7 @@ test('sqlite store: an alias row with a target that is no repo key refuses alias
   assert.deepEqual([...store.aliases.read()], []);
 });
 
-// --- 27. Registry entries and evidence still under folder names ---
+// --- 27. Old task list entries and evidence still under folder names ---
 
 const sessionStart = (h: string): string => {
   const ran = spawnSync(LEDGER_BIN, ['hook', 'session-start'], { cwd: h, env: commandEnv(h), input: JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup', cwd: h }), encoding: 'utf8' });
@@ -695,12 +689,11 @@ const sessionStart = (h: string): string => {
   return ran.stdout === '' ? '' : (JSON.parse(ran.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext;
 };
 
-test('session-start gives the conversion hint when only registry entries use folder names', (t) => {
+test('session-start gives no conversion hint when only the old task list uses folder names', (t) => {
   const h = home(t);
-  const store = fileStore(ledgerPaths(h));
   const gone = path.join(h, 'repos/gone');
-  writeRegistry(store, [{ repo: 'gone', slug: 'live', path: path.join(gone, '.claude/worktrees/live/.claude/ledger.md'), branch: 'live', status: 'active', main: gone, created, updated: created }]);
-  assert.equal(sessionStart(h), '1 registry entry still uses folder names (gone); run `ledger store migrate --repo-ids`.');
+  writeOldTaskList(h, [{ repo: 'gone', slug: 'live', path: path.join(gone, '.claude/worktrees/live/.claude/ledger.md'), branch: 'live', status: 'active', main: gone, created, updated: created }]);
+  assert.equal(sessionStart(h), '');
 });
 
 for (const storage of ['file', 'sqlite'] as const) {
@@ -994,36 +987,15 @@ test('store migrate --to sqlite that fails removes the aliases it added, and kee
   assert.deepEqual([...after.aliases.read()], [['lib', 'github.com/me/lib']]);
 });
 
-// --- 37. Session start counts what uses folder names before it rebuilds the registry ---
+// --- 38. An old task list entry counts as a ledger an earlier run moved only when it is surely that ledger's ---
 
-test('session-start in a task counts its registry entry under a folder name, which its registry rebuild re-keys', (t) => {
-  const h = home(t);
-  const app = repository(h, path.join(h, 'repos/app'));
-  const ledgerFile = worktreeTask(h, app, { slug: 'epic' });
-  const epic = path.dirname(path.dirname(ledgerFile));
-  writeRegistry(fileStore(ledgerPaths(h)), [{ repo: 'app', slug: 'epic', path: ledgerFile, branch: 'me/epic', status: 'active', main: app, created, updated: created }]);
-  const ran = spawnSync(LEDGER_BIN, ['hook', 'session-start'], { cwd: epic, env: commandEnv(h), input: JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup', cwd: epic }), encoding: 'utf8' });
-  assert.equal(ran.status, 0, ran.stderr);
-  assert.match(ran.stdout, /1 registry entry still uses folder names \(app\)/);
-});
-
-// --- 38. A registry entry is re-keyed only onto its own ledger ---
-
-test('a stale registry entry is not re-keyed onto a ledger of its name that has an entry of its own, and no alias is made', (t) => {
+test('a stale old task list entry is not taken for a ledger of its name that has an entry of its own, so no alias is made', (t) => {
   const { h, app, key, store } = appWorld(t);
   store.backlog.write(key, 'x', ledgerText({ slug: 'x', main: app, goal: 'Unrelated.' }));
   const own = { ...backlogEntry(store, key, 'x', app), created: '2026-02-01T00:00:00.000Z' };
-  writeRegistry(store, [backlogEntry(store, 'app', 'x', app), own]);
-  const out = failedWith(convert(h));
-  assert.match(lineWith(out, 'registry entry app/x'), /^left /);
+  writeOldTaskList(h, [backlogEntry(store, 'app', 'x', app), own]);
+  ok(convert(h));
   assert.deepEqual([...store.aliases.read()], []);
-  assert.deepEqual(
-    registryEntries(store).map(({ repo, path: at, created: since }) => [repo, at, since]),
-    [
-      ['app', store.backlog.location('app', 'x'), created],
-      [key, own.path, own.created],
-    ],
-  );
 });
 
 // --- 39. Leftover evidence is planned before anything moves ---
@@ -1232,55 +1204,12 @@ test('store migrate --to sqlite stops when the database refuses alias writes, th
 
 // --- 50. A SQLite ledger name may end in .md ---
 
-test('sqlite store: a rerun resumes the registry entry of a ledger named fix.md that an earlier run moved', { skip: noSqlite }, (t) => {
+test('sqlite store: a rerun records the alias of a ledger named fix.md that an earlier run moved', { skip: noSqlite }, (t) => {
   const { h, app, key, store } = appWorld(t, 'sqlite');
   store.backlog.write(key, 'fix.md', ledgerText({ slug: 'fix.md', main: app }));
-  writeRegistry(store, [backlogEntry(store, 'app', 'fix.md', app)]);
+  writeOldTaskList(h, [backlogEntry(store, 'app', 'fix.md', app)], 'sqlite');
   ok(convert(h));
-  assert.deepEqual(
-    registryEntries(store).map(({ repo, path: at }) => [repo, at]),
-    [[key, store.backlog.location(key, 'fix.md')]],
-  );
-});
-
-test('sqlite store: the registry entry of a ledger named fix.md that stays under its folder name is not reported as gone', { skip: noSqlite }, (t) => {
-  const { h, app, key, store } = appWorld(t, 'sqlite');
-  store.backlog.write('app', 'fix.md', ledgerText({ slug: 'fix.md', main: app }));
-  store.backlog.write(key, 'fix.md', ledgerText({ slug: 'fix.md', main: app, goal: 'Already here.' }));
-  writeRegistry(store, [backlogEntry(store, 'app', 'fix.md', app)]);
-  const out = failedWith(convert(h));
-  assert.match(lineWith(out, 'backlog app/fix.md'), /already has fix\.md/);
-  assert.equal(out.includes('registry entry app/fix.md'), false, out);
-  assert.equal(registryEntries(store)[0].repo, 'app');
-});
-
-// --- 51. A registry entry resumes or re-keys only onto what is surely its own ---
-
-test('a stale registry entry is not resumed onto a ledger of its name under the alias key that names no main', (t) => {
-  const { h, app, key, store } = appWorld(t);
-  store.aliases.add('app', key);
-  store.backlog.write(key, 'x', ledgerText({ slug: 'x', goal: 'Unrelated.' }));
-  writeRegistry(store, [backlogEntry(store, 'app', 'x', app)]);
-  const out = failedWith(convert(h));
-  assert.match(lineWith(out, 'registry entry app/x'), /^left /);
-  assert.equal(registryEntries(store)[0].repo, 'app');
-});
-
-test('an active entry whose path is in a checkout of another folder name is reported and keeps its key', (t) => {
-  const { h, app, store } = appWorld(t);
-  const live = legacyWorktreeLedger(h, app, 'live');
-  writeRegistry(store, [{ ...backlogEntry(store, 'lib', 'live', app), status: 'active', path: live }]);
-  assert.match(lineWith(failedWith(convert(h)), 'registry entry lib/live'), /^left /);
-  assert.equal(registryEntries(store)[0].repo, 'lib');
-});
-
-test('an active entry whose main is a checkout of another repo than the one that holds its ledger is reported and keeps its key', (t) => {
-  const { h, app, store } = appWorld(t);
-  const lib = repository(h, path.join(h, 'repos/lib'));
-  const live = legacyWorktreeLedger(h, app, 'live');
-  writeRegistry(store, [{ ...backlogEntry(store, 'app', 'live', lib), status: 'active', path: live }]);
-  assert.match(lineWith(failedWith(convert(h)), 'registry entry app/live'), new RegExp(`^left .*${app}.*${lib}`));
-  assert.equal(registryEntries(store)[0].repo, 'app');
+  assert.deepEqual([...store.aliases.read()], [['app', key]]);
 });
 
 // --- 52. Stray evidence joins a moved copy only from an alias of its key ---
@@ -1412,18 +1341,4 @@ test('the error of ledger show --repo of another repo names what it searched: th
   const ran = ledger(h, app, 'show', 'nothing', '--repo', OTHER);
   assert.equal(ran.status, 1);
   assert.equal(ran.stderr.trim(), 'No ledger named nothing is in the active tasks, the backlog or the archive of the repo me/app.');
-});
-
-// --- 57. An active entry with no main takes the main checkout git names ---
-
-test('an active entry with no main, of a linked worktree outside .claude/worktrees, gets the key of the checkout it belongs to', (t) => {
-  const { h, app, key, store } = appWorld(t);
-  const folder = path.join(h, 'elsewhere/live');
-  git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/live', folder, 'main');
-  const file = path.join(folder, '.claude/ledger.md');
-  mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, ledgerText({ slug: 'live' }));
-  writeRegistry(store, [{ repo: 'app', slug: 'live', path: file, branch: 'me/live', status: 'active', created, updated: created }]);
-  ok(convert(h));
-  assert.equal(registryEntries(store)[0].repo, key);
 });

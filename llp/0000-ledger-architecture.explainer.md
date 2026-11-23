@@ -26,8 +26,8 @@ document describes only what exists.
 The system has five parts:
 
 1. The `ledger` command, in `tools/ledger/` and started by `bin/ledger`.
-2. The store, which keeps active and backlog ledgers, archive copies and the
-   registry.
+2. The store, which keeps active and backlog ledgers, archive copies and repo
+   aliases.
 3. The plugin, in `mods/ledger/`, which gives Claude Code the `/ledger:`
    commands.
 4. The hooks, which Claude Code runs through `ledger hook <event>`.
@@ -180,7 +180,8 @@ five parts:
   so a new folder at a lost task's old path is free.
 - `archive`: copies of retired ledgers, named `<YYYY-MM-DD>-<slug>`, with the
   files of their evidence.
-- `registry`: the text of the task list.
+- `oldTaskList`: the text of the task list older versions kept. Only the
+  one-time moves read it, and nothing writes it.
 - `aliases`: old repo keys, each with the key that replaced it. `replace`
   removes some aliases and adds others in one write, so a stop between the
   two cannot lose an alias.
@@ -225,7 +226,7 @@ Three stores implement the interfaces:
   once and starts `ledger store sync --quiet` in the background, so a command
   never waits for the network. Only the ledgers, a
   `.ledger-data` marker and a `.gitignore` are committed. Evidence, the
-  registry and the repo aliases stay on this machine.
+  old task list and the repo aliases stay on this machine.
 
 `readStorage` in `tools/ledger/settings.ts` picks the store. It reads
 `"storage"` from `~/.claude/ledger-settings.json`. With no file and no key, the
@@ -330,19 +331,21 @@ flags only and never prompts:
   database and repair no git hook. Before a SQLite store's database exists,
   the report prints "No problems found." and exits 0.
 
-### The registry
+### The task list
 
-`tools/ledger/registry.ts` keeps the registry, a JSON list of every task. The
-plugin reads the same shape. The registry is a cache: `loadTasks` can always
-rebuild it from the ledgers.
+The task list is a query over the task records, as D29 in LLP 0001 says.
+`findTasks` in `tools/ledger/tasks.ts` reads every active, backlog and archived
+task from the store each time. Nothing caches the result, so no write has to
+keep a list in line with the records.
 
-`loadTasks` reads every task from the store, so the registry does not tell it
-where to look. It drops an entry whose ledger the store no longer holds, such
-as a task retired on another machine.
-
-A rebuild runs git and can take seconds. So `loadTasks` does not hold the
-registry while it rebuilds. It writes the result only when the registry is
-still the text it read. Otherwise it starts again, up to 20 times.
+Older versions kept a cache of it, the registry: `~/.claude/ledgers.json`, the
+`registry` table of `~/.claude/ledgers.db`, or `~/.claude/ledgers-git.json`.
+Nothing writes it now. The one-time moves read it, through `oldTaskList` and
+`parseOldTaskList` in `tools/ledger/unmoved.ts`. Before
+`ledger store migrate --active` runs, a repo's active tasks exist only in its
+worktrees' `.claude/ledger.md`, and deploy runs the moves from HOME. So the old
+list is what names those repos there. `--active` also looks in the repo of every
+task the store holds.
 
 ### The plugin
 
@@ -654,7 +657,7 @@ a worktree are the main repository's.
 | Backlog ledger | `~/.claude/ledger-backlog/<repo key>/<slug>.json` | `~/.claude/ledgers.db`, table `records` | `~/.claude/ledger-data/backlog/<repo key>/<slug>.json`, committed |
 | Archive copy | `~/.claude/ledger-archive/<repo key>/<YYYY-MM-DD>-<slug>.json` | `~/.claude/ledgers.db`, table `records` | `~/.claude/ledger-data/archive/<repo key>/<YYYY-MM-DD>-<slug>.json`, committed |
 | Archive evidence | `~/.claude/ledger-archive/<repo key>/<YYYY-MM-DD>-<slug>/` | `~/.claude/ledgers.db`, as bytes | `~/.claude/ledger-evidence/<repo key>/<YYYY-MM-DD>-<slug>/`, never committed |
-| Registry | `~/.claude/ledgers.json` | `~/.claude/ledgers.db` | `~/.claude/ledgers-git.json`, never committed |
+| Old task list, read-only | `~/.claude/ledgers.json` | `~/.claude/ledgers.db`, table `registry`, only in a database an older version made | `~/.claude/ledgers-git.json`, never committed |
 | Repo aliases | `~/.claude/ledger-aliases.json` | `~/.claude/ledgers.db` | `~/.claude/ledger-aliases-git.json`, never committed |
 | Active ledger | `~/.claude/ledger-active/<repo key>/<slug>.json` | `~/.claude/ledgers.db`, table `records` | `~/.claude/ledger-data/active/<repo key>/<slug>.json`, committed |
 | Store setting | `~/.claude/ledger-settings.json` | the same file | the same file |
@@ -662,7 +665,7 @@ a worktree are the main repository's.
 The git store also keeps a clone lock, `~/.claude/ledger-data.lock`, and the
 last sync problem, `~/.claude/ledger-data.status.json`, outside the clone.
 
-The file store writes backlog and active ledgers and the registry atomically. It holds a
+The file store writes backlog and active ledgers atomically. It holds a
 lock file, `<target>.lock`, during each such write. `withLock` in `tools/ledger/lock.ts` waits
 up to five seconds for a lock. It takes over a lock whose process is gone or
 that is older than one minute.

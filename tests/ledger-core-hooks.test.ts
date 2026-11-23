@@ -537,7 +537,7 @@ test('session-start prints nothing when there is no ledger', (t) => {
   assert.equal(hook(h, 'session-start', { cwd: main }), '');
 });
 
-test('session-start leaves out backlog tasks, both their ledger files and their registry entries', (t) => {
+test('session-start leaves out backlog tasks, both their ledger files and their entries in the old task list', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
   const backlog = path.join(h, '.claude/ledger-backlog', repoFolder(h, 'main'), 'idea.md');
@@ -565,43 +565,7 @@ test('session-start keeps quotes, backslashes, tabs and non-ASCII text intact', 
   assert.equal(output.additionalContext, fullLedgerText(ledger));
 });
 
-const registeredPaths = (h: string): string[] =>
-  (JSON.parse(readFileSync(path.join(h, '.claude/ledgers.json'), 'utf8')) as { path: string }[]).map((entry) => entry.path).sort();
-
-test('session-start registers its one ledger in ~/.claude/ledgers.json', (t) => {
-  const h = home(t);
-  const main = checkout(h, 'main');
-  const ledger = ledgerIn(h, worktree(h, main, path.join(h, 'sibling')));
-
-  sessionStart(h, main);
-
-  assert.deepEqual(registeredPaths(h), [ledger]);
-});
-
-test('session-start registers each of several ledgers', (t) => {
-  const h = home(t);
-  const main = checkout(h, 'main');
-  const first = ledgerIn(h, worktree(h, main, path.join(h, 'first')));
-  const second = ledgerIn(h, worktree(h, main, path.join(h, 'second')));
-
-  sessionStart(h, main);
-
-  assert.deepEqual(registeredPaths(h), [first, second].sort());
-});
-
-test('session-start prints the same JSON and exits 0 when the registry cannot be written', (t) => {
-  const h = home(t);
-  const sibling = worktree(h, checkout(h, 'main'), path.join(h, 'sibling'));
-  const ledger = ledgerIn(h, sibling);
-  const expected = hook(h, 'session-start', { cwd: sibling });
-  rmSync(path.join(h, '.claude/ledgers.json'), { force: true });
-  mkdirSync(path.join(h, '.claude/ledgers.json'));
-
-  assert.equal(hook(h, 'session-start', { cwd: sibling }), expected);
-  assert.equal(sessionStart(h, sibling).additionalContext, fullLedgerText(ledger));
-});
-
-test('pre-compact names the one task by slug and worktree, kept in the store, and leaves the registry alone', (t) => {
+test('pre-compact names the one task by slug and worktree, kept in the store, and writes no task list', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
   const sibling = worktree(h, main, path.join(h, 'sibling'));
