@@ -613,14 +613,22 @@ because its turn end does not clear the session.
   `go <slug>`.
 - `pre-compact`: tells the compaction to keep the task's slug, worktree path
   and next step.
-- `pre-tool-use`: denies three kinds of tool calls. The first removes a
+- `pre-tool-use`: denies four kinds of tool calls. The first removes a
   worktree folder whose ledger is not archived. The second writes a
   `.claude/ledger.md` anywhere, as no ledger lives in a worktree; its message
   names `ledger show` and `ledger notes`. The third writes to a backlog
   ledger still in Markdown, from before task records, whose new text cites a
-  file in a session folder. It does not check today's JSON records.
-  `ledger notes` refuses such a citation itself, and a hook that blocks every
-  hand write to the store is planned (D38 in LLP 0001).
+  file in a session folder. It does not check today's JSON records;
+  `ledger notes` refuses such a citation itself. The fourth writes the ledger
+  store by hand (D38 in LLP 0001):
+  a file tool or a shell command that writes a path of the file store, the
+  SQLite database or the git clone, or a git command in the clone that does
+  more than read. Removing or moving a folder above the store counts too, and
+  so does a glob that could match a store path. `ledger` itself is allowed,
+  unless its output is redirected into the store. Its message names
+  `ledger show`, `ledger notes` and `ledger store`. For a git command in the
+  clone it adds that the operator resolves a sync conflict in a terminal, so
+  the agent asks them.
 
 When a hook fails, `tools/ledger/cli.ts` prints the error to stderr and exits
 0. Claude Code then allows the tool call. A hook never blocks work by accident.

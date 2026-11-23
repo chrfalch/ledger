@@ -55,6 +55,9 @@ import {
   type Machine,
 } from './ledger-git-fixtures.js';
 
+/** A sync conflict is the operator's to resolve: the message tells an agent to ask them, and keeps the git steps. */
+const ASKS_THE_OPERATOR = /An agent does not run these git steps: it asks the operator to run them in a terminal\./;
+
 const SAMPLES = [
   GITHUB_TOKEN,
   token(['gh', 'o_'].join(''), 'Z9y8X7', 36),
@@ -662,6 +665,7 @@ test('when two machines change the same ledger, the second sync exits 1, names t
   const output = failed(run(b, ['store', 'sync']));
 
   assert.match(output, new RegExp(String.raw`backlog\/${APP_PATTERN}\/fix-login\.json`));
+  assert.match(output, ASKS_THE_OPERATOR);
   assert.equal(git(b.h, b.clone, 'rev-parse', 'HEAD'), local);
   assert.match(readFileSync(path.join(b.clone, `backlog/${APP}/fix-login.json`), 'utf8'), /parked on B/);
   assert.equal(git(b.h, b.clone, 'status', '--porcelain'), '');
@@ -672,6 +676,34 @@ test('when two machines change the same ledger, the second sync exits 1, names t
   const context = hookContext(b);
   assert.match(context, /conflict/i);
   assert.match(context, /ledger store sync/);
+});
+
+test('a pull whose rebase fails without a conflict exits 1, pushes nothing and tells an agent to ask the operator', (t) => {
+  const bare = remote(t);
+  const a = machine(t, bare);
+  setUp(a);
+  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  ledgerOk(a, 'store', 'sync');
+  const b = machine(t, bare);
+  answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
+  setUp(b);
+  ledgerOk(a, 'task', 'park', 'fix-login', '--reason', 'parked on A');
+  ledgerOk(a, 'store', 'sync');
+  const hook = path.join(b.clone, '.git/hooks/pre-rebase');
+  writeFileSync(hook, '#!/bin/sh\necho "pre-rebase refuses" >&2\nexit 1\n');
+  chmodSync(hook, 0o755);
+  ok(run(b, ['task', 'new', 'fix-signup', '--goal', 'Sign-up fails.']));
+  const local = git(b.h, b.clone, 'rev-parse', 'HEAD');
+  const remoteBefore = remoteHead(bare);
+
+  const output = failed(run(b, ['store', 'sync']));
+
+  assert.match(output, /failed, so nothing was pushed/);
+  assert.match(output, /pre-rebase refuses/);
+  assert.match(output, ASKS_THE_OPERATOR);
+  assert.equal(git(b.h, b.clone, 'rev-parse', 'HEAD'), local);
+  assert.equal(remoteHead(bare), remoteBefore);
+  assert.equal(JSON.parse(readFileSync(b.status, 'utf8')).problem, 'conflict');
 });
 
 // -------------------------------------------------------------------------------------------------------------- offline
@@ -1129,7 +1161,9 @@ test('a stash that left a conflict stops the commit of every command and of ledg
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), head);
   assert.notEqual(git(a.h, a.clone, 'ls-files', '-u'), '', 'the conflict was marked as resolved');
   assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'conflict');
-  assert.match(failed(run(a, ['store', 'sync'])), new RegExp(String.raw`backlog\/${APP_PATTERN}\/fix-login\.json`));
+  const output = failed(run(a, ['store', 'sync']));
+  assert.match(output, new RegExp(String.raw`backlog\/${APP_PATTERN}\/fix-login\.json`));
+  assert.match(output, ASKS_THE_OPERATOR);
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), head);
 });
 
@@ -1148,7 +1182,9 @@ test('during a rebase a person has not finished, ledger store sync refuses, push
   git(b.h, b.clone, 'fetch', '--quiet', 'origin');
   assert.notEqual(gitRan(b.h, b.clone, 'rebase', 'origin/main').status, 0, 'the rebase stops');
 
-  assert.match(failed(run(b, ['store', 'sync'])), /rebase/);
+  const output = failed(run(b, ['store', 'sync']));
+  assert.match(output, /rebase/);
+  assert.match(output, ASKS_THE_OPERATOR);
 
   assert.ok(existsSync(path.join(b.clone, '.git/rebase-merge')), 'the rebase was aborted');
   assert.doesNotMatch(remoteText(bare, `backlog/${APP}/fix-login.json`), /parked on B/);
@@ -1630,6 +1666,7 @@ test('when the session-start pull cannot undo a rebase that stopped, it records 
   const status = JSON.parse(readFileSync(b.status, 'utf8')) as { problem: string; message: string };
   assert.equal(status.problem, 'conflict');
   assert.match(status.message, /git rebase --abort/);
+  assert.match(status.message, ASKS_THE_OPERATOR);
 });
 
 // ------------------------------------------------------------------------------------------------------- locks and status
@@ -2174,7 +2211,9 @@ test('ledger store sync refuses to rebase a merge commit made in the clone, whic
   ledgerOk(a, 'store', 'sync');
   const before = remoteHead(bare);
 
-  assert.match(failed(run(b, ['store', 'sync'])), /merge commit/);
+  const output = failed(run(b, ['store', 'sync']));
+  assert.match(output, /merge commit/);
+  assert.match(output, ASKS_THE_OPERATOR);
 
   assert.equal(git(b.h, b.clone, 'rev-parse', 'HEAD'), merge);
   assert.equal(remoteHead(bare), before);

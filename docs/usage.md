@@ -545,9 +545,10 @@ ledger refuses, a repository that is not private, unfinished work in the clone,
 a remote that lost commits, and a network failure.
 
 A conflict means that two machines changed the same ledger. The sync stops,
-names the file, and keeps your commits in the clone, not pushed. To merge
-them, run `git rebase origin/<branch>` in `~/.claude/ledger-data`, fix the file,
-run `git add` and `git rebase --continue`, and then `ledger store sync`.
+names the file, and keeps your commits in the clone, not pushed. You merge
+them yourself, in a terminal: an agent does not run these git steps, and asks
+you to run them. Run `git rebase origin/<branch>` in `~/.claude/ledger-data`, fix the
+file, run `git add` and `git rebase --continue`, and then `ledger store sync`.
 `git -C ~/.claude/ledger-data branch --show-current` prints `<branch>`.
 
 A remote that lost commits is one that no longer has a commit the clone

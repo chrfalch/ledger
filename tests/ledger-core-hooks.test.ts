@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { after, before, type TestContext } from 'node:test';
@@ -797,9 +797,10 @@ function assertAllowed(stdout: string): void {
 
 const STORE_REASON = `Task ledgers are kept in the ledger store, not in .claude/ledger.md. Read this task's ledger with \`${BIN} show\`. Write one item with \`${BIN} notes <command>\`; \`${BIN} notes --help\` lists them.`;
 const UNMOVED_REASON = `${STORE_REASON}\nThis ledger has not been moved yet: run \`${BIN} store migrate --active\`.`;
+const HAND_EDIT_REASON = `The ledger store is changed only by the ledger tool, not by hand. Read a task with \`${BIN} show [<slug>]\`. Write one item with \`${BIN} notes <command>\`; \`${BIN} notes --help\` lists them. To move or sync the store, see \`${BIN} store --help\`.`;
 
 const CITATION_REASON =
-  "A task ledger may not cite files in the Claude Code session folder or its scratchpad, because macOS deletes them. Move the file to .claude/evidence/ in the task's worktree and cite that path, for example .claude/evidence/xcodebuild-red.log. Copy the file and write the ledger in two separate commands.";
+  `A task ledger may not cite files in the Claude Code session folder or its scratchpad, because macOS deletes them. Move the file to .claude/evidence/ in the task's worktree and cite that path, for example .claude/evidence/xcodebuild-red.log. Read a task with \`${BIN} show [<slug>]\`. Write one item with \`${BIN} notes <command>\`; \`${BIN} notes --help\` lists them.`;
 
 for (const tool of ['Write', 'Edit', 'MultiEdit']) {
   test(`${tool} of .claude/ledger.md in a main checkout is denied, naming ledger show and ledger notes`, () => {
@@ -929,6 +930,14 @@ const bashWrites = [
   'cp x .claude/ledger.md <<< hi',
   'mv a .claude/ledger.md < /dev/null',
   'tee .claude/ledger.md < /tmp/x',
+  'echo "$(cp x .claude/ledger.md)"',
+  'echo "`cp x .claude/ledger.md`"',
+  'echo `cp x .claude/ledger.md`',
+  "cat > .claude/ledger.md <<'EOF'\nit's done\nEOF",
+  '(echo x > .claude/ledger.md)',
+  'cp /tmp/ledger.md .claude/',
+  'cp x .claude/ledger.md # keep a copy',
+  'ln -sf /tmp/note .claude/ledger.md',
 ];
 
 for (const command of bashWrites) {
@@ -982,6 +991,14 @@ const bashReads = [
   'rg -i mv .claude/ledger.md',
   'tee /tmp/y < .claude/ledger.md',
   'tee -a /tmp/log < .claude/ledger.md',
+  'echo "see x > .claude/ledger.md"',
+  "git commit -m 'stop writing; cp x .claude/ledger.md'",
+  'git commit -m "stop writing\ncp x .claude/ledger.md"',
+  "echo '$(cp x .claude/ledger.md)'",
+  "echo '`cp x .claude/ledger.md`'",
+  'cp .claude/ledger.md /tmp/',
+  'cp .claude/ledger.md /tmp/copy.md # not .claude/ledger.md',
+  'ln -s .claude/ledger.md /tmp/ledger-link.md',
 ];
 
 for (const command of bashReads) {
@@ -1028,7 +1045,7 @@ function writing(tool: string, file: string, text: string): ToolInput {
   }
 }
 
-/** The backlog ledger the citation tests write: since active ledgers left .claude/ledger.md, the only ledger a file tool may write. */
+/** The backlog ledger the citation tests write. The store gate denies any write to it; one that cites a session file gets the citation reason instead. */
 const backlogLedgerFile = (): string => path.join(gateWorld.h, '.claude/ledger-backlog/main/idea.md');
 
 for (const tool of ['Write', 'Edit', 'MultiEdit']) {
@@ -1039,8 +1056,8 @@ for (const tool of ['Write', 'Edit', 'MultiEdit']) {
   }
 
   for (const text of prose) {
-    test(`${tool} of a backlog ledger with ${JSON.stringify(text)} is allowed`, () => {
-      assertAllowed(gate(gateWorld.plain, tool, writing(tool, backlogLedgerFile(), text)));
+    test(`${tool} of a backlog ledger with ${JSON.stringify(text)} cites nothing, so it gets the store reason`, () => {
+      assert.equal(assertDenied(gate(gateWorld.plain, tool, writing(tool, backlogLedgerFile(), text))), HAND_EDIT_REASON);
     });
   }
 
@@ -1050,9 +1067,9 @@ for (const tool of ['Write', 'Edit', 'MultiEdit']) {
   });
 }
 
-test('an Edit whose old text cites the scratchpad and new text does not is allowed', () => {
+test('an Edit whose old text cites the scratchpad and new text does not cites nothing, so it gets the store reason', () => {
   const edit = { file_path: backlogLedgerFile(), old_string: `- red: ${citations[0]}`, new_string: '- red: .claude/evidence/red.log' };
-  assertAllowed(gate(gateWorld.plain, 'Edit', edit));
+  assert.equal(assertDenied(gate(gateWorld.plain, 'Edit', edit)), HAND_EDIT_REASON);
 });
 
 test('a write to .claude/ledger.md that also cites the scratchpad gets the ledger store reason', () => {
@@ -1076,7 +1093,6 @@ for (const command of bashCitingWrites) {
 const bashAllowedNearCitations = [
   `cp ${citations[0]} .claude/evidence/xcodebuild-red.log`,
   `cat ${citations[0]} > .claude/evidence/red.log`,
-  "echo '- the scratchpad is gone; see .claude/evidence/red.log' >> ~/.claude/ledger-backlog/main/idea.md",
 ];
 
 for (const command of bashAllowedNearCitations) {
@@ -1084,6 +1100,1322 @@ for (const command of bashAllowedNearCitations) {
     assertAllowed(gate(gateWorld.worktree, 'Bash', { command }));
   });
 }
+
+test('a Bash write of a backlog ledger that cites no session file gets the store reason', () => {
+  const command = "echo '- the scratchpad is gone; see .claude/evidence/red.log' >> ~/.claude/ledger-backlog/main/idea.md";
+  assert.equal(assertDenied(gate(gateWorld.worktree, 'Bash', { command })), HAND_EDIT_REASON);
+});
+
+// PreToolUse: the store gate
+
+/** A path in each part of the store, relative to HOME: the file store, SQLite and git storage, and the files beside them. */
+const storeFiles = [
+  '.claude/ledger-backlog/main/idea.md',
+  '.claude/ledger-active/main/task.md',
+  '.claude/ledger-archive/main/task.md',
+  '.claude/ledger-evidence/main/task/red.log',
+  '.claude/ledger-data/ledgers/main/task.md',
+  '.claude/ledger-data/.git/config',
+  '.claude/ledgers.json',
+  '.claude/ledger-aliases.json',
+  '.claude/ledgers.db',
+  '.claude/ledgers.db-wal',
+  '.claude/ledgers.db-shm',
+  '.claude/ledgers.db-journal',
+  '.claude/ledger-data.status.json',
+  '.claude/ledger-data.not-private',
+  '.claude/ledgers-git.json',
+  '.claude/ledger-aliases-git.json',
+  '.claude/ledger-data.sync-order.json',
+  '.claude/ledger-data.init',
+  '.claude/ledger-data.init.lock',
+  '.claude/ledger-data.sync',
+  '.claude/ledger-data.sync.lock',
+  '.claude/ledger-data.sync-pending',
+];
+
+for (const file of storeFiles) {
+  test(`a file tool or Bash write of ~/${file} is denied, naming the ledger commands`, () => {
+    const { h, plain } = gateWorld;
+    for (const tool of ['Write', 'Edit', 'MultiEdit']) {
+      assert.equal(assertDenied(gate(plain, tool, writing(tool, path.join(h, file), '- a note'))), HAND_EDIT_REASON, tool);
+    }
+    assert.equal(assertDenied(gate(plain, 'Bash', { command: `echo x > ~/${file}` })), HAND_EDIT_REASON);
+  });
+}
+
+test('a store path through ~, $HOME, ${HOME}, quotes, an absolute path or a relative one is denied', () => {
+  const { h, plain } = gateWorld;
+  for (const target of ['~/.claude/ledgers.json', '$HOME/.claude/ledgers.json', '${HOME}/.claude/ledgers.json', '"$HOME/.claude/ledgers.json"', `'${h}/.claude/ledgers.json'`, path.join(h, '.claude/ledgers.json')]) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command: `echo x > ${target}` })), HAND_EDIT_REASON, target);
+  }
+  assert.equal(assertDenied(gate(plain, 'Write', { file_path: '../.claude/ledgers.json' })), HAND_EDIT_REASON);
+});
+
+test("a file tool's path is literal, not shell text: a quote in it is part of the name", () => {
+  const { plain } = gateWorld;
+  assertAllowed(gate(plain, 'Write', { file_path: "~/.claude/ledger's.json", content: 'x' }));
+  assert.equal(assertDenied(gate(plain, 'Write', { file_path: '~/.claude/ledgers.json', content: 'x' })), HAND_EDIT_REASON);
+});
+
+const bashStoreWrites = [
+  'echo x >> ~/.claude/ledger-active/main/task.md',
+  'echo x | tee ~/.claude/ledger-backlog/main/idea.md',
+  "sed -i '' 's/a/b/' ~/.claude/ledger-archive/main/task.md",
+  'cp /tmp/x ~/.claude/ledger-aliases.json',
+  'mv /tmp/x ~/.claude/ledger-evidence/main/task/red.log',
+  'rm ~/.claude/ledgers.json',
+  'rm -rf ~/.claude/ledger-data',
+  'rm /tmp/unrelated ~/.claude/ledger-data.status.json',
+  'rmdir ~/.claude/ledger-active/main',
+  'touch ~/.claude/ledger-data.not-private',
+  'truncate -s 0 ~/.claude/ledgers.db',
+  'ln -sf /tmp/x ~/.claude/ledger-aliases.json',
+  'mkdir -p /tmp/elsewhere ~/.claude/ledger-backlog/main',
+  'git status; rm -f ~/.claude/ledger-active/main/task.md',
+  'sudo rm ~/.claude/ledgers.db-wal',
+  'cd ~/.claude && rm ledgers.json',
+  'cd $HOME/.claude/ledger-active && rm -rf main',
+  'cd ${HOME}/.claude; touch ledger-aliases.json',
+  'sqlite3 ~/.claude/ledgers.db "DELETE FROM ledgers"',
+  'sqlite3 -batch ~/.claude/ledgers.db < /tmp/fix.sql',
+  'cd ~/.claude && sqlite3 ledgers.db .dump',
+  'sqlite3 -cmd ".timeout 5" ~/.claude/ledgers.db "select 1"',
+  'ledger show > ~/.claude/ledgers.json',
+  `${BIN} show >> ~/.claude/ledger-active/main/task.md`,
+  'mv ~/.claude/ledgers.json /tmp/x',
+  'mv -f ~/.claude/ledger-active/main/task.md /tmp/a /tmp/elsewhere',
+  'rm -rf ~/.claude',
+  'rm -rf ~',
+  'rm -rf $HOME',
+  'rm -rf "${HOME}"',
+  'rmdir ~/.claude',
+  'cd ~ && rm -rf .claude',
+  'mv ~/.claude /tmp/claude-old',
+  'rm -rf ~/.claude/ledger-*',
+  'rm ~/.claude/*',
+  'rm -rf ~/.c*',
+  'rm ~/.claude/ledgers.*',
+  'rm -rf ~/.claude/ledger-data/*',
+  'mv ~/.claude/ledger-a* /tmp',
+  'cp /tmp/x ~/.claude/ledger-active/*/task.md',
+  'echo x | tee ~/.claude/ledger-[ab]*/main/x.md',
+  'echo x > ~/.claude/ledgers.db-?al',
+  'echo "x" > "$HOME/.claude/ledgers.json"',
+  "echo 'a;b' > ~/.claude/ledgers.json",
+  'cp "/tmp/a b" "$HOME/.claude/ledgers.json"',
+  'ledger notes decision "a > b" > ~/.claude/ledgers.json',
+];
+
+for (const command of bashStoreWrites) {
+  test(`Bash ${JSON.stringify(command)} is denied, naming the ledger commands`, () => {
+    assert.equal(assertDenied(gate(gateWorld.plain, 'Bash', { command })), HAND_EDIT_REASON);
+  });
+}
+
+const CLONE_GIT_REASON = `${HAND_EDIT_REASON}\nA sync conflict in the clone is resolved by the operator in a terminal, not by an agent: ask the operator.`;
+
+const bashCloneGitWrites = [
+  'git -C ~/.claude/ledger-data commit -am fix',
+  'git -C ~/.claude -C ledger-data rebase origin/main',
+  'git --git-dir=$HOME/.claude/ledger-data/.git reset --hard',
+  'git --work-tree ~/.claude/ledger-data checkout .',
+  'git -c user.name=x -C ~/.claude/ledger-data/ledgers add .',
+  'cd ~/.claude/ledger-data && git push --force',
+  'git -C ~/.claude/ledger-data stash',
+  'git -C ~/.claude/ledger-data stash pop',
+  'git -C ~/.claude/ledger-data commit -m "fix; resolve > conflict"',
+  'git -C ~/.claude/ledger-data branch -d side',
+  'git -C ~/.claude/ledger-data branch -D side',
+  'git -C ~/.claude/ledger-data branch -m main old',
+  'git -C ~/.claude/ledger-data branch -M main',
+  'git -C ~/.claude/ledger-data branch -c main copy',
+  'git -C ~/.claude/ledger-data branch rescue',
+  'git -C ~/.claude/ledger-data branch -v rescue',
+  'git -C ~/.claude/ledger-data branch --set-upstream-to=origin/main',
+  'git -C ~/.claude/ledger-data remote add other /tmp/other.git',
+  'git -C ~/.claude/ledger-data remote remove origin',
+  'git -C ~/.claude/ledger-data remote rename origin old',
+  'git -C ~/.claude/ledger-data remote set-url origin /tmp/other.git',
+  'git -C ~/.claude/ledger-data remote prune origin',
+  'git -C ~/.claude/ledger-data remote set-head origin -a',
+  'git -C ~/.claude/ledger-data remote -v add other /tmp/other.git',
+];
+
+for (const command of bashCloneGitWrites) {
+  test(`Bash ${JSON.stringify(command)} is denied, saying the operator resolves a sync conflict`, () => {
+    assert.equal(assertDenied(gate(gateWorld.plain, 'Bash', { command })), CLONE_GIT_REASON);
+  });
+}
+
+const bashStoreReads = [
+  'ledger show',
+  'ledger notes decision "keep the store in git"',
+  'bin/ledger store sync',
+  `${BIN} notes next "run the suite"`,
+  'cat ~/.claude/ledgers.json',
+  'ls -la ~/.claude/ledger-active/',
+  'grep -rn Goal ~/.claude/ledger-backlog',
+  'cd ~/.claude/ledger-data && cat ledgers/main/task.md',
+  'sqlite3 -readonly ~/.claude/ledgers.db "SELECT count(*) FROM ledgers"',
+  'sqlite3 ~/other.db VACUUM',
+  'git -C ~/.claude/ledger-data branch --show-current',
+  'git -C ~/.claude/ledger-data branch',
+  'git -C ~/.claude/ledger-data branch -a -vv',
+  'git -C ~/.claude/ledger-data branch -r -v',
+  'git -C ~/.claude/ledger-data branch --list',
+  'git -C ~/.claude/ledger-data branch --contains HEAD',
+  'git -C ~/.claude/ledger-data branch --merged origin/main --no-merged=main',
+  'git -C ~/.claude/ledger-data remote',
+  'git -C ~/.claude/ledger-data remote -v',
+  'git -C ~/.claude/ledger-data remote show origin',
+  'git -C ~/.claude/ledger-data remote get-url origin',
+  'git -C ~/.claude/ledger-data fetch',
+  'git -C ~/.claude/ledger-data rev-list --count HEAD',
+  'git -C ~/.claude/ledger-data reflog',
+  'git -C ~/.claude/ledger-data stash list',
+  'ledger notes decide "backlog -> ~/.claude/ledger-active"',
+  "ledger notes decision 'x; rm ~/.claude/ledgers.json'",
+  'echo "a | tee ~/.claude/ledgers.json"',
+  'git commit -m "move > ~/.claude/ledgers.json"',
+  'git -C ~/.claude/ledger-data log --oneline',
+  'git -C ~/.claude/ledger-data status',
+  'git --git-dir=$HOME/.claude/ledger-data/.git show HEAD',
+  'git -C ~/.claude/ledger-data rev-parse HEAD',
+  'git -C ~/.claude/ledger-data ls-files',
+  'git -C ~/.claude/ledger-data cat-file -p HEAD',
+  'git -C ~/.claude/ledger-data blame ledgers/main/task.md',
+  'cd ~/.claude/ledger-data && git diff HEAD~1',
+  'git -C /tmp/other commit -m x',
+  'echo x > ~/.claude/ledger-hook-failures.log',
+  'cp /tmp/x ~/.claude/ledgers.json.bak',
+  'mkdir -p ~/.claude/ledger-data-backup',
+  'touch ~/.claude/settings.json',
+  'mv /tmp/a /tmp/b',
+  'mv /tmp/x ~/.claude',
+  'echo x > ~/.claude/other.txt',
+  'touch ~/.claude',
+  'mkdir -p ~/.claude',
+  'cp /tmp/x ~/.claude',
+  'rm -rf ~/.claude/plugins',
+  'rm ~/.claude/*.log',
+  'rm -rf ~/.claude/plugin*',
+  'echo x > ~/.claude/*.txt',
+  'rm -rf ~/*',
+];
+
+for (const command of bashStoreReads) {
+  test(`Bash ${JSON.stringify(command)} is allowed`, () => {
+    assertAllowed(gate(gateWorld.plain, 'Bash', { command }));
+  });
+}
+
+test('git check-ref-format and git shortlog only read, so they are allowed in the clone', () => {
+  for (const command of ['git -C ~/.claude/ledger-data check-ref-format refs/heads/main', 'git -C ~/.claude/ledger-data shortlog -sn HEAD']) {
+    assertAllowed(gate(gateWorld.plain, 'Bash', { command }));
+  }
+});
+
+test('sqlite3 from ~/.claude reads only its database operand as a path: SQL and option values are not files', () => {
+  const claude = path.join(gateWorld.h, '.claude');
+  for (const command of ['sqlite3 /tmp/o.db "select * from t"', 'sqlite3 /tmp/o.db select \\* from ledgers.json', 'sqlite3 -cmd ".read ledgers.db" /tmp/o.db']) {
+    assertAllowed(gate(claude, 'Bash', { command }));
+  }
+  for (const command of ['sqlite3 ledgers.db "select 1"', 'sqlite3 -separator , ledgers.db']) {
+    assert.equal(assertDenied(gate(claude, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+});
+
+test('writes to an unguarded ~/.claude file and to a worktree\'s .claude/evidence are allowed', () => {
+  const { h, worktree: linked } = gateWorld;
+  for (const file of [path.join(h, '.claude/ledger-hook-failures.log'), path.join(h, '.claude/ledgers-notes.md'), path.join(linked, '.claude/evidence/red.log')]) {
+    assertAllowed(gate(linked, 'Write', { file_path: file, content: 'x' }));
+  }
+  for (const command of ['mkdir -p .claude/evidence', 'cp /tmp/x .claude/evidence/red.log', 'echo x > .claude/evidence/red.log', 'rm .claude/evidence/red.log']) {
+    assertAllowed(gate(linked, 'Bash', { command }));
+  }
+});
+
+test('a write to the store through a symbolic link to a store folder or file, or under a ~/.claude that is a link, is denied', (t) => {
+  const h = home(t);
+  const claude = path.join(h, 'dotfiles/claude');
+  mkdirSync(path.dirname(claude));
+  renameSync(path.join(h, '.claude'), claude);
+  mkdirSync(path.join(claude, 'ledger-active/main'), { recursive: true });
+  mkdirSync(path.join(claude, 'ledger-data'));
+  writeFileSync(path.join(claude, 'ledger-active/main/task.md'), ledgerText({ slug: 'task' }));
+  symlinkSync(claude, path.join(h, '.claude'));
+  symlinkSync(path.join(h, '.claude/ledger-active'), path.join(h, 'active-link'));
+  symlinkSync(path.join(h, '.claude/ledger-active/main/task.md'), path.join(h, 'task-link.md'));
+  symlinkSync(path.join(h, '.claude/ledger-data'), path.join(h, 'data-link'));
+
+  for (const file of [path.join(h, 'active-link/main/task.md'), path.join(h, 'active-link/main/new.md'), path.join(h, 'task-link.md'), path.join(claude, 'ledgers.json')]) {
+    assert.equal(assertDenied(gate(h, 'Write', { file_path: file, content: 'x' }, h)), HAND_EDIT_REASON, file);
+    assert.equal(assertDenied(gate(h, 'Bash', { command: `echo x >> ${file}` }, h)), HAND_EDIT_REASON, file);
+  }
+  assert.equal(assertDenied(gate(h, 'Bash', { command: 'git -C ~/data-link commit -m x' }, h)), CLONE_GIT_REASON);
+  assertAllowed(gate(h, 'Bash', { command: 'git -C ~/data-link log' }, h));
+});
+
+test('a git command run from inside the clone is denied unless it only reads', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data/ledgers');
+  mkdirSync(clone, { recursive: true });
+
+  for (const command of ['git commit -am fix', 'git reset --hard HEAD~1', 'git -C .. push']) {
+    assert.equal(assertDenied(gate(clone, 'Bash', { command }, h)), CLONE_GIT_REASON, command);
+  }
+  for (const command of ['git log', 'git status --short', 'git show HEAD:ledgers.json']) {
+    assertAllowed(gate(clone, 'Bash', { command }, h));
+  }
+});
+
+test('git archive in the clone is allowed unless its -o or --output names a file in the store', () => {
+  const { plain } = gateWorld;
+  for (const command of ['git -C ~/.claude/ledger-data archive HEAD > /dev/null', 'git -C ~/.claude/ledger-data archive -o /tmp/store.tar HEAD', 'git -C ~/.claude/ledger-data archive --output=/tmp/store.tar HEAD']) {
+    assertAllowed(gate(plain, 'Bash', { command }));
+  }
+  for (const command of ['git -C ~/.claude/ledger-data archive -o store.tar HEAD', 'git -C ~/.claude/ledger-data archive --output ~/.claude/ledgers.json HEAD', 'git -C /tmp archive --output=$HOME/.claude/ledger-active/x.tar HEAD']) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+});
+
+test('git branch in the clone with a list filter such as --points-at only lists, so it is allowed', () => {
+  const { plain } = gateWorld;
+  for (const command of ['git -C ~/.claude/ledger-data branch --points-at HEAD', 'git -C ~/.claude/ledger-data branch --no-contains HEAD', 'git -C ~/.claude/ledger-data branch --sort -committerdate --format "%(refname)"', 'git -C ~/.claude/ledger-data branch -a --points-at=HEAD']) {
+    assertAllowed(gate(plain, 'Bash', { command }));
+  }
+  for (const command of ['git -C ~/.claude/ledger-data branch --points-at HEAD -d side', 'git -C ~/.claude/ledger-data branch --sort refname rescue']) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), CLONE_GIT_REASON, command);
+  }
+});
+
+test('git branch in the clone with a list filter reads the words after it as patterns, so it only lists', () => {
+  const { plain } = gateWorld;
+  for (const command of ["git -C ~/.claude/ledger-data branch --points-at HEAD '*'", "git -C ~/.claude/ledger-data branch --merged=main 'side*' main", "git -C ~/.claude/ledger-data branch --contains HEAD 'x*'"]) {
+    assertAllowed(gate(plain, 'Bash', { command }));
+  }
+  for (const command of ['git -C ~/.claude/ledger-data branch --sort refname rescue', 'git -C ~/.claude/ledger-data branch --format x rescue', 'git -C ~/.claude/ledger-data branch --points-at HEAD -m side']) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), CLONE_GIT_REASON, command);
+  }
+});
+
+test('git branch --list in the clone reads the words after -- as patterns, so it only lists', () => {
+  const { plain } = gateWorld;
+  for (const command of ["git -C ~/.claude/ledger-data branch --list -- 'main*'", "git -C ~/.claude/ledger-data branch -l -- -d 'main*'", "git -C ~/.claude/ledger-data branch --points-at HEAD -- '*'"]) {
+    assertAllowed(gate(plain, 'Bash', { command }));
+  }
+  for (const command of ['git -C ~/.claude/ledger-data branch -- rescue', 'git -C ~/.claude/ledger-data branch -d -- side', 'git -C ~/.claude/ledger-data branch -m -- side other', 'git -C ~/.claude/ledger-data branch -c -- side other', 'git -C ~/.claude/ledger-data branch -u origin/main -- side']) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), CLONE_GIT_REASON, command);
+  }
+});
+
+test('git branch in the clone lists with -i, with -l in a bundle such as -vl, and with nothing after --', () => {
+  const { plain } = gateWorld;
+  for (const command of ["git -C ~/.claude/ledger-data branch --list --ignore-case -- 'MASTER*'", "git -C ~/.claude/ledger-data branch -il 'M*'", "git -C ~/.claude/ledger-data branch -vl -- '*'", 'git -C ~/.claude/ledger-data branch --']) {
+    assertAllowed(gate(plain, 'Bash', { command }));
+  }
+  for (const command of ['git -C ~/.claude/ledger-data branch -i side', 'git -C ~/.claude/ledger-data branch -v -- side', 'git -C ~/.claude/ledger-data branch -dl side', 'git -C ~/.claude/ledger-data branch -m -- side', 'git -C ~/.claude/ledger-data branch -c side other', 'git -C ~/.claude/ledger-data branch -u origin/main --']) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), CLONE_GIT_REASON, command);
+  }
+});
+
+test('git branch --list in the clone takes the display flags --column, --abbrev, --color and --omit-empty, with or without their no- forms', () => {
+  const { h } = gateWorld;
+  for (const flag of ['--no-column', '--no-abbrev', '--abbrev=8', '--omit-empty', '--column', '--abbrev', '--no-color', '--color', '--color=always']) {
+    const command = `git -C ~/.claude/ledger-data branch --list ${flag}`;
+    assertAllowed(gate(h, 'Bash', { command }));
+  }
+  for (const command of ['git -C ~/.claude/ledger-data branch --abbrev=8 side', 'git -C ~/.claude/ledger-data branch --no-column side', 'git -C ~/.claude/ledger-data branch --omit-empty side']) {
+    assert.equal(assertDenied(gate(h, 'Bash', { command })), CLONE_GIT_REASON, command);
+  }
+});
+
+test('git fetch in the clone with --dry-run writes nothing, so it is allowed even when it prunes', () => {
+  const { plain } = gateWorld;
+  for (const command of ['git -C ~/.claude/ledger-data fetch --prune --dry-run', 'git -C ~/.claude/ledger-data fetch --dry-run --force origin +main:main']) {
+    assertAllowed(gate(plain, 'Bash', { command }));
+  }
+  for (const command of ['git -C ~/.claude/ledger-data fetch --prune', 'git -C ~/.claude/ledger-data fetch -n --prune']) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), CLONE_GIT_REASON, command);
+  }
+});
+
+const bashStoreWritesInDepth = [
+  'echo "a\nb" > ~/.claude/ledgers.json',
+  'cat > ~/.claude/ledgers.json <<EOF\n{}\nEOF',
+  "cat <<'EOF' > /tmp/notes\ndon't\nEOF\necho x > ~/.claude/ledgers.json",
+  'cat <<A <<B > /tmp/notes\none\nA\ntwo\nB\nrm ~/.claude/ledgers.json',
+  'echo "$(rm ~/.claude/ledgers.json)"',
+  'echo "`rm ~/.claude/ledgers.json`"',
+  'echo x >| ~/.claude/ledgers.json',
+  '(echo x > ~/.claude/ledgers.json)',
+  'echo $(echo x >~/.claude/ledgers.json)',
+  'cp /tmp/ledgers.json ~/.claude/',
+  'cp /tmp/ledgers.json ~/.claude',
+  'cp -t ~/.claude /tmp/ledgers.json',
+  'cp --target-directory=$HOME/.claude /tmp/a /tmp/ledgers.json',
+  'mv /tmp/a "/tmp/ledgers.json" ~/.claude/',
+  'ln -s /tmp/ledgers.json ~/.claude/',
+  'cp /tmp/x ~/.claude/ledgers.json # keep a copy',
+  'cd -- ~/.claude && rm ledgers.json',
+  'echo x > "${HOME}"/.claude/ledgers.json',
+  'rm -rf "$HOME"/.claude/ledger-*',
+  'sqlite3 -separator -readonly ~/.claude/ledgers.db "DELETE FROM ledgers"',
+  'touch -r /tmp/x ~/.claude/ledgers.json',
+];
+
+for (const command of bashStoreWritesInDepth) {
+  test(`Bash ${JSON.stringify(command)} is denied, naming the ledger commands`, () => {
+    assert.equal(assertDenied(gate(gateWorld.plain, 'Bash', { command })), HAND_EDIT_REASON);
+  });
+}
+
+const bashStoreReadsInDepth = [
+  'git commit -m "fix the store\nrm -rf ~/.claude/ledger-active\nand more"',
+  "gh pr create --title x --body \"$(cat <<'EOF'\n## Summary\nIt's done: echo x > ~/.claude/ledgers.json\nEOF\n)\"",
+  'cat <<-EOF > /tmp/notes\n\trm -rf ~/.claude/ledger-data\n\tEOF',
+  'cat <<"EOF"\n> ~/.claude/ledgers.json\nEOF',
+  "echo '$(rm ~/.claude/ledgers.json)'",
+  'cp /tmp/notes.json ~/.claude/',
+  'cp ~/.claude/ledgers.json /tmp/backup.json # not ~/.claude/ledgers.json',
+  'cp /tmp/x /tmp/y  # see > ~/.claude/ledgers.json',
+  "echo x > '$HOME/.claude/ledgers.json'",
+  "git -C '$HOME/.claude/ledger-data' commit -m x",
+  "rm -rf ~/.claude/'ledger-*'",
+  'rm ~/.claude/"*"',
+  'echo x > "$HOME/.claude/ledgers.*"',
+  'sqlite3 ~/.claude/ledgers.db -readonly "select 1"',
+  'touch -r ~/.claude/ledgers.json /tmp/x',
+  'touch --reference=~/.claude/ledgers.json /tmp/x',
+  'git -C ~/.claude/ledger-data reflog show',
+  'git -C ~/.claude/ledger-data reflog -n 5',
+  'git -C ~/.claude/ledger-data reflog HEAD',
+  'git -C ~/.claude/ledger-data reflog main@{1}',
+  'git -C ~/.claude/ledger-data reflog --date=iso',
+  'git -C ~/.claude/ledger-data branch -avv',
+  'git -C ~/.claude/ledger-data branch --all',
+  'git -C ~/.claude/ledger-data branch --remotes --verbose',
+  'git -C ~/.claude/ledger-data branch -l',
+  "git -C ~/.claude/ledger-data branch --format='%(refname:short)' --sort=-committerdate",
+  'git -C ~/.claude/ledger-data branch --color=always --no-color --column --column=never',
+  "git -C ~/.claude/ledger-data branch --list 'fix-*' main",
+];
+
+for (const command of bashStoreReadsInDepth) {
+  test(`Bash ${JSON.stringify(command)} is allowed`, () => {
+    assertAllowed(gate(gateWorld.plain, 'Bash', { command }));
+  });
+}
+
+const bashCloneGitWritesInDepth = [
+  'git -C "${HOME}/.claude/ledger-data" commit -m x',
+  'git -C "$HOME"/.claude/ledger-data reset --hard',
+  'git --git-dir="${HOME}/.claude/ledger-data/.git" reset --hard',
+  'git -C ~/.claude/ledger-data reflog expire --all',
+  'git -C ~/.claude/ledger-data reflog delete HEAD@{1}',
+  'git -C ~/.claude/ledger-data reflog drop',
+];
+
+for (const command of bashCloneGitWritesInDepth) {
+  test(`Bash ${JSON.stringify(command)} is denied, saying the operator resolves a sync conflict`, () => {
+    assert.equal(assertDenied(gate(gateWorld.plain, 'Bash', { command })), CLONE_GIT_REASON);
+  });
+}
+
+test('a backtick substitution is one word of the command around it, so the words after it still count', () => {
+  for (const folder of [gateWorld.main, gateWorld.worktree]) {
+    assert.equal(assertDenied(gate(folder, 'Bash', { command: 'cp `printf %s notes.md` .claude/ledger.md' })), STORE_REASON, folder);
+  }
+});
+
+test('a target that starts with a command substitution and ends in .claude/ledger.md is denied', () => {
+  for (const folder of [gateWorld.main, gateWorld.worktree]) {
+    for (const command of ['echo x > $(pwd)/.claude/ledger.md', 'cp notes.md `pwd`/.claude/ledger.md', 'mv notes.md "$(pwd)/.claude/ledger.md"']) {
+      assert.equal(assertDenied(gate(folder, 'Bash', { command })), STORE_REASON, `${command} in ${folder}`);
+    }
+  }
+});
+
+test('an unquoted here-document body runs its command substitutions; a quoted one is data', () => {
+  const { plain } = gateWorld;
+  const runs = [
+    'cat <<EOF\n$(rm -rf ~/.claude/ledger-active)\nEOF',
+    'cat <<-EOF\n\tnote `rm ~/.claude/ledgers.json` here\n\tEOF',
+    "cat <<EOF > /tmp/notes\nit's $(rm ~/.claude/ledgers.json) (done\nEOF",
+    'cd ~/.claude && cat <<EOF\n$(rm ledgers.json)\nEOF',
+    'cat <<A <<B\n$(date)\nA\n$(rm ~/.claude/ledgers.json)\nB',
+    'cat <<EOF\n$(date)\nEOF\nrm ~/.claude/ledgers.json',
+  ];
+  for (const command of runs) assert.equal(assertDenied(gate(plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  const data = [
+    "cat <<'EOF'\n$(rm -rf ~/.claude/ledger-active)\nEOF",
+    'cat <<"EOF"\n`rm ~/.claude/ledgers.json`\nEOF',
+    'cat <<\\EOF\n$(rm ~/.claude/ledgers.json)\nEOF',
+    'cat <<EOF\n\\$(rm ~/.claude/ledgers.json)\nEOF',
+    "cat <<A <<'B'\n$(date)\nA\n$(rm ~/.claude/ledgers.json)\nB",
+    "cat <<EOF\nit's (done\nEOF\necho ok > /tmp/notes",
+  ];
+  for (const command of data) assertAllowed(gate(plain, 'Bash', { command }));
+});
+
+test('a brace expansion in a target word is expanded before the word is checked', () => {
+  const { h, plain } = gateWorld;
+  for (const command of ['rm -f ~/.claude/ledgers.db{,-wal,-shm}', 'rm ~/.claude/{ledgers,ledger-aliases}.json', 'mv ~/.claude/ledgers.json{,.bak}', 'touch ~/.claude/ledger-{data,x}.status.json']) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+  assert.equal(assertDenied(gate(path.join(h, '.claude'), 'Bash', { command: 'rm -rf ledger-{active,backlog}' })), HAND_EDIT_REASON);
+  for (const command of ['cp ~/.claude/ledgers.json{,.bak}', 'rm -f /tmp/{a,b}', 'rm -f "$HOME/.claude/ledgers.{db,json}"', "rm -f ~/.claude/'{ledgers,x}'.json", 'ls | xargs -I{} cp {} /tmp/']) {
+    assertAllowed(gate(plain, 'Bash', { command }));
+  }
+});
+
+test('an option value is not a path: mkdir -m, truncate -s and -r, and touch -d and -t write only their operands', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data');
+  mkdirSync(clone, { recursive: true });
+  const elsewhere = ['mkdir -m 700 /tmp/report-cache', 'mkdir -p --mode 700 /tmp/report-cache', 'truncate -s 0 /tmp/notes', 'touch -d "2 days ago" /tmp/notes', 'touch -t 202601010000 /tmp/notes'];
+  for (const command of elsewhere) assertAllowed(gate(clone, 'Bash', { command }, h));
+  assertAllowed(gate(h, 'Bash', { command: 'cd ~/.claude/ledger-data && mkdir -m 700 /tmp/report-cache' }, h));
+  assertAllowed(gate(h, 'Bash', { command: 'truncate -r ~/.claude/ledgers.db /tmp/notes' }, h));
+  for (const command of ['mkdir -m 700 ~/.claude/ledger-backlog/main', 'truncate -s 0 ~/.claude/ledgers.db', 'touch -d now ~/.claude/ledgers.json', 'truncate -r /tmp/notes ~/.claude/ledgers.db']) {
+    assert.equal(assertDenied(gate(h, 'Bash', { command }, h)), HAND_EDIT_REASON, command);
+  }
+});
+
+test('a bundle of short options that ends in -r, -d or -t takes the next word as its value, so touch -cr only reads that file', (t) => {
+  const h = home(t);
+  mkdirSync(path.join(h, '.claude/ledger-data'), { recursive: true });
+  const main = checkout(h, 'main');
+  for (const command of ['touch -cr ~/.claude/ledger-data .', 'touch -mr ~/.claude/ledgers.json /tmp/notes', 'touch -cd "2 days ago" /tmp/notes', 'touch -ct 202601010000 /tmp/notes', 'truncate -cr ~/.claude/ledgers.db /tmp/notes']) {
+    assertAllowed(gate(main, 'Bash', { command }, h));
+  }
+  for (const command of ['touch -cr /tmp/x ~/.claude/ledgers.json', 'touch -rc ~/.claude/ledgers.json', 'touch -cd now ~/.claude/ledgers.json', 'touch -crx ~/.claude/ledgers.json']) {
+    assert.equal(assertDenied(gate(main, 'Bash', { command }, h)), HAND_EDIT_REASON, command);
+  }
+});
+
+test('a $(...) in double quotes closes at its matching ), and is one word of the command around it', () => {
+  const { plain } = gateWorld;
+  assert.equal(assertDenied(gate(plain, 'Bash', { command: 'cp "$(pwd)/notes.json" ~/.claude/ledgers.json' })), HAND_EDIT_REASON);
+  assertAllowed(gate(plain, 'Bash', { command: 'cp "$(ls ~/.claude/ledgers.json)" /tmp/backup.json' }));
+});
+
+test('a word that starts with a command substitution names no known path, so it is not a write in the folder the command runs in', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data');
+  mkdirSync(clone, { recursive: true });
+  for (const command of ['echo x > "$(mktemp)"', 'cp notes.md $(mktemp -d)', 'echo x > `mktemp`']) assertAllowed(gate(clone, 'Bash', { command }, h));
+});
+
+test('rm, an mv source and touch of a .claude/ledger.md are denied, as for a store path', () => {
+  for (const command of ['rm .claude/ledger.md', 'rm -f .claude/ledger.md', 'mv .claude/ledger.md /tmp/x', 'touch .claude/ledger.md']) {
+    for (const folder of [gateWorld.main, gateWorld.worktree]) {
+      assert.equal(assertDenied(gate(folder, 'Bash', { command })), STORE_REASON, `${command} in ${folder}`);
+    }
+  }
+});
+
+test('a cd at the top of a command carries over to later lines and later commands, but not out of a subshell', () => {
+  const { h, plain } = gateWorld;
+  for (const command of ['cd ~/.claude\nprintf x > ledgers.json', 'cd ~/.claude && ls\n\nrm ledgers.json', '{ cd ~/.claude; }\nprintf x > ledgers.json', '(cd ~/.claude && printf x > ledgers.json)']) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+  assertAllowed(gate(path.join(h, '.claude'), 'Bash', { command: 'cd /tmp\nprintf x > ledgers.json' }));
+  for (const command of ['(cd ~/.claude)\nprintf x > ledgers.json', '(cd ~/.claude && ls); printf x > ledgers.json', 'echo "$(cd ~/.claude && pwd)"\nprintf x > ledgers.json', 'ls `cd ~/.claude`; rm ledgers.json']) {
+    assertAllowed(gate(plain, 'Bash', { command }));
+  }
+});
+
+test('a backslash-newline joins two lines into one command', () => {
+  for (const command of ['printf x > \\\n~/.claude/ledgers.json', 'rm -f \\\n  ~/.claude/ledgers.json', 'cp /tmp/x \\\n  "$HOME/.claude/ledgers.json"']) {
+    assert.equal(assertDenied(gate(gateWorld.plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+});
+
+test('a cd inside a subshell that spans lines counts on its later lines', () => {
+  for (const command of ['(cd ~/.claude\nprintf x > ledgers.json)', '(\n  cd ~/.claude\n  printf x > ledgers.json\n)']) {
+    assert.equal(assertDenied(gate(gateWorld.plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+});
+
+test('an arithmetic << is a shift, not a here-document, so the lines after it still count', () => {
+  for (const folder of [gateWorld.main, gateWorld.worktree]) {
+    assert.equal(assertDenied(gate(folder, 'Bash', { command: 'n=$((1 << 2))\nprintf x > .claude/ledger.md' })), STORE_REASON, folder);
+  }
+  const shifts = [
+    'echo "$((x << 1))"\nrm ~/.claude/ledgers.json',
+    'n=$(( (1 << 2) + 1 ))\nrm ~/.claude/ledgers.json',
+    '(( n <<= 1 ))\nrm ~/.claude/ledgers.json',
+    'for ((i = 0; i << 1; i++)); do :; done\nrm ~/.claude/ledgers.json',
+    'n=$((1<<2)); cat <<EOF\n$(rm ~/.claude/ledgers.json)\nEOF',
+    'n=$(( $(rm ~/.claude/ledgers.json) + 1 ))',
+    'echo $((cd ~/.claude && rm ledgers.json) )',
+  ];
+  for (const command of shifts) assert.equal(assertDenied(gate(gateWorld.plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+});
+
+test('a > or ; inside an arithmetic expansion is an operator, not a redirect or a command end', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data');
+  mkdirSync(clone, { recursive: true });
+  for (const command of ['echo $(( 3 > 2 ))', 'echo "$((n >= 1 ? 1 : 0))"', '(( n > 2 )) && echo big']) assertAllowed(gate(clone, 'Bash', { command }, h));
+});
+
+test('every word after -- is an operand, also one that starts with -', () => {
+  const legacy = [
+    'echo x | tee -- -old/.claude/ledger.md',
+    'rm -- -old/.claude/ledger.md',
+    'mv -- -old/.claude/ledger.md /tmp/x',
+    'touch -- -old/.claude/ledger.md',
+    'truncate -s 0 -- -old/.claude/ledger.md',
+    "sed -i -- 's/a/b/' -old/.claude/ledger.md",
+    'cp -- /tmp/x -old/.claude/ledger.md',
+    'ln -s -- /tmp/x -old/.claude/ledger.md',
+  ];
+  for (const command of legacy) {
+    for (const folder of [gateWorld.main, gateWorld.worktree]) {
+      assert.equal(assertDenied(gate(folder, 'Bash', { command })), STORE_REASON, `${command} in ${folder}`);
+    }
+  }
+  const { h } = gateWorld;
+  for (const command of ['sqlite3 -- ~/.claude/ledgers.db "select 1"', 'mkdir -p -- -x/../.claude/ledger-backlog/main', 'git clone -- /tmp/x.git -x/../.claude/ledger-data']) {
+    assert.equal(assertDenied(gate(h, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+});
+
+test('the operands after -- are read as before: a sed script and an option value are no files', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data');
+  mkdirSync(clone, { recursive: true });
+  for (const command of ['sed -i -- s/x/y/ /tmp/notes', 'cp -- /tmp/a /tmp/b', 'touch -d now -- /tmp/notes', 'echo x | tee -- /tmp/notes', 'sqlite3 -- /tmp/o.db "select 1"']) {
+    assertAllowed(gate(clone, 'Bash', { command }, h));
+  }
+});
+
+const bashCloneGitReads = [
+  'git -C ~/.claude/ledger-data config --local user.name',
+  'git -C ~/.claude/ledger-data config --global user.name',
+  'git -C ~/.claude/ledger-data config --worktree --get user.name',
+  'git -C ~/.claude/ledger-data config --system --list',
+  'git -C ~/.claude/ledger-data config get user.name',
+  'git -C ~/.claude/ledger-data config get --all remote.origin.url',
+  'git -C ~/.claude/ledger-data config list',
+  'git -C ~/.claude/ledger-data config list --local',
+  'git -C ~/.claude/ledger-data merge-base HEAD origin/main',
+  'git -C ~/.claude/ledger-data merge-base --is-ancestor HEAD origin/main',
+  'git -C ~/.claude/ledger-data merge-base --fork-point origin/main',
+  'git -C ~/.claude/ledger-data tag',
+  'git -C ~/.claude/ledger-data tag -n',
+  'git -C ~/.claude/ledger-data tag -n5',
+  'git -C ~/.claude/ledger-data tag --contains HEAD',
+  'git -C ~/.claude/ledger-data tag --no-contains=HEAD --merged',
+  'git -C ~/.claude/ledger-data tag --no-merged origin/main --points-at HEAD',
+  "git -C ~/.claude/ledger-data tag --sort=-creatordate --format='%(refname:short)' --column",
+  "git -C ~/.claude/ledger-data tag -l 'v*'",
+  "git -C ~/.claude/ledger-data tag --list 'v*' -n",
+  'git -C ~/.claude/ledger-data tag -n v1',
+  "git -C ~/.claude/ledger-data tag -n5 v1 'v2*'",
+  'git -C ~/.claude/ledger-data tag -i',
+  'git -C ~/.claude/ledger-data tag --ignore-case --sort=refname',
+  'git -C ~/.claude/ledger-data tag -i -n v1',
+  'git -C ~/.claude/ledger-data for-each-ref refs/heads',
+  "git -C ~/.claude/ledger-data for-each-ref --format='%(refname)' refs/tags",
+  'git -C ~/.claude/ledger-data clean -n',
+  'git -C ~/.claude/ledger-data clean -nd',
+  'git -C ~/.claude/ledger-data clean -ndx',
+  'git -C ~/.claude/ledger-data clean -dn',
+  'git -C ~/.claude/ledger-data clean --dry-run -d',
+  "git -C ~/.claude/ledger-data clean -e '*.tmp' -n",
+  'git -C ~/.claude/ledger-data check-ignore -v -- notes.md',
+  'git -C ~/.claude/ledger-data add --dry-run .',
+  'git -C ~/.claude/ledger-data add -n notes.md',
+  'git -C ~/.claude/ledger-data add -An',
+  'git -C ~/.claude/ledger-data clean -n -- generated/',
+  'git -C ~/.claude/ledger-data apply --check /tmp/review.patch',
+  'git -C ~/.claude/ledger-data apply --stat /tmp/review.patch',
+  'git -C ~/.claude/ledger-data apply --numstat /tmp/review.patch',
+  'git -C ~/.claude/ledger-data apply --summary /tmp/review.patch',
+  'git -C ~/.claude/ledger-data apply --check --index /tmp/review.patch',
+  'git -C ~/.claude/ledger-data apply --check --cached /tmp/review.patch',
+  'git -C ~/.claude/ledger-data apply --stat --index /tmp/review.patch',
+  'git -C ~/.claude/ledger-data apply --numstat --cached /tmp/review.patch',
+  'git -C ~/.claude/ledger-data apply --stat -- --apply',
+  'git -C ~/.claude/ledger-data diff --name-only HEAD -- --output=notes.md',
+  'git -C ~/.claude/ledger-data diff-tree --no-commit-id --name-only -r HEAD',
+  'git -C ~/.claude/ledger-data count-objects -v',
+  'git -C ~/.claude/ledger-data diff-index --cached HEAD',
+  'git -C ~/.claude/ledger-data cherry-pick -h',
+  'git -C ~/.claude/ledger-data reset --help',
+  'cd ~/.claude/ledger-data && git config --global user.name Example',
+  'git -C ~/.claude/ledger-data config --system core.editor vim',
+  'git -C ~/.claude/ledger-data config --global --unset user.name',
+];
+
+for (const command of bashCloneGitReads) {
+  test(`Bash ${JSON.stringify(command)} only reads the clone, so it is allowed`, () => {
+    assertAllowed(gate(gateWorld.plain, 'Bash', { command }));
+  });
+}
+
+const bashCloneGitChanges = [
+  'git -C ~/.claude/ledger-data config --local user.name x',
+  'git -C ~/.claude/ledger-data config --local --unset user.name',
+  'git -C ~/.claude/ledger-data config set user.name x',
+  'git -C ~/.claude/ledger-data config unset user.name',
+  'git -C ~/.claude/ledger-data tag v1',
+  'git -C ~/.claude/ledger-data tag -a v1 -m x',
+  'git -C ~/.claude/ledger-data tag -d v1',
+  'git -C ~/.claude/ledger-data tag -f v1 HEAD',
+  'git -C ~/.claude/ledger-data tag --sort=v:refname v2',
+  'git -C ~/.claude/ledger-data tag -i v1',
+  'git -C ~/.claude/ledger-data tag -n -d v1',
+  'git -C ~/.claude/ledger-data config user.name x',
+  'git -C ~/.claude/ledger-data config --worktree user.name x',
+  'git -C ~/.claude/ledger-data config --file .git/config user.name x',
+  'git -C ~/.claude/ledger-data clean -fd',
+  'git -C ~/.claude/ledger-data clean -f -enode_modules',
+  'git -C ~/.claude/ledger-data clean -fx -e -n',
+  'git -C ~/.claude/ledger-data clean -f --exclude -n',
+  'git -C ~/.claude/ledger-data clean -fe -n',
+  'git -C ~/.claude/ledger-data add .',
+  'git -C ~/.claude/ledger-data add -A',
+  'git -C ~/.claude/ledger-data add -- -n',
+  'git -C ~/.claude/ledger-data clean -fd -- generated/ -n',
+  'git -C ~/.claude/ledger-data clean -f -- --dry-run',
+  'git -C ~/.claude/ledger-data apply /tmp/review.patch',
+  'git -C ~/.claude/ledger-data apply --index /tmp/review.patch',
+  'git -C ~/.claude/ledger-data apply --stat --apply /tmp/review.patch',
+  'git -C ~/.claude/ledger-data apply --check --apply /tmp/review.patch',
+];
+
+for (const command of bashCloneGitChanges) {
+  test(`Bash ${JSON.stringify(command)} changes the clone, so it is denied`, () => {
+    assert.equal(assertDenied(gate(gateWorld.plain, 'Bash', { command })), CLONE_GIT_REASON);
+  });
+}
+
+test('BSD sed -i takes a backup suffix that starts with . or is empty as a word of its own, so the script follows it', () => {
+  const { plain } = gateWorld;
+  for (const command of ['cd ~/.claude/ledger-data && sed -i .bak s/a/b/ /tmp/notes', "cd ~/.claude/ledger-data && sed -i '' s/a/b/ /tmp/notes", 'cd ~/.claude/ledger-data && sed -i .orig -e s/a/b/ /tmp/notes']) {
+    assertAllowed(gate(plain, 'Bash', { command }));
+  }
+  assert.equal(assertDenied(gate(plain, 'Bash', { command: 'sed -i .bak s/a/b/ ~/.claude/ledgers.json' })), HAND_EDIT_REASON);
+  for (const command of ['sed -i .bak s/a/b/ .claude/ledger.md', 'sed -e s/a/b/ -i .claude/ledger.md']) {
+    assert.equal(assertDenied(gate(gateWorld.worktree, 'Bash', { command })), STORE_REASON, command);
+  }
+});
+
+test('a bare -i after the script, or after -e or -f, takes no backup suffix, so the dot word after it is a file', () => {
+  const { plain } = gateWorld;
+  for (const command of ["cd ~/.claude/ledger-data && sed -e 's/old/new/' -i .gitignore", "cd ~/.claude/ledger-data && sed 's/old/new/' -i .gitignore", 'cd ~/.claude/ledger-data && sed -f /tmp/fix.sed -i .gitignore']) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+});
+
+test('a here-string or here-document before the command word does not hide the command', () => {
+  const { plain } = gateWorld;
+  for (const command of ["<<< '{}' tee ~/.claude/ledgers.json", '<<EOF tee ~/.claude/ledgers.json\n{}\nEOF', '<<-EOF tee ~/.claude/ledgers.json\n\t{}\n\tEOF', "<<'EOF' tee ~/.claude/ledgers.json\n{}\nEOF"]) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+  assertAllowed(gate(plain, 'Bash', { command: "<<< '{}' tee /tmp/notes" }));
+});
+
+test('inside [[ ]] a $( ) in single quotes is literal text, but one in double quotes still runs', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data');
+  mkdirSync(clone, { recursive: true });
+  assertAllowed(gate(h, 'Bash', { command: `cd ~/.claude/ledger-data && [[ "$line" == '$(touch notes)' ]]` }, h));
+  for (const command of ['cd ~/.claude/ledger-data && [[ "$(touch notes)" == x ]]', `[[ "'$(rm ~/.claude/ledgers.json)'" == x ]]`, `[[ '$x' == y && -n $(rm ~/.claude/ledgers.json) ]]`]) {
+    assert.equal(assertDenied(gate(h, 'Bash', { command }, h)), HAND_EDIT_REASON, command);
+  }
+});
+
+test('a cd in a list that & sends to the background leaves the folder of later commands as it was', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  const inClaude = path.join(legacy, '.claude');
+  mkdirSync(inClaude, { recursive: true });
+  writeFileSync(path.join(inClaude, 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  for (const command of ['cd .. && npm test &\necho done >> ledger.md', 'cd .. & echo done >> ledger.md', '{ cd ..; npm test; } & echo done >> ledger.md']) {
+    assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  }
+  for (const command of ['cd .. && npm test\necho done >> ledger.md', 'cd .. && npm test 2>&1; echo done >> ledger.md', 'cd .. &>/dev/null; echo done >> ledger.md', 'npm test & cd .. && echo done >> ledger.md']) {
+    assertAllowed(gate(inClaude, 'Bash', { command }, h));
+  }
+});
+
+test('in a worktree that holds a .claude/ledger.md, a glob that ends in / matches only folders, so it does not reach the ledger', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  mkdirSync(path.join(legacy, '.claude/evidence'), { recursive: true });
+  writeFileSync(path.join(legacy, '.claude/ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  assertAllowed(gate(legacy, 'Bash', { command: 'rm -rf .claude/*/' }, h));
+  for (const command of ['rm -rf .claude/*', 'rm -rf .cl*/']) assert.equal(assertDenied(gate(legacy, 'Bash', { command }, h)), UNMOVED_REASON, command);
+});
+
+test('a cd that a ; or a newline ends before a later & runs in the foreground, so it still leads later commands', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  const inClaude = path.join(legacy, '.claude');
+  mkdirSync(inClaude, { recursive: true });
+  writeFileSync(path.join(inClaude, 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  for (const command of ['cd .claude; true & echo done >> ledger.md', 'cd .claude\ntrue & echo done >> ledger.md', 'cd .claude; sleep 1 & rm ledger.md', 'cd .claude && pwd; true & echo done >> ledger.md']) {
+    assert.equal(assertDenied(gate(legacy, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  }
+  assert.equal(assertDenied(gate(gateWorld.plain, 'Bash', { command: 'cd ~/.claude; sleep 1 & rm ledgers.json' })), HAND_EDIT_REASON);
+});
+
+test('a cd .. out of .claude that a ; or a newline ends before a later & leads a later write to a file beside .claude, not to the ledger', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  const inClaude = path.join(legacy, '.claude');
+  mkdirSync(inClaude, { recursive: true });
+  writeFileSync(path.join(inClaude, 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  for (const command of ['cd ..; true & echo done >> ledger.md', 'cd ..\ntrue & echo done >> ledger.md', '{ cd ..; npm test; }; true & echo done >> ledger.md']) {
+    assertAllowed(gate(inClaude, 'Bash', { command }, h));
+  }
+});
+
+test('a line that ends in &&, || or | goes on with the same list, so an & on the next line sends the cd on the first to the background', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  const inClaude = path.join(legacy, '.claude');
+  mkdirSync(inClaude, { recursive: true });
+  writeFileSync(path.join(inClaude, 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  for (const command of ['cd .. &&\n true &\n echo done >> ledger.md', 'cd .. ||\n true &\n echo done >> ledger.md', 'cd .. |\n true &\n echo done >> ledger.md', 'cd .. && # up\n true & echo done >> ledger.md']) {
+    assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  }
+  for (const command of ['cd .. &&\n true\n echo done >> ledger.md', 'cd .. &&\n true;\n true & echo done >> ledger.md']) assertAllowed(gate(inClaude, 'Bash', { command }, h));
+});
+
+test('a { ... } group that spans lines and runs in the background or a pipeline leaves the folder of later lines as it was', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  const inClaude = path.join(legacy, '.claude');
+  mkdirSync(inClaude, { recursive: true });
+  writeFileSync(path.join(inClaude, 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  for (const command of ['{ cd ..;\n  true; } &\necho done >> ledger.md', '{\n  cd ..\n} &\necho done >> ledger.md', '{ cd ..;\n  true; } && true &\necho done >> ledger.md', '{ cd ..;\n  true; } | cat\necho done >> ledger.md']) {
+    assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  }
+  for (const command of ['{ cd ..;\n  true; }\necho done >> ledger.md', '{\n  cd ..\n}\necho done >> ledger.md', '{ cd ..;\n  true; }; true &\necho done >> ledger.md']) {
+    assertAllowed(gate(inClaude, 'Bash', { command }, h));
+  }
+});
+
+test('a cd in a pipeline runs in a subshell, so it does not lead later commands', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  const inClaude = path.join(legacy, '.claude');
+  mkdirSync(inClaude, { recursive: true });
+  writeFileSync(path.join(inClaude, 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  for (const command of ['cd .. |\n  cat\necho done >> ledger.md', 'cd .. | cat; echo done >> ledger.md', 'cd .. |& cat; echo done >> ledger.md', 'true | cd ..; echo done >> ledger.md', '{ cd ..; true; } | cat; echo done >> ledger.md', 'cd .. | tee ledger.md']) {
+    assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  }
+  for (const command of ['cd .. && cat x | cat; echo done >> ledger.md', 'cd .. || true | cat; echo done >> ledger.md', 'cd ..; true | cat; echo done >> ledger.md']) {
+    assertAllowed(gate(inClaude, 'Bash', { command }, h));
+  }
+  for (const command of ['cd .claude |\n  cat\necho done >> ledger.md', 'cd .claude | cat; echo done >> ledger.md']) assertAllowed(gate(legacy, 'Bash', { command }, h));
+  assert.equal(assertDenied(gate(legacy, 'Bash', { command: 'cd .claude && cat x | tee ledger.md' }, h)), UNMOVED_REASON);
+});
+
+test('if ... fi, a loop ... done and case ... esac are groups: piped or in the background they run in a subshell, else a cd in them leads later commands', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  const inClaude = path.join(legacy, '.claude');
+  mkdirSync(inClaude, { recursive: true });
+  writeFileSync(path.join(inClaude, 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  const subshells = [
+    'if true; then cd ..; fi | cat\necho x >> ledger.md',
+    'if true; then\n  cd ..\nfi | cat\necho x >> ledger.md',
+    'if true; then cd ..; fi &\necho x >> ledger.md',
+    'while true; do cd ..; break; done | cat\necho x >> ledger.md',
+    'for d in a; do cd ..; done | cat\necho x >> ledger.md',
+    'until false; do\n  cd ..\n  break\ndone &\necho x >> ledger.md',
+    'if true; then cd ..; fi | cat; echo x >> ledger.md',
+    'case x in\n  x)\n    cd ..\n    ;;\nesac | cat\necho x >> ledger.md',
+    '{ if true; then cd ..; fi; } | cat\necho x >> ledger.md',
+  ];
+  for (const command of subshells) assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  const carried = [
+    'if true; then cd ..; fi\necho x >> ledger.md',
+    'if true; then\n  cd ..\nfi\necho x >> ledger.md',
+    'while true; do cd ..; break; done; echo x >> ledger.md',
+    'for d in a; do\n  cd ..\ndone\necho x >> ledger.md',
+    'if true; then cd ..; fi; true | cat; echo x >> ledger.md',
+    'if true; then cd ..; fi; true & echo x >> ledger.md',
+    'case x in\n  x)\n    cd ..\n    ;;\nesac\necho x >> ledger.md',
+    'cd ..; case x in x) true;; esac & echo x >> ledger.md',
+    'cd ..; case x in (x|y) true;; *) true;; esac\necho x >> ledger.md',
+    'cd ..; echo done | cat; echo x >> ledger.md',
+  ];
+  for (const command of carried) assertAllowed(gate(inClaude, 'Bash', { command }, h));
+});
+
+test('a keyword word that is an argument, as in echo then fi, neither opens nor closes a group', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  const inClaude = path.join(legacy, '.claude');
+  mkdirSync(inClaude, { recursive: true });
+  writeFileSync(path.join(inClaude, 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  const subshells = [
+    '{ echo do done\ncd ..\n} | cat\necho x >> ledger.md',
+    '{ echo then fi\ncd ..\n} | cat\necho x >> ledger.md',
+    '{\n  echo then fi\n  cd ..\n} &\necho x >> ledger.md',
+    'if true; then\n  echo then fi\n  cd ..\nfi | cat\necho x >> ledger.md',
+    'if true; then\n  echo do done\n  cd ..\nfi | cat\necho x >> ledger.md',
+    'for d in a; do\n  echo do done\n  cd ..\ndone | cat\necho x >> ledger.md',
+    'while read x; do\n  echo then fi\n  cd ..\ndone < /dev/null &\necho x >> ledger.md',
+    'case a in\n a)\n  echo then esac\n  cd ..\n  ;;\nesac | cat\necho x >> ledger.md',
+  ];
+  for (const command of subshells) assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  assertAllowed(gate(legacy, 'Bash', { command: '{ echo then fi\ncd .claude\n} | cat\necho x >> ledger.md' }, h));
+  for (const command of ['echo then fi', 'git commit -m "if done"', 'grep -r for .', 'type if fi done', 'git log --grep done']) assertAllowed(gate(inClaude, 'Bash', { command }, h));
+});
+
+test('a } that is an argument, as in { echo }, does not close the group', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  const inClaude = path.join(legacy, '.claude');
+  mkdirSync(inClaude, { recursive: true });
+  writeFileSync(path.join(inClaude, 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  assert.equal(assertDenied(gate(inClaude, 'Bash', { command: '{ echo }\ncd ..\n} | cat\necho x >> ledger.md' }, h)), UNMOVED_REASON);
+  for (const command of ['{ cd ..; (true) } | cat\necho x >> ledger.md', '{ cd ..; if true; then true; fi } | cat\necho x >> ledger.md', '{ cd ..; { true; } } | cat\necho x >> ledger.md']) {
+    assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  }
+});
+
+test('a } right after a ) closes the group, as in { cd ..; (true)} | cat', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  const inClaude = path.join(legacy, '.claude');
+  mkdirSync(inClaude, { recursive: true });
+  writeFileSync(path.join(inClaude, 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  assert.equal(assertDenied(gate(inClaude, 'Bash', { command: '{ cd ..; (true)} | cat\necho x >> ledger.md' }, h)), UNMOVED_REASON);
+  assertAllowed(gate(inClaude, 'Bash', { command: '{ cd ..; (true)}\necho x >> ledger.md' }, h));
+});
+
+test('a } right before a redirect closes the group, as in }</dev/null | cat', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  const inClaude = path.join(legacy, '.claude');
+  mkdirSync(inClaude, { recursive: true });
+  writeFileSync(path.join(inClaude, 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  for (const close of ['}</dev/null', '}>/dev/null', '}>>/tmp/log', '}&>/dev/null']) {
+    const command = `{ cd ..\n${close} | cat\necho x >> ledger.md`;
+    assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  }
+  assert.equal(assertDenied(gate(inClaude, 'Bash', { command: '{ cd ..\n}<<EOF | cat\nx\nEOF\necho x >> ledger.md' }, h)), UNMOVED_REASON);
+  assertAllowed(gate(inClaude, 'Bash', { command: '{ cd ..\n}</dev/null\necho x >> ledger.md' }, h));
+});
+
+test('the ) that closes a process substitution does not close a group, so <(true)} leaves the { open', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  const inClaude = path.join(legacy, '.claude');
+  mkdirSync(inClaude, { recursive: true });
+  writeFileSync(path.join(inClaude, 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  for (const first of ['{ cd ..; echo <(true)}', '{ cd ..; echo >(true)}', '{ cd ..; cat <(true)}>/dev/null', '{ cd ..; echo <(true) }']) {
+    const command = `${first}\n} | cat\necho x >> ledger.md`;
+    assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  }
+});
+
+test('a redirect on the } or fi that closes a group is made where the group started, before its cd', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  const inClaude = path.join(legacy, '.claude');
+  mkdirSync(inClaude, { recursive: true });
+  writeFileSync(path.join(inClaude, 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  for (const command of ['{ cd ..\n}>ledger.md | cat', '{ cd ..\n}>ledger.md', '{ cd ..; }>ledger.md', 'if true; then cd ..\nfi > ledger.md']) {
+    assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  }
+});
+
+test('a redirect on the } that closes a group ignores the cd inside it, so { cd .claude; }>ledger.md misses the store', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  mkdirSync(path.join(legacy, '.claude'), { recursive: true });
+  writeFileSync(path.join(legacy, '.claude', 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  for (const command of ['{ cd .claude\n}>ledger.md | cat', '{ cd .claude; }>ledger.md']) {
+    assertAllowed(gate(legacy, 'Bash', { command }, h));
+  }
+});
+
+/** A worktree whose .claude holds an unmoved ledger.md, and that .claude folder. */
+function legacyWorktree(t: TestContext): { h: string; legacy: string; inClaude: string } {
+  const h = home(t);
+  const legacy = worktree(h, checkout(h, 'main'), path.join(h, 'legacy'));
+  const inClaude = path.join(legacy, '.claude');
+  mkdirSync(inClaude, { recursive: true });
+  writeFileSync(path.join(inClaude, 'ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  return { h, legacy, inClaude };
+}
+
+test('a piped group that spans lines leaves the folder as it was from its }, so a later command in the pipeline is not led by its cd', (t) => {
+  const { h, inClaude } = legacyWorktree(t);
+  for (const command of ['{ cd ..\n} | tee ledger.md', '{ cd ..\n}>/dev/null | tee ledger.md', '{ cd ..\n} 2>&1 | tee ledger.md']) {
+    assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  }
+});
+
+test('a group that spans lines and runs in the background does not lead the command right after its &, but leads one after && before the &', (t) => {
+  const { h, legacy, inClaude } = legacyWorktree(t);
+  assert.equal(assertDenied(gate(inClaude, 'Bash', { command: '{ cd ..\n} & tee ledger.md' }, h)), UNMOVED_REASON);
+  assertAllowed(gate(legacy, 'Bash', { command: '{ cd .claude\n} & tee ledger.md' }, h));
+  assert.equal(assertDenied(gate(legacy, 'Bash', { command: '{ cd .claude\n} && echo x >> ledger.md &' }, h)), UNMOVED_REASON);
+  assertAllowed(gate(inClaude, 'Bash', { command: '{ cd ..\n} && echo x >> ledger.md &' }, h));
+});
+
+test('a group that a pipe on an earlier line leads into runs in a subshell, so its cd does not lead a command after its close', (t) => {
+  const { h, inClaude } = legacyWorktree(t);
+  for (const command of ['true | {\ncd ..\n}\necho x >> ledger.md', 'true | { cd ..\n}\necho x >> ledger.md', 'true | while read x; do\ncd ..\ndone\necho x >> ledger.md']) {
+    assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  }
+});
+
+test('an & after a group that spans lines sends the cd before the group in its and-or list to the background too', (t) => {
+  const { h, inClaude } = legacyWorktree(t);
+  for (const command of ['cd .. && {\npwd\n} & wait\necho x >> ledger.md', 'cd .. && if true; then\npwd\nfi & wait\necho x >> ledger.md']) {
+    assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  }
+});
+
+test('an & after groups that span lines sends the cd before them in its and-or list to the background too', (t) => {
+  const { h, legacy } = legacyWorktree(t);
+  for (const command of ['cd .claude && (\npwd\n) & wait\necho x >> ledger.md', 'cd .claude && {\npwd\n} && {\npwd\n} & wait\necho x >> ledger.md']) {
+    assertAllowed(gate(legacy, 'Bash', { command }, h));
+  }
+});
+
+test('an & after a pipe out of a group that spans lines sends the cd before the group in its and-or list to the background too', (t) => {
+  const { h, legacy, inClaude } = legacyWorktree(t);
+  assert.equal(assertDenied(gate(inClaude, 'Bash', { command: 'cd .. && {\npwd\n} | cat &\necho x >> ledger.md' }, h)), UNMOVED_REASON);
+  assertAllowed(gate(legacy, 'Bash', { command: 'cd .claude && {\npwd\n} | cat &\necho x >> ledger.md' }, h));
+});
+
+test('a cd .claude in a group that a pipe on an earlier line leads into does not lead a write after its close into .claude', (t) => {
+  const { h, legacy } = legacyWorktree(t);
+  for (const command of ['true | {\ncd .claude\n}\necho x >> ledger.md', 'true | { cd .claude\n}\necho x >> ledger.md', 'true | while read x; do\ncd .claude\ndone\necho x >> ledger.md']) {
+    assertAllowed(gate(legacy, 'Bash', { command }, h));
+  }
+});
+
+test('a cd .claude before a group that spans lines, in the and-or list an & sends to the background, does not lead a later write into .claude', (t) => {
+  const { h, legacy } = legacyWorktree(t);
+  for (const command of ['cd .claude && {\npwd\n} & wait\necho x >> ledger.md', 'cd .claude && if true; then\npwd\nfi & wait\necho x >> ledger.md']) {
+    assertAllowed(gate(legacy, 'Bash', { command }, h));
+  }
+});
+
+test('a cd .claude in a piped group that spans lines does not lead a tee later in the pipeline into .claude', (t) => {
+  const { h, legacy } = legacyWorktree(t);
+  assertAllowed(gate(legacy, 'Bash', { command: '{ cd .claude\n} | tee ledger.md' }, h));
+});
+
+test('a process substitution that spans lines stays one word, so the ) that closes it on a later line closes no group', (t) => {
+  const { h, legacy, inClaude } = legacyWorktree(t);
+  assertAllowed(gate(legacy, 'Bash', { command: '{ cd .claude; echo <(\ntrue) }\n} | cat\necho x >> ledger.md' }, h));
+  assert.equal(assertDenied(gate(inClaude, 'Bash', { command: '{ cd ..; echo <(\ntrue) }\n} | cat\necho x >> ledger.md' }, h)), UNMOVED_REASON);
+});
+
+test('a redirect attached to the fi, done or esac that closes a group is made where the group started', (t) => {
+  const { h, legacy, inClaude } = legacyWorktree(t);
+  for (const command of ['if true; then cd .claude\nfi>ledger.md | cat', 'for x in a; do cd .claude\ndone>ledger.md | cat', 'case x in\nx)\ncd .claude\n;;\nesac>ledger.md | cat']) {
+    assertAllowed(gate(legacy, 'Bash', { command }, h));
+  }
+  for (const command of ['if true; then cd ..\nfi>ledger.md | cat', 'for x in a; do cd ..\ndone>ledger.md | cat', 'case x in\nx)\ncd ..\n;;\nesac>ledger.md | cat']) {
+    assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  }
+});
+
+test('every redirect word on the } that closes a group, a command substitution in it and one after a >(...) too, is made where the group started', (t) => {
+  const { h, legacy, inClaude } = legacyWorktree(t);
+  for (const command of ['{ cd .claude\n}>$(echo log > ledger.md; echo output)', '{ cd .claude\n} > >(cat) >ledger.md']) {
+    assertAllowed(gate(legacy, 'Bash', { command }, h));
+  }
+  for (const command of ['{ cd ..\n}>$(echo log > ledger.md; echo output)', '{ cd ..\n} > >(cat) >ledger.md']) {
+    assert.equal(assertDenied(gate(inClaude, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  }
+});
+
+test('a quoted ]] inside [[ ]] is pattern text, so the conditional goes on past it', () => {
+  const { worktree: linked } = gateWorld;
+  for (const command of [`[[ "$line" == *' ]] '* ]] && echo done >> .claude/ledger.md`, `[[ "$line" == *" ]] "* ]] && echo done >> .claude/ledger.md`, `[[ $x == *\\ ]] ]] && echo done >> .claude/ledger.md`]) {
+    assert.equal(assertDenied(gate(linked, 'Bash', { command })), STORE_REASON, command);
+  }
+  assertAllowed(gate(linked, 'Bash', { command: `[[ "$line" == *' ]] '* ]] && echo done >> /tmp/notes` }));
+});
+
+test("in $'...' a backslash escapes the next character, so an escaped ' does not end the quote", () => {
+  const { worktree: linked } = gateWorld;
+  for (const command of [`echo $'a\\'b' && echo x >> .claude/ledger.md`, `echo $'a\\\\' && echo x >> .claude/ledger.md`, `[[ $x == $'a\\'b' ]] && echo x >> .claude/ledger.md`, `[[ $x == $'a\\' ]] ' ]] && echo x >> .claude/ledger.md`, `echo "$'" && echo x >> .claude/ledger.md`]) {
+    assert.equal(assertDenied(gate(linked, 'Bash', { command })), STORE_REASON, command);
+  }
+  assertAllowed(gate(linked, 'Bash', { command: `echo $'a\\'; echo x >> .claude/ledger.md'` }));
+});
+
+test("an unescaped $$ is one word, so a ' after it opens a plain quote, not $'...'", () => {
+  const { worktree: linked } = gateWorld;
+  for (const command of [`echo $$'\\' ; echo x >> .claude/ledger.md #'`, `[[ $$'\\' == ' ]] ' ]] && echo x >> .claude/ledger.md`]) {
+    assert.equal(assertDenied(gate(linked, 'Bash', { command })), STORE_REASON, command);
+  }
+  assertAllowed(gate(linked, 'Bash', { command: `echo $$'\\' '> .claude/ledger.md'` }));
+});
+
+test('in a .claude folder with a ledger, a glob segment followed by another segment matches only folders, so a write through it misses the ledger', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  mkdirSync(path.join(legacy, '.claude/sub'), { recursive: true });
+  writeFileSync(path.join(legacy, '.claude/ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+  for (const command of ['cp x .claude/*/', 'cp x .claude/*/x', 'touch .claude/l*/x', 'rm -rf .claude/*/x']) assertAllowed(gate(legacy, 'Bash', { command }, h));
+  for (const command of ['rm -rf .claude/*', 'rm -rf .claude/l*', 'cp x .claude/l*']) assert.equal(assertDenied(gate(legacy, 'Bash', { command }, h)), UNMOVED_REASON, command);
+});
+
+test('an empty word after a bare -i is the BSD backup suffix even after the script, as no file has an empty name', () => {
+  const { plain } = gateWorld;
+  for (const command of ["cd ~/.claude/ledger-data && sed -e 's/old/new/' -i '' /tmp/notes", 'cd ~/.claude/ledger-data && sed s/a/b/ -i "" /tmp/notes']) assertAllowed(gate(plain, 'Bash', { command }));
+  for (const command of ["cd ~/.claude/ledger-data && sed -e 's/old/new/' -i '' notes.md", "cd ~/.claude/ledger-data && sed -e 's/old/new/' -i .gitignore"]) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+});
+
+test('a > or < inside [[ ]] compares strings and redirects nothing, but a command substitution in it still runs', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data');
+  mkdirSync(clone, { recursive: true });
+  for (const command of ['cd ~/.claude/ledger-data && [[ b > a ]]', '[[ b > a ]] && echo ok', 'if [[ a < b ]]; then echo ok; fi']) assertAllowed(gate(clone, 'Bash', { command }, h));
+  for (const command of ['[[ -n "$(rm ~/.claude/ledgers.json)" ]]', '[[ b > a ]] && rm ~/.claude/ledgers.json', 'if [[ a < b ]]; then rm ~/.claude/ledgers.json; fi']) {
+    assert.equal(assertDenied(gate(h, 'Bash', { command }, h)), HAND_EDIT_REASON, command);
+  }
+});
+
+test('a cd inside a subshell that spans lines ends at the line that closes it', () => {
+  const { h, plain } = gateWorld;
+  for (const command of ['(cd /tmp\npwd)\nrm .claude/ledgers.json', '(\n  cd /tmp\n  pwd\n)\nrm .claude/ledgers.json', '(cd /tmp\n(cd /var; pwd)\npwd)\nrm .claude/ledgers.json', '(cd /tmp\npwd); rm .claude/ledgers.json']) {
+    assert.equal(assertDenied(gate(h, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+  for (const command of ['(cd ~/.claude\npwd)\nprintf x > ledgers.json', '(cd ~/.claude\n(pwd)\nls)\nrm ledgers.json']) assertAllowed(gate(plain, 'Bash', { command }));
+});
+
+test('in a worktree that holds a .claude/ledger.md, a glob that matches it and a removal of a folder above it are denied', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const legacy = worktree(h, main, path.join(h, 'legacy'));
+  const clean = worktree(h, main, path.join(h, 'clean'));
+  for (const folder of [legacy, clean]) mkdirSync(path.join(folder, '.claude/evidence'), { recursive: true });
+  writeFileSync(path.join(legacy, '.claude/ledger.md'), ledgerText({ slug: 'legacy', worktree: legacy }));
+
+  const removals = ['rm -f .claude/ledger.*', 'rm -r .claude', 'rm -rf .cl*', 'rmdir .claude', `rm -r ${legacy}`, 'mv .claude /tmp/claude-old'];
+  for (const command of removals) assert.equal(assertDenied(gate(legacy, 'Bash', { command }, h)), UNMOVED_REASON, command);
+  assert.equal(assertDenied(gate(h, 'Bash', { command: 'rm -r legacy/.claude' }, h)), UNMOVED_REASON);
+  for (const command of ['rm -f .claude/notes.*', 'rm -r .claude/evidence', 'rm -f .claude/ledger.m?.bak']) assertAllowed(gate(legacy, 'Bash', { command }, h));
+  for (const command of removals.slice(0, 4)) assertAllowed(gate(clean, 'Bash', { command }, h));
+});
+
+test('a redirect before the command word does not hide the command', () => {
+  const { plain } = gateWorld;
+  for (const command of ['2>/dev/null rm -f ~/.claude/ledgers.json', '>/tmp/log rm ~/.claude/ledgers.json', '2>&1 rm ~/.claude/ledgers.json', '</dev/null cp /tmp/x ~/.claude/ledgers.json', '2> /dev/null cd ~/.claude && rm ledgers.json', 'ls; 2>/dev/null rm ~/.claude/ledgers.json']) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+  assert.equal(assertDenied(gate(gateWorld.worktree, 'Bash', { command: '2>/dev/null rm .claude/ledger.md' })), STORE_REASON);
+  assertAllowed(gate(plain, 'Bash', { command: '2>/dev/null rm -f /tmp/x' }));
+});
+
+test('the -P, -L, -e and -@ options of cd come before its folder', () => {
+  const { h, plain } = gateWorld;
+  for (const command of ['cd -P && rm .claude/ledgers.json', 'cd -L ~ && rm .claude/ledgers.json', 'cd -P ~/.claude && rm ledgers.json', 'cd -Pe -- ~/.claude; rm ledgers.json', 'cd -@ ~/.claude && rm ledgers.json']) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+  assertAllowed(gate(path.join(h, '.claude'), 'Bash', { command: 'cd -P /tmp && rm ledgers.json' }));
+});
+
+test('a file tool path is literal: a * or ? in it is part of the name, not a glob', () => {
+  const { h, plain } = gateWorld;
+  for (const file of ['.claude/ledger-*', '.claude/ledgers.jso?', '.claude/ledger-acti?e/main/task.md', '.claude/ledgers.db-[ws]al', '.claude/*/main/task.md']) {
+    for (const tool of ['Write', 'Edit', 'MultiEdit']) assertAllowed(gate(plain, tool, writing(tool, path.join(h, file), '- a note')));
+  }
+});
+
+test('truncate of a .claude/ledger.md is denied, as touch is', () => {
+  for (const command of ['truncate -s 0 .claude/ledger.md', 'truncate --size=0 .claude/ledger.md']) {
+    for (const folder of [gateWorld.main, gateWorld.worktree]) {
+      assert.equal(assertDenied(gate(folder, 'Bash', { command })), STORE_REASON, `${command} in ${folder}`);
+    }
+  }
+});
+
+test('>& before a word that is no file descriptor redirects to that word, as &> and &>> do', () => {
+  for (const command of ['printf x >& ~/.claude/ledgers.json', 'printf x >&~/.claude/ledgers.json', 'printf x &> ~/.claude/ledgers.json', 'printf x &>> ~/.claude/ledgers.json']) {
+    assert.equal(assertDenied(gate(gateWorld.plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+});
+
+test('>& before a file descriptor or - duplicates or closes it, so it writes no file', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data');
+  mkdirSync(clone, { recursive: true });
+  for (const command of ['echo x >&2', 'ls 2>&1 | head', 'echo x 1>& 2', 'exec 3>&-', 'echo x >&2; ls']) assertAllowed(gate(clone, 'Bash', { command }, h));
+});
+
+test('a bare cd, or cd --, leads to HOME', () => {
+  const { h, plain } = gateWorld;
+  for (const command of ['cd && rm .claude/ledgers.json', 'cd\nrm .claude/ledgers.json', 'cd; printf x > .claude/ledgers.json', 'cd ~ && rm .claude/ledgers.json', '(cd && rm .claude/ledgers.json)', 'cd -- && rm .claude/ledgers.json']) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+  const claude = path.join(h, '.claude');
+  for (const command of ['cd && rm ledgers.json', 'cd; printf x > ledgers.json']) assertAllowed(gate(claude, 'Bash', { command }));
+  assert.equal(assertDenied(gate(claude, 'Bash', { command: 'cdx && rm ledgers.json' })), HAND_EDIT_REASON);
+});
+
+test('a shell keyword before a command does not hide it', () => {
+  const commands = [
+    'if rm ~/.claude/ledgers.json; then echo ok; fi',
+    'if true; then :; elif rm ~/.claude/ledgers.json; then :; fi',
+    'while rm ~/.claude/ledgers.json; do sleep 1; done',
+    'until rm ~/.claude/ledgers.json; do sleep 1; done',
+    '! rm ~/.claude/ledgers.json',
+    'time rm ~/.claude/ledgers.json',
+    'time -p touch ~/.claude/ledgers.json',
+  ];
+  for (const command of commands) assert.equal(assertDenied(gate(gateWorld.plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+});
+
+test('git fetch in the clone is denied when it prunes, forces or names a refspec that writes a ref', () => {
+  const { plain } = gateWorld;
+  for (const args of ['--prune', '-p', '--force', '-f', '-fp', '--prune-tags', 'origin --prune','origin main:main', 'origin +main', 'origin +refs/heads/*:refs/remotes/origin/*', 'origin refs/heads/main:refs/heads/side']) {
+    const command = `git -C ~/.claude/ledger-data fetch ${args}`;
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), CLONE_GIT_REASON, command);
+  }
+  for (const args of ['', ' origin', ' --quiet origin', ' origin main']) {
+    assertAllowed(gate(plain, 'Bash', { command: `git -C ~/.claude/ledger-data fetch${args}` }));
+  }
+});
+
+test('the read-only git commands are allowed in the clone, and config and tag only when they read', () => {
+  const { plain } = gateWorld;
+  const reads = [
+    'grep -n Goal',
+    'ls-files',
+    'ls-tree -r HEAD',
+    'cat-file -p HEAD',
+    'show-ref',
+    'describe --always',
+    'ls-remote origin',
+    'stash show -p',
+    'worktree list',
+    'config --get remote.origin.url',
+    'config --get-all core.hooksPath',
+    'config --get-regexp ^remote',
+    'config --list',
+    'config -l',
+    'config --local --list',
+    'config remote.origin.url',
+    'tag',
+    'tag -l',
+    'tag --list',
+    "tag -l 'v*'",
+  ];
+  for (const args of reads) assertAllowed(gate(plain, 'Bash', { command: `git -C ~/.claude/ledger-data ${args}` }));
+  const writes = [
+    'config core.hooksPath /tmp/hooks',
+    'config --unset core.hooksPath',
+    'config --add user.name x',
+    'config --unset-all remote.origin.fetch',
+    'config --edit',
+    'tag v1',
+    'tag -d v1',
+    'tag -a v1 -m x',
+    'tag -f v1 HEAD~1',
+    'worktree add /tmp/side',
+    'worktree remove /tmp/side',
+    'stash drop',
+  ];
+  for (const args of writes) {
+    const command = `git -C ~/.claude/ledger-data ${args}`;
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), CLONE_GIT_REASON, command);
+  }
+});
+
+test('git --output on log, show or diff is judged by the file it writes, in any repository', () => {
+  const { main, plain } = gateWorld;
+  for (const command of [
+    'git -C ~/.claude/ledger-data diff --output=/tmp/review.patch',
+    'git -C ~/.claude/ledger-data log --output=/tmp/log',
+    'git -C ~/.claude/ledger-data show --output /tmp/show HEAD',
+    'git -C ~/.claude/ledger-data diff --output=/tmp/diff',
+  ]) {
+    assertAllowed(gate(plain, 'Bash', { command }));
+  }
+  for (const command of [
+    'git log --output="$HOME/.claude/ledgers.json"',
+    'git diff --output ~/.claude/ledger-active/main/task.md',
+    'git -C ~/.claude show --output=ledgers.json HEAD',
+    'git -C ~/.claude diff-tree --output=ledgers.json -r HEAD',
+  ]) {
+    assert.equal(assertDenied(gate(main, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+});
+
+test('git clone into a store path is denied, as is reflog write in the clone', () => {
+  const { plain } = gateWorld;
+  for (const command of ['git clone /tmp/data.git ~/.claude/ledger-data', 'git clone --depth 1 -b main /tmp/data.git "$HOME/.claude/ledger-data"', 'cd ~/.claude && git clone /tmp/data.git ledger-data']) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+  for (const command of ['git clone ~/.claude/ledger-data /tmp/copy', 'git clone -b main ~/.claude/ledger-data', 'git -C ~/.claude/ledger-data clone . /tmp/copy']) {
+    assertAllowed(gate(plain, 'Bash', { command }));
+  }
+  assert.equal(assertDenied(gate(plain, 'Bash', { command: 'git -C ~/.claude/ledger-data reflog write HEAD 0000 x' })), CLONE_GIT_REASON);
+});
+
+test('tee options are not files, and sed -i writes only its file operands, not a script or a suffix', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data');
+  mkdirSync(clone, { recursive: true });
+  for (const command of ['echo x | tee -a /tmp/notes.log', 'echo x | tee -i -a /tmp/notes.log > /dev/null', "sed -i '' 's/a/b/' /tmp/notes", 'sed -i -e s/a/b/ /tmp/notes']) {
+    assertAllowed(gate(clone, 'Bash', { command }, h));
+  }
+  const { plain } = gateWorld;
+  for (const command of ['sed -i.bak -f ~/.claude/ledger-data/fix.sed /tmp/notes', 'sed -i -e s/a/b/ -f ~/.claude/ledger-data/fix.sed /tmp/notes', 'sed -i --expression=s/a/b/ --file ~/.claude/ledgers.json /tmp/notes', 'sed -ne s/a/b/p -i /tmp/notes']) {
+    assertAllowed(gate(plain, 'Bash', { command }));
+  }
+  for (const command of ['sed -i.bak -f /tmp/fix.sed ~/.claude/ledgers.json', "sed -i '' -e s/a/b/ /tmp/notes ~/.claude/ledgers.json", 'sed --in-place s/a/b/ ~/.claude/ledgers.json', 'sed -E -i s/a/b/ ~/.claude/ledgers.json']) {
+    assert.equal(assertDenied(gate(plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+});
+
+test('ln with one operand links its name into the folder it runs in', () => {
+  const { h, plain } = gateWorld;
+  for (const command of ['ln -s ~/.claude/ledgers.json', 'ln ~/.claude/ledger-active/main/task.md']) assertAllowed(gate(plain, 'Bash', { command }));
+  for (const command of ['ln -sf /tmp/ledgers.json', 'ln -s "/tmp/ledger-aliases.json"']) {
+    assert.equal(assertDenied(gate(path.join(h, '.claude'), 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+});
+
+test('cd - leaves the folder a write is resolved against as it was', () => {
+  assert.equal(assertDenied(gate(path.join(gateWorld.h, '.claude'), 'Bash', { command: 'cd - && rm ledgers.json' })), HAND_EDIT_REASON);
+});
+
+test('the hooks source writes its private-use mask characters as escapes', () => {
+  const source = readFileSync(path.join(REPO, 'tools/ledger/hooks.ts'), 'utf8');
+  assert.equal(/[\uE000-\uF8FF]/.test(source), false, 'a raw private-use character is in tools/ledger/hooks.ts');
+});
 
 // PreToolUse: the worktree gate
 
@@ -1148,6 +2480,24 @@ test('a removal by the retire commands is allowed', (t) => {
   assertAllowed(gate(main, 'Bash', { command: `ledger task retire task --force; rm -rf ${task}` }, h));
 });
 
+test('a removal named only in quotes, a here-document body or a comment is data, not a removal', (t) => {
+  const { h, main, task } = removal(t);
+
+  for (const command of [`ledger notes decide 'example: rm -rf ${task} here'`, `git commit -m "do not rm -rf ${task}"`, `cat <<EOF > /tmp/notes\nrm -rf ${task}\nEOF`, `echo done # rm -rf ${task}`]) {
+    assertAllowed(gate(main, 'Bash', { command }, h));
+  }
+  for (const command of [`rm -rf ${task}`, `echo "$(rm -rf ${task})"`, `rm -rf \\\n  ${task}`]) {
+    assert.equal(assertDenied(gate(main, 'Bash', { command }, h)), removalReason(main, task), command);
+  }
+});
+
+test('a removal in a command substitution of an unquoted here-document body is denied; in a quoted one it is data', (t) => {
+  const { h, main, task } = removal(t);
+
+  assert.equal(assertDenied(gate(main, 'Bash', { command: `cat <<EOF\n$(git worktree remove ${task} && echo removed)\nEOF` }, h)), removalReason(main, task));
+  assertAllowed(gate(main, 'Bash', { command: `cat <<'EOF'\n$(git worktree remove ${task} && echo removed)\nEOF` }, h));
+});
+
 test('a removal that names the deleted cc-worktree-retire script is denied', (t) => {
   const { h, main, task } = removal(t);
 
@@ -1175,6 +2525,178 @@ test('a glob with a POSIX class over folders without a ledger is allowed', (t) =
   mkdirSync(path.join(main, 'build/cache'), { recursive: true });
 
   assertAllowed(gate(main, 'Bash', { command: 'rm -rf build/[[:alpha:]]*' }, h));
+});
+
+test('a bracket in a glob matches one character of its class, so a POSIX class that no store file has there misses the store', () => {
+  for (const command of ['touch ~/.claude/ledger[[:digit:]].json', 'touch ~/.claude/ledger[[:upper:]].json', 'touch ~/.claude/ledger[![:alpha:]].json']) {
+    assertAllowed(gate(gateWorld.plain, 'Bash', { command }));
+  }
+  for (const command of ['touch ~/.claude/ledger[[:lower:]].json', 'touch ~/.claude/ledger[![:digit:]].json', 'touch ~/.claude/ledger[[:digit:][:alpha:]].json', 'touch ~/.claude/ledger[=s=].json']) {
+    assertDenied(gate(gateWorld.plain, 'Bash', { command }));
+  }
+});
+
+test('an escaped dash in a bracket class is a literal dash, not a range', () => {
+  assertAllowed(gate(gateWorld.plain, 'Bash', { command: 'touch ~/.claude/ledger[a\\-z].json' }));
+  assertDenied(gate(gateWorld.plain, 'Bash', { command: 'touch ~/.claude/ledger[a\\-s].json' }));
+});
+
+test('a file command asked for its help or version writes nothing', () => {
+  for (const command of ['cp --help ~/.claude/ledgers.json', 'mv --version ~/.claude/ledgers.json', 'rm --help ~/.claude/ledger-data', 'touch --help ~/.claude/ledgers.json', 'tee --version ~/.claude/ledgers.json']) {
+    assertAllowed(gate(gateWorld.plain, 'Bash', { command }));
+  }
+});
+
+test('a --help or --version after an operand is a file name, as BSD tools stop reading options at the first operand', () => {
+  assert.equal(assertDenied(gate(gateWorld.main, 'Bash', { command: 'tee .claude/ledger.md --help < /dev/null' })), STORE_REASON);
+  for (const command of ['rm ~/.claude/ledgers.json --help', 'touch ~/.claude/ledgers.json --help', 'rm -rf ~/.claude/ledger-data --version', 'mkdir ~/.claude/ledger-active/x --help']) {
+    assert.equal(assertDenied(gate(gateWorld.plain, 'Bash', { command })), HAND_EDIT_REASON, command);
+  }
+});
+
+test('a { that is an argument opens no group, so the & after the group backgrounds the cd before it', () => {
+  const command = 'cd .. && {\n  echo {\n} & wait\nprintf x >> ledger.md';
+  assert.equal(assertDenied(gate(path.join(gateWorld.main, '.claude'), 'Bash', { command })), STORE_REASON);
+});
+
+test('a --version inside a process substitution is not an option of the tee that reads it', () => {
+  assert.equal(assertDenied(gate(gateWorld.main, 'Bash', { command: 'tee .claude/ledger.md < <(git --version)' })), STORE_REASON);
+});
+
+test('a here-document delimiter is read after quote removal, so the body ends at its unquoted line', () => {
+  assert.equal(assertDenied(gate(gateWorld.main, 'Bash', { command: "cat <<'E'OF\nbody\nEOF\nprintf x >> .claude/ledger.md" })), STORE_REASON);
+});
+
+test('command -v cd only describes cd, so it changes no folder', () => {
+  assert.equal(assertDenied(gate(path.join(gateWorld.main, '.claude'), 'Bash', { command: 'command -v cd\nprintf x >> ledger.md' })), STORE_REASON);
+});
+
+test('a redirect between git arguments is no argument, so -h stays the only one', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data');
+  mkdirSync(clone, { recursive: true });
+  assertAllowed(gate(clone, 'Bash', { command: 'git reset 2>&1 -h' }, h));
+});
+
+test('git version only reads, so it is allowed in the clone', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data');
+  mkdirSync(clone, { recursive: true });
+  assertAllowed(gate(clone, 'Bash', { command: 'git version' }, h));
+});
+
+test('command -v or -V describes the cd it names after a --, more options or a redirect, so it changes no folder', () => {
+  for (const command of ['command -v -- cd\nprintf x >> ledger.md', 'command -v -- cd; printf x >> ledger.md', 'command -V -- cd\nprintf x >> ledger.md', 'command -v >/dev/null cd\nprintf x >> ledger.md']) {
+    assert.equal(assertDenied(gate(path.join(gateWorld.main, '.claude'), 'Bash', { command })), STORE_REASON, command);
+  }
+});
+
+test("a here-document delimiter in $'...' or with an escape inside double quotes ends the body at its unquoted line", () => {
+  for (const command of ["cat <<$'EOF'\nbody\nEOF\nprintf x >> .claude/ledger.md", 'cat <<"END\\$"\nbody\nEND$\nprintf x >> .claude/ledger.md']) {
+    assert.equal(assertDenied(gate(gateWorld.main, 'Bash', { command })), STORE_REASON, command);
+  }
+});
+
+test('time and coproc before a { open a group, so the & or pipe after it runs the cd inside in a subshell', () => {
+  const commands = [
+    'time {\n  cd ..\n} & wait\nprintf x >> ledger.md',
+    'time {\n  cd ..\n} | cat\nprintf x >> ledger.md',
+    'time -p {\n  cd ..\n} & wait\nprintf x >> ledger.md',
+    'time { cd ..\n} & wait\nprintf x >> ledger.md',
+    'cd .. && time {\n  :\n} & wait\nprintf x >> ledger.md',
+    'coproc {\n  cd ..\n}\nprintf x >> ledger.md',
+  ];
+  for (const command of commands) {
+    assert.equal(assertDenied(gate(path.join(gateWorld.main, '.claude'), 'Bash', { command })), STORE_REASON, command);
+  }
+});
+
+test('a { after the ) of a process substitution is an argument, while one after f() opens a group', () => {
+  const dotclaude = path.join(gateWorld.main, '.claude');
+  assert.equal(assertDenied(gate(dotclaude, 'Bash', { command: 'cd .. && {\n  echo <(true) {\n} & wait\nprintf x >> ledger.md' })), STORE_REASON);
+  assert.equal(assertDenied(gate(dotclaude, 'Bash', { command: 'f() {\n  cd ..\n} & wait\nprintf x >> ledger.md' })), STORE_REASON);
+});
+
+test('an &>, &>> or <& redirect between git arguments is no argument, so -h stays the only one', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data');
+  mkdirSync(clone, { recursive: true });
+  for (const command of ['git reset &>/dev/null -h', 'git reset &>>/dev/null -h', 'git reset 0<& 0 -h']) {
+    assertAllowed(gate(clone, 'Bash', { command }, h));
+  }
+});
+
+test('git help only reads, so it is allowed on the clone', (t) => {
+  const h = home(t);
+  mkdirSync(path.join(h, '.claude/ledger-data'), { recursive: true });
+  assertAllowed(gate(h, 'Bash', { command: 'git -C ~/.claude/ledger-data help reset' }, h));
+});
+
+test('command -v or -V does not run the command it names', () => {
+  assertAllowed(gate(gateWorld.h, 'Bash', { command: 'command -v touch ~/.claude/ledgers.json' }));
+});
+
+test('a --help or --version before the first operand, after options only, writes nothing; after a -- it is an operand', () => {
+  assertAllowed(gate(gateWorld.h, 'Bash', { command: 'rm -f --help ~/.claude/ledgers.json' }));
+  assert.equal(assertDenied(gate(gateWorld.h, 'Bash', { command: 'rm -- --help ~/.claude/ledgers.json' })), HAND_EDIT_REASON);
+});
+
+test('cp of a store file with a --help after it reads the store and writes a file named --help', () => {
+  assertAllowed(gate(gateWorld.h, 'Bash', { command: 'cp ~/.claude/ledgers.json --help' }));
+});
+
+test('the words of a process substitution are not file arguments of the command that reads it', () => {
+  assertAllowed(gate(gateWorld.main, 'Bash', { command: 'tee < <(cat ~/.claude/ledgers.json) /dev/null' }));
+});
+
+test("a here-document delimiter in $'...' is read with its escapes decoded", () => {
+  assert.equal(assertDenied(gate(gateWorld.main, 'Bash', { command: "cat <<$'END\\x31'\nbody\nEND1\nprintf x >> .claude/ledger.md" })), STORE_REASON);
+});
+
+test('a cd to a path that is no folder fails and changes no folder', () => {
+  assert.equal(assertDenied(gate(path.join(gateWorld.main, '.claude'), 'Bash', { command: 'cd /dev/null\nprintf x >> ledger.md' })), STORE_REASON);
+});
+
+test('a --help or --version that is the value of an option is no info option, so the command still writes', () => {
+  for (const command of ['cp -S --help /etc/hosts .claude/ledger.md', 'mv -S --help /etc/hosts .claude/ledger.md', 'cp --suffix --help /etc/hosts .claude/ledger.md']) {
+    assert.equal(assertDenied(gate(gateWorld.main, 'Bash', { command })), STORE_REASON, command);
+  }
+});
+
+test('a --help or --version after an option and its value, before the first operand, writes nothing', () => {
+  for (const command of ['cp -t .claude --help ledger.md', 'cp -t .claude --version ledger.md', 'mv -t .claude --help ledger.md', 'ln -t .claude --help ledger.md']) {
+    assertAllowed(gate(gateWorld.main, 'Bash', { command }));
+  }
+});
+
+test('git symbolic-ref with no new value only reads, while setting or deleting one is denied', (t) => {
+  const h = home(t);
+  const clone = path.join(h, '.claude/ledger-data');
+  mkdirSync(clone, { recursive: true });
+  assertAllowed(gate(clone, 'Bash', { command: 'git symbolic-ref --short HEAD' }, h));
+  for (const command of ['git symbolic-ref HEAD refs/heads/x', 'git symbolic-ref -d HEAD']) {
+    assertDenied(gate(clone, 'Bash', { command }, h));
+  }
+});
+
+test('the folder after mv -t is where mv moves to, not a source it removes, while each operand is a source', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  mkdirSync(path.join(main, '.claude'), { recursive: true });
+  writeFileSync(path.join(main, '.claude/ledger.md'), ledgerText({ slug: 'main' }));
+  for (const command of ['mv -t .claude notes.txt', 'mv --target-directory .claude notes.txt', 'mv --target-directory=.claude notes.txt', 'mv -ft .claude notes.txt']) {
+    assertAllowed(gate(main, 'Bash', { command }, h));
+  }
+  for (const command of ['mv -t /tmp .claude/ledger.md', 'mv -t /tmp notes.txt .claude']) {
+    assert.equal(assertDenied(gate(main, 'Bash', { command }, h)), STORE_REASON, command);
+  }
+  for (const command of ['mv -St x ~/.claude', 'mv -S -t x ~/.claude', 'mv --suffix -t x ~/.claude']) {
+    assertAllowed(gate(h, 'Bash', { command }, h));
+  }
+});
+
+test('a { after an argument is an argument too, so the word after it is none of its commands', () => {
+  assertAllowed(gate(gateWorld.h, 'Bash', { command: 'echo { touch ~/.claude/ledgers.json' }));
 });
 
 test('a check that throws does not disable the other: a failed archive read still lets a .claude/ledger.md write be denied', (t) => {

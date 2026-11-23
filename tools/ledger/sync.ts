@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   ancestry,
+  ASK_THE_OPERATOR,
   branchOf,
   checkFinished,
   clearStatus,
@@ -517,7 +518,7 @@ function rebaseOnto({ clone, where, remote }: Sync, { upstream, incoming }: { up
   if (must(cloneGit(clone, ['rev-list', '--merges', '--count', 'HEAD', '--not', incoming], { deadline })).trim() !== '0') {
     throw new SyncProblem(
       'conflict',
-      `The commits not pushed yet in ${where} hold a merge commit, which the pull from ${remote.shown} would drop with its rebase, so nothing was pulled or pushed.\nRewrite them without a merge there, for example with git rebase ${upstream.replace(/^refs\/remotes\//, '')}, then run ledger store sync.`,
+      `The commits not pushed yet in ${where} hold a merge commit, which the pull from ${remote.shown} would drop with its rebase, so nothing was pulled or pushed.\nRewrite them without a merge there, for example with git rebase ${upstream.replace(/^refs\/remotes\//, '')}, then run ledger store sync.\n${ASK_THE_OPERATOR}`,
     );
   }
   const unsafe = unique([...unsafeEntries(clone, incoming, deadline), ...unsafeChanges(clone, [incoming, '--not', 'HEAD'], deadline)]);
@@ -534,16 +535,17 @@ function rebaseOnto({ clone, where, remote }: Sync, { upstream, incoming }: { up
   if (['rebase-merge', 'rebase-apply'].some((mark) => isTaken(path.join(clone, '.git', mark)))) {
     throw new SyncProblem(
       'conflict',
-      `The pull from ${remote.shown} stopped halfway, and git rebase --abort failed too, so a rebase is left in ${where}; nothing was pushed.\nRun git rebase --abort there, then ledger store sync.\n${aborted.stderr}`,
+      `The pull from ${remote.shown} stopped halfway, and git rebase --abort failed too, so a rebase is left in ${where}; nothing was pushed.\nRun git rebase --abort there, then ledger store sync.\n${ASK_THE_OPERATOR}\n${aborted.stderr}`,
     );
   }
   if (rebased.timedOut) throw new SyncProblem('timeout', `The pull from ${remote.shown} ran out of time, so it was undone; the next sync pulls again.`);
-  if (conflicted.length === 0) throw new SyncProblem('conflict', `The pull from ${remote.shown} failed, so nothing was pushed.\n${rebased.stderr}`);
+  if (conflicted.length === 0) throw new SyncProblem('conflict', `The pull from ${remote.shown} failed, so nothing was pushed.\n${rebased.stderr.trimEnd()}\n${ASK_THE_OPERATOR}`);
   throw new SyncProblem(
     'conflict',
     [
       `The pull from ${remote.shown} has a conflict with the ledger commits made here, in ${shownPaths(conflicted)}, so nothing was pushed.`,
       `The commits made here stay in ${where}. To merge by hand: cd ${where}; git rebase ${upstream.replace(/^refs\/remotes\//, '')}; fix each file; git add it; git rebase --continue. Then run ledger store sync.`,
+      ASK_THE_OPERATOR,
     ].join('\n'),
   );
 }

@@ -226,11 +226,15 @@ export type FileStoreOptions = { link?: (existing: string, to: string) => void; 
  * The ledger store as files under ~/.claude, in the layout the ledger plugin and the old scripts read: evidence sits next
  * to its archive copy.
  */
-export function fileStore({ home }: LedgerPaths, options: FileStoreOptions = {}): LedgerStore {
+export function fileStore(paths: LedgerPaths, options: FileStoreOptions = {}): LedgerStore {
+  return { ...fileStoreAt(fileStoreRoots(paths), options), host: validHost(paths.home), ownHosts: ownHosts(paths.home) };
+}
+
+/** Where the file store under ~/.claude keeps its ledgers, registry and aliases. */
+export function fileStoreRoots({ home }: LedgerPaths): FileRoots {
   const claude = path.join(home, '.claude');
   const archive = path.join(claude, 'ledger-archive');
-  const roots = { backlog: path.join(claude, 'ledger-backlog'), active: path.join(claude, 'ledger-active'), archive, evidence: archive, registry: path.join(claude, 'ledgers.json'), aliases: path.join(claude, 'ledger-aliases.json') };
-  return { ...fileStoreAt(roots, options), host: validHost(home), ownHosts: ownHosts(home) };
+  return { backlog: path.join(claude, 'ledger-backlog'), active: path.join(claude, 'ledger-active'), archive, evidence: archive, registry: path.join(claude, 'ledgers.json'), aliases: path.join(claude, 'ledger-aliases.json') };
 }
 
 /**

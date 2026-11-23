@@ -304,6 +304,9 @@ function isPlainOrGone(file: string): boolean {
   return stat === undefined || (stat.isFile() && (stat.mode & 0o111) === 0);
 }
 
+/** The pre-tool-use hook denies git commands in the clone that write, so the steps of a conflict are the operator's. */
+export const ASK_THE_OPERATOR = 'An agent does not run these git steps: it asks the operator to run them in a terminal.';
+
 /** Git's marks of work a person started in the clone and has not finished. */
 const UNFINISHED: [mark: string, work: string][] = [
   ['rebase-merge', 'A rebase'],
@@ -319,11 +322,11 @@ export const conflictedFiles = (clone: string, deadline?: number): string[] => n
 export function checkFinished(clone: string, deadline?: number): void {
   const unfinished = UNFINISHED.find(([mark]) => isTaken(path.join(clone, '.git', mark)));
   if (unfinished !== undefined) {
-    throw new SyncProblem('conflict', `${unfinished[1]} is in progress in ${clone}, so nothing was committed or pushed.\nFinish it or abort it there, then run ledger store sync.`);
+    throw new SyncProblem('conflict', `${unfinished[1]} is in progress in ${clone}, so nothing was committed or pushed.\nFinish it or abort it there, then run ledger store sync.\n${ASK_THE_OPERATOR}`);
   }
   const conflicted = conflictedFiles(clone, deadline);
   if (conflicted.length > 0) {
-    throw new SyncProblem('conflict', `${shownPaths(conflicted)} in ${clone} has a conflict nobody resolved, so nothing was committed or pushed.\nResolve it there, then run ledger store sync.`);
+    throw new SyncProblem('conflict', `${shownPaths(conflicted)} in ${clone} has a conflict nobody resolved, so nothing was committed or pushed.\nResolve it there, then run ledger store sync.\n${ASK_THE_OPERATOR}`);
   }
 }
 
