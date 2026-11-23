@@ -186,10 +186,12 @@ test('file store: a move onto another disk is no automatic move, in the dry run 
   fileStore(ledgerPaths(h)).backlog.write('app', 'x', ledgerText({ slug: 'x', main: app }));
   const target = fileStore(ledgerPaths(h)).backlog.repoLocation(key);
   mkdirSync(target, { recursive: true });
+  const crossDevice = (): never => {
+    throw Object.assign(new Error('EXDEV: cross-device link not permitted'), { code: 'EXDEV' });
+  };
   const otherDisk = fileStore(ledgerPaths(h), {
-    rename: () => {
-      throw Object.assign(new Error('EXDEV: cross-device link not permitted'), { code: 'EXDEV' });
-    },
+    link: crossDevice,
+    rename: crossDevice,
     device: (file) => (file === target || file.startsWith(`${target}/`) ? 2 : 1),
   });
   const run = (dryRun: boolean): Move[] => {

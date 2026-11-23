@@ -1,19 +1,22 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { setLocationBullet } from '../tools/ledger/edit.js';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
+import { parseLedger } from '../tools/ledger/format.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
+import { repairStore } from '../tools/ledger/repair.js';
 import { sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { findTasks } from '../tools/ledger/tasks.js';
 import { pauseForTest } from '../tools/ledger/wait.js';
 import { goTask, type Context } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
-import { asCli, commandEnv, home, LEDGER_BIN, ledger, ledgerText, noSqlite, ok, readLedgerFile, repoKeyOf, repository, storeFolder, type Ran } from './ledger-core-fixtures.js';
+import { asCli, commandEnv, git, home, LEDGER_BIN, ledger, ledgerText, noSqlite, ok, readLedgerFile, repoKeyOf, repository, storeFolder, type Ran } from './ledger-core-fixtures.js';
 
 type Storage = 'file' | 'sqlite';
 
@@ -141,6 +144,54 @@ for (const storage of ['file', 'sqlite'] as const) {
     assert.equal(real.active.has(key, 'epic'), false, 'the new active ledger is removed');
     assert.equal(spawnSync('git', ['-C', app, 'branch', '--list', 'epic'], { encoding: 'utf8' }).stdout.trim(), '', 'the new branch is deleted');
   });
+
+  test(`${storage} store: of two store repair --to runs at once that point two tasks at one folder, exactly one succeeds`, { skip }, async (t) => {
+    const { h, app, key, inStore } = setup(t, storage);
+    for (let round = 0; round < ROUNDS; round++) {
+      const [first, second] = [`first-${round}`, `second-${round}`].map((slug) => goneTask(h, app, slug));
+      // On one branch, so the folder passes the branch check of both.
+      inStore((store) => store.active.update(key, second.slug, (text) => setLocationBullet(text, 'branch', first.branch)));
+      const folder = path.join(h, 'moved', String(round));
+      git(h, app, 'worktree', 'add', '--quiet', '-f', folder, first.branch);
+      const runs = await Promise.all([first, second].map(({ slug }) => ledgerAsync(h, app, 'store', 'repair', slug, '--to', folder)));
+      assert.equal(runs.filter(({ status }) => status === 0).length, 1, `round ${round}: one run points its task at the folder\n${shown(runs)}`);
+      inStore((store) => assert.ok(store.active.byWorktree(folder), `round ${round}: no task names the folder`));
+    }
+  });
+
+  test(`${storage} store: store repair --lost refuses when a --to gives the task a folder that is there after --lost read the record`, { skip }, (t) => {
+    const { h, app, key, real, context } = inProcess(t, storage);
+    const { slug, branch } = goneTask(h, app, 'fix-login');
+    const folder = path.join(h, 'moved');
+    git(h, app, 'worktree', 'add', '--quiet', '-f', folder, branch);
+    const racing: LedgerStore = {
+      ...real,
+      active: {
+        ...real.active,
+        update: (...args: Parameters<LedgerStore['active']['update']>) => {
+          real.active.update(key, slug, (text) => setLocationBullet(text, 'worktree', folder));
+          return real.active.update(...args);
+        },
+      },
+    };
+    assert.throws(
+      () => repairStore({ ...context, writable: () => racing }, slug, { lost: true, dryRun: false }, () => {}),
+      (error) => error instanceof Failure && error.message.includes(folder),
+    );
+    const location = parseLedger(real.active.read(key, slug)?.text ?? '').location;
+    assert.equal(location.worktree, folder);
+    assert.equal(location.lost, undefined, `the task is marked lost though its folder ${folder} is there`);
+  });
+}
+
+/** Starts `slug` with ledger task new and ledger go, then removes its worktree; gives its slug and branch. */
+function goneTask(h: string, app: string, slug: string): { slug: string; branch: string } {
+  ok(ledger(h, app, 'task', 'new', slug, '--goal', `Goal of ${slug}.`));
+  ok(ledger(h, app, 'go', slug));
+  const worktree = path.join(app, '.claude/worktrees', slug);
+  const branch = git(h, worktree, 'branch', '--show-current');
+  rmSync(worktree, { recursive: true, force: true });
+  return { slug, branch };
 }
 
 /** A HOME with the repo `app`, the store of `storage` open in this process, and git run as the CLI runs it. */

@@ -969,12 +969,16 @@ export function setDependencies(context: Context, childName: string, names: stri
   const childRef = taskRef(cwd, childName);
   const key = repoKey(childRef.main);
   const given = names.map((each) => dependencyFrom(cwd, key, each));
-  const dependencies = given.filter(({ slug, repo }, index) => given.findIndex((other) => other.slug === slug && other.repo === repo) === index).map(({ slug, repo }) => ({ slug, repo }));
+  const aliases = context.store.aliases.read();
+  // By the key each names once its alias is resolved: an old key and the new one name one task.
+  const idOf = ({ slug, repo }: Required<Dependency>): string => `${aliases.get(repo) ?? repo}\n${slug}`;
+  const dependencies = given.filter((each, index) => given.findIndex((other) => idOf(other) === idOf(each)) === index).map(({ slug, repo }) => ({ slug, repo }));
   const tasks = findTasks(context.store);
   const child = theTask(tasks, childRef, { live: true });
   const name = dependencyName(cwd);
   const self = { slug: childRef.slug, repo: key };
-  const isSelf = ({ slug, repo }: Required<Dependency>): boolean => slug === self.slug && repo === self.repo;
+  // By any key of its repo, as dependencyTask finds a task by an old key that is an alias now.
+  const isSelf = ({ slug, repo }: Required<Dependency>): boolean => slug === self.slug && child.repoKeys.includes(repo);
   if (dependencies.some(isSelf)) fail(`${name(self)} cannot wait for itself.`);
   for (const dependency of dependencies) {
     const cycle = dependencyPath(tasks, dependency, isSelf);

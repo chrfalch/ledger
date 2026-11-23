@@ -253,6 +253,10 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
         all<Row>(`SELECT * FROM ${STORED} WHERE place = ? AND repo = ?`, place, repo)
           .sort(byFileName)
           .flatMap((row) => readable(() => stored(row)) ?? []),
+      unreadable: (repo) =>
+        all<Row>(`SELECT * FROM ${STORED} WHERE place = ? AND repo = ?`, place, repo)
+          .sort(byFileName)
+          .flatMap((row) => (readable(() => stored(row)) === undefined ? [row.name] : [])),
       read: (repo, name) => {
         const row = one<Row>(`SELECT * FROM ${STORED} WHERE place = ? AND repo = ? AND name = ?`, place, repo, name);
         return row && stored(row);

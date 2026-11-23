@@ -46,6 +46,11 @@ export interface LedgerCollection {
   repos(): string[];
   /** The ledgers of one repo, in the order of their file names; none for an unknown repo. */
   list(repo: string): StoredLedger[];
+  /**
+   * The names of `repo` that `list` leaves out, as no valid record can be read under them. Fails where `list` cannot
+   * know its names, as for a repo folder that cannot be read.
+   */
+  unreadable(repo: string): string[];
   read(repo: string, name: string): StoredLedger | undefined;
   /** The same as `read(repo, name) !== undefined`, without reading the text. */
   has(repo: string, name: string): boolean;
@@ -84,7 +89,10 @@ export type Change<T> = (text: T) => string | undefined;
 /** Ledgers of tasks not started yet; the name is the slug. */
 export interface Backlog extends LedgerCollection {
   write(repo: string, slug: string, text: string): void;
-  /** Writes a new ledger, at once and whole. False, with nothing written, when `slug` is taken, also by a command running now. */
+  /**
+   * Writes a new ledger, at once and whole, under its lock, so a move of that name comes before or after it. False,
+   * with nothing written, when `slug` is taken, also by a command running now.
+   */
   create(repo: string, slug: string, text: string): boolean;
   /** Rewrites the ledger with `change`, which no other write can come between. True when it was written; throws when it does not exist. */
   update(repo: string, slug: string, change: Change<string>): boolean;
@@ -94,14 +102,22 @@ export interface Backlog extends LedgerCollection {
    */
   remove(repo: string, slug: string, expected: string): boolean;
   /**
-   * Moves the ledger to the repo `to`, text and times as they are, by a rename on one disk. False, with nothing moved, when
-   * anything has `slug` in `to` already, also a name that differs only in case on a disk that ignores case. Throws when
-   * the ledger does not exist, and when the rename fails, such as with EXDEV to another disk; then nothing moved.
+   * Moves the ledger to the repo `to`, text and times as they are, holding its lock under both repos, so no write of
+   * that name in either comes between. A file store links each file at `to`, which never replaces an entry, and only
+   * then removes it from `repo`; a move that stops between the two leaves the ledger under both. False, with nothing
+   * moved, when anything has `slug` in `to` already, also a name that differs only in case on a disk that ignores case.
+   * Throws, with nothing moved, when the ledger does not exist, when a file of it is a symbolic link, and when a link
+   * fails, such as with EXDEV to another disk. A move that stopped halfway, which `movedHalfway` tells, it finishes.
    */
   move(repo: string, slug: string, to: string): boolean;
-  /** Whether `move` would move the ledger now, by the checks it makes, without moving anything. */
+  /** Whether `move` would move the ledger now, by the checks it makes, without moving anything; it throws where `move` would. */
   canMove(repo: string, slug: string, to: string): boolean;
-  /** Whether `move` would rename the ledger onto another disk, where the rename fails with EXDEV; absent where a move is no rename. */
+  /**
+   * Whether a move of the ledger to `to` stopped after it linked the ledger there and before it removed it from `repo`,
+   * so it is under both; absent where a move cannot stop halfway.
+   */
+  movedHalfway?(repo: string, slug: string, to: string): boolean;
+  /** Whether `move` would link the ledger onto another disk, where the link fails with EXDEV; absent where a move is no link. */
   acrossDisks?(repo: string, slug: string, to: string): boolean;
 }
 
@@ -195,9 +211,11 @@ export interface Archive extends LedgerCollection {
    * and `to` has none. A move that stopped between the two left that, so then only the evidence moves.
    */
   move(repo: string, name: string, to: string): boolean;
-  /** Whether `move` would move the copy now, by the checks it makes, without moving anything. */
+  /** Whether `move` would move the copy now, by the checks it makes, without moving anything; it throws where `move` would. */
   canMove(repo: string, name: string, to: string): boolean;
-  /** Whether `move` would rename the copy or its evidence onto another disk, as `Backlog.acrossDisks`. */
+  /** As `Backlog.movedHalfway`. */
+  movedHalfway?(repo: string, name: string, to: string): boolean;
+  /** Whether `move` would link the copy, or rename its evidence, onto another disk, as `Backlog.acrossDisks`. */
   acrossDisks?(repo: string, name: string, to: string): boolean;
   /** Evidence kept under a name that has no archive copy, in any repo, such as what a move or a hand left behind. */
   orphanEvidence(): { repo: string; name: string }[];
@@ -294,6 +312,19 @@ export interface LedgerStore {
    * it recorded a ledger of `expected` with any other text.
    */
   commit?(expected?: WrittenLedger[]): void;
+  /**
+   * Records the moves of ledgers from the repo key `from` to `to` that a command made and did not record, as one
+   * stopped before its commit leaves them, with whatever else `ledger store sync` would record. A moved record of
+   * another machine is recorded too, as the move is this machine's. Throws when it cannot, also when a moved ledger is
+   * not recorded as it is.
+   */
+  commitPending?(from: string, to: string): void;
+  /**
+   * Whether the repo keys `a` and `b` are kept in one repo folder, as a key and its URI encoding are, or two keys that
+   * differ only in case on a disk that ignores case: a move from one to the other would remove what it moves. Absent
+   * where each key is kept apart, as in a database.
+   */
+  sharesFolder?(a: string, b: string): boolean;
   /** Lets go of what the store holds open, such as a database; the store is not used after it. */
   close?(): void;
 }
