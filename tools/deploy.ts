@@ -225,13 +225,17 @@ const LEDGER = path.join(REPO, 'bin/ledger');
 const MOVE_KINDS = ['repo-ids', 'active', 'records'] as const;
 type MoveKind = (typeof MOVE_KINDS)[number];
 
-/** One item of `ledger store migrate --pending --json`: `auto` is false for a task the move leaves, for `reason`. */
+/**
+ * One item of `ledger store migrate --pending --json`: `auto` is false for a task the move leaves, for `reason`;
+ * `accepted` when that task needs no person. A ledger from before `accepted` sends none.
+ */
 export interface PendingMove {
   kind: MoveKind;
   from: string;
   to: string;
   auto: boolean;
   reason?: string;
+  accepted?: true;
 }
 
 export const MIGRATE_HINT = 'Run bin/deploy --migrate to move them.';
@@ -282,11 +286,38 @@ const printMoves = (moves: PendingMove[]): void => {
   for (const move of moves) console.log(`moves    ${move.kind.padEnd(8)} ${moveText(move)}`);
 };
 
+const needsPerson = ({ auto, accepted }: PendingMove): boolean => !auto && !accepted;
+
+/** An accepted move's task: its `from` without the place it starts with, `archive` or `evidence`, which means nothing to a reader. */
+const acceptedName = ({ from }: PendingMove): string => from.slice(from.indexOf(' ') + 1);
+
+// Prints the texts of pendingText in tools/ledger/pending.ts, which deploy cannot import (see LEDGER); keep them in step.
+function printLeftovers(moves: PendingMove[]): void {
+  const stuck = moves.filter(needsPerson);
+  if (stuck.length > 0) {
+    console.log(`moves    ${stuck.length === 1 ? '1 task needs a person to move it:' : `${stuck.length} tasks need a person to move them:`}`);
+    printMoves(stuck);
+  }
+  const accepted = moves.filter((move) => move.accepted);
+  if (accepted.length === 0) return;
+  console.log(
+    `moves    ${accepted.length === 1
+      ? '1 finished task stays under its old repo folder name, as that folder is gone or unknown. Nothing to do: it stays readable in the archive.'
+      : `${accepted.length} finished tasks stay under their old repo folder name, as that folder is gone or unknown. Nothing to do: they stay readable in the archive.`}`,
+  );
+  for (const move of accepted) console.log(`moves    ${acceptedName(move)}: ${move.reason}`);
+}
+
 const canMove = (moves: PendingMove[], kind?: MoveKind): boolean => moves.some((move) => move.auto && (kind === undefined || move.kind === kind));
+
+/** The lines of `ledger store migrate --repo-ids` on what it left, each of which runMoves prints itself from its last check. */
+const LEFT_BY_REPO_IDS = /^(left |(kept|would keep) \d+ finished tasks? )/;
 
 function runMove(home: string, kind: MoveKind): SpawnSyncReturns<string> {
   const moved = runLedger(home, ['store', 'migrate', `--${kind}`]);
-  for (const line of printedLines(moved)) console.log(`ledgers  ${line}`);
+  for (const line of printedLines(moved)) {
+    if (kind !== 'repo-ids' || !LEFT_BY_REPO_IDS.test(line)) console.log(`ledgers  ${line}`);
+  }
   return moved;
 }
 
@@ -294,9 +325,10 @@ function runMove(home: string, kind: MoveKind): SpawnSyncReturns<string> {
  * Runs each kind of move, in order, when a check made just before it lists a task it can take: a list shown earlier may
  * be out of date, and a move may make a task of a later kind movable. A move exits 1 for any task it leaves, also one the
  * check named already, so the run fails only when a move could not run or exited above 1, or a task a last check names
- * can still move. Prints each task that stays, with why, and gives 1 for a failed run.
+ * can still move. Prints each task that stays, with why, the accepted ones only with `showAccepted`, and gives 1 for a
+ * failed run.
  */
-export function runMoves(home: string): number {
+export function runMoves(home: string, { showAccepted = true } = {}): number {
   let broken = false;
   for (const kind of MOVE_KINDS) {
     const moves = checkMoves(home);
@@ -310,7 +342,7 @@ export function runMoves(home: string): number {
   }
   const moves = checkMoves(home);
   if (moves === undefined) return 1;
-  printMoves(moves.filter(({ auto }) => !auto));
+  printLeftovers(showAccepted ? moves : moves.filter(({ accepted }) => !accepted));
   if (canMove(moves)) {
     console.log('moves    still to do after the run:');
     printMoves(moves.filter(({ auto }) => auto));
@@ -326,8 +358,9 @@ function migrate(home: string, dry: boolean): number {
     return 0;
   }
   if (!dry && canMove(moves)) return runMoves(home);
-  printMoves(moves);
-  if (!dry) console.log('Nothing deploy can move: each task above stays for the reason it names.');
+  printMoves(moves.filter(({ auto }) => auto));
+  printLeftovers(moves);
+  if (!dry && moves.some(needsPerson)) console.log('Nothing deploy can move: each task above stays for the reason it names.');
   return 0;
 }
 
@@ -349,7 +382,7 @@ function moveAfterDeploy(home: string, named: boolean): void {
 }
 
 function listMovesStillToDo(home: string): void {
-  const moves = checkMoves(home) ?? [];
+  const moves = checkMoves(home)?.filter(({ accepted }) => !accepted) ?? [];
   if (moves.length === 0) return;
   console.log('moves    still to do:');
   printMoves(moves);

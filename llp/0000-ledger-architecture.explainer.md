@@ -252,9 +252,41 @@ that filed ledgers under the main checkout's folder name. It moves each such
 ledger to its repo key with a plain rename on the same disk, and records the
 folder name as an alias only for tasks it moved. A ledger whose main checkout it
 cannot find, that lies on another disk, or whose target name is taken stays
-where it is, and a person moves it by hand. In git storage the moves are
-committed and pushed like any other write; each machine records its aliases
-itself.
+where it is. In git storage the moves are committed and pushed like any other
+write; each machine records its aliases itself.
+
+What stays is of two kinds. Most of it needs a person, who moves it by hand. A
+finished task whose repo is gone or unknown needs nobody, and is accepted as it
+is: an archive copy whose main folder is not there, or
+whose ledger names no main that any record knows, and evidence of whose name no
+ledger is in the store, under a folder name that no alias names and whose other
+tasks get no repo in the same run. It stays readable in the archive under its
+old folder name. A main folder that is there but no git repo, or that git did
+not answer for, is not accepted, as the lookup may have failed; nor is one
+under `/Volumes/<disk>`, `/mnt/<disk>` or `/media/<user>/<disk>` whose disk is
+not there, as that disk may only be unmounted, nor one that cannot be read. A
+main folder whose whole home is missing, as on another machine, is accepted. A main folder that is not there needs no git to tell, so
+the dry run spawns none for it.
+
+The move reports an accepted item with `accepted: true` and does not count it
+as left: `ledger store migrate --repo-ids` exits 0 when only accepted items
+remain, and prints one line that counts them, not one line each; `--pending`
+names each with its reason. The session-start hint (`conversionHint`) counts
+only the others, and names an alias that a task contradicts when it runs the dry run described next. It learns which
+items are accepted from the move's own dry run, so the rule has one copy, and
+runs that dry run only when an archive copy or evidence is under a folder name,
+as nothing else can be accepted. A backlog or active ledger is never accepted,
+nor is a finished task that stays for any other reason, such as a taken name,
+another disk or an ambiguous folder name.
+
+The main checkout of a ledger is its `- main:` line. People add notes to it, so
+a value that ends in `)` loses all from its first ` (`, unless the whole value
+is a folder on disk, as a folder named `engine (legacy)` can be. Other notes,
+such as one after a dash, are not recognised and make the value a path that is
+not there. A value that is then no absolute path, such as `.`, names no main,
+and the worktree and the records decide instead, as for a ledger with no
+`- main:` line; `ledger go` still starts a backlog task filed under the repo's
+key that has such a line, and refuses only one with no `- main:` line at all.
 
 `migrateActive` in `tools/ledger/migrate-active.ts` runs once for ledgers from
 before active records. It moves the `.claude/ledger.md` of each linked worktree
@@ -280,10 +312,21 @@ another command took in between.
 only for display: `runMoves` in `tools/deploy.ts` checks again before each kind
 of move, runs the kind only when that check lists an item it can move, and
 checks once more at the end. It never runs an item the move
-would leave; that item waits for a person. Such an item is not a failure:
-`bin/deploy --migrate` prints it with its reason and still exits 0. It exits 1
+would leave; that item waits for a person, or for nobody when it is accepted.
+Such an item is not a failure: `bin/deploy --migrate` prints it with its reason
+and still exits 0. Of the `--repo-ids` run it ran, it passes on the moves and
+the final count, not the lines on what that run left, as the last check prints
+each of those once. It exits 1
 only when a check fails, a move cannot start, is stopped by a signal or exits
 above 1, or the last check still lists a move it could have made.
+
+`bin/deploy --migrate`, its dry run and `ledger store migrate --pending` print
+the items in three groups: the moves they can make, then the tasks that need a
+person under a line that counts them, then the accepted items under one line
+that says there is nothing to do, each with its plain reason. A plain
+`bin/deploy`, its dry run, and the wizard after a deploy, also when it runs
+the moves, show nothing for accepted items, so a second machine with finished tasks of repos it never had
+is not told about them on every deploy.
 
 `repairStore` in `tools/ledger/repair.ts` runs `ledger store repair`. It takes
 flags only and never prompts:

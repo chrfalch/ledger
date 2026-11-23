@@ -764,6 +764,102 @@ test('--migrate exits 0 when every task it can move moved, names each task that 
 });
 
 /**
+ * A HOME with three finished tasks under folder names whose repo is gone or unknown, as a second machine has them: notes
+ * with no ledger, a ledger whose main is `.`, and one whose main is gone and carries a note. With `stuck`, also a backlog
+ * ledger whose main is gone, which needs a person; with `movable`, also a backlog ledger of the live repo ~/repos/app.
+ */
+function homeWithFinishedLeftovers(t: TestContext, { stuck = false, movable = false } = {}) {
+  const home = fixtureHome(t);
+  const store = fileStore(ledgerPaths(home));
+  const notes = store.archive.evidenceLocation('expo', '2026-10-14-core-only-evidence');
+  mkdirSync(notes, { recursive: true });
+  writeFileSync(path.join(notes, 'red.txt'), 'failing\n');
+  store.archive.write('jev-sim-controller', '2026-10-12-keychain-keys', ledgerText({ slug: 'keychain-keys', main: '.' }));
+  const gone = path.join(home, 'repos/react-native-netinfo/react-native-netinfo');
+  mkdirSync(path.dirname(gone), { recursive: true });
+  store.archive.write('react-native-netinfo', '2026-10-28-spm-package', ledgerText({ slug: 'spm-package', main: `${gone} (lib fork clone; ledger moved here 2026-10-27, operator option 1)` }));
+  if (stuck) store.backlog.write('react-native-netinfo', 'later', ledgerText({ slug: 'later', main: gone }));
+  if (movable) store.backlog.write('app', 'next', ledgerText({ slug: 'next', main: repository(home, path.join(home, 'repos/app')) }));
+  return { home, gone };
+}
+
+const FINISHED = ['2026-10-14-core-only-evidence', '2026-10-12-keychain-keys', '2026-10-28-spm-package'];
+
+const finishedLines = (gone: string): string[] => [
+  'moves    3 finished tasks stay under their old repo folder name, as that folder is gone or unknown. Nothing to do: they stay readable in the archive.',
+  'moves    expo/2026-10-14-core-only-evidence: notes of a finished task whose ledger is not in the store',
+  'moves    jev-sim-controller/2026-10-12-keychain-keys: its ledger does not say which repo folder it came from',
+  `moves    react-native-netinfo/2026-10-28-spm-package: its repo folder ${gone} is gone`,
+];
+
+for (const dry of [false, true]) {
+  test(`--migrate${dry ? ' --dry-run' : ''} names the finished tasks that stay under a gone folder name as nothing to do, and exits 0`, (t) => {
+    const { home, gone } = homeWithFinishedLeftovers(t);
+
+    const migrated = runWithoutClaude(home, DEPLOY, '--migrate', ...(dry ? ['--dry-run'] : []));
+
+    assert.equal(migrated.status, 0, migrated.stdout);
+    assert.deepEqual(migrated.stdout.trimEnd().split('\n'), finishedLines(gone));
+  });
+}
+
+test('--migrate names the tasks that need a person apart from the finished tasks that stay, and exits 0', (t) => {
+  const { home, gone } = homeWithFinishedLeftovers(t, { stuck: true });
+
+  const migrated = runWithoutClaude(home, DEPLOY, '--migrate');
+
+  assert.equal(migrated.status, 0, migrated.stdout);
+  assert.deepEqual(migrated.stdout.trimEnd().split('\n'), [
+    'moves    1 task needs a person to move it:',
+    `moves    repo-ids backlog react-native-netinfo/later stays: its repo folder ${gone} is gone`,
+    ...finishedLines(gone),
+    'Nothing deploy can move: each task above stays for the reason it names.',
+  ]);
+});
+
+test('--migrate that moves a task names each task that stays once, under one line for the finished ones, and exits 0', (t) => {
+  const { home } = homeWithFinishedLeftovers(t, { movable: true, stuck: true });
+
+  const migrated = runWithoutClaude(home, DEPLOY, '--migrate');
+
+  assert.equal(migrated.status, 0, migrated.stdout);
+  const lines = migrated.stdout.split('\n');
+  assert.match(migrated.stdout, /^ledgers +moved backlog app\/next to /m);
+  for (const name of [...FINISHED, 'react-native-netinfo/later']) assert.equal(lines.filter((line) => line.includes(name)).length, 1, `${name}:\n${migrated.stdout}`);
+  assert.equal(lines.filter((line) => /\d+ finished tasks? /.test(line)).length, 1, migrated.stdout);
+});
+
+test('--migrate words its leftovers as ledger store migrate --pending does', (t) => {
+  const { home } = homeWithFinishedLeftovers(t, { stuck: true });
+
+  const pending = runWithoutClaude(home, [path.join(REPO, 'bin/ledger')], 'store', 'migrate', '--pending');
+  const migrated = runWithoutClaude(home, DEPLOY, '--migrate', '--dry-run');
+
+  assert.equal(pending.status, 0, pending.stderr);
+  const unindented = (lines: string[]): string[] => lines.filter((line) => !line.startsWith(' '));
+  assert.deepEqual(
+    unindented(migrated.stdout.trimEnd().split('\n').filter((line) => /^moves +\d/.test(line)).map((line) => line.replace(/^moves +/, ''))),
+    unindented(pending.stdout.trimEnd().split('\n')),
+  );
+  assert.deepEqual(
+    migrated.stdout.split('\n').filter((line) => FINISHED.some((name) => line.includes(name))).map((line) => line.replace(/^moves +/, '')),
+    pending.stdout.split('\n').filter((line) => FINISHED.some((name) => line.includes(name))).map((line) => line.trim()),
+  );
+});
+
+for (const dry of [false, true]) {
+  test(`plain deploy${dry ? ' --dry-run' : ''} prints nothing for finished tasks that stay under a gone folder name`, (t) => {
+    const { home } = homeWithFinishedLeftovers(t);
+
+    const deployed = runWithoutClaude(home, DEPLOY, '--no-codex', ...(dry ? ['--dry-run'] : []));
+
+    assert.equal(deployed.status, 0, deployed.stderr);
+    assert.doesNotMatch(deployed.stdout, /^moves /m);
+    assert.doesNotMatch(deployed.stdout, /keychain-keys|spm-package|core-only-evidence/);
+  });
+}
+
+/**
  * Runs deploy --migrate against a stub bin/ledger: --pending lists one records move, and the move exits `status`. After
  * the move, --pending lists nothing, unless `sticky`; with `once`, it lists nothing after its first answer.
  */

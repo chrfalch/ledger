@@ -84,6 +84,48 @@ test('migrate --pending marks a move that would leave its task with the reason, 
   assert.match(ok(pending(h)), new RegExp(`^  ${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} stays: its heading names no task slug`, 'm'));
 });
 
+test('migrate --pending lists the tasks that need a person apart, then the finished tasks that stay under a folder name that is gone, and exits 0', (t) => {
+  const { h, key, file, store } = world(t);
+  const gone = path.join(h, 'repos/gone');
+  store.backlog.write('app', 'later', ledgerText({ slug: 'later', main: gone }));
+  store.archive.write('app', '2026-01-01-done', ledgerText({ slug: 'done', main: gone }));
+
+  const repoIds = movesOf(ok(pending(h, '--json'))).filter(({ kind }) => kind === 'repo-ids');
+  const lines = ok(pending(h)).trimEnd().split('\n');
+
+  assert.deepEqual(repoIds, [
+    { kind: 'repo-ids', from: 'backlog app/fix-login', to: shown(key), auto: true },
+    { kind: 'repo-ids', from: 'backlog app/later', to: 'repo address', auto: false, reason: `its repo folder ${gone} is gone` },
+    { kind: 'repo-ids', from: 'archive app/2026-01-01-done', to: 'repo address', auto: false, reason: `its repo folder ${gone} is gone`, accepted: true },
+  ]);
+  assert.deepEqual(lines, [
+    'Repo keys from folder names to repo addresses (--repo-ids):',
+    `  backlog app/fix-login → ${shown(key)}`,
+    'Ledgers in .claude/ledger.md into active records (--active):',
+    `  ${file} → active ${repoLabel(key)} task`,
+    'Markdown ledgers into task records (--records):',
+    `  Markdown backlog ${repoLabel(key)} stray → task record`,
+    '1 task needs a person to move it:',
+    `  backlog app/later stays: its repo folder ${gone} is gone`,
+    '1 finished task stays under its old repo folder name, as that folder is gone or unknown. Nothing to do: it stays readable in the archive.',
+    `  app/2026-01-01-done: its repo folder ${gone} is gone`,
+  ]);
+});
+
+test('migrate --pending with only finished tasks under a folder name that is gone names them, and nothing to move', (t) => {
+  const h = home(t);
+  mkdirSync(path.join(h, 'repos'));
+  const store = fileStore(ledgerPaths(h));
+  store.archive.write('app', '2026-01-01-done', ledgerText({ slug: 'done', main: path.join(h, 'repos/gone') }));
+  store.archive.write('app', '2026-01-02-also', ledgerText({ slug: 'also', main: path.join(h, 'repos/gone') }));
+
+  assert.deepEqual(ok(pending(h)).trimEnd().split('\n'), [
+    '2 finished tasks stay under their old repo folder name, as that folder is gone or unknown. Nothing to do: they stay readable in the archive.',
+    `  app/2026-01-01-done: its repo folder ${path.join(h, 'repos/gone')} is gone`,
+    `  app/2026-01-02-also: its repo folder ${path.join(h, 'repos/gone')} is gone`,
+  ]);
+});
+
 test('migrate --pending with nothing to move says so and exits 0', (t) => {
   const h = home(t);
   assert.equal(ok(pending(h)).trim(), 'Nothing to move.');

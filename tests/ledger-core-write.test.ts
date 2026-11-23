@@ -279,6 +279,15 @@ test('ledger go refuses a missing backlog task (2), one of a same-named repo (3)
   assert.equal(existsSync(worktreeOf(app, 'no-main')), false);
 });
 
+test('ledger go starts a backlog task filed under the repo whose main line is ., as it is a task of this repo', (t) => {
+  const { h, app } = setup(t);
+  const file = path.join(storeFolder(h, 'ledger-backlog', app), 'dot-main.md');
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, ledgerText({ slug: 'dot-main', main: '.' }));
+  ok(ledger(h, app, 'go', 'dot-main'));
+  assert.equal(existsSync(worktreeOf(app, 'dot-main')), true);
+});
+
 test('ledger go fails when the branch exists, and leaves the backlog ledger and no worktree', (t) => {
   const { h, app } = setup(t);
   ok(ledger(h, app, 'task', 'new', 'taken-later'));

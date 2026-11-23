@@ -359,7 +359,7 @@ function promote(context: Context, slug: string, main: string, repo: string): St
   const { text } = backlog;
   const { location } = parseLedger(text);
   // Filed under this repo's key, so it is a task of this repo, also when its main line names another clone of it.
-  location.main ?? fail(`The backlog ledger ${backlog.location} has no "- main:" line, so its repo is unknown.`, 4);
+  location.mainLine ?? fail(`The backlog ledger ${backlog.location} has no "- main:" line, so its repo is unknown.`, 4);
   const base = location.base?.ref ?? originHead(main) ?? currentBranch(main) ?? fail(`${main} has no origin/HEAD and a detached HEAD, so there is no branch to start from.`);
   const started = startWorktree(
     context,
