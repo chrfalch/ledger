@@ -55,7 +55,10 @@ is a note and is kept as it is.
 ### The ledger command
 
 `tools/ledger/cli.ts` defines the commands with `commander`. `bin/ledger` runs
-it. The commands are grouped by what they change (D30 in LLP 0001).
+it. `bin/ledger` checks for Node 20.12 or later and runs `npm ci` when the
+dependencies are missing. For `ledger hook` it installs nothing: it prints
+the problem to stderr and exits 0, so the tool call goes ahead. The commands
+are grouped by what they change (D30 in LLP 0001).
 `ledger --help` lists the groups, and `ledger <group> --help` the commands of
 each:
 
@@ -64,8 +67,9 @@ each:
     With `--stack`, it makes the worktree and branch at once, on top of the
     current branch, and the task is active. With `--here`, it adds an active
     ledger to the linked worktree it runs in (`hereTask` in
-    `tools/ledger/write.ts`). It refuses a main checkout. With no slug given,
-    the slug is the last part of the branch name, else the folder name.
+    `tools/ledger/write.ts`). It refuses a main checkout. With `--here` and no
+    slug given, the slug is the last part of the branch name, else the
+    folder name. Without `--here`, it needs a slug.
   - `go`: starts a task. It makes the worktree and branch of a backlog task
     and moves its ledger from the backlog to the active ledgers, naming that
     worktree. For a parent task, it starts the first child task, in order,
@@ -465,11 +469,14 @@ because its turn end does not clear the session.
   `go <slug>`.
 - `pre-compact`: tells the compaction to keep the task's slug, worktree path
   and next step.
-- `pre-tool-use`: denies two kinds of tool calls. The first removes a worktree
-  folder whose ledger is not archived. The second writes a `.claude/ledger.md`
-  anywhere, as no ledger lives in a worktree, or writes ledger text that cites
-  a file in a session folder. Its message names `ledger show` and
-  `ledger notes`.
+- `pre-tool-use`: denies three kinds of tool calls. The first removes a
+  worktree folder whose ledger is not archived. The second writes a
+  `.claude/ledger.md` anywhere, as no ledger lives in a worktree; its message
+  names `ledger show` and `ledger notes`. The third writes to a backlog
+  ledger still in Markdown, from before task records, whose new text cites a
+  file in a session folder. It does not check today's JSON records.
+  `ledger notes` refuses such a citation itself, and a hook that blocks every
+  hand write to the store is planned (D38 in LLP 0001).
 
 When a hook fails, `tools/ledger/cli.ts` prints the error to stderr and exits
 0. Claude Code then allows the tool call. A hook never blocks work by accident.
@@ -522,7 +529,10 @@ runs through `hooks/logged.sh`, except the status line:
 `retireTask` in `tools/ledger/retire.ts` retires a task. It checks first. It
 exits 1 with nothing changed when a check stops it. Checks include uncommitted
 changes, an unmerged branch and active child tasks. `--force` skips these
-checks. `--dry-run` prints the plan and changes nothing.
+checks. It never skips an evidence check, such as an archive copy whose
+evidence differs or a link in `.claude/evidence/`, as evidence would be lost.
+`--dry-run` prints the plan. It changes nothing but the remote-tracking branch
+of the default branch, which it fetches.
 
 Then it does these steps:
 
@@ -599,7 +609,15 @@ child task with its own ledger, under one parent task.
 
 ### Deploy
 
-`bin/deploy` checks for Node 20.12 or later and runs `tools/deploy.ts`. In a
+`bin/deploy` checks for Node 20.12 or later and runs `tools/deploy.ts`.
+After the Node check and before `tools/deploy.ts`, it fetches the remote of
+the branch's upstream. It does this in a terminal or with
+`DEPLOY_PULL_CHECK=1`, and not with `--migrate` or `--help`. When that fetch
+fails, it deploys without the check. When the upstream has new commits, it
+asks to pull them with `git pull --ff-only`. It stops with nothing deployed
+when that pull fails. With `--dry-run` it only says how many commits are new.
+When
+`node_modules/.package-lock.json` is missing, it runs `npm ci` first. In a
 terminal with no arguments, an interactive wizard (`runWizard` in
 `tools/wizard.ts`) picks the components and flags, previews a dry run, and
 runs deploy.
