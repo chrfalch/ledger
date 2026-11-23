@@ -400,7 +400,7 @@ test('without the test switch a command returns first, prints only its own outpu
 
 // ------------------------------------------------------------------------------------------------------------ allowlist
 
-test('only allowlisted paths reach the remote: no evidence, registry, lock or temporary file', (t) => {
+test('only allowlisted paths reach the remote: no evidence, lock or temporary file', (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   setUp(a);
@@ -420,7 +420,6 @@ test('only allowlisted paths reach the remote: no evidence, registry, lock or te
   const name = `${today()}-old`;
   assert.equal(readFileSync(path.join(a.h, `.claude/ledger-evidence/${APP}`, name, 'red.txt'), 'utf8'), 'failing\n');
   assert.equal(existsSync(path.join(a.clone, `archive/${APP}`, name)), false, 'no evidence in the clone');
-  assert.ok(existsSync(path.join(a.h, '.claude/ledgers-git.json')), 'the registry stays local');
   const files = remoteFiles(bare);
   assert.ok(files.includes(`archive/${APP}/${name}.json`));
   for (const file of files) assert.match(file, ALLOWED);
@@ -1299,21 +1298,6 @@ test('when the remote moves between the fetch and the push, ledger store sync pu
 
 // --------------------------------------------------------------------------------------------------- migrate and git
 
-test('migrate file → git --remove-source keeps every registry entry, in the registry of git storage', (t) => {
-  const bare = remote(t);
-  const a = machine(t, bare);
-  ledgerOk(a, 'task', 'new', 'active', '--goal', 'Under way.');
-  ledgerOk(a, 'go', 'active');
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ok(run(a, ['store', 'sync', 'init', URL]));
-
-  ledgerOk(a, 'store', 'migrate', '--to', 'git', '--remove-source');
-
-  const entries = JSON.parse(readFileSync(path.join(a.h, '.claude/ledgers-git.json'), 'utf8')) as { slug: string; status: string }[];
-  assert.ok(entries.some(({ slug, status }) => slug === 'active' && status === 'active'), JSON.stringify(entries));
-  assert.ok(entries.some(({ slug }) => slug === 'fix-login'), JSON.stringify(entries));
-});
-
 test('migrate --to git --remove-source stops before it removes or switches anything when git storage cannot commit', (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
@@ -1939,54 +1923,41 @@ test('gh error text is printed and recorded without secret-like words', (t) => {
   }
 });
 
-for (const held of ['lock', 'reclaim guard'] as const) {
-  test(`the whole session start in a linked worktree stays within its 5 s, when the pull uses its share, git then hangs in the main checkout, and another process holds the registry's ${held}`, (t) => {
-    const bare = remote(t);
-    const a = machine(t, bare);
-    setUp(a);
-    ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-    ledgerOk(a, 'store', 'sync');
-    const b = machine(t, bare);
-    answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
-    setUp(b);
-    ledgerOk(a, 'task', 'new', 'later', '--goal', 'Comes later.');
-    ledgerOk(a, 'store', 'sync');
-    ledgerOk(b, 'task', 'new', 'mine', '--goal', 'Made on B.');
-    ledgerOk(b, 'go', 'mine');
-    // Without a registry the session start writes one, so it waits for the registry's lock, or to release it.
-    const registry = path.join(b.h, '.claude/ledgers-git.json');
-    rmSync(registry, { force: true });
-    const planted = JSON.stringify({ pid: process.pid, since: new Date().toISOString() });
-    writeFileSync(held === 'lock' ? `${registry}.lock` : `${registry}.lock.reclaim`, planted);
-    const rewriting = path.join(b.h, 'rewriting');
-    const slow = path.join(b.clone, '.git/hooks/post-rewrite');
-    writeFileSync(slow, `#!/bin/sh\nexec >/dev/null 2>&1 </dev/null\ntouch '${rewriting}'\nsleep 30\n`);
-    chmodSync(slow, 0o755);
-    const stubs = path.join(b.h, 'hanging-git');
-    mkdirSync(stubs);
-    const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
-    // Only the main checkout hangs, so the session finds its own active task first, and then the registry is rebuilt.
-    writeFileSync(path.join(stubs, 'git'), `#!/bin/sh\nfor arg in "$@"; do case "$arg" in '${b.app}') exec sleep 30 ;; esac; done\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
-    const env = { ...quietEnv(b), PATH: `${stubs}${path.delimiter}${quietEnv(b).PATH ?? ''}` };
-    const [, startUp] = timed(() => run(b, ['--help'], { env }));
-    const mine = path.join(b.app, '.claude/worktrees/mine');
+test('the whole session start in a linked worktree stays within its 5 s, when the pull uses its share and git then hangs in the main checkout', (t) => {
+  const bare = remote(t);
+  const a = machine(t, bare);
+  setUp(a);
+  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
+  ledgerOk(a, 'store', 'sync');
+  const b = machine(t, bare);
+  answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
+  setUp(b);
+  ledgerOk(a, 'task', 'new', 'later', '--goal', 'Comes later.');
+  ledgerOk(a, 'store', 'sync');
+  ledgerOk(b, 'task', 'new', 'mine', '--goal', 'Made on B.');
+  ledgerOk(b, 'go', 'mine');
+  const rewriting = path.join(b.h, 'rewriting');
+  const slow = path.join(b.clone, '.git/hooks/post-rewrite');
+  writeFileSync(slow, `#!/bin/sh\nexec >/dev/null 2>&1 </dev/null\ntouch '${rewriting}'\nsleep 30\n`);
+  chmodSync(slow, 0o755);
+  const stubs = path.join(b.h, 'hanging-git');
+  mkdirSync(stubs);
+  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  // Only the main checkout hangs, so the session finds its own active task first, and then lists every task.
+  writeFileSync(path.join(stubs, 'git'), `#!/bin/sh\nfor arg in "$@"; do case "$arg" in '${b.app}') exec sleep 30 ;; esac; done\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+  const env = { ...quietEnv(b), PATH: `${stubs}${path.delimiter}${quietEnv(b).PATH ?? ''}` };
+  const [, startUp] = timed(() => run(b, ['--help'], { env }));
+  const mine = path.join(b.app, '.claude/worktrees/mine');
 
-    const [ran, ms] = timed(() => run(b, ['hook', 'session-start'], { cwd: mine, env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd: mine }) }));
+  const [ran, ms] = timed(() => run(b, ['hook', 'session-start'], { cwd: mine, env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd: mine }) }));
 
-    assert.equal(ran.status, 0, ran.stderr);
-    assert.match((JSON.parse(ran.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext, /A task ledger exists for mine in the worktree /);
-    assert.ok(existsSync(rewriting), 'the session start did not rebase');
-    if (held === 'lock') {
-      assert.equal(existsSync(registry), false, 'the session start wrote the registry: its lock was not in the way');
-      assert.equal(readFileSync(`${registry}.lock`, 'utf8'), planted);
-    } else {
-      assert.ok(existsSync(`${registry}.lock`), 'the session start let go of the registry lock: the reclaim guard was not in the way');
-    }
-    // The 5 s start when the hook starts its work. The second on top is for the work after the last git call, which reads
-    // files only, and for start-up times that differ between runs; without one deadline the hook takes about 9 s.
-    assert.ok(ms - startUp < 6000, `the session start took ${ms - startUp} ms after start-up`);
-  });
-}
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.match((JSON.parse(ran.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext, /A task ledger exists for mine in the worktree /);
+  assert.ok(existsSync(rewriting), 'the session start did not rebase');
+  // The 5 s start when the hook starts its work. The second on top is for the work after the last git call, which reads
+  // files only, and for start-up times that differ between runs; without one deadline the hook takes about 9 s.
+  assert.ok(ms - startUp < 6000, `the session start took ${ms - startUp} ms after start-up`);
+});
 
 test('git in the clone ignores GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and GIT_CONFIG_* of the environment ledger runs in', (t) => {
   const bare = remote(t);

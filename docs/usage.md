@@ -337,9 +337,8 @@ start says how many there were since the last report.
 
 Two `ledger` commands can run at the same time, for example in two sessions.
 Neither loses the other's change, and only one of them can make a task with a
-given name. With file storage, a command that changes a backlog ledger or
-`~/.claude/ledgers.json` holds a lock file next to it for that moment, such as
-`~/.claude/ledgers.json.lock`. A command that waits more than five seconds for
+given name. With file storage, a command that changes a backlog ledger holds a
+lock file next to it for that moment. A command that waits more than five seconds for
 another stops with exit 1 and says so; run it again. The next command takes
 over a lock that a killed command left behind. If another command changes a
 backlog ledger while `ledger go` starts it, `ledger go` starts nothing. It
@@ -474,7 +473,7 @@ other machines can read it:
 | Pushed | Stays on this machine |
 |---|---|
 | Backlog ledgers, `backlog/<repo key>/<slug>.json`, or `.md` from before task records | Evidence, in `~/.claude/ledger-evidence/<repo key>/<name>/`, and the `.claude/evidence/` of each worktree |
-| Active ledgers, `active/<repo key>/<slug>.json` | The task list `~/.claude/ledgers-git.json`, the repo aliases `~/.claude/ledger-aliases-git.json`, the pre-push hook, lock files and temporary files |
+| Active ledgers, `active/<repo key>/<slug>.json` | The task list older versions kept, `~/.claude/ledgers-git.json`, which only the one-time moves read; the repo aliases `~/.claude/ledger-aliases-git.json`, the pre-push hook, lock files and temporary files |
 | Archive copies, `archive/<repo key>/<name>.json`, or `.md` from before task records | |
 | `.ledger-data`, `.gitignore` | |
 
@@ -629,8 +628,6 @@ marks it retired there and copies its report. See
   Sibling tasks that have no order yet get one first, in the order of their
   lines, after those that have one.
 - The parent ledger gets `- <child>` under `## Children`.
-- The child's entry in `~/.claude/ledgers.json` gets a `parent` field.
-  Each `/ledger:all` rebuilds it from the ledger text.
 
 `/ledger:parent <parent> remove <child>` undoes all of these, the order too. The command refuses
 a relation that breaks one of these rules:
@@ -776,8 +773,6 @@ main checkout:
 - The child ledger gets `- parent: <parent> @ <main checkout>`.
 - The parent ledger gets `- <child> @ <main checkout>`, and the started or
   retired mark follows it.
-- The child's entry in `~/.claude/ledgers.json` gets `parent` and
-  `parentMain`.
 
 Two tasks with the same slug in two repositories are two tasks. The command
 refuses a link to another repository when the path of either main checkout has

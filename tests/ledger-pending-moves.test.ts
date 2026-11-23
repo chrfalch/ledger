@@ -23,7 +23,7 @@ const movesOf = (stdout: string): Move[] => {
 
 /**
  * A HOME with one task of each move still to do: a backlog ledger filed under the folder name app, the .claude/ledger.md
- * of a linked worktree the registry names, and a backlog ledger under the repo's address kept as Markdown.
+ * of a linked worktree the old task list names, and a backlog ledger under the repo's address kept as Markdown.
  */
 function world(t: TestContext, worktreeMarkdown = ledgerText({ slug: 'task' })) {
   const h = home(t);
@@ -127,17 +127,14 @@ test('each migration reports the same moves to its callback in a dry run as in t
   assert.deepEqual(run(true), []);
 });
 
-test('migrate --pending lists a registry entry --repo-ids re-keys with no ledger of its own to move', (t) => {
+test('migrate --pending lists no --repo-ids move for an old task list entry with no ledger of its own to move', (t) => {
   const { h, app, key, file } = world(t);
   const entry = { repo: 'app', slug: 'task', path: file, branch: 'me/task', status: 'active', main: app, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' };
   writeFileSync(path.join(h, '.claude/ledgers.json'), JSON.stringify([entry]));
 
   const repoIds = movesOf(ok(pending(h, '--json'))).filter(({ kind }) => kind === 'repo-ids');
 
-  assert.deepEqual(repoIds, [
-    { kind: 'repo-ids', from: 'backlog app/fix-login', to: shown(key), auto: true },
-    { kind: 'repo-ids', from: 'registry entry app/task', to: shown(key), auto: true },
-  ]);
+  assert.deepEqual(repoIds, [{ kind: 'repo-ids', from: 'backlog app/fix-login', to: shown(key), auto: true }]);
 });
 
 test('file store: a move onto another disk is no automatic move, in the dry run as in the run, for the reason the run gives', (t) => {

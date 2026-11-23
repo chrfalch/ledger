@@ -45,10 +45,6 @@ const SCHEMA = `
     data BLOB NOT NULL,
     PRIMARY KEY (repo, name, path)
   ) STRICT;
-  CREATE TABLE IF NOT EXISTS registry (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    text TEXT NOT NULL
-  ) STRICT;
   CREATE TABLE IF NOT EXISTS aliases (
     old TEXT PRIMARY KEY,
     repo TEXT NOT NULL
@@ -157,7 +153,7 @@ function realFolderIn(root: string, relative: string, outside: () => never): str
 
 /**
  * The ledger store as one SQLite database, <home>/.claude/ledgers.db: backlog and active records, archive copies with the bytes of
- * their evidence, and the registry. A location is the database file and a place in it, such as
+ * their evidence, and aliases. A location is the database file and a place in it, such as
  * ~/.claude/ledgers.db:archive/app/2026-11-01-fix-login, and names no file of its own.
  */
 export function sqliteStore({ home }: { home: string }, { readOnly = false } = {}): LedgerStore {
@@ -371,9 +367,6 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
       ? []
       : all<{ old: string; repo: string }>('SELECT old, repo FROM aliases').map(({ old, repo }) => [old, repo]);
 
-  const readRegistry = (): string | undefined => one<{ text: string }>('SELECT text FROM registry WHERE id = 1')?.text;
-  const writeRegistry = (text: string): void => void run('INSERT INTO registry VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET text = excluded.text', text);
-
   function writable(place: 'backlog' | 'active'): Backlog {
     const ledgers = collection(place);
     const existing = (repo: string, slug: string): string => (ledgers.read(repo, slug) ?? fail(`${ledgers.location(repo, slug)} does not exist.`)).text;
@@ -482,16 +475,11 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
            WHERE NOT EXISTS (SELECT 1 FROM ${STORED} l WHERE l.place = 'archive' AND l.repo = e.repo AND l.name = e.name)`,
         ).sort((a, b) => byCodeUnit(a.repo, b.repo) || byCodeUnit(a.name, b.name)),
     },
-    registry: {
-      read: readRegistry,
-      write: (text) => transaction(() => writeRegistry(text)),
-      update: (change) =>
-        transaction(() => {
-          const text = change(readRegistry());
-          if (text !== undefined) writeRegistry(text);
-        }),
-      remove: () => transaction(() => void run('DELETE FROM registry')),
-    },
+    // Only a database from before the task list became a query has the table.
+    oldTaskList: () =>
+      one(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'registry'`) === undefined
+        ? undefined
+        : one<{ text: string }>('SELECT text FROM registry WHERE id = 1')?.text,
     aliases: {
       read: () => checkedAliases(storedAliases()).aliases,
       problem: () => checkedAliases(storedAliases()).problem,

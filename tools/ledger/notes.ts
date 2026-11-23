@@ -6,7 +6,6 @@ import { parseLedger } from './format.js';
 import { isKind, KINDS, STAGES } from './kinds.js';
 import { CITATION_ADVICE, realPath, SESSION_CITATION } from './paths.js';
 import { parseRecord, renderRecord, validateRecord, type Constraint, type Decision, type Question, type Step, type TaskRecord } from './record.js';
-import { loadTasks } from './registry.js';
 import { notOnThisMachine, type Task } from './tasks.js';
 import { currentTask, liveTask, readLedger, today, updateLedger, type Context } from './write.js';
 
@@ -114,8 +113,6 @@ function write<T extends object>(context: Context, name: string | undefined, app
     return renderRecord(record);
   });
   if (done === undefined) return fail(`The ledger ${task.file} is gone.`);
-  // The task list caches each ledger's next step and state; reload it so `ledger list` shows this write.
-  loadTasks(context);
   return { ...done.details, slug: task.slug, ledger: task.file, warnings: problemsOf(done.record) };
 }
 

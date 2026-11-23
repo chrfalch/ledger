@@ -353,7 +353,7 @@ function leftSome(ran: Ran): string {
   return ran.stdout;
 }
 
-/** Every ledger, evidence file, registry text and alias of the store, to see that a run changed nothing. */
+/** Every ledger, evidence file and alias of the store, to see that a run changed nothing. */
 function snapshot(h: string, storage: Storage): string {
   const store = openStore(h, storage);
   try {
@@ -363,7 +363,7 @@ function snapshot(h: string, storage: Storage): string {
       ),
     );
     const files = storage === 'file' ? treeOf(path.join(h, '.claude')) : [];
-    return JSON.stringify({ ledgers, registry: store.registry.read(), aliases: [...store.aliases.read()], files });
+    return JSON.stringify({ ledgers, aliases: [...store.aliases.read()], files });
   } finally {
     store.close?.();
   }
@@ -378,7 +378,7 @@ const treeOf = (folder: string): string[] =>
  * A HOME whose store files ledgers under old folder-name keys: the repo app (origin a local bare repo) with a backlog
  * task, an archive copy with evidence whose worktree names the repo, an archive copy that names no repo, and a backlog
  * task whose slug the new key already has; a backlog task of a repo that is gone; an archive copy of a repo no record
- * names; and a registry entry of the backlog task.
+ * names.
  */
 function legacyWorld(t: TestContext, storage: Storage) {
   const h = home(t);
@@ -396,11 +396,8 @@ function legacyWorld(t: TestContext, storage: Storage) {
   store.backlog.write(key, 'dup', ledgerText({ slug: 'dup', main: app, goal: 'The new dup.' }));
   store.backlog.write('gone', 'idea', ledgerText({ slug: 'idea', main: path.join(h, 'repos/gone') }));
   store.archive.write('lost', '2026-01-03-x', ledgerText({ slug: 'x' }));
-  const created = '2025-12-01T00:00:00.000Z';
-  const entry = { repo: 'app', slug: 'fix-login', path: store.backlog.location('app', 'fix-login'), branch: 'fix-login', status: 'backlog', main: app, created, updated: created };
-  store.registry.write(`${JSON.stringify([entry], null, 2)}\n`);
   store.close?.();
-  return { h, app, key, created };
+  return { h, app, key };
 }
 
 for (const storage of ['file', 'sqlite'] as const) {
@@ -421,8 +418,8 @@ for (const storage of ['file', 'sqlite'] as const) {
     assert.match(lineWith(out, 'alias'), /would record/);
   });
 
-  test(`${storage} store: store migrate --repo-ids moves each ledger it can resolve to the repo's new key, with evidence, registry entries and an alias`, { skip }, (t) => {
-    const { h, app, key, created } = legacyWorld(t, storage);
+  test(`${storage} store: store migrate --repo-ids moves each ledger it can resolve to the repo's new key, with evidence and an alias`, { skip }, (t) => {
+    const { h, app, key } = legacyWorld(t, storage);
     const out = leftSome(ledger(h, app, 'store', 'migrate', '--repo-ids'));
     const store = openStore(h, storage);
     t.after(() => store.close?.());
@@ -435,8 +432,6 @@ for (const storage of ['file', 'sqlite'] as const) {
     assert.deepEqual(store.backlog.list('gone').map(({ name }) => name), ['idea']);
     assert.deepEqual(store.archive.list('lost').map(({ name }) => name), ['2026-01-03-x']);
     assert.deepEqual([...store.aliases.read()], [['app', key]]);
-    const [entry] = JSON.parse(store.registry.read() ?? '[]') as { repo: string; path: string; created: string }[];
-    assert.deepEqual([entry.repo, entry.path, entry.created], [key, store.backlog.location(key, 'fix-login'), created]);
     assert.match(lineWith(out, 'dup'), /already/);
     assert.match(lineWith(out, 'idea'), /left/);
     assert.match(lineWith(out, '2026-01-03-x'), /left/);

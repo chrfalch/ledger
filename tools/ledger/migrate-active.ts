@@ -9,10 +9,11 @@ import { notedLines } from './migrate-records.js';
 import { realPath, samePath } from './paths.js';
 import type { OnMove } from './pending.js';
 import { recordToWrite, renderRecord } from './record.js';
-import { parseRegistry } from './registry.js';
 import { repoKey, repoLabel } from './repo-key.js';
 import { noteOwnHost } from './settings.js';
 import { keyAndAliases, readable, type LedgerStore } from './store.js';
+import { findTasks } from './tasks.js';
+import { parseOldTaskList } from './unmoved.js';
 import { plural } from './views.js';
 
 const LEGACY_LEDGER = path.join('.claude', 'ledger.md');
@@ -28,12 +29,15 @@ function isLinkedWorktree(folder: string): boolean {
 }
 
 /**
- * The .claude/ledger.md of each linked worktree of the main checkouts the registry names and of the repo of `cwd`, and
- * each one a registry entry names. A main checkout's own is never a task's ledger.
+ * The .claude/ledger.md of each linked worktree of the main checkouts the old task list or a stored task names and of
+ * the repo of `cwd`, and each one an entry of the old task list names. A main checkout's own is never a task's ledger.
+ * The old task list counts because before this move a repo's active tasks exist only in .claude/ledger.md, and deploy
+ * runs this from HOME, in no repo.
  */
 function legacyLedgers(store: LedgerStore | undefined, cwd: string): LegacyLedger[] {
-  const entries = parseRegistry(store?.registry.read() ?? '') ?? [];
-  const mains = new Set(entries.flatMap(({ main }) => (typeof main === 'string' ? [main] : [])));
+  const entries = parseOldTaskList(store?.oldTaskList() ?? '') ?? [];
+  const named = [...entries.map(({ main }) => main), ...(store === undefined ? [] : findTasks(store).map(({ main }) => main))];
+  const mains = new Set(named.filter((main) => typeof main === 'string'));
   const here = mainCheckout(cwd);
   if (here !== undefined) mains.add(here);
   const found = new Map<string, LegacyLedger>();

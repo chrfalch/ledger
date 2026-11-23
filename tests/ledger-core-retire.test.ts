@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { REPO, snapshot } from './helpers.js';
@@ -24,8 +24,6 @@ const worktreeOf = (main: string, slug: string): string => path.join(main, '.cla
 const archiveFolder = (h: string, main: string): string => storeFolder(h, 'ledger-archive', main);
 const archiveList = (h: string, main: string): string[] => (existsSync(archiveFolder(h, main)) ? readdirSync(archiveFolder(h, main)).sort() : []);
 const buildRoot = (main: string): string => path.join(realpathSync(main), '.claude/worktrees/.build');
-type RegistryEntry = { slug: string; status: string; archivePath?: string };
-const registry = (h: string): RegistryEntry[] => JSON.parse(readFileSync(path.join(h, '.claude/ledgers.json'), 'utf8'));
 
 function today(): string {
   const date = new Date();
@@ -63,7 +61,7 @@ test('ledger retire --help names the slug, --dry-run and --force', (t) => {
   assert.match(ok(ledger(h, h, 'task', '--help')), /^\s+retire\b/m);
 });
 
-test('ledger retire with no slug retires the task of the worktree it runs in: archive copy, worktree gone, branch deleted, registry archived', (t) => {
+test('ledger retire with no slug retires the task of the worktree it runs in: archive copy, worktree gone, branch deleted', (t) => {
   const { h, app } = setup(t);
   const file = worktreeTask(h, app, { slug: 'fix-login' });
   const text = read(file);
@@ -75,9 +73,6 @@ test('ledger retire with no slug retires the task of the worktree it runs in: ar
   assert.equal(existsSync(worktree), false);
   assert.match(stdout, /deleted +branch me\/fix-login/);
   assert.equal(git(h, app, 'branch', '--list', 'me/fix-login'), '');
-  const entry = registry(h).find(({ slug }) => slug === 'fix-login');
-  assert.equal(entry?.status, 'archived');
-  assert.equal(entry?.archivePath, copy);
 });
 
 test('ledger retire names the archive copy after the ledger title, not the branch or folder', (t) => {
@@ -650,7 +645,6 @@ test('ledger retire of a backlog task archives and deletes its ledger, and never
   assert.equal(read(path.join(archiveFolder(h, app), `${today()}-later.json`)), text);
   assert.match(stdout, /removed +.*later\.md/);
   assert.equal(existsSync(path.join(h, 'gh-was-called')), false);
-  assert.equal(registry(h).find(({ slug }) => slug === 'later')?.status, 'archived');
 });
 
 test('ledger retire stops with a message when the backlog ledger cannot be deleted, and names the command to run again', { skip: process.getuid?.() === 0 }, (t) => {

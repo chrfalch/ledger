@@ -237,13 +237,6 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync, device = (f
       return undefined;
     }
   };
-  const readRegistry = (): string | undefined => {
-    try {
-      return readText(registry);
-    } catch {
-      return undefined;
-    }
-  };
   const evidenceOf = (repo: string, name: string): string => path.join(evidenceRoot.repoLocation(repo), entryName(name));
   /** The evidence folder to copy or remove; a symbolic link at it, its repo folder or the evidence root fails, as each leads outside it. */
   const evidenceToChange = (repo: string, name: string): string => {
@@ -458,15 +451,12 @@ export function fileStoreAt(roots: FileRoots, { rename = renameSync, device = (f
             .map(({ name }) => ({ repo, name })),
         ),
     },
-    registry: {
-      read: readRegistry,
-      write: (text) => withLock(registry, () => writeAtomic(registry, text)),
-      update: (change) =>
-        withLock(registry, () => {
-          const text = change(readRegistry());
-          if (text !== undefined) writeAtomic(registry, text);
-        }),
-      remove: () => withLock(registry, () => rmSync(registry, { force: true })),
+    oldTaskList: () => {
+      try {
+        return readText(registry);
+      } catch {
+        return undefined;
+      }
     },
     aliases: {
       read: () => checkedAliases(aliasEntries() ?? []).aliases,

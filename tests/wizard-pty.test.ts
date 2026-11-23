@@ -180,7 +180,7 @@ test('a preview that throws is reported, and the wizard says nothing was written
 });
 
 /**
- * A HOME whose registry names the .claude/ledger.md of a linked worktree of ~/repos/app, from before active records, and
+ * A HOME whose old task list names the .claude/ledger.md of a linked worktree of ~/repos/app, from before active records, and
  * with `markdown` a backlog ledger kept as Markdown, from before task records.
  */
 function homeWithUnmovedLedger(t: Parameters<typeof freshHome>[0], markdown = false): { home: string; app: string; file: string; markdownFile: string } {

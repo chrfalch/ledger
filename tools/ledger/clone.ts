@@ -10,7 +10,7 @@ import { readRecordJson } from './record.js';
 import { isSecretLike, prePushHook, RAW_CHANGES_LOG, WITHHELD } from './secret-scan.js';
 import { HOST_LABEL } from './settings.js';
 
-/** The clone of git storage and what stays next to it on this machine: evidence, the sync status, the registry and the repo aliases are never pushed. */
+/** The clone of git storage and what stays next to it on this machine: evidence, the sync status, the old task list and the repo aliases are never pushed. */
 export function clonePaths({ home }: LedgerPaths) {
   const claude = path.join(home, '.claude');
   return {
@@ -24,7 +24,7 @@ export function clonePaths({ home }: LedgerPaths) {
     notPrivate: path.join(claude, 'ledger-data.not-private'),
     /** The number the last sync took, and that of the newest sync that recorded how it ended; see takeSyncNumber. */
     order: path.join(claude, 'ledger-data.sync-order.json'),
-    // Not the ledgers.json of file storage: a migrate between the two would merge one registry into itself, and remove from it.
+    /** The task list older versions of git storage kept, read only by the one-time moves. */
     registry: path.join(claude, 'ledgers-git.json'),
     // Not the ledger-aliases.json of file storage, for the same reason: a migrate that stops removes the aliases it added.
     aliases: path.join(claude, 'ledger-aliases-git.json'),

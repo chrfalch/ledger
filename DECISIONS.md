@@ -1483,3 +1483,24 @@ and the next write to such a record names the new label.
 `active/<host>/` reads past them, and the first write under the clone lock
 removes them in its commit. The allowlist and the pre-push hook still take
 their paths, so that removal can be pushed.
+
+## 2026-11-22 — The task list is a query, with no cache
+
+**The registry is gone.** Every command that lists tasks reads them from the
+task records in the store, as D29 in LLP 0001 says the task list should. No
+command writes `~/.claude/ledgers.json`, the `registry` table of
+`~/.claude/ledgers.db` or `~/.claude/ledgers-git.json` any more, and a new
+database has no such table. A retire no longer updates it, and nothing has to
+keep it in line with the records.
+
+**The old file stays, read-only.** The one-time moves still read the task list
+older versions wrote. Before `ledger store migrate --active` runs, a repo's
+active tasks exist only in its worktrees' `.claude/ledger.md`, and deploy runs
+the moves from HOME, in no repo. The old list is what names those repos there.
+`--active` also looks in the repo of every task the store holds. `--repo-ids`
+reads it only to tell which checkout a folder name was, and no longer re-keys
+its entries.
+
+**`ledger store migrate --to` no longer carries it.** A storage switch copies
+the ledgers, the archive with its evidence, and the repo aliases. It neither
+copies nor removes the old task list.

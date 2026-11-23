@@ -13,10 +13,10 @@ import { parseLedger } from '../tools/ledger/format.js';
 import { gitStore } from '../tools/ledger/git-store.js';
 import { withLock, withLockIfFree } from '../tools/ledger/lock.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
-import { loadTasks } from '../tools/ledger/registry.js';
 import { parseRecord, recordJson, renderRecord } from '../tools/ledger/record.js';
 import { loadSqlite, sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
+import { findTasks } from '../tools/ledger/tasks.js';
 import { createTask, goTask, orderChildren, parkTask, type Context } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
 import { archivedTask, home, ledgerText, noSqlite, repoKeyOf, repository } from './ledger-core-fixtures.js';
@@ -65,12 +65,10 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     const first = open(h);
     first.backlog.write('app', 'fix-login', text('fix-login'));
     first.archive.write('app', '2026-11-01-old', text('old'), evidenceFolder(h));
-    first.registry.write('[]\n');
     const second = open(h);
     assert.equal(second.backlog.read('app', 'fix-login')?.text, text('fix-login'));
     assert.equal(second.archive.read('app', '2026-11-01-old')?.text, text('old'));
     assert.deepEqual(second.archive.evidenceFiles('app', '2026-11-01-old'), ['logs/build.log', 'logs/old/trace.bin', 'red.txt']);
-    assert.equal(second.registry.read(), '[]\n');
   });
 
   test(`${name}: archived evidence reads back: its files as sorted relative paths, without folders and links, and each file's bytes exactly`, { skip }, (t) => {
@@ -331,13 +329,12 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     for (const other of others) assert.notEqual(before, other);
   });
 
-  test(`${name}: the registry is undefined until written, then reads back as written`, { skip }, (t) => {
+  test(`${name}: a new store has no old task list, and no write makes one`, { skip }, (t) => {
     const store = makeStore(t);
-    assert.equal(store.registry.read(), undefined);
-    store.registry.write('[]\n');
-    assert.equal(store.registry.read(), '[]\n');
-    store.registry.write('[{"path":"x"}]\n');
-    assert.equal(store.registry.read(), '[{"path":"x"}]\n');
+    assert.equal(store.oldTaskList(), undefined);
+    store.backlog.write('app', 'fix-login', text('fix-login'));
+    store.archive.write('app', '2026-11-01-old', text('old'));
+    assert.equal(store.oldTaskList(), undefined);
   });
 
   test(`${name}: a ledger is kept as a task record, so read gives the record rendered, also for text out of the template layout`, { skip }, (t) => {
@@ -608,6 +605,27 @@ const openGitStore = (h: string): LedgerStore => {
 storeContract('file store', (h) => fileStore(ledgerPaths(h)));
 storeContract('sqlite store', (h) => sqliteStore({ home: h }), noSqlite);
 storeContract('git store', openGitStore);
+
+test('file and git store: the old task list reads back from ~/.claude/ledgers.json and ~/.claude/ledgers-git.json', (t) => {
+  const h = home(t);
+  writeFileSync(path.join(h, '.claude/ledgers.json'), '[{"path":"file"}]\n');
+  writeFileSync(path.join(h, '.claude/ledgers-git.json'), '[{"path":"git"}]\n');
+  assert.equal(fileStore(ledgerPaths(h)).oldTaskList(), '[{"path":"file"}]\n');
+  const git = openGitStore(h);
+  t.after(() => git.close?.());
+  assert.equal(git.oldTaskList(), '[{"path":"git"}]\n');
+});
+
+test('sqlite store: the old task list reads back from the registry table of a database older versions made', { skip: noSqlite }, (t) => {
+  const h = home(t);
+  const store = sqliteStore({ home: h });
+  t.after(() => store.close?.());
+  const db = new (createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')).DatabaseSync(sqliteFile(h));
+  db.exec('CREATE TABLE registry (id INTEGER PRIMARY KEY CHECK (id = 1), text TEXT NOT NULL) STRICT');
+  db.prepare('INSERT INTO registry VALUES (1, ?)').run('[]\n');
+  db.close();
+  assert.equal(store.oldTaskList(), '[]\n');
+});
 
 for (const [name, open] of [['file store', (h: string) => fileStore(ledgerPaths(h))], ['git store', openGitStore]] as const) {
   for (const linked of ['repo folder', 'evidence folder'] as const) {
@@ -898,7 +916,6 @@ test('sqlite store: everything is in <home>/.claude/ledgers.db, with no other fi
   writeFileSync(path.join(evidence, 'red.txt'), 'failing');
   store.backlog.write('app', 'fix-login', text('fix-login'));
   store.archive.write('app', '2026-11-01-old', text('old'), evidence);
-  store.registry.write('[]\n');
   const added = readdirSync(claude).filter((name) => !before.includes(name));
   assert.deepEqual(
     added.filter((name) => !/^ledgers\.db-(?:wal|shm|journal)$/.test(name)),
@@ -913,13 +930,11 @@ test('file store: each ledger is a <name>.json task record where the old layout 
   const { h, store } = fileHome(t);
   store.backlog.write('app', 'fix-login', text('fix-login'));
   store.archive.write('app', '2026-11-01-fix-login', text('old'));
-  store.registry.write('[]\n');
   const backlog = path.join(h, '.claude/ledger-backlog/app/fix-login.json');
   const archive = path.join(h, '.claude/ledger-archive/app/2026-11-01-fix-login.json');
   assert.deepEqual(JSON.parse(readFileSync(backlog, 'utf8')), parseRecord(text('fix-login')));
   assert.deepEqual(JSON.parse(readFileSync(archive, 'utf8')), parseRecord(text('old')));
   assert.equal(existsSync(path.join(h, '.claude/ledger-backlog/app/fix-login.md')), false);
-  assert.equal(readFileSync(path.join(h, '.claude/ledgers.json'), 'utf8'), '[]\n');
   assert.equal(store.backlog.read('app', 'fix-login')?.location, backlog);
   assert.equal(store.backlog.location('app', 'fix-login'), backlog);
   assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.location, archive);
@@ -1189,15 +1204,12 @@ test('file store: an archive write keeps the ledger copy when the evidence copy 
 test('file store: writes go through a temporary file that is gone afterwards, and keep the mode of the file they replace', (t) => {
   const { h, store } = fileHome(t);
   store.backlog.write('app', 'fix-login', 'one');
-  store.registry.write('one');
   store.archive.write('app', '2026-11-01-fix-login', 'one');
   const files = new Map([
     [path.join(h, '.claude/ledger-backlog/app/fix-login.json'), recordJson(parseRecord('two'))],
-    [path.join(h, '.claude/ledgers.json'), 'two'],
   ]);
   for (const file of files.keys()) chmodSync(file, 0o600);
   store.backlog.write('app', 'fix-login', 'two');
-  store.registry.write('two');
   for (const [file, written] of files) {
     assert.equal(readFileSync(file, 'utf8'), written);
     assert.equal(mode(file), 0o600, file);
@@ -1352,12 +1364,7 @@ function recording(inner: LedgerStore): { store: LedgerStore; calls: string[] } 
       canMove: (repo, name, to) => (note('archive.canMove', repo, name, to), inner.archive.canMove(repo, name, to)),
       orphanEvidence: () => (note('archive.orphanEvidence'), inner.archive.orphanEvidence()),
     },
-    registry: {
-      read: () => (note('registry.read'), inner.registry.read()),
-      write: (body) => (note('registry.write'), inner.registry.write(body)),
-      update: (change) => (note('registry.update'), inner.registry.update(change)),
-      remove: () => (note('registry.remove'), inner.registry.remove()),
-    },
+    oldTaskList: () => (note('oldTaskList'), inner.oldTaskList()),
     aliases: {
       read: () => (note('aliases.read'), inner.aliases.read()),
       problem: () => (note('aliases.problem'), inner.aliases.problem()),
@@ -1373,7 +1380,7 @@ function includesAll(calls: string[], expected: string[]): void {
   for (const call of expected) assert.ok(calls.includes(call), `expected the call "${call}" in:\n${calls.join('\n')}`);
 }
 
-test('the core reads and writes backlog ledgers and the registry through the store it is given', (t) => {
+test('the core reads and writes backlog ledgers through the store it is given, and never reads the old task list', (t) => {
   const h = home(t);
   copyFileSync(path.join(REPO, 'ledger.template.md'), path.join(h, '.claude/ledger.template.md'));
   const app = repository(h, path.join(h, 'repos/app'));
@@ -1384,12 +1391,13 @@ test('the core reads and writes backlog ledgers and the registry through the sto
   const key = repoKeyOf(app);
 
   createTask(context, 'fix-login', { goal: 'Users cannot log in.' });
-  includesAll(calls, [`backlog.has ${key} fix-login`, `backlog.create ${key} fix-login`, 'registry.update']);
+  includesAll(calls, [`backlog.has ${key} fix-login`, `backlog.create ${key} fix-login`]);
+  assert.equal(calls.includes('oldTaskList'), false);
   assert.match(store.backlog.read(key, 'fix-login')?.text ?? '', /Users cannot log in\./);
 
   calls.length = 0;
   parkTask(context, 'fix-login', 'waits for the API');
-  includesAll(calls, ['registry.read', `backlog.list ${key}`, `backlog.update ${key} fix-login`]);
+  includesAll(calls, [`backlog.list ${key}`, `backlog.update ${key} fix-login`]);
   assert.match(store.backlog.read(key, 'fix-login')?.text ?? '', /Parked: .* — waits for the API/);
 
   createTask(context, 'add-cache', { goal: 'Pages load slowly.' });
@@ -1400,8 +1408,8 @@ test('the core reads and writes backlog ledgers and the registry through the sto
   assert.ok(store.active.has(key, 'add-cache'));
 
   calls.length = 0;
-  const tasks = loadTasks(context);
-  includesAll(calls, ['registry.read', 'backlog.repos', `backlog.list ${key}`, 'archive.repos', `archive.list ${key}`]);
+  const tasks = findTasks(context.store);
+  includesAll(calls, ['backlog.repos', `backlog.list ${key}`, 'archive.repos', `archive.list ${key}`]);
   assert.deepEqual(
     tasks.map(({ slug, place }) => `${slug} ${place}`),
     ['add-cache active', 'fix-login backlog', 'old-task archive'],

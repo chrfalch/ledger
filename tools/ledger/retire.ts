@@ -22,7 +22,6 @@ import {
 } from './git.js';
 import { ledgerBin, samePath } from './paths.js';
 import { storedText } from './record.js';
-import { loadTasks } from './registry.js';
 import { repoKey } from './repo-key.js';
 import type { Archive } from './store.js';
 import { findNamed, findTasks, inRepo, locateChild, namedChildren, sameTask, type Task } from './tasks.js';
@@ -104,7 +103,6 @@ export type RetireAction =
   | { kind: 'remove-backlog'; repo: string; name: string; location: string }
   | { kind: 'mark-parent'; parent: Task; parentRef: Ref; child: Ref; childName: string }
   | { kind: 'copy-report'; parent: Task; parentRef: Ref; heading: string; report: readonly string[]; childName: string }
-  | { kind: 'update-registry' }
   | { kind: 'delete-branch'; main: string; branch: string; head: string }
   | { kind: 'keep-branch'; branch: string; reason: string }
   | { kind: 'delete-build-folders'; folders: string[] }
@@ -252,7 +250,7 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
   if (buildFolders.length > 0) actions.push({ kind: 'delete-build-folders', folders: buildFolders });
   // Last, so a retire that stops before it leaves the task for a plain rerun to find and finish.
   if (task.place === 'active') actions.push({ kind: 'remove-active', ...removal });
-  actions.push({ kind: 'update-registry' }, ...hint);
+  actions.push(...hint);
 
   const blocked = blockers.some((blocker) => !isForceable(blocker) || !force);
   return { task, ...(worktree === undefined ? {} : { worktree }), blockers, blocked, warnings, actions };
@@ -560,8 +558,6 @@ function stepText(action: RetireAction): string | string[] | undefined {
       return `mark ${action.childName} retired under ## Children of ${action.parentRef.slug} in ${action.parent.file}`;
     case 'copy-report':
       return `copy the report to ## Child reports of ${action.parentRef.slug} in ${action.parent.file}`;
-    case 'update-registry':
-      return 'update the registry';
     case 'delete-branch':
       return `delete the branch ${action.branch}, because it is merged`;
     case 'keep-branch':
@@ -757,13 +753,6 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
           out.line(`copied the report of ${action.childName} to ${action.parent.file}`);
         } catch (error) {
           out.warn(`could not copy the report of ${action.childName} to ${action.parent.file}: ${message(error)}`);
-        }
-        break;
-      case 'update-registry':
-        try {
-          loadTasks(context);
-        } catch (error) {
-          out.warn(`the registry is not updated: ${message(error)}`);
         }
         break;
       case 'delete-branch': {

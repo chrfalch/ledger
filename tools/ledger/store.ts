@@ -210,20 +210,10 @@ export type CheckedCopy = { text: string; evidence: string };
 export const isAsChecked = (archive: Pick<Archive, 'read' | 'evidenceState'>, repo: string, name: string, { text, evidence }: CheckedCopy): boolean =>
   archive.read(repo, name)?.text === text && archive.evidenceState(repo, name, evidence) === (holdsAnything(evidence) ? 'same' : 'none');
 
-/** The text of the registry, a cache that a rebuild from the ledgers can always replace. */
-export interface Registry {
-  read(): string | undefined;
-  write(text: string): void;
-  /** Rewrites the text with `change`, which gets undefined for no registry; no other write can come between. */
-  update(change: Change<string | undefined>): void;
-  /** After it, `read` gives undefined, so the next load rebuilds the registry. */
-  remove(): void;
-}
-
 /** A ledger with the text a caller wrote to it. */
 export type WrittenLedger = { place: 'backlog' | 'active' | 'archive'; repo: string; name: string; text: string };
 
-/** Old repo keys, such as the folder names keys were before D10, each with the key that replaced it. Unlike the registry, no rebuild can recreate it. */
+/** Old repo keys, such as the folder names keys were before D10, each with the key that replaced it. No other record can recreate it. */
 export interface Aliases {
   /** Only the aliases whose old key is a repo key and whose target is an address or a path, so a target is never joined into a path that climbs out. */
   read(): ReadonlyMap<string, string>;
@@ -281,13 +271,14 @@ export function needsAlias(entries: Iterable<readonly [string, unknown]>, old: s
   return current === undefined;
 }
 
-/** Stores backlog and active records, archive copies, the registry and aliases. */
+/** Stores backlog and active records, archive copies and aliases. */
 export interface LedgerStore {
   backlog: Backlog;
   active: Active;
   archive: Archive;
-  registry: Registry;
   aliases: Aliases;
+  /** The text of the task list older versions kept, undefined when there is none; only the one-time moves read it. */
+  oldTaskList(): string | undefined;
   /**
    * This machine's host label, which each active record it starts names; undefined for a "host" setting that names no
    * label, and for a store opened without a home. Then no record counts as another machine's by its host alone.

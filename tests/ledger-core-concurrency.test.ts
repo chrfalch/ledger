@@ -7,9 +7,9 @@ import test, { type TestContext } from 'node:test';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
-import { loadTasks, type RegistryEntry } from '../tools/ledger/registry.js';
 import { sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
+import { findTasks } from '../tools/ledger/tasks.js';
 import { pauseForTest } from '../tools/ledger/wait.js';
 import { goTask, type Context } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
@@ -57,8 +57,6 @@ function ledgerAsync(h: string, cwd: string, ...args: string[]): Promise<Ran> {
 
 const together = (count: number, run: (index: number) => Promise<Ran>): Promise<Ran[]> => Promise.all(Array.from({ length: count }, (_, index) => run(index)));
 
-const registryEntries = (store: LedgerStore): RegistryEntry[] => JSON.parse(store.registry.read() ?? '[]') as RegistryEntry[];
-
 const shown = (runs: Ran[]): string => runs.map(({ status, stderr }, index) => `run ${index}: exit ${status} ${stderr.trim()}`).join('\n');
 
 for (const storage of ['file', 'sqlite'] as const) {
@@ -77,12 +75,11 @@ for (const storage of ['file', 'sqlite'] as const) {
       }
       inStore((store) => {
         assert.match(store.backlog.read(key, slug)?.text ?? '', new RegExp(`Goal of run ${made[0]}\\.`), 'the ledger is the one of the run that succeeded');
-        assert.equal(registryEntries(store).filter((entry) => entry.slug === slug).length, 1);
       });
     }
   });
 
-  test(`${storage} store: ${PROCESSES} ledger task runs at once with distinct slugs leave every ledger in the backlog and every entry in the registry`, { skip }, async (t) => {
+  test(`${storage} store: ${PROCESSES} ledger task runs at once with distinct slugs leave every ledger in the backlog and in the task list`, { skip }, async (t) => {
     const { h, app, key, inStore } = setup(t, storage);
     for (let round = 0; round < ROUNDS; round++) {
       const slugs = Array.from({ length: PROCESSES }, (_, index) => `task-${round}-${index}`);
@@ -90,10 +87,10 @@ for (const storage of ['file', 'sqlite'] as const) {
       assert.deepEqual(runs.map(({ status }) => status), slugs.map(() => 0), shown(runs));
       inStore((store) => {
         const listed = new Set(store.backlog.list(key).map(({ name }) => name));
-        const registered = new Set(registryEntries(store).map(({ slug }) => slug));
+        const tasks = new Set(findTasks(store).map(({ slug }) => slug));
         for (const slug of slugs) {
           assert.ok(listed.has(slug), `round ${round}: ${slug} is in the backlog`);
-          assert.ok(registered.has(slug), `round ${round}: ${slug} is in the registry`);
+          assert.ok(tasks.has(slug), `round ${round}: ${slug} is in the task list`);
         }
       });
     }
@@ -112,68 +109,6 @@ for (const storage of ['file', 'sqlite'] as const) {
         assert.match(store.backlog.read(key, child)?.text ?? '', /^- parent: epic$/m, `${child} names its parent`);
       }
     });
-  });
-
-  test(`${storage} store: a registry another command wrote since it was read is rebuilt outside the registry update, and keeps that command's task`, { skip }, (t) => {
-    const { h, app, key, real, context } = inProcess(t, storage);
-    ok(ledger(h, app, 'task', 'new', 'first'));
-    assert.ok(real.backlog.create(key, 'mine', ledgerText({ slug: 'mine', main: app, branch: 'mine' })));
-    let updating = false;
-    let interfered = false;
-    const listedWhileUpdating: string[] = [];
-    const store: LedgerStore = {
-      ...real,
-      backlog: { ...real.backlog, list: (repo) => (updating && listedWhileUpdating.push(repo), real.backlog.list(repo)) },
-      registry: {
-        ...real.registry,
-        update: (change) => {
-          if (!interfered) {
-            interfered = true;
-            assert.ok(real.backlog.create(key, 'other', ledgerText({ slug: 'other', main: app, branch: 'other' })));
-            loadTasks({ ...context, store: real });
-          }
-          updating = true;
-          try {
-            real.registry.update(change);
-          } finally {
-            updating = false;
-          }
-        },
-      },
-    };
-    const tasks = loadTasks({ ...context, store });
-    assert.ok(interfered, 'the registry was updated');
-    assert.deepEqual(listedWhileUpdating, [], 'no rebuild ran inside the registry update');
-    assert.deepEqual(tasks.map(({ name }) => name).sort(), ['first', 'mine', 'other']);
-    assert.deepEqual(registryEntries(real).map(({ slug }) => slug).sort(), ['first', 'mine', 'other']);
-  });
-
-  test(`${storage} store: a registry that other commands change on every try ends the rebuild with a message after a bounded number of tries`, { skip }, (t) => {
-    const { h, app, key, real, context } = inProcess(t, storage);
-    ok(ledger(h, app, 'task', 'new', 'first'));
-    assert.ok(real.backlog.create(key, 'mine', ledgerText({ slug: 'mine', main: app, branch: 'mine' })));
-    let tries = 0;
-    const store: LedgerStore = {
-      ...real,
-      registry: {
-        ...real.registry,
-        update: (change) => {
-          tries++;
-          real.registry.write(`${' '.repeat(tries)}[]\n`);
-          real.registry.update(change);
-        },
-      },
-    };
-    assert.throws(
-      () => loadTasks({ ...context, store }),
-      (error) => {
-        assert.ok(error instanceof Failure, String(error));
-        assert.match(error.message, new RegExp(`changed the task registry ${tries} times`));
-        assert.match(error.message, /Try again\.$/);
-        return true;
-      },
-    );
-    assert.ok(tries > 1 && tries <= 20, `tries: ${tries}`);
   });
 
   test(`${storage} store: ledger go starts nothing, keeps the backlog ledger, and says to run it again, when the ledger changes while the worktree is made`, { skip }, (t) => {
@@ -303,12 +238,11 @@ function storeCallAsync(h: string, call: string): Promise<Ran> {
 test('sqlite store: every write that waits too long for the database says another command holds it, and writes nothing', { skip: noSqlite }, async (t) => {
   const { h, app, key, inStore } = setup(t, 'sqlite');
   ok(ledger(h, app, 'task', 'new', 'fix-login'));
-  const before = inStore((store) => ({ ledger: store.backlog.read(key, 'fix-login')?.text, registry: store.registry.read() }));
+  const before = inStore((store) => ({ ledger: store.backlog.read(key, 'fix-login')?.text }));
   const calls = {
     'backlog.write': `store.backlog.write(${JSON.stringify(key)}, 'fix-login', 'changed\\n')`,
     'backlog.remove': `store.backlog.remove(${JSON.stringify(key)}, 'fix-login', store.backlog.read(${JSON.stringify(key)}, 'fix-login').text)`,
     'archive.write': `store.archive.write(${JSON.stringify(key)}, '2026-11-19-fix-login', 'archived\\n')`,
-    'registry.write': `store.registry.write('[]\\n')`,
   };
   const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
   const holder = new DatabaseSync(path.join(h, '.claude/ledgers.db'));
@@ -327,16 +261,16 @@ test('sqlite store: every write that waits too long for the database says anothe
   inStore((store) => {
     assert.equal(store.backlog.read(key, 'fix-login')?.text, before.ledger);
     assert.equal(store.archive.has(key, '2026-11-19-fix-login'), false);
-    assert.equal(store.registry.read(), before.registry);
   });
 });
 
 test('sqlite store: a write that fails, and whose rollback fails too, reports why the write failed', { skip: noSqlite }, (t) => {
-  const { h } = setup(t, 'sqlite');
+  const { h, app, key } = setup(t, 'sqlite');
   const store = sqliteStore({ home: h });
+  store.backlog.write(key, 'fix-login', ledgerText({ slug: 'fix-login', main: app }));
   assert.throws(
     () =>
-      store.registry.update(() => {
+      store.backlog.update(key, 'fix-login', () => {
         store.close?.();
         throw new Error('the change failed');
       }),

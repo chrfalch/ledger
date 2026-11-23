@@ -54,7 +54,6 @@ import {
   type Tag,
 } from './notes.js';
 import { openStore, openToRead } from './open-store.js';
-import { loadTasks } from './registry.js';
 import { retireTask, retireText } from './retire.js';
 import { readStorage, STORAGES, type Storage } from './settings.js';
 import { ownLedger, shownLedger } from './show.js';
@@ -71,7 +70,7 @@ import {
   worktreesView,
   type PruneReport,
 } from './worktrees.js';
-import { archivedTasks, childrenOf, taskRef, theTask, type Task } from './tasks.js';
+import { archivedTasks, childrenOf, findTasks, taskRef, theTask, type Task } from './tasks.js';
 import { archiveView, listView, parentView, writtenBranch, type ArchiveRow } from './views.js';
 import {
   changeParent,
@@ -135,7 +134,7 @@ function realMains<T>(value: T): T {
 
 /** The tasks of every known repo, newest first; retired ones only with `archived`. */
 function list(context: Context, archived: boolean): Task[] {
-  return loadTasks(context)
+  return findTasks(context.store)
     .filter((task) => archived || task.place !== 'archive')
     .sort(newestFirst);
 }
@@ -179,7 +178,7 @@ const archiveFields = ({ repo, term, folder, rows }: ArchiveList) => ({
 function parent(context: Context, name: string) {
   const ref = taskRef(context.cwd, name);
   const { main } = ref;
-  const tasks = loadTasks(context);
+  const tasks = findTasks(context.store);
   const task = theTask(tasks, ref);
   return { task, main, children: childrenOf(task, main, tasks) };
 }
@@ -624,7 +623,7 @@ export async function main(argv: string[]): Promise<number> {
   storeGroup
     .command('migrate')
     .description(
-      'Move the backlog ledgers, the archive with its evidence, and the registry from one storage to the storage --to names. It copies everything, reads every copy back, and then sets "storage" in ~/.claude/ledger-settings.json. Exits 1, with nothing changed, when the target already has a name to copy. A move into or out of git storage commits and pushes; a failed push is reported, and ledger store sync pushes later. With --repo-ids instead, it files the ledgers kept under the folder name of a repo under its address, once. With --records instead, it rewrites each backlog and archive ledger still kept as Markdown as a task record, once; a line that fits no field of the record goes to its general notes. With --active instead, it moves the .claude/ledger.md of each linked worktree into an active record for that worktree, once, and deletes the file; .claude/evidence/ stays. Exits 1, with that ledger left as it is, when its slug or worktree is taken. With --pending instead, it lists what --repo-ids, --active and --records would move, in the order they run, and changes nothing.',
+      'Move the backlog ledgers, the archive with its evidence, and the repo aliases from one storage to the storage --to names. It copies everything, reads every copy back, and then sets "storage" in ~/.claude/ledger-settings.json. Exits 1, with nothing changed, when the target already has a name to copy. A move into or out of git storage commits and pushes; a failed push is reported, and ledger store sync pushes later. With --repo-ids instead, it files the ledgers kept under the folder name of a repo under its address, once. With --records instead, it rewrites each backlog and archive ledger still kept as Markdown as a task record, once; a line that fits no field of the record goes to its general notes. With --active instead, it moves the .claude/ledger.md of each linked worktree into an active record for that worktree, once, and deletes the file; .claude/evidence/ stays. Exits 1, with that ledger left as it is, when its slug or worktree is taken. With --pending instead, it lists what --repo-ids, --active and --records would move, in the order they run, and changes nothing.',
     )
     .addOption(new Option('--to <storage>', 'the storage to move the ledgers to').choices(STORAGES))
     .addOption(new Option('--from <storage>', 'the storage to move the ledgers from; by default the one "storage" names, and when that is --to, the other of file and sqlite').choices(STORAGES))
