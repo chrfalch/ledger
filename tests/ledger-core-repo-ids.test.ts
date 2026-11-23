@@ -9,6 +9,7 @@ import { fileStore } from '../tools/ledger/file-store.js';
 import { conversionHint, migrateRepoIds } from '../tools/ledger/migrate-repo-ids.js';
 import { migrateStorage } from '../tools/ledger/migrate.js';
 import { ledgerPaths, type LedgerPaths } from '../tools/ledger/paths.js';
+import type { Move } from '../tools/ledger/pending.js';
 import { storedText } from '../tools/ledger/record.js';
 import { repoLabel } from '../tools/ledger/repo-key.js';
 import { sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
@@ -48,11 +49,12 @@ function writeOldTaskList(h: string, entries: object[], storage: Storage = 'file
 
 const failure = (needle: string) => (error: unknown): boolean => error instanceof Failure && error.message.includes(needle);
 
-/** A HOME with the repo ~/repos/app, whose origin is a local bare repo, and the store of `storage`. */
+/** A HOME with the repo ~/repos/app, whose origin is a local bare repo, the folder ~/old that held a repo, and the store of `storage`. */
 function appWorld(t: TestContext, storage: Storage = 'file') {
   const h = home(t);
   if (storage === 'sqlite') useSqlite(h);
   const app = repository(h, path.join(h, 'repos/app'));
+  mkdirSync(path.join(h, 'old'));
   const store = openStore(h, storage);
   t.after(() => store.close?.());
   return { h, app, key: repoKeyOf(app), store };
@@ -102,6 +104,16 @@ test('a folder whose move fails gets no alias, and the run exits 1', (t) => {
   assert.match(lineWith(out, '2026-01-01-old'), /^left .*the move failed/);
   assert.deepEqual([...store.aliases.read()], []);
   assert.equal(store.archive.has('app', '2026-01-01-old'), true);
+});
+
+test('notes left under a folder name whose ledger an earlier run moved before it stopped are not accepted', (t) => {
+  const { h, app, key, store } = appWorld(t);
+  store.backlog.write(key, 'fix-login', ledgerText({ slug: 'fix-login', main: app }));
+  writeOldTaskList(h, [backlogEntry(store, 'app', 'fix-login', app)]);
+  orphanNotes(h, store, 'file');
+  const notes = plannedMoves(store).find(({ from }) => from === 'evidence app/2026-01-01-old');
+  assert.equal(notes?.accepted, undefined);
+  assert.match(notes?.reason ?? '', /of the repo /);
 });
 
 // --- 2. File-store moves rename on one disk, onto nothing ---
@@ -428,7 +440,7 @@ test('a conversion leaves an archive file named ...md where it is, and the rest 
   const folder = store.archive.repoLocation('app');
   mkdirSync(folder, { recursive: true });
   writeFileSync(path.join(folder, '...md'), ledgerText({ slug: 'dots', main: app }));
-  failedWith(convert(h));
+  ok(convert(h));
   assert.equal(existsSync(path.join(folder, '...md')), true);
   assert.equal(store.archive.has('lost', '2026-01-03-x'), true);
 });
@@ -696,22 +708,180 @@ test('session-start gives no conversion hint when only the old task list uses fo
   assert.equal(sessionStart(h), '');
 });
 
+/** What a dry run of the conversion reports, by its callback. */
+function plannedMoves(store: LedgerStore): Move[] {
+  const moves: Move[] = [];
+  migrateRepoIds(store, { dryRun: true }, () => {}, (move) => void moves.push(move));
+  return moves;
+}
+
+const kept = (count: number): RegExp =>
+  new RegExp(`^(?:would keep|kept) ${count === 1 ? '1 finished task under its' : `${count} finished tasks under their`} old repo folder name, as that folder is gone or unknown; ledger store migrate --pending names ${count === 1 ? 'it' : 'them'}\\.$`, 'm');
+
+/** Notes of a finished task under the folder name app, with no archive copy of their name anywhere. */
+function orphanNotes(h: string, store: LedgerStore, storage: Storage): void {
+  if (storage === 'file') {
+    const folder = store.archive.evidenceLocation('app', '2026-01-01-old');
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(path.join(folder, 'red.txt'), 'failing\n');
+  } else {
+    const db = sqliteDb(h);
+    db.prepare(`INSERT INTO evidence VALUES ('app', '2026-01-01-old', 'red.txt', 'file', ?)`).run(Buffer.from('failing\n'));
+    db.close();
+  }
+}
+
 for (const storage of ['file', 'sqlite'] as const) {
-  test(`${storage} store: evidence under a folder name with no archive copy is left over: the hint counts it, and a conversion reports it`, { skip: storage === 'sqlite' && noSqlite }, (t) => {
+  test(`${storage} store: evidence under a folder name whose ledger is nowhere in the store is kept: no hint, and a conversion counts it kept and exits 0`, { skip: storage === 'sqlite' && noSqlite }, (t) => {
     const { h, store } = appWorld(t, storage);
-    if (storage === 'file') {
-      const folder = store.archive.evidenceLocation('app', '2026-01-01-old');
-      mkdirSync(folder, { recursive: true });
-      writeFileSync(path.join(folder, 'red.txt'), 'failing\n');
-    } else {
-      const db = sqliteDb(h);
-      db.prepare(`INSERT INTO evidence VALUES ('app', '2026-01-01-old', 'red.txt', 'file', ?)`).run(Buffer.from('failing\n'));
-      db.close();
-    }
+    orphanNotes(h, store, storage);
+    assert.equal(conversionHint(store), undefined);
+    assert.equal(sessionStart(h), '');
+    assert.deepEqual(plannedMoves(store), [
+      { kind: 'repo-ids', from: 'evidence app/2026-01-01-old', to: 'repo address', auto: false, reason: 'notes of a finished task whose ledger is not in the store', accepted: true },
+    ]);
+    const out = ok(convert(h));
+    assert.doesNotMatch(out, /2026-01-01-old/);
+    assert.match(out, kept(1));
+    assert.match(out, /^Moved 0 ledgers; left 0 as they are\.$/m);
+  });
+
+  test(`${storage} store: evidence with no ledger under a folder name that is an alias of a repo needs a person: the hint counts it, and a conversion exits 1`, { skip: storage === 'sqlite' && noSqlite }, (t) => {
+    const { h, key, store } = appWorld(t, storage);
+    store.aliases.add('app', key);
+    orphanNotes(h, store, storage);
     assert.equal(conversionHint(store), '1 evidence folder still uses folder names (app); run `ledger store migrate --repo-ids`.');
-    assert.match(lineWith(failedWith(convert(h)), '2026-01-01-old'), /^left evidence app\/2026-01-01-old/);
+    assert.deepEqual(plannedMoves(store), [
+      {
+        kind: 'repo-ids',
+        from: 'evidence app/2026-01-01-old',
+        to: 'repo address',
+        auto: false,
+        reason: `notes of a finished task whose ledger is not in the store, of the repo ${repoLabel(key)} (${key}); move them by hand to ${store.archive.evidenceLocation(key, '2026-01-01-old')}`,
+      },
+    ]);
+    assert.match(lineWith(failedWith(convert(h)), '2026-01-01-old'), /^left evidence app\/2026-01-01-old: /);
   });
 }
+
+test('the hint counts a backlog and an active ledger whose repo folder is gone, and not an archive copy whose repo folder is gone', (t) => {
+  const { h, store } = appWorld(t);
+  const gone = path.join(h, 'old/app');
+  store.backlog.write('app', 'later', ledgerText({ slug: 'later', main: gone }));
+  store.active.write('app', 'busy', ledgerText({ slug: 'busy', main: gone }));
+  store.archive.write('app', '2026-01-01-done', ledgerText({ slug: 'done', main: gone }));
+  assert.equal(conversionHint(store), '2 ledgers still use folder names (app); run `ledger store migrate --repo-ids`.');
+  assert.deepEqual(plannedMoves(store), [
+    { kind: 'repo-ids', from: 'backlog app/later', to: 'repo address', auto: false, reason: `its repo folder ${gone} is gone` },
+    { kind: 'repo-ids', from: 'active app/busy', to: 'repo address', auto: false, reason: `its repo folder ${gone} is gone` },
+    { kind: 'repo-ids', from: 'archive app/2026-01-01-done', to: 'repo address', auto: false, reason: `its repo folder ${gone} is gone`, accepted: true },
+  ]);
+  const out = failedWith(convert(h));
+  assert.match(out, kept(1));
+  assert.match(out, /^Moved 0 ledgers; left 2 as they are\.$/m);
+});
+
+test('an archive copy whose main is a folder that is no git repo needs a person: the hint counts it, and a conversion exits 1', (t) => {
+  const { h, store } = appWorld(t);
+  const plain = path.join(h, 'work/plain');
+  mkdirSync(plain, { recursive: true });
+  store.archive.write('plain', '2026-01-01-done', ledgerText({ slug: 'done', main: plain }));
+  assert.equal(conversionHint(store), '1 ledger still uses folder names (plain); run `ledger store migrate --repo-ids`.');
+  assert.deepEqual(plannedMoves(store), [
+    { kind: 'repo-ids', from: 'archive plain/2026-01-01-done', to: 'repo address', auto: false, reason: `its repo folder ${plain} is no longer a git repo, or git did not answer` },
+  ]);
+  failedWith(convert(h));
+});
+
+test('an archive copy whose main is on a disk that is not mounted, or cannot be read, needs a person', (t) => {
+  const { h, store } = appWorld(t);
+  const unmounted = `/Volumes/ledger-test-not-mounted-${process.pid}/app`;
+  store.archive.write('disk', '2026-01-01-done', ledgerText({ slug: 'done', main: unmounted }));
+  const doubled = `/Volumes//ledger-test-not-mounted-${process.pid}/app`;
+  store.archive.write('slash', '2026-01-04-done', ledgerText({ slug: 'done', main: doubled }));
+  const otherHome = path.join(h, 'Users/someone/repos/app/app');
+  store.archive.write('far', '2026-01-03-done', ledgerText({ slug: 'done', main: otherHome }));
+  const locked = path.join(h, 'locked');
+  const hidden = path.join(locked, 'app');
+  mkdirSync(hidden, { recursive: true });
+  store.archive.write('hidden', '2026-01-02-done', ledgerText({ slug: 'done', main: hidden }));
+  chmodSync(locked, 0o000);
+  let reasons: unknown[][];
+  try {
+    reasons = plannedMoves(store).map(({ from, reason, accepted }) => [from, reason, accepted]);
+  } finally {
+    chmodSync(locked, 0o755);
+  }
+  const of = (from: string): unknown[] | undefined => reasons.find((each) => each[0] === from);
+  assert.deepEqual(of('archive disk/2026-01-01-done'), ['archive disk/2026-01-01-done', `its repo folder ${unmounted} is on a disk that is not mounted`, undefined]);
+  assert.equal(of('archive slash/2026-01-04-done')?.[2], undefined);
+  assert.deepEqual(of('archive far/2026-01-03-done'), ['archive far/2026-01-03-done', `its repo folder ${otherHome} is gone`, true]);
+  if (process.getuid?.() !== 0) assert.deepEqual(of('archive hidden/2026-01-02-done'), ['archive hidden/2026-01-02-done', `its repo folder ${hidden} cannot be read (EACCES)`, undefined]);
+});
+
+test('session-start runs no git for an archive copy whose repo folder is gone', (t) => {
+  const { h, store } = appWorld(t);
+  const gone = path.join(h, 'old/app');
+  store.archive.write('app', '2026-01-01-done', ledgerText({ slug: 'done', main: gone }));
+  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  const calls = path.join(h, 'git-calls.log');
+  writeFileSync(path.join(h, 'stub-bin/git'), `#!/bin/sh\necho "$*" >> ${JSON.stringify(calls)}\nexec ${JSON.stringify(realGit)} "$@"\n`, { mode: 0o755 });
+  assert.equal(sessionStart(h), '');
+  assert.ok(existsSync(calls), 'the stub saw no git call at all');
+  assert.doesNotMatch(readFileSync(calls, 'utf8'), new RegExp(gone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('evidence with no ledger under a folder name whose other task moves to a repo in the same run needs a person, in the run as in a later --pending', (t) => {
+  const { h, app, key, store } = appWorld(t);
+  orphanNotes(h, store, 'file');
+  store.backlog.write('app', 'next', ledgerText({ slug: 'next', main: app }));
+  const reason = `notes of a finished task whose ledger is not in the store, of the repo ${repoLabel(key)} (${key}); move them by hand to ${store.archive.evidenceLocation(key, '2026-01-01-old')}`;
+  const planned = plannedMoves(store).find(({ from }) => from === 'evidence app/2026-01-01-old');
+  assert.deepEqual(planned, { kind: 'repo-ids', from: 'evidence app/2026-01-01-old', to: 'repo address', auto: false, reason });
+  assert.equal(lineWith(failedWith(convert(h)), '2026-01-01-old'), `left evidence app/2026-01-01-old: ${reason}`);
+  assert.deepEqual(plannedMoves(store), [planned]);
+});
+
+test('the hint names an alias conflict the conversion finds, though the only ledger under the folder name is kept', (t) => {
+  const { h, app, store } = appWorld(t);
+  store.aliases.add('app', OTHER);
+  store.archive.write('app', '2026-01-01-done', ledgerText({ slug: 'done', main: path.join(h, 'old/app') }));
+  const live = legacyWorktreeLedger(h, app, 'live');
+  writeOldTaskList(h, [{ ...backlogEntry(store, 'app', 'live', app), status: 'active', path: live }]);
+  assert.equal(conversionHint(store), 'The folder name app is an alias of one repo while a task of it is in another; run `ledger store migrate --repo-ids` to see it.');
+  failedWith(convert(h));
+});
+
+test('the hint reads no task list when nothing under a folder name is an archive copy or evidence, as nothing else can be kept', (t) => {
+  const { h, app, store } = appWorld(t);
+  store.backlog.write('app', 'later', ledgerText({ slug: 'later', main: app }));
+  let reads = 0;
+  const watched: LedgerStore = { ...store, oldTaskList: () => (reads++, store.oldTaskList()) };
+  assert.equal(conversionHint(watched), '1 ledger still uses folder names (app); run `ledger store migrate --repo-ids`.');
+  assert.equal(reads, 0);
+  store.archive.write('app', '2026-01-01-done', ledgerText({ slug: 'done', main: path.join(h, 'old/app') }));
+  assert.equal(conversionHint(watched), '1 ledger still uses folder names (app); run `ledger store migrate --repo-ids`.');
+  assert.equal(reads, 1);
+});
+
+test('an archive copy whose main line is . or a path with a note is read by the path: kept when unknown or gone, moved when it is a repo', (t) => {
+  const { h, app, key, store } = appWorld(t);
+  const gone = path.join(h, 'repos/netinfo');
+  store.archive.write('app', '2026-01-01-here', ledgerText({ slug: 'here', main: `${app} (lib fork clone; moved here, operator option 1)` }));
+  store.archive.write('jev', '2026-01-02-dot', ledgerText({ slug: 'dot', main: '.' }));
+  store.archive.write('netinfo', '2026-01-03-noted', ledgerText({ slug: 'noted', main: `${gone} (lib fork clone; moved here, operator option 1)` }));
+  const accepted = plannedMoves(store).filter((move) => move.accepted);
+  assert.deepEqual(accepted.map(({ from, reason }) => [from, reason]), [
+    ['archive jev/2026-01-02-dot', 'its ledger does not say which repo folder it came from'],
+    ['archive netinfo/2026-01-03-noted', `its repo folder ${gone} is gone`],
+  ]);
+  const out = ok(convert(h));
+  assert.match(lineWith(out, '2026-01-01-here'), /^moved archive app\/2026-01-01-here to /);
+  assert.equal(store.archive.has(key, '2026-01-01-here'), true);
+  assert.match(out, kept(2));
+  assert.equal(store.archive.has('jev', '2026-01-02-dot'), true);
+  assert.equal(store.archive.has('netinfo', '2026-01-03-noted'), true);
+});
 
 // --- 28. A storage switch keeps every alias as it is ---
 
@@ -757,15 +927,17 @@ function localRepo(h: string, main: string): string {
   return main;
 }
 
-test('a ledger that names no main and that no record places stays, and its folder name gets no alias', (t) => {
+test('an archive copy that names no main and that no record places is kept, and its folder name gets no alias', (t) => {
   const h = home(t);
   const renamed = repository(h, path.join(h, 'repos/app-renamed'));
   const store = fileStore(ledgerPaths(h));
   store.backlog.write('app', 'x', ledgerText({ slug: 'x', main: renamed }));
   store.archive.write('app', '2026-01-01-bare', ledgerText({ slug: 'bare' }));
-  const out = failedWith(convert(h));
+  const out = ok(convert(h));
   assert.match(lineWith(out, 'backlog app/x'), /^moved/);
-  assert.match(lineWith(out, '2026-01-01-bare'), /^left/);
+  assert.doesNotMatch(out, /2026-01-01-bare/);
+  assert.match(out, kept(1));
+  assert.match(lineWith(out, 'alias'), /^kept no alias for app/);
   assert.equal(store.archive.has('app', '2026-01-01-bare'), true);
   assert.deepEqual([...store.aliases.read()], []);
 });
@@ -797,13 +969,16 @@ test('an archive copy whose folder name fits two checkouts is not moved by an al
 });
 
 for (const storage of ['file', 'sqlite'] as const) {
-  for (const [place, name] of [['backlog', 'foo'], ['archive', '2026-01-01-foo']] as const) {
-    test(`${storage} store: a ${place} ledger whose own main is gone stays, and its folder name gets no alias, in the dry run as in the run`, { skip: storage === 'sqlite' && noSqlite }, (t) => {
+  for (const [place, name, keep] of [['backlog', 'foo', false], ['archive', '2026-01-01-foo', true]] as const) {
+    test(`${storage} store: a ${place} ledger whose own main is gone ${keep ? 'is kept and the run exits 0' : 'stays and the run exits 1'}, and its folder name gets no alias, in the dry run as in the run`, { skip: storage === 'sqlite' && noSqlite }, (t) => {
       const { h, app, key, store } = appWorld(t, storage);
+      const gone = path.join(h, 'old/app');
       store.backlog.write('app', 'bar', ledgerText({ slug: 'bar', main: app }));
-      store[place].write('app', name, ledgerText({ slug: 'foo', main: path.join(h, 'old/app') }));
-      for (const out of [failedWith(convert(h, '--dry-run')), failedWith(convert(h))]) {
-        assert.match(lineWith(out, `${place} app/${name}`), /^left .*is not one any more/);
+      store[place].write('app', name, ledgerText({ slug: 'foo', main: gone }));
+      const finish = keep ? ok : failedWith;
+      for (const out of [finish(convert(h, '--dry-run')), finish(convert(h))]) {
+        if (keep) assert.match(out, kept(1));
+        else assert.equal(lineWith(out, `${place} app/${name}`), `left ${place} app/${name}: its repo folder ${gone} is gone`);
         assert.match(lineWith(out, 'alias'), /^kept no alias for app/);
       }
       assert.equal(store.backlog.has(key, 'bar'), true);
@@ -1010,7 +1185,7 @@ test('evidence left under one folder name is not attached to a copy this run mov
   writeFileSync(path.join(stray, 'red.txt'), 'failing\n');
   const planned = failedWith(convert(h, '--dry-run'));
   const done = failedWith(convert(h));
-  for (const out of [planned, done]) assert.match(lineWith(out, 'evidence b/2026-01-01-old'), /^left evidence b\/2026-01-01-old: no archive copy has its name/);
+  for (const out of [planned, done]) assert.equal(lineWith(out, 'evidence b/2026-01-01-old'), 'left evidence b/2026-01-01-old: notes of a finished task, while a ledger of its name is under a; move them by hand beside it if they are its notes');
   assert.equal(store.archive.has(repoKeyOf(b), '2026-01-01-old'), true);
   assert.deepEqual(store.archive.evidenceFiles(repoKeyOf(b), '2026-01-01-old'), []);
   assert.equal(existsSync(path.join(stray, 'red.txt')), true);

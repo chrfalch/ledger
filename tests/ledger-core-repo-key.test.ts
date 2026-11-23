@@ -414,8 +414,9 @@ for (const storage of ['file', 'sqlite'] as const) {
     assert.match(lineWith(out, '2026-01-02-bare'), /would move/);
     assert.match(lineWith(out, 'dup'), /already/);
     assert.match(lineWith(out, 'idea'), /left/);
-    assert.match(lineWith(out, '2026-01-03-x'), /left/);
+    assert.doesNotMatch(out, /2026-01-03-x/);
     assert.match(lineWith(out, 'alias'), /would record/);
+    assert.match(out, /^would keep 1 finished task under its old repo folder name, as that folder is gone or unknown; ledger store migrate --pending names it\.$/m);
   });
 
   test(`${storage} store: store migrate --repo-ids moves each ledger it can resolve to the repo's new key, with evidence and an alias`, { skip }, (t) => {
@@ -434,7 +435,8 @@ for (const storage of ['file', 'sqlite'] as const) {
     assert.deepEqual([...store.aliases.read()], [['app', key]]);
     assert.match(lineWith(out, 'dup'), /already/);
     assert.match(lineWith(out, 'idea'), /left/);
-    assert.match(lineWith(out, '2026-01-03-x'), /left/);
+    assert.doesNotMatch(out, /2026-01-03-x/);
+    assert.match(out, /^kept 1 finished task under its old repo folder name, as that folder is gone or unknown; ledger store migrate --pending names it\.$/m);
   });
 
   test(`${storage} store: a second store migrate --repo-ids changes nothing`, { skip }, (t) => {

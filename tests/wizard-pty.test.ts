@@ -321,3 +321,25 @@ test('after a deploy, the wizard shows the tasks that stay, with why, and asks n
   assert.match(output, / stays: its heading/);
   assert.doesNotMatch(output, /Run these moves now\?/);
 });
+
+test('after a deploy, the wizard shows no moves when only finished tasks of a gone repo stay under its folder name', { skip }, (t) => {
+  const home = fixtureHome(t);
+  mkdirSync(path.join(home, 'repos'));
+  fileStore(ledgerPaths(home)).archive.write('gone', '2026-10-12-keychain-keys', ledgerText({ slug: 'keychain-keys', main: path.join(home, 'repos/gone') }));
+  const { status, output } = wizard(home, [...DEFAULT_SELECTIONS, answer('Apply these changes?', ENTER)]);
+  assert.equal(status, 0, output);
+  assert.doesNotMatch(output, /Left for you to move|Stored task data to move|keychain-keys/);
+});
+
+test('after a deploy, yes runs the other moves and names no finished task of a gone repo', { skip }, (t) => {
+  const { home, markdownFile } = homeWithUnmovedLedger(t, true);
+  fileStore(ledgerPaths(home)).archive.write('gone', '2026-10-12-keychain-keys', ledgerText({ slug: 'keychain-keys', main: path.join(home, 'repos/gone') }));
+  const { status, output } = wizard(home, [
+    ...DEFAULT_SELECTIONS,
+    answer('Apply these changes?', ENTER),
+    answer('Run these moves now?', ENTER),
+  ]);
+  assert.equal(status, 0, output);
+  assert.equal(existsSync(markdownFile), false);
+  assert.doesNotMatch(output, /keychain-keys|finished task/);
+});

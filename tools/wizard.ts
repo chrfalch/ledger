@@ -233,7 +233,8 @@ function checkMoves(home: string): PendingMove[] | undefined {
 /** After a deploy, which moved the .claude/ledger.md files already. Gives the status of the moves, 0 when none ran. */
 async function offerMoves(): Promise<number> {
   const home = homedir();
-  const moves = checkMoves(home);
+  // A finished task whose repo folder is gone needs nothing, so a deploy does not name it again each time.
+  const moves = checkMoves(home)?.filter(({ accepted }) => !accepted);
   if (moves === undefined || moves.length === 0) return 0;
   showMoves(moves);
   if (!canRun(moves)) return 0;
@@ -242,7 +243,7 @@ async function offerMoves(): Promise<number> {
     log.info(MIGRATE_HINT);
     return 0;
   }
-  return runMoves(home);
+  return runMoves(home, { showAccepted: false });
 }
 
 async function migrateWizard(): Promise<number> {

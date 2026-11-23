@@ -1,10 +1,11 @@
+import { statSync } from 'node:fs';
 import path from 'node:path';
 import { exists, isEntryName } from './files.js';
 import { parseLedger } from './format.js';
 import { mainCheckout } from './git.js';
 import { mainOfTaskWorktree, realPath, samePath } from './paths.js';
 import { repoKey, repoLabel } from './repo-key.js';
-import type { OnMove } from './pending.js';
+import type { Move, OnMove } from './pending.js';
 import type { LedgerStore, StoredLedger } from './store.js';
 import { parseOldTaskList, type OldTaskListEntry } from './unmoved.js';
 import { joined, plural } from './views.js';
@@ -13,8 +14,10 @@ import { joined, plural } from './views.js';
 
 export const places = ['backlog', 'active', 'archive'] as const;
 export type Place = (typeof places)[number];
-/** Where a ledger goes, or why it stays: no key for it is sure. */
-type Outcome = { to: string } | { left: string };
+/** Why a ledger stays: no key for it is sure; `noRepo` when its repo is gone or unknown. */
+type Left = { left: string; noRepo?: true };
+/** Where a ledger goes, or why it stays. */
+type Outcome = { to: string } | Left;
 type Moved = { repo: string; location: string };
 
 /** A key from before D10: the folder name of a main checkout. Every D10 key, an address or a path, holds a slash. */
@@ -50,6 +53,28 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 
 const taken = (key: string, name: string): string => `${shown(key)} already has ${name}`;
 
+const itemName = (place: Place | 'evidence', old: string, name: string): string => `${place} ${old}/${name}`;
+const ALIAS = 'alias ';
+
+const MOUNT_DEPTH: Record<string, number> = { Volumes: 3, mnt: 3, media: 4 };
+
+/** The root of the removable or network disk that holds `file`, by its path alone: /Volumes/<disk>, /mnt/<disk> or /media/<user>/<disk>. */
+function volumeRoot(file: string): string | undefined {
+  const parts = path.normalize(file).split('/');
+  const depth = MOUNT_DEPTH[parts[1]];
+  return depth === undefined || parts.length < depth ? undefined : parts.slice(0, depth).join('/');
+}
+
+/** The code `stat` fails with for `file`, or undefined when it is there. */
+function statError(file: string): string | undefined {
+  try {
+    statSync(file);
+    return undefined;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code ?? 'an error';
+  }
+}
+
 /**
  * Moves the ledger `name` of `place` from the repo key `old` to `to`, with an archive copy's evidence, or with `dryRun`
  * checks that it would, by the store's own checks. Gives why it stays where it is, or undefined when it moved.
@@ -71,17 +96,28 @@ export function withHint(store: LedgerStore, message: string): string {
   return hint === undefined ? message : `${message} ${hint}`;
 }
 
-/** What the store still keeps under folder names: its ledgers and evidence with no archive copy, each by the folder name it is under. */
-function leftUnderFolderNames(store: LedgerStore): { ledgers: string[]; evidence: string[] } {
-  return {
-    ledgers: places.flatMap((place) => store[place].repos().filter(isFolderName).flatMap((repo) => store[place].list(repo).map(() => repo))),
-    evidence: store.archive.orphanEvidence().flatMap(({ repo }) => (isFolderName(repo) ? [repo] : [])),
-  };
+type Item = { repo: string; what: string; finished: boolean };
+
+/**
+ * What the store still keeps under folder names: its ledgers and evidence with no archive copy, each by the folder name
+ * it is under, and the folder names whose alias a task contradicts.
+ */
+function leftUnderFolderNames(store: LedgerStore): { ledgers: string[]; evidence: string[]; conflicts: string[] } {
+  const ledgers = places.flatMap((place) => store[place].repos().filter(isFolderName).flatMap((repo) => store[place].list(repo).map(({ name }) => ({ repo, what: itemName(place, repo, name), finished: place === 'archive' }))));
+  const evidence = store.archive.orphanEvidence().flatMap(({ repo, name }) => (isFolderName(repo) ? [{ repo, what: itemName('evidence', repo, name), finished: true }] : []));
+  const moves: Move[] = [];
+  // Only a finished task can be accepted, and only the conversion's own dry run knows which is: that takes git and the
+  // old task list, too slow for every session start when nothing could be.
+  if ([...ledgers, ...evidence].some(({ finished }) => finished)) migrateRepoIds(store, { dryRun: true }, () => {}, (move) => void moves.push(move));
+  const accepted = new Set(moves.flatMap(({ from, accepted }) => (accepted ? [from] : [])));
+  const kept = (items: Item[]): string[] => items.flatMap(({ repo, what }) => (accepted.has(what) ? [] : [repo]));
+  const conflicts = moves.flatMap(({ from, auto }) => (!auto && from.startsWith(ALIAS) ? [from.slice(ALIAS.length)] : []));
+  return { ledgers: kept(ledgers), evidence: kept(evidence), conflicts };
 }
 
 /** What the operator should fix in the store's repo keys: what is still kept under folder names, and aliases it ignores. */
 export function conversionHint(store: LedgerStore): string | undefined {
-  const { ledgers, evidence } = leftUnderFolderNames(store);
+  const { ledgers, evidence, conflicts } = leftUnderFolderNames(store);
   const kinds: [repos: string[], one: string, many: string][] = [
     [ledgers, 'ledger', 'ledgers'],
     [evidence, 'evidence folder', 'evidence folders'],
@@ -90,7 +126,12 @@ export function conversionHint(store: LedgerStore): string | undefined {
   const count = ledgers.length + evidence.length;
   const old = [...new Set([...ledgers, ...evidence])].sort();
   const legacy = count === 0 ? undefined : `${joined(counts)} still use${count === 1 ? 's' : ''} folder names (${old.join(', ')}); run \`ledger store migrate --repo-ids\`.`;
-  const hints = [legacy, store.aliases.problem()].filter((hint) => hint !== undefined);
+  const one = conflicts.length === 1;
+  const contradicted =
+    conflicts.length === 0
+      ? undefined
+      : `The folder name${one ? '' : 's'} ${joined(conflicts)} ${one ? 'is an alias' : 'are aliases'} of one repo while a task of ${one ? 'it' : 'each'} is in another; run \`ledger store migrate --repo-ids\` to see ${one ? 'it' : 'them'}.`;
+  const hints = [legacy, contradicted, store.aliases.problem()].filter((hint) => hint !== undefined);
   return hints.length === 0 ? undefined : hints.join('\n');
 }
 
@@ -109,14 +150,18 @@ export function conversionHint(store: LedgerStore): string | undefined {
  * counts for the alias too: a ledger an earlier run moved, and the checkout of an active entry while its ledger is there.
  * An alias map that cannot be read stops the run before anything moves, in a dry run too.
  *
+ * A finished task it leaves because its repo folder is not on disk or is unknown is accepted: an archive copy, or
+ * evidence of a folder name that is no alias and whose ledger is nowhere in the store. Nobody can or needs to move it,
+ * so it is no failure, and one line counts them all.
+ *
  * `store` is undefined for a database that is not there. Prints one line per step to `line`, gives `onMove` each ledger,
  * evidence folder and alias conflict, and returns how many ledgers, evidence folders and alias conflicts it left, or
- * with `dryRun` would leave, under a folder name.
+ * with `dryRun` would leave, under a folder name for a person to move.
  */
 export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dryRun: boolean }, line: (text: string) => void, onMove?: OnMove): number {
   line(`Convert repo keys from folder names to repo addresses${dryRun ? ' · dry run, nothing changed' : ''}`);
-  const report = (from: string, to: string, reason?: string): void =>
-    onMove?.({ kind: 'repo-ids', from, to, auto: reason === undefined, ...(reason === undefined ? {} : { reason }) });
+  const report = (from: string, to: string, reason?: string, accepted = false): void =>
+    onMove?.({ kind: 'repo-ids', from, to, auto: reason === undefined, ...(reason === undefined ? {} : { reason }), ...(accepted ? { accepted } : {}) });
   const act = (done: string, planned: string): string => (dryRun ? `would ${planned}` : done);
   const nothing = (): number => (line(`${dryRun ? 'Would move' : 'Moved'} 0 ledgers; nothing uses a folder name.`), 0);
   if (store === undefined) return nothing();
@@ -145,14 +190,26 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
   const keys = new Map<string, string | undefined>();
   const keyOf = (main: string): string | undefined => {
     if (!keys.has(main)) {
-      // A folder that is no main checkout any more may sit inside another repo, whose key it must not take.
-      const checkout = mainCheckout(main);
+      // A folder that is not there needs no git, which keeps the hint's dry run cheap where the repos are gone.
+      // One that is no main checkout any more may sit inside another repo, whose key it must not take.
+      const checkout = exists(main) ? mainCheckout(main) : undefined;
       keys.set(main, checkout !== undefined && samePath(checkout, main) ? repoKey(checkout) : undefined);
     }
     return keys.get(main);
   };
   const aliases = store.aliases.read();
-  const gone = (main: string): Outcome => ({ left: `its main checkout ${main} is not one any more` });
+  /**
+   * Why a ledger whose main has no key stays. A folder that is not there is gone, unless it is on a disk that is not
+   * mounted; a whole missing home is the usual case on another machine. A folder that is there may be a git lookup that failed.
+   */
+  const noKey = (main: string): Left => {
+    const error = statError(main);
+    if (error === undefined) return { left: `its repo folder ${main} is no longer a git repo, or git did not answer` };
+    if (error !== 'ENOENT') return { left: `its repo folder ${main} cannot be read (${error})` };
+    const volume = volumeRoot(main);
+    if (volume !== undefined && statError(volume) !== undefined) return { left: `its repo folder ${main} is on a disk that is not mounted` };
+    return { left: `its repo folder ${main} is gone`, noRepo: true };
+  };
   const ownerless = (old: string): Outcome => {
     const candidates = [...new Map(recorded.filter((main) => path.basename(main) === old).map((main) => [realPath(main), main])).values()];
     const found = new Set(candidates.map(keyOf));
@@ -160,17 +217,17 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
     if (candidates.length === 0) {
       // An earlier run decided it, from records that may have moved on since: the ledgers it moved.
       const saved = aliases.get(old);
-      return saved === undefined ? { left: 'it names no main checkout, and no record names one' } : { to: saved };
+      return saved === undefined ? { left: 'its ledger does not say which repo folder it came from', noRepo: true } : { to: saved };
     }
     if (found.size === 1 && key !== undefined) return { to: key };
-    if (candidates.length === 1) return gone(candidates[0]);
+    if (candidates.length === 1) return noKey(candidates[0]);
     return { left: `ambiguous: ${old} was the folder name of ${candidates.length} checkouts, ${candidates.join(', ')}` };
   };
   const ledgerOutcome = (old: string, text: string): Outcome => {
     const own = namedMain(text);
     if (own === undefined) return ownerless(old);
     const key = keyOf(own);
-    return key === undefined ? gone(own) : { to: key };
+    return key === undefined ? noKey(own) : { to: key };
   };
   /** The key an active entry of the old task list says its folder name stands for, when it says one. */
   const activeTarget = (entry: OldTaskListEntry): string | undefined => {
@@ -199,7 +256,25 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
       return main !== undefined && path.basename(main) === old && keyOf(main) === repo;
     });
     const [key] = found;
-    if (key === undefined) return { left: 'no archive copy has its name' };
+    if (key === undefined) {
+      // A copy of its name under any key, a folder name too, may be its ledger, which a person can still bring it to.
+      const holders = store.archive.repos().filter((repo) => store.archive.has(repo, name));
+      if (holders.length > 0) {
+        const where = joined(holders.map((repo) => (isFolderName(repo) ? repo : shown(repo))));
+        return { left: `notes of a finished task, while a ledger of its name is under ${where}; move them by hand beside it if they are its notes` };
+      }
+      // The repo of its folder name is known once an alias names it, also one this run records for the ledgers it moves.
+      const owners = [...new Set([
+        aliases.get(old),
+        ...(outcomes.get(old) ?? []).map(({ outcome }) => ('to' in outcome ? outcome.to : undefined)),
+        ...resumed.flatMap((each) => (each.old === old ? [each.key] : [])),
+      ].filter((key) => key !== undefined))];
+      const notes = 'notes of a finished task whose ledger is not in the store';
+      const [owner] = owners;
+      if (owner === undefined) return { left: notes, noRepo: true };
+      if (owners.length > 1) return { left: `${notes}, of one of the repos ${owners.map(shown).join(', ')}; move them by hand to the right one` };
+      return { left: `${notes}, of the repo ${shown(owner)}; move them by hand to ${store.archive.evidenceLocation(owner, name)}` };
+    }
     if (found.length > 1) return { left: `ambiguous: ${found.length} repos have a copy of its name from a checkout named ${old}, ${found.map(shown).join(', ')}` };
     const other = [...aliases].find(([folder, to]) => folder !== old && to === key)?.[0];
     if (other !== undefined) return { left: `ambiguous: its copy in ${shown(key)} may have moved there from ${other}, an alias of that repo too` };
@@ -225,25 +300,28 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
     return entries.some((other) => entryLocation(other) === to) ? undefined : { repo: key, location: to };
   };
   // Planned before anything moves, so a dry run plans what the run does: a ledger this run moves is no sign of an earlier run.
-  const strays = orphans.map((orphan) => ({ ...orphan, outcome: strayOutcome(orphan.repo, orphan.name) }));
+  const outcomes = new Map([...filed].map(([old, list]) => [old, list.map((each) => ({ ...each, outcome: ledgerOutcome(old, each.ledger.text) }))]));
   const resumed = legacyEntries.flatMap((entry) => {
     const moved = earlierMove(entry);
     return moved === undefined ? [] : [{ old: entry.repo, key: moved.repo }];
   });
+  const strays = orphans.map((orphan) => ({ ...orphan, outcome: strayOutcome(orphan.repo, orphan.name) }));
 
   const reserved = new Set<string>();
-  let [moved, left] = [0, 0];
-  const leave = (what: string, why: string): void => {
-    left++;
-    line(`left ${what}: ${why}`);
-    report(what, 'repo address', why);
+  let [moved, left, kept] = [0, 0, 0];
+  const leave = (what: string, outcome: Left, finished: boolean): void => {
+    const accepted = finished && outcome.noRepo === true;
+    if (accepted) kept++;
+    else left++;
+    if (!accepted) line(`left ${what}: ${outcome.left}`);
+    report(what, 'repo address', outcome.left, accepted);
   };
   /** Moves `name` of `place` from `old` to `to`, or in a dry run checks that it would, by the store's own checks; says why not. */
   const moves = (place: Place, old: string, name: string, to: string, what: string): boolean => {
     const slot = `${place}\0${to}\0${name}`;
     const why = reserved.has(slot) ? taken(to, name) : moveLedger(store, place, { old, name, to }, dryRun);
     if (why !== undefined) {
-      leave(what, why);
+      leave(what, { left: why }, false);
       return false;
     }
     reserved.add(slot);
@@ -251,14 +329,14 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
   };
 
   for (const old of olds) {
-    const ledgers = (filed.get(old) ?? []).map((each) => ({ ...each, outcome: ledgerOutcome(old, each.ledger.text) }));
+    const ledgers = outcomes.get(old) ?? [];
     const actives = legacyEntries.filter(({ repo, status }) => repo === old && status === 'active').flatMap((entry) => activeTarget(entry) ?? []);
     const saved = aliases.get(old);
 
     const movedTo = new Map<string, Moved>();
     for (const { place, ledger, outcome } of ledgers) {
-      const what = `${place} ${old}/${ledger.name}`;
-      if ('left' in outcome) leave(what, outcome.left);
+      const what = itemName(place, old, ledger.name);
+      if ('left' in outcome) leave(what, outcome, place === 'archive');
       else if (moves(place, old, ledger.name, outcome.to, what)) {
         moved++;
         movedTo.set(ledger.location, { repo: outcome.to, location: store[place].location(outcome.to, ledger.name) });
@@ -267,8 +345,8 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
       }
     }
     for (const { name, outcome } of strays.filter(({ repo }) => repo === old)) {
-      const what = `evidence ${old}/${name}`;
-      if ('left' in outcome) leave(what, outcome.left);
+      const what = itemName('evidence', old, name);
+      if ('left' in outcome) leave(what, outcome, true);
       else if (moves('archive', old, name, outcome.to, what)) {
         movedTo.set(store.archive.location(old, name), { repo: outcome.to, location: store.archive.location(outcome.to, name) });
         line(`${act('moved', 'move')} ${what} to ${shown(outcome.to)}, where a stopped run moved its archive copy`);
@@ -283,7 +361,7 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
     if (saved !== undefined && elsewhere !== undefined) {
       left++;
       line(`kept the alias ${old} of ${shown(saved)} as it is, though a task of ${old} is in ${shown(elsewhere)}; an alias is never changed`);
-      report(`alias ${old}`, shown(elsewhere), `it is an alias of ${shown(saved)}, and an alias is never changed`);
+      report(`${ALIAS}${old}`, shown(elsewhere), `it is an alias of ${shown(saved)}, and an alias is never changed`);
     } else if (saved === undefined && movedKeys.size > 0) {
       if (ledgers.some(({ outcome }) => 'left' in outcome)) line(`kept no alias for ${old}: the repo of a ledger left under it is not known`);
       else if (targets.size > 1) line(`kept no alias for ${old}: its tasks are in ${plural(targets.size, 'repo')}`);
@@ -292,6 +370,10 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
         line(`${act('recorded', 'record')} ${old} as an alias of ${shown(target)}`);
       }
     }
+  }
+  // One line for them all: they need nobody, and `--pending` names each.
+  if (kept > 0) {
+    line(`${act('kept', 'keep')} ${plural(kept, 'finished task')} under ${kept === 1 ? 'its' : 'their'} old repo folder name, as that folder is gone or unknown; ledger store migrate --pending names ${kept === 1 ? 'it' : 'them'}.`);
   }
   line(`${dryRun ? 'Would move' : 'Moved'} ${plural(moved, 'ledger')}; ${dryRun ? 'would leave' : 'left'} ${left} as ${left === 1 ? 'it is' : 'they are'}.`);
   return left;

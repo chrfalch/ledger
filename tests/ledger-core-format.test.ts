@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { isNewSlug, isReadableSlug, parseLedger, serializeLedger } from '../tools/ledger/format.js';
 import { ledgerText } from './ledger-core-fixtures.js';
 import { REPO } from './helpers.js';
@@ -84,6 +85,39 @@ test('a parent in the same repo has no main; a backlog ledger has a main line', 
   assert.equal(location.main, '/repos/app');
   assert.equal(location.parent?.slug, 'epic');
   assert.equal(location.parent?.main, undefined);
+});
+
+test('a main line that is no folder drops all from its first " (" when it ends in ")", and keeps parentheses that do not end it', () => {
+  const main = (value: string): string | undefined => parseLedger(ledgerText({ slug: 'idea', main: value })).location.main;
+  assert.equal(main('/repos/netinfo/netinfo (lib fork clone; moved here 2026-10-27, operator option 1)'), '/repos/netinfo/netinfo');
+  assert.equal(main('/repos/r (fork (legacy))'), '/repos/r');
+  assert.equal(main('/repos/old (2025)/app'), '/repos/old (2025)/app');
+  assert.equal(main('/repos/old (2025)/app (renamed)'), '/repos/old');
+});
+
+test('a main line that is a folder whose name ends in parentheses keeps them; a missing one drops the note', (t: TestContext) => {
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'ledger-main-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const engine = path.join(root, 'engine (legacy)');
+  mkdirSync(engine);
+  const main = (value: string): string | undefined => parseLedger(ledgerText({ slug: 'idea', main: value })).location.main;
+  assert.equal(main(engine), engine);
+  assert.equal(main(path.join(root, 'x (note; moved here 2026-10-27)')), path.join(root, 'x'));
+  const locked = path.join(root, 'locked');
+  mkdirSync(locked);
+  const hidden = path.join(locked, 'engine (legacy)');
+  chmodSync(locked, 0o000);
+  try {
+    if (process.getuid?.() !== 0) assert.equal(main(hidden), hidden, 'a folder that cannot be read may be there');
+  } finally {
+    chmodSync(locked, 0o755);
+  }
+});
+
+test('a main line that is no absolute path, such as . or repos/app, names no main', () => {
+  for (const value of ['.', 'repos/app', '. (the repo itself)']) {
+    assert.equal(parseLedger(ledgerText({ slug: 'idea', main: value })).location.main, undefined, value);
+  }
 });
 
 test('a parent line outside ## Location is not the parent', () => {

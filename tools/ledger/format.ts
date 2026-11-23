@@ -1,3 +1,5 @@
+import { statSync } from 'node:fs';
+
 // Not starting with a dot, so a slug never names ., .. or a hidden folder when it becomes a worktree folder.
 const READABLE_SLUG = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
 const NEW_SLUG = /^[a-z0-9][a-z0-9-]*$/;
@@ -38,6 +40,8 @@ export type Location = {
   branch?: string;
   base?: { ref: string; commit?: string };
   main?: string;
+  /** The line of `- main:`, also when its value names no main. */
+  mainLine?: number;
   parent?: TaskRef & { line: number };
   claim?: Claim;
   state?: string;
@@ -237,6 +241,27 @@ function findSections(plain: string[]): Section[] {
   }));
 }
 
+/**
+ * A `- main:` value, without the note in parentheses people add at its end: all from its first ` (`, notes in notes too.
+ * The whole value stays when it is a folder on disk, as `engine (legacy)` can be. A path that is not absolute, such as
+ * `.`, names no main.
+ */
+/** Only a path stat says is not there; one it cannot read may be there. */
+function isMissing(file: string): boolean {
+  try {
+    statSync(file);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
+function mainPath(value: string): string | undefined {
+  const bare = value.replace(/\s+\(.*\)$/, '');
+  const main = bare === value || !isMissing(value) ? value : bare;
+  return main.startsWith('/') ? main : undefined;
+}
+
 function parseLocation(plain: string[], range: number[]): Location {
   const location: Location = {};
   const lost: string[] = [];
@@ -244,7 +269,12 @@ function parseLocation(plain: string[], range: number[]): Location {
     const [, name, raw] = FIELD.exec(plain[index].trim()) ?? [];
     const value = raw?.trim();
     if (name === undefined || !value || value.startsWith('<')) continue;
-    if (name === 'worktree' || name === 'host' || name === 'branch' || name === 'main') location[name] ??= value;
+    if (name === 'main' && location.mainLine === undefined) {
+      location.mainLine = index;
+      const main = mainPath(value);
+      if (main !== undefined) location.main = main;
+    }
+    else if (name === 'worktree' || name === 'host' || name === 'branch') location[name] ??= value;
     else if (name === 'base' && location.base === undefined) {
       const [ref, commit] = value.split(/[ \t]+@[ \t]+/);
       location.base = commit === undefined ? { ref } : { ref, commit };

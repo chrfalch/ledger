@@ -628,7 +628,7 @@ export async function main(argv: string[]): Promise<number> {
     .addOption(new Option('--to <storage>', 'the storage to move the ledgers to').choices(STORAGES))
     .addOption(new Option('--from <storage>', 'the storage to move the ledgers from; by default the one "storage" names, and when that is --to, the other of file and sqlite').choices(STORAGES))
     .addOption(
-      new Option('--repo-ids', "file each ledger kept under a repo's folder name under the repo's address, or its path without a remote, and keep the folder name as an alias").conflicts(['to', 'from']),
+      new Option('--repo-ids', "file each ledger kept under a repo's folder name under the repo's address, or its path without a remote, and keep the folder name as an alias; a finished task whose repo folder is gone or unknown stays as it is and does not make it exit 1").conflicts(['to', 'from']),
     )
     .addOption(new Option('--records', 'rewrite each backlog and archive ledger kept as Markdown as a task record').conflicts(['to', 'from', 'repoIds']))
     .addOption(new Option('--active', 'move the .claude/ledger.md of each linked worktree into an active record').conflicts(['to', 'from', 'repoIds', 'records']))
@@ -637,7 +637,7 @@ export async function main(argv: string[]): Promise<number> {
     .addOption(
       new Option('--pending', 'list each task --repo-ids, --active and --records would move, or would leave and why').conflicts(['to', 'from', 'repoIds', 'records', 'active', 'removeSource', 'dryRun']),
     )
-    .option('--json', 'with --pending, print one JSON object: {"moves":[{"kind","from","to","auto","reason"},...]}')
+    .option('--json', 'with --pending, print one JSON object: {"moves":[{"kind","from","to","auto","reason","accepted"},...]}; "accepted" is true for a task left that needs nobody')
     .addHelpText(
       'after',
       [
