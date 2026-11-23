@@ -614,6 +614,19 @@ export const register: Register = (on, options) => {
     return asked
   })
 
+  // T3 starts a message queued with fresh context as a new run of the thread once this turn ends; that run is the cleared
+  // session. A send T3 refused queues nothing, so the turn end clears as before and the operator types `go <slug>`.
+  on('tool.call', { tool: 'mcp__t3-code__t3_thread_send' }, async ($, e, next) => {
+    const sent = await next(e)
+    if (e.agentId !== undefined || sent.deny !== undefined || sent.isError === true) return sent
+    const { value } = await $.state.get(armed)
+    const continues = value?.mode === 'next' || value?.mode === 'go'
+    if (continues && value.typed && e.mode === 'queue' && e.freshContext === true && typeof e.message === 'string' && e.message.trim() === `go ${value.slug}`) {
+      await $.state.set(armed, { ...value, queued: true })
+    }
+    return sent
+  }).catch(async ($, e, next) => next(e))
+
   // The first word names another task only when a live task of this repo has that slug; otherwise it is part of the reason. A slug of
   // another task with no reason is a mistake, not this task's reason.
   on('command.run', { command: 'ledger:park' }, async ($, e, next) => {
@@ -672,12 +685,15 @@ export const register: Register = (on, options) => {
       return next(e)
     }
     await $.state.set(armed, null)
-    if (e.reason !== 'answer') return next(e)
+    // T3 starts a queued run even after a turn cut short, and that run needs the claims released.
+    const queued = (value.mode === 'next' || value.mode === 'go') && value.queued === true
+    if (e.reason !== 'answer' && !queued) return next(e)
     // go.md creates the task only when the conversation shows what it is; without a ledger, `go <slug>` would find nothing.
     if (value.mode === 'go' && 'isNew' in value) {
       const made = await hasTask($, value.slug, value.main)
       if (made !== true) {
-        await $.ui.log(made === false ? notCreatedMessage(value.slug) : notCheckedMessage(value.slug, made.error))
+        const why = made === false ? notCreatedMessage(value.slug) : notCheckedMessage(value.slug, made.error)
+        await $.ui.log(queued ? `${why} The queued "go ${value.slug}" still runs; stop it in T3.` : why)
         return next(e)
       }
     }
@@ -693,6 +709,10 @@ export const register: Register = (on, options) => {
     await releaseClaims($)
     // A release that failed leaves that claim live; the new session's go prompt takes it over.
     if (value.mode === 'go') await $.state.set(handover, { slug: value.slug, from: value.sessionId }).catch(() => undefined)
+    if ((value.mode === 'next' || value.mode === 'go') && value.queued) {
+      if (value.previous) await showRetireHint($, value.previous, value.mode === 'next')
+      return next(e)
+    }
     const go = `go ${value.slug}`
     const continues = value.mode === 'next' || value.mode === 'go'
     try {
