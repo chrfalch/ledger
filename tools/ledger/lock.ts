@@ -70,6 +70,9 @@ export type LockOptions = {
   keepWhileRunning?: boolean;
 };
 
+export const lockFile = (target: string): string => `${target}.lock`;
+export const reclaimGuard = (file: string): string => `${file}.reclaim`;
+
 /**
  * Removes `file`, a lock or a reclaim guard, while it still holds `text`, and true; false, with nothing done, while
  * another process holds its guard `<file>.reclaim`. Either is only made by an exclusive create, with a unique text, and
@@ -78,7 +81,7 @@ export type LockOptions = {
  * same way, under a guard of its own; so of the processes that find it, only one removes it, and only that guard.
  */
 function removeIfStill(file: string, text: string): boolean {
-  const guard = `${file}.reclaim`;
+  const guard = reclaimGuard(file);
   const mine = holderText();
   if (!createFile(guard, mine)) {
     const held = lockText(guard);
@@ -143,7 +146,7 @@ function holding<T>(lock: string, mine: string, work: () => T): T {
  * taken over; so is one older than a minute, unless `keepWhileRunning`.
  */
 export function withLock<T>(target: string, work: () => T, options: LockOptions = {}): T {
-  const lock = `${target}.lock`;
+  const lock = lockFile(target);
   const taken = take(lock, options);
   if (typeof taken !== 'string') {
     const by = taken.holder === undefined ? '' : ` held by process ${taken.holder.pid} since ${taken.holder.since}`;
@@ -154,7 +157,7 @@ export function withLock<T>(target: string, work: () => T, options: LockOptions 
 
 /** Runs `work` under `<target>.lock` when no other process holds it, and gives its result; 'busy' at once otherwise. */
 export function withLockIfFree<T>(target: string, work: () => T, { keepWhileRunning }: Pick<LockOptions, 'keepWhileRunning'> = {}): { value: T } | 'busy' {
-  const lock = `${target}.lock`;
+  const lock = lockFile(target);
   const taken = take(lock, { waitMs: 0, keepWhileRunning });
   return typeof taken === 'string' ? holding(lock, taken, () => ({ value: work() })) : 'busy';
 }
