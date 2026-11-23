@@ -55,9 +55,10 @@ is a note and is kept as it is.
 ### The ledger command
 
 `tools/ledger/cli.ts` defines the commands with `commander`. `bin/ledger` runs
-it. `bin/ledger` checks for Node 20.12 or later and runs `npm ci` when the
-dependencies are missing. For `ledger hook` it installs nothing: it prints
-the problem to stderr and exits 0, so the tool call goes ahead. The commands
+it. `bin/ledger` checks for Node 20.12 or later and exits 1 on an older
+version, for `ledger hook` too. It runs `npm ci` when the dependencies are
+missing. For `ledger hook` it installs nothing: it reports the missing
+dependencies on stderr and exits 0, so the tool call goes ahead. The commands
 are grouped by what they change (D30 in LLP 0001).
 `ledger --help` lists the groups, and `ledger <group> --help` the commands of
 each:
@@ -543,7 +544,10 @@ Then it does these steps:
 4. Deletes the merged branch and the worktree's Xcode build folders.
 5. Removes the active record. It comes after every other change to the task, so a retire that stops early
    leaves the task for a plain rerun to find and finish.
-6. Updates the task list.
+
+The task list is a query over the task records, so removing the active
+record, or the backlog ledger, also takes the task off the list. No step
+updates the list itself.
 
 An archive copy is never replaced. `Archive.write` throws when the name is
 taken.
