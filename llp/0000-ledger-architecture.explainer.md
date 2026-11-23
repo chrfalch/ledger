@@ -712,6 +712,18 @@ path in the manifest and restores the files of the newest backup. It leaves
 the plugin and `core.hooksPath` in place, and prints the commands that remove
 them.
 
+**Linked worktrees.** Every link points into the checkout deploy runs from.
+Retiring a task deletes its worktree, so a deploy from a linked worktree would
+leave every link dangling. `tools/deploy.ts` therefore refuses there, in one
+line that names the main checkout: the folder that holds the git common folder.
+It refuses before the wizard and for every flag but `--help` and `--migrate`,
+which link nothing. `--from-worktree` deploys anyway and warns that retiring
+the task breaks the links. `DEPLOY_FROM_WORKTREE=1` does the same without the
+warning; it is for the tests, which may run in a worktree. When the
+worktree that `ledger task retire` removes holds the target of
+`~/.claude/bin/ledger` or `~/.local/bin/ledger`, retire warns, in its dry run
+too, and names the deploy to run from the main checkout. It still retires.
+
 **Git hook chain.** Unless `--no-githooks`, deploy links `githooks/_chain`
 into `~/.config/git/hooks/`, once under its own name and once for each git
 hook name. When `core.hooksPath` is not set, it sets it globally to that

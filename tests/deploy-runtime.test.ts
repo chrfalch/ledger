@@ -237,6 +237,27 @@ test('bin/deploy pulls new upstream commits on an empty answer', (t) => {
   assert.ok(result.stdout.includes(deployed), result.stdout);
 });
 
+test('bin/deploy offers no pull in a linked worktree, which deploy refuses', (t) => {
+  const { repo, env, git } = pullCheckRepo(t);
+  const worktree = path.join(path.dirname(repo), 'task worktree');
+  git(repo, 'worktree', 'add', '--track', '-b', 'task', worktree, 'origin/main');
+  symlinkSync(path.join(REPO, 'node_modules'), path.join(worktree, 'node_modules'));
+  const before = git(worktree, 'rev-parse', 'HEAD');
+  for (const [args, extra] of [[[], {}], [['--from-worktree'], {}], [[], { DEPLOY_FROM_WORKTREE: '1' }]] as const) {
+    const result = spawnSync(path.join(worktree, 'bin/deploy'), args, {
+      cwd: worktree,
+      env: { ...env, DEPLOY_FROM_WORKTREE: undefined, ...extra },
+      input: 'n\n',
+      encoding: 'utf8',
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    const offered = result.stdout.includes('Pull before deploying?');
+    assert.equal(offered, args.length > 0 || 'DEPLOY_FROM_WORKTREE' in extra, result.stdout);
+  }
+  assert.equal(git(worktree, 'rev-parse', 'HEAD'), before);
+});
+
 test('bin/deploy continues without pulling when declined', (t) => {
   const { repo, git, initialHead, deploy, deployed } = pullCheckRepo(t);
   const result = deploy('n\n');
