@@ -103,6 +103,8 @@
       "Bash(ledger task release:*)",
       "Bash(ledger task park:*)",
       "Bash(ledger task unpark:*)",
+      "Bash(ledger task block:*)",
+      "Bash(ledger task unblock:*)",
       "Bash(ledger task show:*)",
       "Bash(ledger task list:*)",
       "Bash(ledger task archive:*)",

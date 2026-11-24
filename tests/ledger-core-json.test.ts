@@ -58,7 +58,7 @@ function bigFile(file: string): void {
 
 test('every command with --json prints one {"ok":false,"error"} object for an unknown option, and exits non-zero', (t) => {
   const { h, app } = setup(t);
-  for (const command of [['list'], ['task', 'archive'], ['tree', 'show', 'x'], ['tree', 'order', 'x', 'y'], ['tree', 'depends', 'x'], ['go', 'x'], ['task', 'new', 'x'], ['task', 'park', 'x', '--reason', 'r'], ['task', 'unpark', 'x'], ['task', 'claim', 'x'], ['task', 'retire'], ['worktrees'], ['worktrees', 'prune'], ['worktrees', 'auto-prune'], ['session']]) {
+  for (const command of [['list'], ['task', 'archive'], ['tree', 'show', 'x'], ['tree', 'order', 'x', 'y'], ['tree', 'depends', 'x'], ['go', 'x'], ['task', 'new', 'x'], ['task', 'park', 'x', '--reason', 'r'], ['task', 'unpark', 'x'], ['task', 'block', 'x', '--on', 'o'], ['task', 'unblock', 'x'], ['task', 'claim', 'x'], ['task', 'retire'], ['worktrees'], ['worktrees', 'prune'], ['worktrees', 'auto-prune'], ['session']]) {
     const ran = ledger(h, app, ...command, '--json', '--bogus');
     assert.notEqual(ran.status, 0, command.join(' '));
     refused(ran, /--bogus/, ran.status ?? 1);
@@ -463,6 +463,20 @@ test('park and unpark --json report the marker; an unknown task fails', (t) => {
   assert.deepEqual(done(json(h, app, 'task', 'unpark', 'epic')), { ok: true, slug: 'epic', main: app, ledger: file, unparked: false });
   refused(json(h, app, 'task', 'park', 'ghost', '--reason', 'x'), /ghost/);
   refused(json(h, app, 'task', 'unpark', 'ghost'), /ghost/);
+});
+
+test('block and unblock --json report the blocked status; a refused move and an unknown task fail', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  const blocked = done(json(h, app, 'task', 'block', 'epic', '--on', 'the API'));
+  assert.deepEqual(blocked, { ok: true, slug: 'epic', main: app, ledger: file, blocked: { date: today(), on: 'the API' } });
+  refused(json(h, app, 'task', 'park', 'epic', '--reason', 'later'), /epic is blocked, so it cannot become parked/);
+  const unblocked = done(json(h, app, 'task', 'unblock', 'epic'));
+  assert.deepEqual(unblocked, { ok: true, slug: 'epic', main: app, ledger: file, unblocked: true, blocked: { date: today(), on: 'the API' } });
+  assert.deepEqual(done(json(h, app, 'task', 'unblock', 'epic')), { ok: true, slug: 'epic', main: app, ledger: file, unblocked: false });
+  refused(json(h, app, 'task', 'block', 'epic', '--on', ' '), /--on <text>/);
+  refused(json(h, app, 'task', 'block', 'ghost', '--on', 'x'), /ghost/);
+  refused(json(h, app, 'task', 'unblock', 'ghost'), /ghost/);
 });
 
 test('retire --dry-run --json gives the plan and its blockers; retire --json lists what it did', (t) => {

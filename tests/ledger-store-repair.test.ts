@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { clonePaths } from '../tools/ledger/clone.js';
-import { setLocationBullet, setLostMark } from '../tools/ledger/edit.js';
+import { setLocationBullet, setLostMark, setStatus } from '../tools/ledger/edit.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { Failure } from '../tools/ledger/failure.js';
 import { parseLedger } from '../tools/ledger/format.js';
@@ -964,6 +964,71 @@ test('store repair <slug> --lost refuses a parked task, and --to refuses a parke
   const marked = text();
   fails(repair(app, 'store', 'repair', 'fix-login', '--to', moved), /parked/);
   assert.equal(text(), marked);
+});
+
+test('store repair <slug> --lost refuses a blocked, waiting or done task, names its state, and writes nothing', (t) => {
+  const { h, app, key } = setup(t);
+  const repair = forStorage(h);
+  const { worktree } = start(repair, app, 'fix-login');
+  rmSync(worktree, { recursive: true, force: true });
+  const store = fileStore(ledgerPaths(h));
+  const text = () => store.active.read(key, 'fix-login')?.text;
+  for (const [status, message] of [
+    [{ value: 'blocked', date: '2026-11-20', detail: 'the API' }, /fix-login is blocked, so it cannot become lost\. A blocked task can become active\./],
+    [{ value: 'waiting', date: '2026-11-20' }, /fix-login is waiting, so it cannot become lost\. A waiting task can become active or done\./],
+    [{ value: 'done', date: '2026-11-20' }, /fix-login is done, so it cannot become lost\. Finalize it with \/ledger:retire fix-login\./],
+  ] as const) {
+    store.active.update(key, 'fix-login', (each) => setStatus(each, status));
+    const before = text();
+    fails(repair(app, 'store', 'repair', 'fix-login', '--lost'), message);
+    assert.equal(text(), before);
+  }
+});
+
+test('store repair reports a blocked, waiting or done task whose folder is gone with --to only, as --lost refuses it; a parked one not at all', (t) => {
+  const { h, app, key } = setup(t);
+  const repair = forStorage(h);
+  const store = fileStore(ledgerPaths(h));
+  const gone = (slug: string): void => rmSync(start(repair, app, slug).worktree, { recursive: true, force: true });
+  gone('fix-login');
+  for (const [slug, status] of [
+    ['held', { value: 'blocked', date: '2026-11-20', detail: 'the API' }],
+    ['review', { value: 'waiting', date: '2026-11-20' }],
+    ['shipped', { value: 'done', date: '2026-11-20' }],
+    ['resting', { value: 'parked', date: '2026-11-20', detail: 'later' }],
+  ] as const) {
+    gone(slug);
+    store.active.update(key, slug, (each) => setStatus(each, status));
+  }
+
+  const ran = repair(app, 'store', 'repair');
+  assert.equal(ran.status, 1, ran.stderr);
+  assert.match(ran.stdout, /ledger store repair fix-login\S* --to <folder>/);
+  assert.match(ran.stdout, /ledger store repair fix-login\S* --lost/);
+  for (const slug of ['held', 'review', 'shipped']) {
+    assert.match(ran.stdout, new RegExp(`ledger store repair ${slug}\\S* --to <folder>`));
+    assert.doesNotMatch(ran.stdout, new RegExp(`ledger store repair ${slug}\\S* --lost`));
+  }
+  assert.ok(!ran.stdout.includes('resting'), `a parked task is not reported:\n${ran.stdout}`);
+});
+
+test('store repair <slug> --to of a lost task with a status line removes the lost mark and keeps the status line', (t) => {
+  const { h, app, key } = setup(t);
+  const repair = forStorage(h);
+  const { worktree } = start(repair, app, 'fix-login');
+  ok(repair(worktree, 'task', 'block', 'fix-login', '--on', 'the API'));
+  const moved = path.join(h, 'moved', 'fix-login');
+  mkdirSync(path.dirname(moved), { recursive: true });
+  renameSync(worktree, moved);
+  const store = fileStore(ledgerPaths(h));
+  store.active.update(key, 'fix-login', (each) => setLocationBullet(each, 'lost', `2026-01-02 — folder ${worktree} not found`));
+  assert.equal(taskIn(repair, app, 'fix-login').status, 'lost');
+
+  ok(repair(app, 'store', 'repair', 'fix-login', '--to', moved));
+  const text = store.active.read(key, 'fix-login')?.text ?? assert.fail('the record is gone');
+  assert.equal(parseLedger(text).location.lost, undefined);
+  assert.match(text, new RegExp(`^- status: blocked ${today()} — the API$`, 'm'));
+  assert.equal(taskIn(repair, app, 'fix-login').status, 'blocked');
 });
 
 test('store repair --remote moves a ledger that names no main checkout when the old key is an alias of this repo already', (t) => {

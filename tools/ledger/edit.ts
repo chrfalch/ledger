@@ -15,6 +15,7 @@ import {
   type Lost,
   type Section,
   type Status,
+  type StatusValue,
 } from './format.js';
 
 /**
@@ -120,11 +121,14 @@ export function setStatus(text: string, status: Status): string | undefined {
   return location && insert(cleared, afterLastText(cleared, location), [bullet]);
 }
 
-/** Drops a parked status, of a legacy form too; a later `Parked:` line under ## Next step is a note and stays. */
-export function unpark(text: string): string {
+/** Drops the status `value`, of a legacy form too, and leaves any other status as it is. */
+export function clearStatus(text: string, value: StatusValue): string {
   const ledger = parseLedger(text);
-  return ledger.location.status?.value === 'parked' ? serializeLedger(withoutStatus(ledger)) : text;
+  return ledger.location.status?.value === value ? serializeLedger(withoutStatus(ledger)) : text;
 }
+
+/** Drops a parked status, of a legacy form too; a later `Parked:` line under ## Next step is a note and stays. */
+export const unpark = (text: string): string => clearStatus(text, 'parked');
 
 /** Adds a bullet at the end of ## Location; undefined when the ledger has no such section. */
 export function addLocationBullet(text: string, bullet: string): string | undefined {

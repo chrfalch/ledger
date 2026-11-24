@@ -54,6 +54,8 @@ test('ledger --help lists the writing commands, and each has its own --help', (t
     'task go': [/<slug>/, /--repo/, /- base:/],
     'task park': [/<slug>/, /--reason/],
     'task unpark': [/<slug>/],
+    'task block': [/<slug>/, /--on/],
+    'task unblock': [/<slug>/],
     tree: [/<slug>/, /\badd\b/, /\bremove\b/, /\bstart\b/, /\bnext\b/, /\border\b/, /\bdepends\b/, /--json/],
     'tree order': [/<slug>/, /<child\.\.\.>/, /--json/],
     'tree depends': [/<child>/, /\[task\.\.\.\]/, /github\.com\/\w+\/\w+/, /--json/],
@@ -441,6 +443,90 @@ test('park and unpark of an unknown slug fail', (t) => {
   const { h, app } = setup(t);
   failed(ledger(h, app, 'task', 'park', 'ghost', '--reason', 'x'), /ghost/);
   failed(ledger(h, app, 'task', 'unpark', 'ghost'), /ghost/);
+});
+
+test('park refuses a blocked, waiting, done or lost task, names its state and next states, and changes nothing', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  const plain = read(file);
+  const lost = `- lost: 2026-11-22 — folder ${worktreeOf(app, 'epic')} not found`;
+  const refusals: [string, RegExp][] = [
+    [withStatus(plain, 'blocked 2026-11-20 — the API'), /epic is blocked, so it cannot become parked\. A blocked task can become active\./],
+    [withStatus(plain, 'waiting 2026-11-20'), /epic is waiting, so it cannot become parked\. A waiting task can become active or done\./],
+    [withStatus(plain, 'done 2026-11-20'), /epic is done, so it cannot become parked\. Finalize it with \/ledger:retire epic\./],
+    [inserted(plain, '- design refs: none', lost), /epic is lost, so it cannot become parked\. A lost task can become active\./],
+  ];
+  for (const [text, message] of refusals) {
+    writeLedgerFile(file, text);
+    const before = read(file);
+    failed(ledger(h, app, 'task', 'park', 'epic', '--reason', 'later'), message);
+    assert.equal(read(file), before);
+  }
+});
+
+test('block writes the blocked status line and keeps the claim; block again replaces it; unblock restores the exact bytes', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  ok(ledger(h, app, 'task', 'claim', 'epic', '--session', 'session-1'));
+  const before = read(file);
+  const stdout = ok(ledger(h, app, 'task', 'block', 'epic', '--on', 'the API team'));
+  assert.equal(stdout, `Blocked epic. Blocked: ${today()} — the API team\n`);
+  assert.equal(read(file), withStatus(before, `blocked ${today()} — the API team`));
+  const listed = (JSON.parse(ok(ledger(h, app, 'list', '--json'))) as { tasks: { slug: string; status: string }[] }).tasks;
+  assert.equal(listed.find(({ slug }) => slug === 'epic')?.status, 'blocked');
+  ok(ledger(h, app, 'task', 'block', 'epic', '--on', 'an operator answer'));
+  assert.equal(read(file), withStatus(before, `blocked ${today()} — an operator answer`));
+  assert.equal(ok(ledger(h, app, 'task', 'unblock', 'epic')), `Unblocked epic. It was blocked on ${today()}: an operator answer.\n`);
+  assert.equal(read(file), before);
+});
+
+test('block requires what the task waits for: without --on, or with an empty one, it fails and changes nothing', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  const before = read(file);
+  failed(ledger(h, app, 'task', 'block', 'epic'), /--on/);
+  failed(ledger(h, app, 'task', 'block', 'epic', '--on', '  '), /ledger task block <slug> --on <text>/);
+  assert.equal(read(file), before);
+});
+
+test('unblock of a task that is not blocked says so, exits 0 and changes nothing, a parked one included', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  assert.equal(ok(ledger(h, app, 'task', 'unblock', 'epic')), 'epic is not blocked.\n');
+  writeLedgerFile(file, withStatus(read(file), 'parked 2026-11-20 — later'));
+  const parked = read(file);
+  assert.equal(ok(ledger(h, app, 'task', 'unblock', 'epic')), 'epic is not blocked.\n');
+  assert.equal(read(file), parked);
+});
+
+test('block refuses a parked, waiting or done task and changes nothing', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  const plain = read(file);
+  for (const [status, message] of [
+    ['parked 2026-11-20 — later', /epic is parked, so it cannot become blocked\. A parked task can become active\./],
+    ['waiting 2026-11-20', /epic is waiting, so it cannot become blocked/],
+    ['done 2026-11-20', /Finalize it with \/ledger:retire epic\./],
+  ] as const) {
+    writeLedgerFile(file, withStatus(plain, status));
+    const before = read(file);
+    failed(ledger(h, app, 'task', 'block', 'epic', '--on', 'the API'), message);
+    assert.equal(read(file), before);
+  }
+});
+
+test('block and unblock of an unknown slug fail', (t) => {
+  const { h, app } = setup(t);
+  failed(ledger(h, app, 'task', 'block', 'ghost', '--on', 'x'), /ghost/);
+  failed(ledger(h, app, 'task', 'unblock', 'ghost'), /ghost/);
+});
+
+test('ledger go to a blocked task leaves its status line as it is', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  ok(ledger(h, app, 'task', 'block', 'epic', '--on', 'the API'));
+  ok(ledger(h, app, 'go', 'epic'));
+  assert.deepEqual(parseLedger(read(file)).location.status, { value: 'blocked', date: today(), detail: 'the API' });
 });
 
 test('ledger parent add links a child in the same repo; remove restores both ledgers byte for byte', (t) => {
