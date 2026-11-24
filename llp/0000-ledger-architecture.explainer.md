@@ -412,10 +412,12 @@ flags only and never prompts:
   an evidence rename that failed or a run that stopped between the two; it
   does so on a rerun that finds old → new recorded already, too. Evidence under the old key whose archive
   copy is under neither key stays where it is, and keeps no alias from being
-  recorded. A repo folder of the old key that cannot be read stops the run
-  before anything moves, as its ledgers would pass for none; every other
-  command passes such a folder over, so it stops no other repo. A record under
-  the old key that cannot be read stays, and the run names it and exits 1; a folder in a repo folder, such as the evidence of an
+  recorded. Repair reads the old key's record and evidence folders before
+  moving anything. A missing folder counts as empty. If it cannot read a
+  folder, it names the folder and exits 1. This includes an evidence folder
+  spelled differently on a disk that ignores case. Other commands can still list
+  ledgers in other repos. An unreadable record stays under the old key. The
+  run names it and exits 1. A folder in a repo folder, such as the evidence of an
   archive copy whose name ends in `.md`, is no record. When the plan moves every
   task, it records old → new as an alias, re-points each alias of the old key
   to the new one, and removes a new → old alias, so a rename back leaves no
@@ -430,23 +432,31 @@ flags only and never prompts:
   between its links and its removals (see [Data and storage](#data-and-storage))
   leaves the task under both keys, as two links of one file; a rerun finishes
   the move, also one that stopped between the record and the Markdown it
-  hides. Markdown such a run left under the old key, with no record beside
-  it, while a link of it is the Markdown the moved record hides under the new
-  key, is moved without a look at the main checkout it names: the run that
-  stopped judged the task by its record, and the checkout may be gone since.
-  The move then only removes it, under the move's locks. Markdown under the
-  old key that is no such link is judged as any other ledger, also when the
-  new key has a record of its name. On git storage it
-  commits the moves. A failed commit exits 1 and keeps the aliases, which are
+  hides. A rerun skips the checkout check whenever the record or its
+  Markdown is already linked under both keys. The first run checked the
+  checkout before linking, and the checkout may have vanished since. A
+  conflicting ledger under the new key still blocks the move. If the old
+  key holds only hidden Markdown, repair checks both its slug and the slug
+  of the record under the new key. On git storage,
+  repair commits the moves. A failed commit exits 1 and keeps the aliases, which are
   never committed, also when a move failed too; the message says to fix the
   problem and then run `ledger store sync`. A rerun that finds old → new
   recorded already also commits the moves a run left uncommitted
   (`commitPending`), as the run that recorded it may have been killed between
-  its moves and their commit. A move it commits is a ledger that HEAD has
-  under the old key, that is gone from there on disk, and that is under the
-  new key. These paths are the repair's own, so a moved record of another
-  machine is committed, not put back as `ledger store sync` would put it
-  back; anything else uncommitted is committed as sync commits it. It then
+  its moves and their commit. Repair, ordinary commands and sync recognise
+  the same pending move before deciding which host owns a change. HEAD must
+  hold the old path. A different spelling of the new path in HEAD rules out
+  the move. The old path must be absent on disk in any spelling,
+  and the recorded alias must point to the new key. The new path must exist
+  on disk with its exact spelling and hash to the old HEAD blob. If HEAD
+  already holds that blob at the exact new path, only the old deletion
+  remains to commit. A different blob at the new path rules out the move. For a
+  matching move, the commit takes whichever paths git reports as changed,
+  even for another host's record. So a pair is committed together only when
+  git status shows the source removal. A source removal hidden by an index
+  flag stays in HEAD, and repair then fails and names it.
+  A different blob gets the usual ownership check.
+  Repair uses the same checks to find moves for `commitPending`. It then
   checks HEAD holds each of these paths as the disk does, so a removal git
   left out, as of a file marked `assume-unchanged`, exits 1 with the sync
   message, on every rerun until it is fixed. Only git storage has
@@ -887,21 +897,58 @@ and the store keeps the Markdown's birth time as `created` beside the record,
 as a new file's birth time cannot be set. The Markdown does not show
 `created`, so it is no field of the record: each later write carries it over.
 
-A file store move holds the locks of the ledger under both repos, the record's
-and the Markdown's, for the whole move. It takes them in the order of their
-paths, which puts a record before its Markdown, as every write does, so two
-moves, or a move and a write, wait for each other but never in a cycle, so
-never forever. A lock that stays taken past the five-second wait of
-`withLock` fails the command, which lets go of the locks it holds. Every write, create,
-removal and archive copy of that name takes the same lock, so none comes
-between the move's checks and its last step. The move never replaces a
-ledger, as a rename would, not even one a program that takes no lock made at
-the target. It links each file of the ledger, the record and any Markdown the
-record hides, at the target with `link(from, to)`, which fails with `EEXIST`
-on any entry there. Only once every link is there does it remove the files
-from the source with `unlink(from)`. So a move that stops between the two steps leaves the ledger
-under both repos, never under neither. The next move of that ledger finishes
-it: a file at the target that is a link of the one at the source (the same
+A file store move takes the record and Markdown locks under both repo keys
+in path order. Writes, creates, removals and archive copies use the same
+locks. A writer waits up to five seconds and can reclaim a lock older than
+60 seconds even if its holder still runs.
+
+The move records each source inode before linking the file at the target.
+A hard link fails with `EEXIST` if another entry already has that name.
+Once all links exist, the move sets each source aside and compares its inode
+with the one linked. It removes the files only after every source matches.
+If a writer reclaimed the lock and replaced a source, the move puts the
+sources back and refuses the move. A target record is taken back only while
+the old key holds a record. Leftover Markdown alone does not authorize
+removing a moved record. A target Markdown file is taken back while the old
+key holds a regular file at its name or a record. A folder or a symbolic link
+at the old key counts for neither. A record there is
+newer, because a write puts a record in place of Markdown. Otherwise the link
+is kept, because another mover finished and it may be the only copy. A source
+removed by an unrelated command therefore brings the task back under the new
+key. A takeover writer keeps its replacement except in the limits below.
+A stop after linking but before removal
+leaves the ledger under both keys. The next move finishes it. A stop while a
+file is set aside can leave a `<file>.removing-<id>` link beside it. It
+normally duplicates the file. If a writer reclaimed the lock and replaced
+the file just before it was set aside, the link can hold that write.
+Nothing reads the link, so the write would need to be put back by hand.
+
+These limits require another process to take a lock from a live mover after
+60 seconds. Automatic recovery would need a sweep, which is out of scope.
+
+- The mover sets a writer's update aside. A second writer creates a file
+  at the empty source name. Put-back fails because that name is taken.
+  The first update is lost. The target holds the bytes from before it, or
+  is absent when the move returns: the second writer's file at the source
+  makes rollback take the target back.
+- A writer reads the source before the mover sets it aside and publishes
+  its update at the old key afterward. Both report success. The new key
+  holds the older bytes.
+- Another mover finishes and removes the source. Rollback sets the only
+  target aside and then crashes. The record survives only in
+  `<file>.removing-<id>`. Nothing reads it there. Put it back by hand.
+
+Three more limits each need a hand-made store layout that no ledger command
+produces.
+
+- Case-equivalence is judged by JavaScript lower-casing. It can differ from
+  the volume's Unicode folding, for example for `ſ`.
+- A symbolic link used as a store folder inside the git clone is not
+  detected by the pending-move check.
+- A destination staged under one case spelling and present on disk under
+  another is judged from HEAD only.
+
+A file at the target that is a link of the one at the source (the same
 device and inode) counts as linked, and when every file left at the source
 is linked so, the move only removes them. A link onto another disk fails with
 `EXDEV` at once, with nothing changed, and the move is left to do by hand.
@@ -910,9 +957,10 @@ and inode, gives false before it takes a lock, and `canMove` gives false for
 it: each file at the target is the one at the source, which would pass for a
 link of it, so the move would remove the ledger, and the two spellings of one
 lock file would make it wait on itself.
-When a name at the target is taken, it removes the links it made and the move
-gives false. A link it finds replaced since stays. A ledger kept as Markdown
-also counts as taken when a record of its name is at the target, which would
+When a name at the target is taken, it takes back the links it made by the
+rule above, and the move gives false. To take a link back, it moves it aside and checks the inode
+before unlinking it. It tries to put a replacement back. A
+ledger kept as Markdown also counts as taken when a record of its name is at the target, which would
 hide it. A file of the ledger that is a symbolic link fails the move, with
 nothing changed, as a link to it could lead elsewhere from the target;
 `canMove` fails for it too, so a dry run says the same. An

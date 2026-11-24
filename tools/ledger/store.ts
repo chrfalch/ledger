@@ -219,6 +219,8 @@ export interface Archive extends LedgerCollection {
   acrossDisks?(repo: string, name: string, to: string): boolean;
   /** Evidence kept under a name that has no archive copy, in any repo, such as what a move or a hand left behind. */
   orphanEvidence(): { repo: string; name: string }[];
+  /** The names `orphanEvidence` gives for `repo`; it fails where a folder that holds them cannot be listed. */
+  orphanEvidenceIn?(repo: string): string[];
 }
 
 /** An archive copy as it was checked: its text, and a folder that holds its evidence as it was then. */
