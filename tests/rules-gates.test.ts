@@ -363,3 +363,16 @@ test('docs/fleet.md links to rules 10 and 40 instead of copying the agent table'
   assert.ok(!fleetLines.includes(agentHeader), 'docs/fleet.md holds the agent-table header of rule 40');
   assert.ok(!fleetLines.filter((line) => line.startsWith('|')).map(tableHeaderCells).includes(tableHeaderCells(agentHeader)), 'docs/fleet.md copies the agent table of rule 40');
 });
+
+test('rule 10 ends a task with the question ledger task gate finalize prints, and repeats it up the tree', () => {
+  const rule = flatRule10();
+  assert.match(rule, /End of task\.[^]*ask the question `ledger task gate finalize` prints/);
+  assert.match(rule, /`\/ledger:retire <slug> --dry-run` for each ticked retire/);
+  assert.match(rule, /On "Finalize <parent>", ask `ledger task gate finalize <parent>`/);
+  assert.match(rule, /At the top of the tree, say the tree is done\./);
+  assert.doesNotMatch(rule, /one option per other finished task/);
+});
+
+test('rule 20 names every gate ledger task gate knows', () => {
+  assert.match(ruleSource('20-writing.md'), /\(`plan`, `pr` and `finalize` today\)/);
+});

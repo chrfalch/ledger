@@ -976,7 +976,7 @@ test('store repair <slug> --lost refuses a blocked, waiting or done task, names 
   for (const [status, message] of [
     [{ value: 'blocked', date: '2026-11-20', detail: 'the API' }, /fix-login is blocked, so it cannot become lost\. A blocked task can become active\./],
     [{ value: 'waiting', date: '2026-11-20' }, /fix-login is waiting, so it cannot become lost\. A waiting task can become active or done\./],
-    [{ value: 'done', date: '2026-11-20' }, /fix-login is done, so it cannot become lost\. Finalize it with \/ledger:retire fix-login\./],
+    [{ value: 'done', date: '2026-11-20' }, /fix-login is done, so it cannot become lost\. Finalize it with the question from `ledger task gate finalize fix-login`\./],
   ] as const) {
     store.active.update(key, 'fix-login', (each) => setStatus(each, status));
     const before = text();

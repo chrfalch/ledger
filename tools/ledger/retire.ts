@@ -173,8 +173,8 @@ function parentActions({ task, ref, tasks }: RetireFacts, warnings: string[]): R
   const siblingsActive = namedChildren(parent, tasks).some((child) => !sameTask(lineRef(child, parentRef.main), ref) && childStatus(tasks, child, parentRef) !== 'retired');
   if (line !== undefined && !siblingsActive) {
     const text = samePath(parentRef.main, ref.main)
-      ? `Parent ${parentRef.slug} has no active children left. Retire it with /ledger:retire ${parentRef.slug}.`
-      : `Parent ${parentRef.slug} @ ${parentRef.main} has no active children left. Retire it from a session in ${parentRef.main} with /ledger:retire ${parentRef.slug}.`;
+      ? `Parent ${parentRef.slug} has no active children left. Finalize it with the question from \`ledger task gate finalize ${parentRef.slug}\`.`
+      : `Parent ${parentRef.slug} @ ${parentRef.main} has no active children left. Finalize it from a session in ${parentRef.main} with the question from \`ledger task gate finalize ${parentRef.slug}\`.`;
     return [...actions, { kind: 'hint', text }];
   }
   return actions;

@@ -7,8 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { claimResultText, claimTask, Held, knownSession, releaseAll, releaseTask, requiredSession, touchAll, touchTask, type AllResult } from './claims.js';
 import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
+import { finalizeQuestion } from './finalize.js';
 import { parseLedger, planProgress } from './format.js';
-import { GATE_NAMES, gateQuestion } from './gates.js';
+import { ALL_GATE_NAMES, FINALIZE_GATE, gateQuestion } from './gates.js';
 import { mainCheckout } from './git.js';
 import { logHookFailure, oneLine } from './hook-failures.js';
 import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookContext, type HookEvent } from './hooks.js';
@@ -450,10 +451,11 @@ export async function main(argv: string[]): Promise<number> {
   taskGroup
     .command('gate')
     .description('Print the question to ask the operator at a gate, as one AskUserQuestion question in JSON: the recommended action first, Close last.')
-    .argument('<name>', `the gate: ${GATE_NAMES.join(', ')}`)
+    .argument('<name>', `the gate: ${ALL_GATE_NAMES.join(', ')}`)
     .argument('[slug]', 'the task the question names; by default the task of the worktree you are in')
     .action((name: string, slug: string | undefined) => {
-      print(JSON.stringify(gateQuestion(name, slug ?? currentTask(context.store, cwd)?.slug), null, 2));
+      const question = name === FINALIZE_GATE ? finalizeQuestion(context, slug) : gateQuestion(name, slug ?? currentTask(context.store, cwd)?.slug);
+      print(JSON.stringify(question, null, 2));
     });
 
   const notesGroup = program

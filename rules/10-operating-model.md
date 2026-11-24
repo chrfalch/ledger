@@ -116,19 +116,18 @@ The **task ledger** records the task. See `ledger --help`.
   has a parent or children, show its tree with `/ledger:parent <parent>`. Do not re-read
   files or rerun tests to re-establish state. When every plan step is done,
   ask with `ledger task gate pr`.
-- **End of task.** When the work is merged, or the operator says the task is
-  finished, ask one `multiSelect` widget question. Its options are: retire
-  this task; one option per other finished task; start the next task with
-  `/ledger:go <slug>`. Add Close (see Asking the operator). With a parent, the
-  next task is `/ledger:go <parent>`.
-  With no child task left, offer to retire the parent task. A ticked option is
-  the operator's approval to run it.
-  1. Run `/ledger:retire <slug> --dry-run` for each; clear the problems it
-     names. Ask before you discard any change. Do not retire a branch with no merged PR; say what
-     is missing.
+- **End of task.** When the work is merged, or the operator calls it
+  finished, ask the question `ledger task gate finalize` prints. It is
+  multi-select. A ticked option is the operator's approval to run it.
+  1. Run `/ledger:retire <slug> --dry-run` for each ticked retire. Stop on any
+     problem it names, and say what is missing. Ask before you discard any
+     change.
   2. `ExitWorktree` with `keep`, if a retire removes this session's worktree.
   3. Retire each ticked task, this task first.
   4. Start the next task, if ticked.
+
+  On "Finalize <parent>", ask `ledger task gate finalize <parent>` and repeat
+  these steps for the parent. At the top of the tree, say the tree is done.
 - Never commit a ledger.
 
 ### Archiving a ledger

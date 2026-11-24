@@ -28,7 +28,7 @@ is unverified.
 Ask every question that has fixed answers with the question widget (the
 AskUserQuestion tool), not as text. This includes yes/no questions, such as
 whether to commit and open a PR.
-- At a gate that `ledger task gate` knows (`plan` and `pr` today), show the
+- At a gate that `ledger task gate` knows (`plan`, `pr` and `finalize` today), show the
   question it prints as JSON. Do not write its options yourself. Write any
   other gate yourself, with at most three actions, plus Close.
 - A request for approval of one proposed action ("Shall I commit, push and

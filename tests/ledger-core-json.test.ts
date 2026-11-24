@@ -136,7 +136,7 @@ function stubGh(h: string, calls: string, script: string): void {
 }
 
 const prState = (state: string): string => `case "$*" in "pr view 42 --json state") echo '{"state":"${state}"}' ;; *) exit 1 ;; esac`;
-const mergedHint = (slug: string): string => `${slug}: PR merged; marked done. Finalize with /ledger:retire ${slug}.\n`;
+const mergedHint = (slug: string): string => `${slug}: PR merged; marked done. Finalize it with the question from \`ledger task gate finalize ${slug}\`.\n`;
 
 test('list and show mark a waiting task done when gh says its PR is merged, and say to finalize it', (t) => {
   const { h, app } = setup(t);

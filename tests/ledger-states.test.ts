@@ -37,8 +37,8 @@ test('a refused move names the task, its state, the refused state and the states
   assert.equal(refusal('parked', 'parked'), 'epic is parked, so it cannot become parked. A parked task can become active.');
 });
 
-test('a done task can become nothing else here; the refusal says to finalize it with /ledger:retire', () => {
-  for (const to of STATES) assert.equal(refusal('done', to), `epic is done, so it cannot become ${to}. Finalize it with /ledger:retire epic.`);
+test('a done task can become nothing else here; the refusal says to finalize it with the finalize question', () => {
+  for (const to of STATES) assert.equal(refusal('done', to), `epic is done, so it cannot become ${to}. Finalize it with the question from \`ledger task gate finalize epic\`.`);
 });
 
 test('stateOf reads the status line, a lost mark over it, and active for neither', () => {

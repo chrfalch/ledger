@@ -453,7 +453,7 @@ test('park refuses a blocked, waiting, done or lost task, names its state and ne
   const refusals: [string, RegExp][] = [
     [withStatus(plain, 'blocked 2026-11-20 — the API'), /epic is blocked, so it cannot become parked\. A blocked task can become active\./],
     [withStatus(plain, 'waiting 2026-11-20'), /epic is waiting, so it cannot become parked\. A waiting task can become active or done\./],
-    [withStatus(plain, 'done 2026-11-20'), /epic is done, so it cannot become parked\. Finalize it with \/ledger:retire epic\./],
+    [withStatus(plain, 'done 2026-11-20'), /epic is done, so it cannot become parked\. Finalize it with the question from `ledger task gate finalize epic`\./],
     [inserted(plain, '- design refs: none', lost), /epic is lost, so it cannot become parked\. A lost task can become active\./],
   ];
   for (const [text, message] of refusals) {
@@ -506,7 +506,7 @@ test('block refuses a parked, waiting or done task and changes nothing', (t) => 
   for (const [status, message] of [
     ['parked 2026-11-20 — later', /epic is parked, so it cannot become blocked\. A parked task can become active\./],
     ['waiting 2026-11-20', /epic is waiting, so it cannot become blocked/],
-    ['done 2026-11-20', /Finalize it with \/ledger:retire epic\./],
+    ['done 2026-11-20', /Finalize it with the question from `ledger task gate finalize epic`\./],
   ] as const) {
     writeLedgerFile(file, withStatus(plain, status));
     const before = read(file);
