@@ -310,6 +310,15 @@ test('an archive copy that names no main is left as ambiguous when its folder na
   assert.equal(store.archive.has('app', '2026-01-01-bare'), true);
 });
 
+test('an archive copy under an old folder name whose main is a path in backticks moves to the key of that checkout', (t) => {
+  const { h, app, key, store } = appWorld(t);
+  store.archive.write('old-name', '2026-01-01-quoted', ledgerText({ slug: 'quoted', main: `\`${app}\`` }));
+  const out = ok(convert(h));
+  assert.doesNotMatch(lineWith(out, '2026-01-01-quoted'), /^left/);
+  assert.equal(store.archive.has(key, '2026-01-01-quoted'), true);
+  assert.equal(store.archive.has('old-name', '2026-01-01-quoted'), false);
+});
+
 // --- 8. Old task list entries with no ledger in the store ---
 
 test('an active entry of a folder in no git repo, with no main, makes no alias as nothing moved, and the old task list stays as it was', (t) => {
