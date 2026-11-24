@@ -94,6 +94,13 @@ test('a main line that is no folder drops all from its first " (" when it ends i
   assert.equal(main('/repos/old (2025)/app (renamed)'), '/repos/old');
 });
 
+test('one pair of backticks around a main or worktree path is dropped, and a note after it too', () => {
+  const location = (fields: { main?: string; worktree?: string }) => parseLedger(ledgerText({ slug: 'idea', ...fields })).location;
+  assert.equal(location({ main: '`/repos/expo/expo`' }).main, '/repos/expo/expo');
+  assert.equal(location({ main: '`/repos/x` (moved here 2026-10-27)' }).main, '/repos/x');
+  assert.equal(location({ worktree: '`/repos/x/.claude/worktrees/s`' }).worktree, '/repos/x/.claude/worktrees/s');
+});
+
 test('a main line that is a folder whose name ends in parentheses keeps them; a missing one drops the note', (t: TestContext) => {
   const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'ledger-main-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));

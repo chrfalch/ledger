@@ -14,11 +14,29 @@ import { pauseForTest } from './wait.js';
  * no D10 key is, and keeps its folder's name as it was, so the conversion finds every such folder; one that would not
  * stay one folder, such as .. or a name with a \, fails.
  */
-function folderOf(repo: string): string {
+export function folderOf(repo: string): string {
   if (repo.includes('/')) return encodeURIComponent(repo);
   if (!isEntryName(repo) || repo.includes('\0')) fail(`"${repo}" is no repo key, so it names no folder of the store.`);
   return repo;
 }
+
+/** The entries of the alias map, none without one; undefined for a map that cannot be read. */
+function aliasEntries(aliases: string): [string, unknown][] | undefined {
+  let text: string;
+  try {
+    text = readText(aliases);
+  } catch (error) {
+    return code(error) === 'ENOENT' || code(error) === 'ENOTDIR' ? [] : undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? Object.entries(parsed) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export const readFileAliases = (file: string): Map<string, string> => checkedAliases(aliasEntries(file) ?? []).aliases;
 
 /** A folder that is exactly the encoding of a key with a slash names that key; any other is an old folder-name key. */
 function repoOf(folder: string): string {
@@ -116,15 +134,15 @@ const withLedgerLocks = <T>({ record, markdown }: { record: string; markdown: st
 const withLocks = <T>(files: string[], work: () => T): T => [...new Set(files)].sort(byCodeUnit).reduceRight<() => T>((inner, file) => () => withLock(file, inner), work)();
 
 /**
- * The entries of a repo folder, none when there is none; it fails for one that cannot be read, whose ledgers would pass
- * for none. Only for `unreadable`: elsewhere such a folder is passed over, so it stops no command of another repo.
+ * The entries of a folder of `holding`, none when there is none; it fails for one that cannot be read, whose entries
+ * would pass for none. Other repos can still be listed when repair needs a strict read of this one.
  */
-function readableEntries(folder: string): Dirent[] {
+function readableEntries(folder: string, holding: 'ledgers' | 'evidence folders' = 'ledgers'): Dirent[] {
   try {
     return readdirSync(folder, { withFileTypes: true });
   } catch (error) {
     if (code(error) === 'ENOENT' || code(error) === 'ENOTDIR') return [];
-    return fail(`${folder} cannot be read, so the ledgers in it are not known: ${(error as Error).message}`);
+    return fail(`${folder} cannot be read, so the ${holding} in it are not known: ${(error as Error).message}`);
   }
 }
 
@@ -244,6 +262,8 @@ export function fileStoreRoots({ home }: LedgerPaths): FileRoots {
 export function fileStoreAt(roots: FileRoots, { link = linkSync, rename = renameSync, device = (file) => statSync(file).dev }: FileStoreOptions = {}): LedgerStore {
   const archive = collection(roots.archive);
   const evidenceRoot = collection(roots.evidence);
+  const orphanNames = (repo: string, entries: Dirent[]): string[] =>
+    entries.filter((entry) => entry.isDirectory() && isEntryName(entry.name) && !isTaken(archive.location(repo, entry.name))).map(({ name }) => name);
   /** The disk of `folder`, else of the nearest folder above it that exists, where a move makes the missing ones. */
   const diskOf = (folder: string): number => (isTaken(folder) || path.dirname(folder) === folder ? device(folder) : diskOf(path.dirname(folder)));
   const acrossDisks = (files: string[], folder: string): boolean => files.some((file) => isTaken(file) && device(file) !== diskOf(folder));
@@ -269,21 +289,6 @@ export function fileStoreAt(roots: FileRoots, { link = linkSync, rename = rename
   };
   const { registry, aliases } = roots;
   const damaged = `${aliases} is not a JSON object of repo aliases`;
-  /** The entries of the alias map, none without one; undefined for a map that cannot be read. */
-  const aliasEntries = (): [string, unknown][] | undefined => {
-    let text: string;
-    try {
-      text = readText(aliases);
-    } catch (error) {
-      return code(error) === 'ENOENT' || code(error) === 'ENOTDIR' ? [] : undefined;
-    }
-    try {
-      const parsed: unknown = JSON.parse(text);
-      return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? Object.entries(parsed) : undefined;
-    } catch {
-      return undefined;
-    }
-  };
   const evidenceOf = (repo: string, name: string): string => path.join(evidenceRoot.repoLocation(repo), entryName(name));
   /** The evidence folder to copy or remove; a symbolic link at it, its repo folder or the evidence root fails, as each leads outside it. */
   const evidenceToChange = (repo: string, name: string): string => {
@@ -346,15 +351,25 @@ export function fileStoreAt(roots: FileRoots, { link = linkSync, rename = rename
   const oneFolder = (collection: FileCollection, repo: string, to: string): boolean => isSameFolder(collection.repoLocation(repo), collection.repoLocation(to));
   /** Links `file` at `to` and gives the inode linked; undefined when anything is at `to`, as a link never replaces. */
   const linkFree = (file: string, to: string): number | undefined => {
+    const ino = lstatSync(file).ino;
     try {
       link(file, to);
     } catch (error) {
       if (code(error) === 'EEXIST') return undefined;
       throw error;
     }
-    return lstatSync(to).ino;
+    return ino;
   };
-  /** Runs `work` holding the locks of the ledger `name` under both `repo` and `to`, so no write of it in either comes between. */
+  // A writer can replace the path between lstat and rename. Only the private name is safe to unlink.
+  const setAsideLink = (file: string, ino: number): string | undefined => {
+    if (lstatSync(file, { throwIfNoEntry: false })?.ino !== ino) return undefined;
+    const aside = moveAside(file);
+    if (aside !== undefined && lstatSync(aside).ino !== ino) {
+      putBack(aside, file);
+      return undefined;
+    }
+    return aside;
+  };
   const withMoveLocks = <T>(collection: FileCollection, repo: string, name: string, to: string, legacyMarkdown: boolean, work: () => T): T =>
     withLocks([...filesOf(collection, repo, name, legacyMarkdown), ...filesOf(collection, to, name, legacyMarkdown)], work);
   /**
@@ -367,17 +382,28 @@ export function fileStoreAt(roots: FileRoots, { link = linkSync, rename = rename
     const moving = kinds.filter((kind) => isTaken(from[kind]));
     refuseSymbolic(collection, repo, name, legacyMarkdown);
     const finishing = moving.every((kind) => linkOf(from[kind], target[kind]) !== undefined);
-    const linked: { file: string; ino: number }[] = [];
-    // Only a link still there as made: a file another command put in its place since stays.
-    const takeBack = (): false => {
-      for (const { file, ino } of linked) if (lstatSync(file, { throwIfNoEntry: false })?.ino === ino) rmSync(file);
-      return false;
+    const linked: { source: string; target: string; ino: number }[] = [];
+    const takeBack = (): void => {
+      // The target is stale while the source still holds its own file or a record, as when a writer put a record in
+      // place of the moved Markdown. Leftover Markdown alone does not outrank a moved record: that record may be the
+      // only one.
+      const sourceLeft = (source: string): boolean => [source, from.record].some((file) => lstatSync(file, { throwIfNoEntry: false })?.isFile());
+      for (const { source, target, ino } of linked) {
+        if (lstatSync(target, { throwIfNoEntry: false })?.ino !== ino || !sourceLeft(source)) continue;
+        const aside = setAsideLink(target, ino);
+        if (aside === undefined) continue;
+        if (sourceLeft(source)) rmSync(aside);
+        else putBack(aside, target);
+      }
     };
     try {
       for (const kind of moving) {
         const ino = linkOf(from[kind], target[kind]) ?? linkFree(from[kind], target[kind]);
-        if (ino === undefined) return takeBack();
-        linked.push({ file: target[kind], ino });
+        if (ino === undefined) {
+          takeBack();
+          return false;
+        }
+        linked.push({ source: from[kind], target: target[kind], ino });
       }
     } catch (error) {
       takeBack();
@@ -386,9 +412,26 @@ export function fileStoreAt(roots: FileRoots, { link = linkSync, rename = rename
     // A record made at `to` meanwhile would hide the moved Markdown, as Markdown made there would be hidden by the record.
     // Not so when every file here is linked there already: a move that stopped between its removals left only the
     // Markdown here, which the record at `to` hid before.
-    if (!finishing && kinds.some((kind) => !moving.includes(kind) && isTaken(target[kind]))) return takeBack();
-    for (const kind of moving) rmSync(from[kind]);
-    return true;
+    const held: { source: string; aside: string }[] = [];
+    let moved = false;
+    try {
+      if (!finishing && kinds.some((kind) => !moving.includes(kind) && isTaken(target[kind]))) return false;
+      for (const { source, ino } of linked) {
+        const aside = setAsideLink(source, ino);
+        if (aside === undefined) return false;
+        held.push({ source, aside });
+      }
+      // Rollback by another mover can set a target aside before we set its source aside.
+      moved = linked.every(({ target, ino }) => lstatSync(target, { throwIfNoEntry: false })?.ino === ino);
+      return moved;
+    } finally {
+      // Keep the record recoverable until the hidden Markdown has passed the same check.
+      for (const { source, aside } of held) {
+        if (moved) rmSync(aside);
+        else putBack(aside, source);
+      }
+      if (!moved) takeBack();
+    }
   };
   /** Fails when `root` is a symbolic link, as a new ledger made through it could land anywhere. */
   const checkRoot = (root: string): void => {
@@ -563,12 +606,12 @@ export function fileStoreAt(roots: FileRoots, { link = linkSync, rename = rename
       canMove: archiveCanMove,
       movedHalfway: (repo, name, to) => movedHalfway(archive, repo, name, to),
       acrossDisks: (repo, name, to) => acrossDisks(filesOf(archive, repo, name), archive.repoLocation(to)) || acrossDisks([evidenceOf(repo, name)], evidenceRoot.repoLocation(to)),
-      orphanEvidence: () =>
-        evidenceRoot.repos().flatMap((repo) =>
-          folderEntries(evidenceRoot.repoLocation(repo))
-            .filter((entry) => entry.isDirectory() && isEntryName(entry.name) && !isTaken(archive.location(repo, entry.name)))
-            .map(({ name }) => ({ repo, name })),
-        ),
+      orphanEvidence: () => evidenceRoot.repos().flatMap((repo) => orphanNames(repo, folderEntries(evidenceRoot.repoLocation(repo))).map((name) => ({ repo, name }))),
+      orphanEvidenceIn: (repo) => {
+        // A searchable root can still be unlistable, which repair must report.
+        readableEntries(roots.evidence, 'evidence folders');
+        return orphanNames(repo, readableEntries(evidenceRoot.repoLocation(repo), 'evidence folders'));
+      },
     },
     sharesFolder: (a, b) => [roots.backlog, roots.active, roots.archive, roots.evidence].some((root) => isSameFolder(path.join(root, folderOf(a)), path.join(root, folderOf(b)))),
     oldTaskList: () => {
@@ -579,25 +622,25 @@ export function fileStoreAt(roots: FileRoots, { link = linkSync, rename = rename
       }
     },
     aliases: {
-      read: () => checkedAliases(aliasEntries() ?? []).aliases,
+      read: () => readFileAliases(aliases),
       problem: () => {
-        const entries = aliasEntries();
+        const entries = aliasEntries(aliases);
         return entries === undefined ? `${damaged}, so no alias applies. Fix or remove it.` : checkedAliases(entries).problem;
       },
       add: (old, key) =>
         withLock(aliases, () => {
-          const current = aliasEntries() ?? fail(`${damaged}, so ${old} was not made an alias of ${key}. Fix or remove it.`);
+          const current = aliasEntries(aliases) ?? fail(`${damaged}, so ${old} was not made an alias of ${key}. Fix or remove it.`);
           if (needsAlias(current, old, key, aliases)) writeAtomic(aliases, `${JSON.stringify(Object.fromEntries([...current, [old, key]]), null, 2)}\n`);
         }),
       remove: (old, key) =>
         withLock(aliases, () => {
-          const current = aliasEntries() ?? fail(`${damaged}, so the alias ${old} of ${key} was not removed. Fix or remove it.`);
+          const current = aliasEntries(aliases) ?? fail(`${damaged}, so the alias ${old} of ${key} was not removed. Fix or remove it.`);
           const kept = current.filter(([name, target]) => name !== old || target !== key);
           if (kept.length < current.length) writeAtomic(aliases, `${JSON.stringify(Object.fromEntries(kept), null, 2)}\n`);
         }),
       replace: (removed, added) =>
         withLock(aliases, () => {
-          const current = aliasEntries() ?? fail(`${damaged}, so no alias was changed. Fix or remove it.`);
+          const current = aliasEntries(aliases) ?? fail(`${damaged}, so no alias was changed. Fix or remove it.`);
           const kept = current.filter(([name, target]) => !removed.some(([old, key]) => name === old && target === key));
           const next = added.reduce<[string, unknown][]>((entries, [old, key]) => (needsAlias(entries, old, key, aliases) ? [...entries, [old, key]] : entries), kept);
           if (kept.length < current.length || next.length > kept.length) writeAtomic(aliases, `${JSON.stringify(Object.fromEntries(next), null, 2)}\n`);

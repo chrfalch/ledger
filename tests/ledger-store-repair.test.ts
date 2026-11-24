@@ -2010,3 +2010,277 @@ test('tree depends keeps one dependency on a task named by both the old and the 
   const line = shown(repair, app, 'ship').match(/depends on: (.*)/)?.[1] ?? assert.fail('ship depends on nothing');
   assert.equal(line.split(', ').length, 1, line);
 });
+
+function pendingForeignMove(t: TestContext, leaveBacklog = false) {
+  const { h, app, key, repair } = worldOf(t, 'git');
+  start(repair, app, 'fix-login');
+  if (leaveBacklog) ok(repair(app, 'task', 'new', 'idea', '--goal', 'Later.'));
+  const store = openStore(ledgerPaths(h), 'git', { backgroundSync: false });
+  assert.ok(store.active.update(key, 'fix-login', (text) => setLocationBullet(text, 'host', 'other-machine') ?? text));
+  store.close?.();
+  const newKey = renameOrigin(h, app);
+  store.aliases.add(key, newKey);
+  const { clone } = clonePaths(ledgerPaths(h));
+  const [from, to] = [key, newKey].map((repo) => `active/${encodeURIComponent(repo)}/fix-login.json`);
+  mkdirSync(path.dirname(path.join(clone, to)), { recursive: true });
+  renameSync(path.join(clone, from), path.join(clone, to));
+  return { h, app, key, repair, clone, from, to };
+}
+
+test('repair with work left commits the pending foreign move', (t) => {
+  const { h, app, key, repair, clone, from, to } = pendingForeignMove(t, true);
+  ok(repair(app, 'store', 'repair', '--remote', key));
+  const head = git(h, clone, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n');
+  assert.ok(head.includes(to) && !head.includes(from), 'repair restored the foreign record under the old key');
+});
+
+test('sync commits the pending foreign move', (t) => {
+  const { h, app, repair, clone, from, to } = pendingForeignMove(t);
+  ok(repair(app, 'store', 'sync'));
+  const head = git(h, clone, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n');
+  assert.ok(head.includes(to) && !head.includes(from), 'sync restored the foreign record under the old key');
+  assert.ok(existsSync(path.join(clone, to)) && !existsSync(path.join(clone, from)));
+});
+
+test('a different blob cannot claim a foreign deletion', (t) => {
+  const { h, app, key, repair, clone, from, to } = pendingForeignMove(t);
+  const file = path.join(clone, to);
+  writeFileSync(file, readFileSync(file, 'utf8').replace('other-machine', 'unrelated-machine'));
+  ok(repair(app, 'store', 'repair', '--remote', key));
+  const head = git(h, clone, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n');
+  assert.ok(head.includes(from), 'repair committed the foreign deletion');
+  assert.ok(!head.includes(to), 'repair committed an unrelated foreign record as a move');
+});
+
+test('repair reports the unreadable old evidence folder', (t) => {
+  const { h, app, key, repair } = worldOf(t, 'git');
+  const newKey = renameOrigin(h, app);
+  const store = openStore(ledgerPaths(h), 'git', { backgroundSync: false });
+  const name = '2026-01-02-done-one';
+  store.archive.write(newKey, name, ledgerText({ slug: 'done-one', main: app }));
+  store.close?.();
+  store.aliases.add(key, newKey);
+  const evidence = store.archive.evidenceLocation(key, name);
+  mkdirSync(evidence, { recursive: true });
+  writeFileSync(path.join(evidence, 'red.txt'), 'the failing run\n');
+  const folder = path.dirname(evidence);
+  chmodSync(folder, 0o000);
+  try {
+    const ran = repair(app, 'store', 'repair', '--remote', key);
+    assert.notEqual(ran.status, 0, 'repair reported success with unreadable evidence');
+    assert.ok(`${ran.stdout}${ran.stderr}`.includes(folder), 'repair omitted the unreadable folder');
+  } finally {
+    chmodSync(folder, 0o755);
+  }
+});
+
+test('repair finishes a linked record after its checkout vanishes', (t) => {
+  const { h, app, key } = setup(t);
+  const store = fileStore(ledgerPaths(h));
+  store.backlog.write(key, 'idea', ledgerText({ slug: 'idea', main: path.join(h, 'gone') }));
+  const newKey = renameOrigin(h, app);
+  store.aliases.add(key, newKey);
+  mkdirSync(store.backlog.repoLocation(newKey), { recursive: true });
+  linkSync(store.backlog.location(key, 'idea'), store.backlog.location(newKey, 'idea'));
+  const ran = forStorage(h)(app, 'store', 'repair', '--remote', key);
+  assert.equal(ran.status, 0, 'repair refused the linked record whose checkout vanished');
+  assert.equal(store.backlog.has(key, 'idea'), false);
+  assert.ok(store.backlog.has(newKey, 'idea'));
+});
+
+test('a case-mismatched destination cannot claim a foreign deletion', (t) => {
+  const { h, app, repair, clone, from, to } = pendingForeignMove(t);
+  const upper = path.join(path.dirname(to), 'FIX-LOGIN.json');
+  if (!existsSync(path.join(clone, upper))) return t.skip('the test temp volume is case-sensitive');
+  renameSync(path.join(clone, to), path.join(clone, upper));
+  assert.ok(readdirSync(path.join(clone, path.dirname(to))).includes('FIX-LOGIN.json'));
+  ok(repair(app, 'store', 'sync'));
+  const head = git(h, clone, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n');
+  assert.ok(head.includes(from), 'sync committed the old-key deletion alone');
+});
+
+test('a matching old blob cannot replace a foreign record already in HEAD', (t) => {
+  const { h, app, repair, clone, from, to } = pendingForeignMove(t);
+  const file = path.join(clone, to);
+  const old = readFileSync(file, 'utf8');
+  const other = old.replace('other-machine', 'third-machine');
+  assert.notEqual(old, other);
+  writeFileSync(file, other);
+  git(h, clone, 'add', '--', to);
+  git(h, clone, 'commit', '--quiet', '-m', 'Another host owns the destination');
+  writeFileSync(file, old);
+  ok(repair(app, 'store', 'sync'));
+  assert.equal(git(h, clone, 'show', `HEAD:${to}`), other.trim(), 'sync overwrote the destination record in HEAD');
+  assert.equal(git(h, clone, 'show', `HEAD:${from}`), old.trim());
+});
+
+test('repair refuses a half-moved backlog task whose slug is active at the destination', (t) => {
+  const { h, app, key } = setup(t);
+  const store = fileStore(ledgerPaths(h));
+  store.backlog.write(key, 'idea', ledgerText({ slug: 'idea', main: app }));
+  const newKey = renameOrigin(h, app);
+  store.aliases.add(key, newKey);
+  mkdirSync(store.backlog.repoLocation(newKey), { recursive: true });
+  linkSync(store.backlog.location(key, 'idea'), store.backlog.location(newKey, 'idea'));
+  store.active.write(newKey, 'idea', ledgerText({ slug: 'idea', main: app }));
+  const ran = forStorage(h)(app, 'store', 'repair', '--remote', key);
+  assert.equal(ran.status, 1, 'repair accepted the half-moved task despite the live slug collision');
+  assert.match(ran.stdout, /left backlog idea: .* already has idea/);
+  assert.ok(store.backlog.has(key, 'idea'));
+});
+
+test('repair reports an unlistable evidence root containing movable evidence', (t) => {
+  const { h, app, key, repair } = worldOf(t, 'git');
+  const newKey = renameOrigin(h, app);
+  const store = openStore(ledgerPaths(h), 'git', { backgroundSync: false });
+  const name = '2026-01-02-done-one';
+  store.archive.write(newKey, name, ledgerText({ slug: 'done-one', main: app }));
+  store.close?.();
+  store.aliases.add(key, newKey);
+  const evidence = store.archive.evidenceLocation(key, name);
+  mkdirSync(evidence, { recursive: true });
+  writeFileSync(path.join(evidence, 'red.txt'), 'the failing run\n');
+  const root = path.dirname(path.dirname(evidence));
+  chmodSync(root, 0o111);
+  try {
+    const ran = repair(app, 'store', 'repair', '--remote', key);
+    assert.notEqual(ran.status, 0, 'repair reported success with an unlistable evidence root');
+    assert.ok(ran.stderr.includes(root), 'repair omitted the unlistable evidence root');
+  } finally {
+    chmodSync(root, 0o755);
+  }
+});
+
+test('a case-different old record on disk is no pending move', (t) => {
+  const { h, app, repair, clone, from, to } = pendingForeignMove(t);
+  const upper = path.join(path.dirname(from), 'FIX-LOGIN.json');
+  writeFileSync(path.join(clone, upper), readFileSync(path.join(clone, to)));
+  if (!existsSync(path.join(clone, from))) return t.skip('the test temp volume is case-sensitive');
+  ok(repair(app, 'store', 'sync'));
+  const head = git(h, clone, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n');
+  assert.ok(head.includes(from), 'sync committed the old-key deletion while the record is on disk in another spelling');
+  assert.ok(!head.includes(to), 'sync committed a foreign record as a move while its source is on disk in another spelling');
+});
+
+test('a case-variant destination in HEAD cannot claim a foreign deletion', (t) => {
+  const { h, app, repair, clone, from, to } = pendingForeignMove(t);
+  const upper = path.join(path.dirname(to), 'FIX-LOGIN.json');
+  const target = path.join(clone, to);
+  if (!existsSync(path.join(clone, upper))) return t.skip('the test temp volume is case-sensitive');
+  const old = readFileSync(target, 'utf8');
+  const other = old.replace('other-machine', 'third-machine');
+  assert.notEqual(old, other);
+  renameSync(target, path.join(clone, upper));
+  writeFileSync(path.join(clone, upper), other);
+  git(h, clone, 'add', '--', upper);
+  git(h, clone, 'commit', '--quiet', '-m', 'Track the other host under its own spelling');
+  const blob = git(h, clone, 'rev-parse', `HEAD:${upper}`);
+  renameSync(path.join(clone, upper), target);
+  writeFileSync(target, old);
+  assert.ok(readdirSync(path.dirname(target)).includes(path.basename(to)));
+
+  ok(repair(app, 'task', 'new', 'idea', '--goal', 'Later.'));
+  assert.equal(git(h, clone, 'rev-parse', `HEAD:${upper}`), blob, 'the ordinary commit overwrote the destination');
+  assert.ok(git(h, clone, 'ls-tree', '--name-only', 'HEAD', '--', from).includes(from), 'the ordinary commit took the old-key deletion alone');
+});
+
+test('repair commits the foreign source deletion after its index flag is cleared', (t) => {
+  const { h, app, key, repair, clone, from, to } = pendingForeignMove(t);
+  git(h, clone, 'update-index', '--assume-unchanged', from);
+  ok(repair(app, 'store', 'sync'));
+  const paths = (): string[] => git(h, clone, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n');
+  assert.ok(paths().includes(from) && paths().includes(to), 'sync must leave both paths in HEAD while the deletion is hidden');
+  git(h, clone, 'update-index', '--no-assume-unchanged', from);
+
+  ok(repair(app, 'store', 'repair', '--remote', key));
+  const head = paths();
+  assert.ok(head.includes(to) && !head.includes(from), 'repair left the old-key record in HEAD after the deletion became visible');
+});
+
+test('repair checks the record slug when only hidden Markdown remains at the old key', (t) => {
+  const { h, app, key } = setup(t);
+  const store = fileStore(ledgerPaths(h));
+  const newKey = renameOrigin(h, app);
+  store.aliases.add(key, newKey);
+  store.backlog.write(key, 'ship', ledgerText({ slug: 'ship', main: app }));
+  const [from, to] = [key, newKey].map((repo) => store.backlog.repoLocation(repo));
+  writeFileSync(path.join(from, 'ship.md'), ledgerText({ slug: 'draft', main: app }));
+  mkdirSync(to, { recursive: true });
+  for (const file of ['ship.json', 'ship.md']) linkSync(path.join(from, file), path.join(to, file));
+  rmSync(path.join(from, 'ship.json'));
+  store.active.write(newKey, 'ship', ledgerText({ slug: 'ship', main: app }));
+
+  const ran = forStorage(h)(app, 'store', 'repair', '--remote', key);
+  assert.equal(ran.status, 1, 'repair accepted the conflicting destination record slug');
+  assert.match(ran.stdout, /left backlog ship: .* already has ship/);
+  assert.ok(existsSync(path.join(from, 'ship.md')));
+});
+
+test('repair reports an unreadable case-variant evidence repo folder', (t) => {
+  const { h, app, key, repair } = worldOf(t, 'git');
+  const newKey = renameOrigin(h, app);
+  const store = openStore(ledgerPaths(h), 'git', { backgroundSync: false });
+  const name = '2026-01-02-done-one';
+  store.archive.write(newKey, name, ledgerText({ slug: 'done-one', main: app }));
+  store.close?.();
+  store.aliases.add(key, newKey);
+  const evidence = store.archive.evidenceLocation(key, name);
+  mkdirSync(evidence, { recursive: true });
+  writeFileSync(path.join(evidence, 'red.txt'), 'the failing run\n');
+  const folder = path.dirname(evidence);
+  const upper = path.join(path.dirname(folder), path.basename(folder).toUpperCase());
+  assert.notEqual(upper, folder);
+  if (!existsSync(upper)) return t.skip('the test temp volume is case-sensitive');
+  renameSync(folder, upper);
+  chmodSync(upper, 0o000);
+  try {
+    const ran = repair(app, 'store', 'repair', '--remote', key);
+    assert.notEqual(ran.status, 0, 'repair reported success with unreadable case-variant evidence');
+    assert.ok(ran.stderr.toLowerCase().includes(folder.toLowerCase()), ran.stderr);
+    assert.doesNotMatch(ran.stdout, /Nothing is left/);
+  } finally {
+    chmodSync(upper, 0o755);
+  }
+});
+
+test('repair checks the record slug when hidden Markdown under the old key is linked in another case under the new key', (t) => {
+  const { h, app, key } = setup(t);
+  const store = fileStore(ledgerPaths(h));
+  const newKey = renameOrigin(h, app);
+  store.aliases.add(key, newKey);
+  store.backlog.write(key, 'ship', ledgerText({ slug: 'ship', main: app }));
+  const [from, to] = [key, newKey].map((repo) => store.backlog.repoLocation(repo));
+  writeFileSync(path.join(from, 'ship.md'), ledgerText({ slug: 'draft', main: app }));
+  mkdirSync(to, { recursive: true });
+  if (!existsSync(path.join(from, 'SHIP.md'))) return t.skip('the test temp volume is case-sensitive');
+  for (const file of ['ship.json', 'ship.md']) linkSync(path.join(from, file), path.join(to, file.replace('ship', 'SHIP')));
+  rmSync(path.join(from, 'ship.json'));
+  store.active.write(newKey, 'ship', ledgerText({ slug: 'ship', main: app }));
+
+  for (const dryRun of [['--dry-run'], []]) {
+    const ran = forStorage(h)(app, 'store', 'repair', '--remote', key, ...dryRun);
+    assert.notEqual(ran.status, 0, `repair ${dryRun.join(' ')} accepted the destination record slug listed in another case`);
+    assert.match(ran.stdout, /left backlog ship: .* already has ship/);
+    assert.doesNotMatch(ran.stdout, /would move backlog ship|moved backlog ship/);
+  }
+  assert.ok(existsSync(path.join(from, 'ship.md')));
+});
+
+test('repair refuses two half-moved ledgers of one slug, one backlog and one active', (t) => {
+  const { h, app, key } = setup(t);
+  const store = fileStore(ledgerPaths(h));
+  const newKey = renameOrigin(h, app);
+  store.aliases.add(key, newKey);
+  for (const place of ['backlog', 'active'] as const) {
+    store[place].write(key, 'ship', ledgerText({ slug: 'ship', main: app }));
+    mkdirSync(store[place].repoLocation(newKey), { recursive: true });
+    linkSync(store[place].location(key, 'ship'), store[place].location(newKey, 'ship'));
+  }
+
+  const ran = forStorage(h)(app, 'store', 'repair', '--remote', key);
+  assert.notEqual(ran.status, 0, 'repair accepted two half-moved ledgers of one slug');
+  for (const place of ['backlog', 'active'] as const) {
+    assert.match(ran.stdout, new RegExp(`left ${place} ship: .* already has ship`));
+    assert.ok(store[place].has(key, 'ship'), `the ${place} ledger was moved`);
+  }
+});

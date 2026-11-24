@@ -1,8 +1,9 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, lstatSync, realpathSync, rmdirSync, rmSync } from 'node:fs';
+import { chmodSync, lstatSync, readdirSync, realpathSync, rmdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fail, Failure } from './failure.js';
+import { folderOf, readFileAliases } from './file-store.js';
 import { folderEntries, isReadableFile, isTaken, readText, writeAtomic } from './files.js';
 import { withLock, type LockOptions } from './lock.js';
 import type { LedgerPaths } from './paths.js';
@@ -10,11 +11,14 @@ import { readRecordJson } from './record.js';
 import { isSecretLike, prePushHook, RAW_CHANGES_LOG, WITHHELD } from './secret-scan.js';
 import { HOST_LABEL } from './settings.js';
 
+const aliasesOfClone = (clone: string): string => path.join(path.dirname(clone), 'ledger-aliases-git.json');
+
 /** The clone of git storage and what stays next to it on this machine: evidence, the sync status, the old task list and the repo aliases are never pushed. */
 export function clonePaths({ home }: LedgerPaths) {
   const claude = path.join(home, '.claude');
+  const clone = path.join(claude, 'ledger-data');
   return {
-    clone: path.join(claude, 'ledger-data'),
+    clone,
     evidence: path.join(claude, 'ledger-evidence'),
     status: path.join(claude, 'ledger-data.status.json'),
     /**
@@ -27,7 +31,7 @@ export function clonePaths({ home }: LedgerPaths) {
     /** The task list older versions of git storage kept, read only by the one-time moves. */
     registry: path.join(claude, 'ledgers-git.json'),
     // Not the ledger-aliases.json of file storage, for the same reason: a migrate that stops removes the aliases it added.
-    aliases: path.join(claude, 'ledger-aliases-git.json'),
+    aliases: aliasesOfClone(clone),
     /** The lock target of `ledger store sync init`, so only one runs at a time. */
     init: path.join(claude, 'ledger-data.init'),
     /** The lock target of `ledger store sync --quiet`, so only one runs at a time. */
@@ -330,6 +334,78 @@ export function checkFinished(clone: string, deadline?: number): void {
   }
 }
 
+function hasExactPath(clone: string, file: string): boolean {
+  if (!isTaken(path.join(clone, file))) return false;
+  let folder = clone;
+  for (const name of file.split('/')) {
+    if (!readdirSync(folder).includes(name)) return false;
+    folder = path.join(folder, name);
+  }
+  return true;
+}
+
+const treeObject = (entry: string): string => entry.slice(0, entry.indexOf('\t')).split(' ')[2];
+const treePath = (entry: string): string => entry.slice(entry.indexOf('\t') + 1);
+
+type AliasMove = { old: string; key: string; file: string; target: string; committed: boolean };
+
+function destinationsInHead(clone: string, place: string, deadline?: number): Map<string, string | null> {
+  const tree = must(cloneGit(clone, ['ls-tree', '-r', '-t', '-z', 'HEAD', '--', place], { deadline }));
+  const entries = new Map<string, string | null>();
+  for (const entry of nulSeparated(tree)) {
+    const folded = treePath(entry).toLowerCase();
+    // Multiple spellings in HEAD rule out the move even if one matches the disk exactly.
+    entries.set(folded, entries.has(folded) ? null : entry);
+  }
+  return entries;
+}
+
+/**
+ * Each ledger a move under an alias made: in HEAD at `file` under the old key, gone from there on disk, and at `target`
+ * under the new key as HEAD has it at `file`. `committed` when HEAD has it at `target` too. It reads HEAD, not git
+ * status, as an index flag can hide a missing source from git status.
+ */
+export function aliasMoves(clone: string, deadline?: number): AliasMove[] {
+  const aliases = readFileAliases(aliasesOfClone(clone));
+  if (aliases.size === 0 || !hasHead(clone, deadline)) return [];
+  const destinations = new Map<string, Map<string, string | null>>();
+  return [...aliases].flatMap(([old, key]) => {
+    const folders = ['active', 'backlog', 'archive'].map((place) => `${place}/${folderOf(old)}`);
+    const literal = { env: { GIT_LITERAL_PATHSPECS: '1' }, deadline };
+    const tree = must(cloneGit(clone, ['ls-tree', '-r', '-z', 'HEAD', '--', ...folders], literal));
+    return nulSeparated(tree).flatMap((entry) => {
+      const file = treePath(entry);
+      const [place, , name, nested] = file.split('/');
+      // Absent in any spelling: a case-insensitive volume can still hold the old record under another one.
+      if (nested !== undefined || !isAllowed(file) || isTaken(path.join(clone, file))) return [];
+      const target = `${place}/${folderOf(key)}/${name}`;
+      if (!hasExactPath(clone, target) || !isReadableFile(path.join(clone, target))) return [];
+      const blob = treeObject(entry);
+      if (must(cloneGit(clone, ['hash-object', '--', target], { deadline })).trim() !== blob) return [];
+      let entries = destinations.get(place);
+      if (entries === undefined) {
+        entries = destinationsInHead(clone, place, deadline);
+        destinations.set(place, entries);
+      }
+      const destination = entries.get(target.toLowerCase());
+      if (destination === null || (destination !== undefined && (treePath(destination) !== target || treeObject(destination) !== blob))) return [];
+      return [{ old, key, file, target, committed: destination !== undefined }];
+    });
+  });
+}
+
+export const uncommittedMoves = (moves: AliasMove[]): Set<string> =>
+  new Set(moves.flatMap(({ file, target, committed }) => (committed ? [file] : [file, target])));
+
+/**
+ * The old paths of moves that HEAD has under the new key while an index flag hides their
+ * removal, which then no commit takes.
+ */
+export function hiddenMoveRemovals(clone: string, moves: AliasMove[]): string[] {
+  const removals = moves.flatMap(({ file, committed }) => (committed ? [file] : []));
+  return removals.length === 0 ? [] : hiddenIndexPaths(clone, removals);
+}
+
 export type CommitOptions = {
   message?: string;
   deadline?: number;
@@ -342,6 +418,7 @@ export type CommitOptions = {
   ownHosts?: ReadonlySet<string>;
   /** Clone paths this command wrote itself, such as the removal of a record a forced retire made: committed whatever host they name. */
   own?: ReadonlySet<string>;
+  pending?: ReadonlySet<string>;
   /** Says that a record of another machine was put back; on stderr by default. */
   warn?: (text: string) => void;
 };
@@ -350,13 +427,15 @@ export type CommitOptions = {
  * Commits the changes of the clone's working tree; true when it made a commit. Unfinished work, or any changed path
  * outside the allowlist, staged or not, stops it with nothing committed. Call it under the clone lock.
  */
-export function commitChanges(clone: string, { message = 'Update ledgers', deadline, host, ownHosts = new Set(), own = new Set(), warn = (text) => console.error(`warning: ${text}`) }: CommitOptions = {}): boolean {
+export function commitChanges(clone: string, { message = 'Update ledgers', deadline, host, ownHosts = new Set(), own = new Set(), pending, warn = (text) => console.error(`warning: ${text}`) }: CommitOptions = {}): boolean {
   let changed = checkedChanges(clone, deadline);
   // unique: a staged removal of a file that is still on disk is two entries.
-  const theirs = unique(changed).flatMap((file) => {
+  const foreign = unique(changed).flatMap((file) => {
     const owner = own.has(file) ? undefined : otherOwner(clone, file, { host, ownHosts, deadline });
     return owner === undefined ? [] : [{ file, owner }];
   });
+  if (foreign.length > 0) pending ??= uncommittedMoves(aliasMoves(clone, deadline));
+  const theirs = foreign.filter(({ file }) => !pending?.has(file));
   if (theirs.length > 0) {
     restoreFromHead(clone, theirs.map(({ file }) => file), deadline);
     for (const { file, owner } of theirs) warn(`put back ${shownPaths([file])} as git storage holds it: it is the record of a task on ${owner}, and only ${owner} changes it.`);
@@ -477,6 +556,13 @@ const blobName = (format: string, text: string): string => {
   return createHash(format).update(`blob ${body.length}\0`).update(body).digest('hex');
 };
 
+function hiddenIndexPaths(clone: string, files: string[]): string[] {
+  // A lowercase tag marks assume-unchanged and S marks skip-worktree. Both can hide a deletion from git.
+  return nulSeparated(must(cloneGit(clone, ['ls-files', '-v', '-z', '--', ...files], { env: { GIT_LITERAL_PATHSPECS: '1' } })))
+    .filter((entry) => entry[0] === 'S' || entry[0] !== entry[0].toUpperCase())
+    .map((entry) => entry.slice(2));
+}
+
 /**
  * Throws unless each of `files` and of the keys of `texts`, clone paths, is in HEAD as it is on disk, or in neither,
  * and each key of `texts` is in HEAD with its text. A ledger that an ignore rule or a flag of the index kept out of the
@@ -489,12 +575,9 @@ export function checkCommitted(clone: string, files: string[], texts: ReadonlyMa
   const literal = { env: { GIT_LITERAL_PATHSPECS: '1' } };
   const againstHead = (args: string[]): string[] => (hasHead ? nulSeparated(must(cloneGit(clone, [...args, 'HEAD', '--', ...checked], literal))) : []);
   // "<mode> <type> <object>\t<path>"
-  const inHead = new Map(againstHead(['ls-tree', '-r', '-z']).map((entry) => [entry.slice(entry.indexOf('\t') + 1), entry.slice(0, entry.indexOf('\t')).split(' ')[2]]));
+  const inHead = new Map(againstHead(['ls-tree', '-r', '-z']).map((entry) => [entry.slice(entry.indexOf('\t') + 1), treeObject(entry)]));
   const differ = againstHead(['diff', '--name-only', '-z']);
-  // "<tag> <path>": a lowercase tag marks assume-unchanged and S skip-worktree, either of which hides a change from git.
-  const hidden = nulSeparated(must(cloneGit(clone, ['ls-files', '-v', '-z', '--', ...checked], literal)))
-    .filter((entry) => entry[0] === 'S' || entry[0] !== entry[0].toUpperCase())
-    .map((entry) => entry.slice(2));
+  const hidden = hiddenIndexPaths(clone, checked);
   const format = texts.size === 0 ? '' : must(cloneGit(clone, ['rev-parse', '--show-object-format'])).trim();
   const missing = checked.filter((file) => {
     const text = texts.get(file);

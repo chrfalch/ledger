@@ -307,6 +307,12 @@ function markLost(context: Context, writable: () => LedgerStore, name: string, d
 /** A ledger's slug as findTasks sees it: its title's, else its store name. */
 const slugOf = ({ name, text }: { name: string; text: string }): string => parseLedger(text).slug ?? name;
 
+/** Whether `a` and `b` are one file by device and inode, as two spellings on a disk that ignores case are. */
+function isSameFile(a: string, b: string): boolean {
+  const [x, y] = [a, b].map((file) => lstatSync(file, { throwIfNoEntry: false }));
+  return x !== undefined && y !== undefined && x.dev === y.dev && x.ino === y.ino;
+}
+
 /** The key of the repo that holds `cwd`, to file the tasks of `old` under; it fails unless `old` is another repo key. */
 function keyToFileUnder(cwd: string, old: string): string {
   const main = mainCheckout(cwd) ?? fail(`${cwd} is not inside a git repository. Run this in a checkout of the repo whose remote was renamed.`);
@@ -335,36 +341,45 @@ function refileRemote({ store, cwd }: Context, writable: () => LedgerStore, old:
   const ledgers = places.flatMap((place) => store[place].list(old).map(({ name, text }) => ({ place, name, text })));
   const unreadable = places.flatMap((place) => store[place].unreadable(old).map((name) => ({ place, name })));
   // Evidence whose archive copy moved to `key` without it, as when its rename failed. Other evidence with no copy stays.
-  const strays = store.archive.orphanEvidence().flatMap(({ repo, name }) => (repo === old ? (readable(() => store.archive.read(key, name)) ?? []) : []));
+  const archive = store.archive;
+  const names = archive.orphanEvidenceIn?.(old) ?? archive.orphanEvidence().flatMap(({ repo, name }) => (repo === old ? [name] : []));
+  const strays = names.flatMap((name) => readable(() => archive.read(key, name)) ?? []);
   if (ledgers.length + unreadable.length + strays.length === 0 && saved === undefined) nothingFiledUnder(old);
   // A ledger a run that stopped left under both keys is the one under old, which its move finishes.
   const halfMoved = (place: 'backlog' | 'active', each: string, name: string): boolean => each === key && store[place].movedHalfway?.(old, name, key) === true;
   // findTasks hides a backlog task behind an active one of the same slug, so a slug in either place takes it in both.
-  const liveSlugsOf = (each: string): string[] =>
-    (['backlog', 'active'] as const).flatMap((place) => store[place].list(each).flatMap((ledger) => (halfMoved(place, each, ledger.name) ? [] : [slugOf(ledger)])));
-  const liveSlugs = new Set(keyAndAliases(aliases, key).filter((each) => each !== old).flatMap(liveSlugsOf));
+  const liveOf = (each: string) =>
+    (['backlog', 'active'] as const).flatMap((place) =>
+      store[place].list(each).map((ledger) => ({ place, slug: slugOf(ledger), location: ledger.location, halfMoved: halfMoved(place, each, ledger.name) })),
+    );
+  const live = keyAndAliases(aliases, key).filter((each) => each !== old).flatMap(liveOf);
+  const liveSlugsOf = (each: string): string[] => liveOf(each).map(({ slug }) => slug);
+  const liveSlugs = new Set(live.flatMap(({ slug, halfMoved }) => (halfMoved ? [] : [slug])));
   const pointing = [...aliases].flatMap(([alias, target]) => (target === old && alias !== key ? [alias] : []));
   // The tasks of an alias stay filed under it, so a clash cannot be left under old as a move is: it refuses them all.
   const clashes = pointing.flatMap((alias) => liveSlugsOf(alias).filter((slug) => liveSlugs.has(slug)).map((slug) => `${slug} of the alias ${alias}`));
   if (clashes.length > 0) {
     fail(`${shown(key)} has a live task with the slug of ${clashes.join(', ')}: re-pointing the aliases of ${old} would hide one task of each slug, so nothing was moved. Retire or rename one of each, then run this again.`);
   }
-  /**
-   * Markdown a run left under old when it stopped between removing the record and the Markdown it hid: a link of the
-   * Markdown its record hides under key. That run judged the record, so the move only removes it.
-   */
-  const leftByMove = (place: Place, name: string): boolean =>
-    store[place].markdownText?.(old, name) !== undefined && store[place].movedHalfway?.(old, name, key) === true && store[place].hiddenMarkdown?.(key).includes(name) === true;
   /** Why the ledger stays under `old`, decided before anything moves; the store's own checks come at the move. */
   const conflict = (place: Place, ledger: { name: string; text: string }): string | undefined => {
-    if (leftByMove(place, ledger.name)) return undefined;
-    const main = namedMain(ledger.text);
-    // As in ledger store migrate --repo-ids, an alias old → key already says where a ledger that names no main belongs.
-    const now = main === undefined ? saved : keyNow(main);
-    if (now === undefined) return main === undefined ? 'it names no main checkout, so its repo is not known' : `its main checkout ${main} is not one any more`;
-    if (!sameRepo(aliases, now, key)) return `its main checkout ${main} is a checkout of ${shown(now)}`;
-    const slug = slugOf(ledger);
-    return place !== 'archive' && liveSlugs.has(slug) ? `${shown(key)} already has ${slug}` : undefined;
+    // The earlier run checked the checkout before making the link. It may have disappeared since.
+    if (!store[place].movedHalfway?.(old, ledger.name, key)) {
+      const main = namedMain(ledger.text);
+      // As in ledger store migrate --repo-ids, an alias old → key already says where a ledger that names no main belongs.
+      const now = main === undefined ? saved : keyNow(main);
+      if (now === undefined) return main === undefined ? 'it names no main checkout, so its repo is not known' : `its main checkout ${main} is not one any more`;
+      if (!sameRepo(aliases, now, key)) return `its main checkout ${main} is a checkout of ${shown(now)}`;
+    }
+    if (place === 'archive') return undefined;
+    // Its copy under key is the file its name resolves to there, which a disk that ignores case may list in another case.
+    const destination = store[place].location(key, ledger.name);
+    const isOwn = (each: (typeof live)[number]): boolean => each.halfMoved && each.place === place && isSameFile(each.location, destination);
+    const others = new Set(live.flatMap((each) => (isOwn(each) ? [] : [each.slug])));
+    // The old key may have only the Markdown that its copy's record used to hide.
+    const slugs = [slugOf(ledger), ...live.flatMap((each) => (isOwn(each) ? [each.slug] : []))];
+    const clash = slugs.find((slug) => others.has(slug));
+    return clash === undefined ? undefined : `${shown(key)} already has ${clash}`;
   };
   // A move the read store already refuses, as a taken archive name, must not open the store to write.
   const planOf = (place: Place, name: string, why: string | undefined) => ({ place, name, why: why ?? moveLedger(store, place, { old, name, to: key }, true) });
