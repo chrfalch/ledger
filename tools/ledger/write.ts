@@ -5,6 +5,7 @@ import {
   addChild,
   addDecision,
   addLocationBullet,
+  clearStatus,
   fillLedger,
   markStarted,
   placeChildren,
@@ -20,7 +21,7 @@ import {
 import { fail, Failure } from './failure.js';
 import { exists, isFolder, readText, writeAtomic } from './files.js';
 import { installPackages } from './install.js';
-import { findSection, isNewSlug, isReadableSlug, isRepoKeyShape, parseDependencies, parseLedger, showDependencies, type Child, type ChildMark, type Claim, type Dependency, type Location, type TaskRef } from './format.js';
+import { findSection, isNewSlug, isReadableSlug, isRepoKeyShape, parseDependencies, parseLedger, showDependencies, type Child, type ChildMark, type Claim, type Dependency, type Location, type Status, type StatusValue, type TaskRef } from './format.js';
 import {
   addWorktree,
   branchExists,
@@ -44,6 +45,7 @@ import { storedText } from './record.js';
 import { remoteKey, repoKey } from './repo-key.js';
 import { holdsUnmovedLedger } from './unmoved.js';
 import { hostProblem, noteOwnHost } from './settings.js';
+import { checkTransition, stateOf } from './states.js';
 import { keyAndAliases, type Change, type LedgerStore } from './store.js';
 import { pauseForTest } from './wait.js';
 import {
@@ -542,11 +544,36 @@ export type ParkResult = Ref & { ledger: string; parked: ParkedMark };
 /** `parked` is the parked status removed; unparked is false when there was none. */
 export type UnparkResult = Ref & { ledger: string; unparked: boolean; parked?: ParkedMark };
 
+/**
+ * Fails unless the state table lets `task` move to `to` from the state `location` gives it. Set again, a status is only
+ * updated, as a second park replaces the reason.
+ */
+function checkMove(task: Task, location: Location, to: StatusValue): void {
+  const from = stateOf(location);
+  if (from !== to) checkTransition(task.slug, from, to);
+}
+
+function movedTo(task: Task, text: string, status: Status): string {
+  checkMove(task, parseLedger(text).location, status.value);
+  return setStatus(text, status) ?? fail(`${task.file} has no ## Location section.`);
+}
+
+/**
+ * `text` without the status `value`, which makes the task active again.
+ * The check cannot fail today: only parked and blocked are cleared, and the table lets both go back to active.
+ */
+function movedFrom(task: Task, text: string, value: StatusValue): string {
+  checkTransition(task.slug, value, 'active');
+  return clearStatus(text, value);
+}
+
 export function parkTask(context: Context, name: string, reason: string): ParkResult {
   if (oneLine(reason) === '') fail('A parked task needs a reason: ledger task park <slug> --reason <text>');
   const { task, ref } = liveTask(context, name);
+  // Before the write too: updateLedger refuses a lost task as one of another machine, which hides why it cannot move.
+  checkMove(task, task.ledger.location, 'parked');
   const parked = { date: today(), reason: oneLine(reason) };
-  updateLedger(context, task, (text) => setStatus(withoutClaim(text), { value: 'parked', date: parked.date, detail: parked.reason }) ?? fail(`${task.file} has no ## Location section.`));
+  updateLedger(context, task, (text) => movedTo(task, withoutClaim(text), { value: 'parked', date: parked.date, detail: parked.reason }));
   return { ...ref, ledger: task.file, parked };
 }
 
@@ -556,12 +583,45 @@ export function unparkTask(context: Context, name: string): UnparkResult {
   const { task, ref } = liveTask(context, name);
   const parked = parkedOf(task.ledger.location);
   if (parked === undefined) return { ...ref, ledger: task.file, unparked: false };
-  updateLedger(context, task, unpark);
+  updateLedger(context, task, (text) => movedFrom(task, text, 'parked'));
   return { ...ref, ledger: task.file, unparked: true, parked };
 }
 
 export const unparkText = ({ slug, parked }: UnparkResult): string =>
   parked === undefined ? `${slug} is not parked.` : `Unparked ${slug}. It was parked${parked.date ? ` on ${parked.date}` : ''}${parked.reason ? `: ${parked.reason}` : ''}.`;
+
+/** A blocked status as `block` and `unblock` give it: what the task waits for is `on`, a field the line leaves out as empty. */
+type BlockedMark = { date: string; on: string };
+
+const blockedOf = ({ status }: Location): BlockedMark | undefined => (status?.value === 'blocked' ? { date: status.date ?? '', on: status.detail ?? '' } : undefined);
+
+export type BlockResult = Ref & { ledger: string; blocked: BlockedMark };
+
+/** `blocked` is the blocked status removed; unblocked is false when there was none. */
+export type UnblockResult = Ref & { ledger: string; unblocked: boolean; blocked?: BlockedMark };
+
+/** Unlike park, it keeps the claim: the session that holds a blocked task goes on with it once the block is gone. */
+export function blockTask(context: Context, name: string, on: string): BlockResult {
+  if (oneLine(on) === '') fail('A blocked task names what it waits for: ledger task block <slug> --on <text>');
+  const { task, ref } = liveTask(context, name);
+  checkMove(task, task.ledger.location, 'blocked');
+  const blocked = { date: today(), on: oneLine(on) };
+  updateLedger(context, task, (text) => movedTo(task, text, { value: 'blocked', date: blocked.date, detail: blocked.on }));
+  return { ...ref, ledger: task.file, blocked };
+}
+
+export const blockText = ({ slug, blocked: { date, on } }: BlockResult): string => `Blocked ${slug}. Blocked: ${date} — ${on}`;
+
+export function unblockTask(context: Context, name: string): UnblockResult {
+  const { task, ref } = liveTask(context, name);
+  const blocked = blockedOf(task.ledger.location);
+  if (blocked === undefined) return { ...ref, ledger: task.file, unblocked: false };
+  updateLedger(context, task, (text) => movedFrom(task, text, 'blocked'));
+  return { ...ref, ledger: task.file, unblocked: true, blocked };
+}
+
+export const unblockText = ({ slug, blocked }: UnblockResult): string =>
+  blocked === undefined ? `${slug} is not blocked.` : `Unblocked ${slug}. It was blocked${blocked.date ? ` on ${blocked.date}` : ''}${blocked.on ? `: ${blocked.on}` : ''}.`;
 
 /** `notice` is the line for stderr: the hint to finalize a task marked done, or why a merged one was not marked. */
 export type MergedCheck = { marked: boolean; notice?: string };
@@ -576,7 +636,7 @@ export function markMergedDone(context: Context, task: Task): MergedCheck {
   if (task.status !== 'waiting' || pr === undefined || task.elsewhere) return { marked: false };
   if (prState(task.main ?? context.cwd, pr) !== 'merged') return { marked: false };
   try {
-    const marked = updateLedger(context, task, (text) => (parseLedger(text).location.status?.value === 'waiting' ? setStatus(text, { value: 'done', date: today() }) : undefined));
+    const marked = updateLedger(context, task, (text) => (stateOf(parseLedger(text).location) === 'waiting' ? movedTo(task, text, { value: 'done', date: today() }) : undefined));
     return marked ? { marked, notice: `${task.slug}: PR merged; marked done. Finalize with /ledger:retire ${task.slug}.` } : { marked };
   } catch (error) {
     if (!(error instanceof Failure)) throw error;

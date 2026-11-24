@@ -73,6 +73,8 @@ import {
 import { archivedTasks, childrenOf, findTasks, taskRef, theTask, type Task } from './tasks.js';
 import { archiveView, listView, parentView, writtenBranch, type ArchiveRow } from './views.js';
 import {
+  blockTask,
+  blockText,
   changeParent,
   createdText,
   createTask,
@@ -88,6 +90,8 @@ import {
   parkTask,
   parkText,
   setDependencies,
+  unblockTask,
+  unblockText,
   unparkTask,
   unparkText,
   waitingLines,
@@ -342,7 +346,7 @@ export async function main(argv: string[]): Promise<number> {
       });
 
   const program = new Command('ledger').description('Read and change the task ledgers on this machine.').enablePositionalOptions().exitOverride();
-  const taskGroup = program.command('task').description('Make, start, claim, park, retire and read tasks.');
+  const taskGroup = program.command('task').description('Make, start, claim, park, block, retire and read tasks.');
   taskGroup
     .command('new')
     .description('Write a backlog ledger for a new task, from ~/.claude/ledger.template.md. /ledger:go <slug> starts it.')
@@ -404,6 +408,19 @@ export async function main(argv: string[]): Promise<number> {
     .argument('<slug>', 'the task in this repo, or <slug>@<path> for the repo at <path>')
     .option('--json', JSON_HELP)
     .action((slug: string) => show(unparkTask(context, slug), unparkText));
+  taskGroup
+    .command('block')
+    .description('Mark a task blocked: a "- status: blocked <date> — <what it waits for>" line under ## Location. Its claim stays.')
+    .argument('<slug>', 'the task in this repo, or <slug>@<path> for the repo at <path>')
+    .requiredOption('--on <text>', 'what the task waits for: an operator answer or another task')
+    .option('--json', JSON_HELP)
+    .action((slug: string, { on }: { on: string }) => show(blockTask(context, slug, on), blockText));
+  taskGroup
+    .command('unblock')
+    .description('Remove the blocked status from a task.')
+    .argument('<slug>', 'the task in this repo, or <slug>@<path> for the repo at <path>')
+    .option('--json', JSON_HELP)
+    .action((slug: string) => show(unblockTask(context, slug), unblockText));
   taskGroup
     .command('retire')
     .description(

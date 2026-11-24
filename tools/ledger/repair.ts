@@ -10,6 +10,7 @@ import { withLock } from './lock.js';
 import { messageOf, moveLedger, namedMain, places, shown, type Place } from './migrate-repo-ids.js';
 import { samePath } from './paths.js';
 import { isRepoKey, repoKey, repoLabel } from './repo-key.js';
+import { checkTransition, stateOf } from './states.js';
 import { keyAndAliases, readable, SharedWorktree, type Alias, type LedgerStore } from './store.js';
 import { activeTasks, taskRef, UNKNOWN_HOST, type Task } from './tasks.js';
 import { heading, plural } from './views.js';
@@ -29,7 +30,7 @@ export const SEARCH_DEPTH = 6;
 
 const onOtherMachine = ({ host }: Task): boolean => host !== undefined && host !== UNKNOWN_HOST;
 
-/** The active tasks of this machine, neither parked nor lost, whose recorded folder is gone. */
+/** The active tasks of this machine, neither parked nor lost, whose recorded folder is gone: --to refuses a parked one. */
 const missingTasks = (store: LedgerStore): Task[] =>
   activeTasks(store).filter((task) => task.status !== 'parked' && task.status !== 'lost' && task.worktree !== undefined && !isFolder(task.worktree) && !onOtherMachine(task));
 
@@ -198,7 +199,9 @@ function report(context: Context, search: string[] | undefined, print: Print): n
     const [only] = candidates.length === 1 ? candidates : [];
     // Any checkout of the repo names the task, on whatever branch.
     const ref = refOf(context, task, checkouts.map(({ folder }) => folder));
-    moves.push(`  ledger store repair ${ref} --to ${only === undefined ? '<folder>' : shellWord(only.folder)}`, `  ledger store repair ${ref} --lost`);
+    moves.push(`  ledger store repair ${ref} --to ${only === undefined ? '<folder>' : shellWord(only.folder)}`);
+    // --lost refuses a blocked, waiting or done task.
+    if (task.status === 'active') moves.push(`  ledger store repair ${ref} --lost`);
   }
   if (renamed.length > 0) lines.push('', 'Remote renamed:');
   for (const { old, keys } of renamed) {
@@ -237,6 +240,8 @@ function pointTo(context: Context, writable: () => LedgerStore, name: string, to
   const folder = path.resolve(context.cwd, to);
   // By its parked mark, not its status, which a lost mark decides: --to must not make a parked task active.
   if (task.ledger.location.status?.value === 'parked') fail(`${task.slug} is parked, so it was not pointed at ${folder}: --to repairs only a task that is active or lost.`);
+  // A status line under the lost mark stays, as nothing else could clear it on a lost task.
+  if (task.status === 'lost') checkTransition(task.slug, 'lost', 'active');
   if (!isFolder(folder)) fail(`${folder} does not exist, so ${task.slug} was not pointed at it.`);
   const root = checkoutRoot(folder);
   const main = mainCheckout(folder);
@@ -283,8 +288,8 @@ function pointTo(context: Context, writable: () => LedgerStore, name: string, to
 
 function markLost(context: Context, writable: () => LedgerStore, name: string, dryRun: boolean, print: Print): void {
   const task = activeNamed(context, name);
-  // A parked task goes back to active only; --to, which removes a lost mark, refuses it.
-  if (task.ledger.location.status?.value === 'parked') fail(`${task.slug} is parked, so it was not marked lost: --lost marks only an active task.`);
+  const state = stateOf(task.ledger.location);
+  if (state !== 'lost') checkTransition(task.slug, state, 'lost');
   const refuseThere = (worktree: string | undefined): void => {
     if (worktree !== undefined && isFolder(worktree)) {
       fail(`The folder of ${task.slug}, ${worktree}, is there, so it is not lost. If the task moved, point it at its new folder: ledger store repair ${refOf(context, task)} --to <folder>`);

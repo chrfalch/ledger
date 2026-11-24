@@ -1025,6 +1025,10 @@ Known limits of task records:
 3. The agent writes the ledger with `ledger notes` during the work, one item
    per command. The rules say when.
 4. `ledger task park` and `ledger task unpark` mark a task that waits.
+   `ledger task block` and `ledger task unblock` mark a task that cannot
+   go on, and name what it waits for. Each refuses a move the state table
+   of [LLP 0001 section 5.1](0001-ledger-workflow.plan.md#51-states) does
+   not allow (`tools/ledger/states.ts`).
 5. `ledger task retire` archives the ledger and removes the worktree.
 
 A parent task stays in the backlog. Its ledger lists its child tasks.
