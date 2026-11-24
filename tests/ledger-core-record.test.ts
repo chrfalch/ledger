@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
-import { addChild, addDecision, markRetired, park, putChildReport, unpark } from '../tools/ledger/edit.js';
+import { addChild, addDecision, markRetired, putChildReport, setStatus, unpark } from '../tools/ledger/edit.js';
 import { parseLedger, planProgress, plainLine, type Ledger } from '../tools/ledger/format.js';
 import { parseRecord, readRecordJson, renderRecord, validateRecord, type TaskRecord } from '../tools/ledger/record.js';
 import { REPO } from './helpers.js';
@@ -82,7 +82,6 @@ function readByPlugin(text: string) {
     slug: ledger.slug,
     location: { ...location, ...(parent === undefined ? {} : { parent: withoutLine(parent) }) },
     children: ledger.children.map(withoutLine),
-    parked: ledger.parked && withoutLine(ledger.parked),
     goal: ledger.goal,
     next: ledger.next,
     report: ledger.report,
@@ -158,7 +157,7 @@ const FULL: TaskRecord = {
   base: { ref: 'origin/main', commit: '5c5a860' },
   main: '/repos/ledger',
   designRefs: ['0', '1'],
-  parked: { date: '2026-11-21', reason: 'waiting for review' },
+  status: { value: 'parked', date: '2026-11-21', detail: 'waiting for review' },
   goal: 'Backlog and archived ledgers become structured task records in every store.\n\nThe store keeps its string API as an adapter.',
   plan: {
     approved: '2026-11-20',
@@ -252,7 +251,7 @@ test('lines that fit no item go to the notes, each group after its section headi
   assert.equal(record.worktree, '/a/second/worktree');
   assert.deepEqual(record.plan.steps, [{ n: '1', step: 'only step', status: 'todo', owner: 'me', note: '\n| 2 | too | many | cells | here | extra |\nA line under the table.' }]);
   assert.deepEqual(record.decisions, [{ text: 'Use records', reason: 'they are typed [observed]\n  a continuation line of that decision' }]);
-  assert.equal(record.parked, undefined);
+  assert.equal(record.status, undefined);
   assert.equal(record.next, 'Parked: 2026-11-21 — a later marker is a note');
 });
 
@@ -308,8 +307,9 @@ test('ledger editors applied to rendered Markdown change only their field of the
   const markdown = renderRecord(record);
   const after = (edited: string): TaskRecord => parseRecord(edited);
 
-  assert.deepEqual(after(park(markdown, 'Parked: 2026-11-22 — on hold')), { ...record, parked: { date: '2026-11-22', reason: 'on hold' } });
-  assert.deepEqual(after(unpark(markdown)), (({ parked: _parked, ...rest }) => rest)(record));
+  const onHold = { value: 'parked', date: '2026-11-22', detail: 'on hold' } as const;
+  assert.deepEqual(after(setStatus(markdown, onHold) ?? assert.fail('no ## Location')), { ...record, status: onHold });
+  assert.deepEqual(after(unpark(markdown)), (({ status: _status, ...rest }) => rest)(record));
   assert.deepEqual(after(addChild(markdown, '- records-docs')), { ...record, children: [...record.children, { slug: 'records-docs', suffix: '' }] });
   const sqliteChild = parseLedger(markdown).children[1];
   assert.deepEqual(after(markRetired(markdown, sqliteChild, '2026-11-22')).children[1], {
@@ -341,8 +341,92 @@ test('a report keeps one blank line between its paragraphs, as the goal and the 
 test('a next step that reads like a parked marker stays the next step, and is not read as parked', () => {
   const record: TaskRecord = { ...parseRecord(TEMPLATE), slug: 'x', next: 'Parked: 2026-01-01 — in the text' };
   const rendered = renderRecord(record);
-  assert.equal(parseLedger(rendered).parked, undefined);
+  assert.equal(parseLedger(rendered).location.status, undefined);
   assert.deepEqual(parseRecord(rendered), record);
+});
+
+const STATUSES: [TaskRecord['status'] & object, string][] = [
+  [{ value: 'parked', date: '2026-11-23', detail: 'waiting on design' }, '- status: parked 2026-11-23 — waiting on design'],
+  [{ value: 'blocked', detail: 'the API team owes an answer' }, '- status: blocked — the API team owes an answer'],
+  [{ value: 'waiting', date: '2026-11-20' }, '- status: waiting 2026-11-20'],
+  [{ value: 'done' }, '- status: done'],
+];
+
+for (const [status, line] of STATUSES) {
+  test(`status ${line.slice('- status: '.length)} renders as one Location line and reads back as the same record`, () => {
+    const record: TaskRecord = { ...parseRecord(TEMPLATE), slug: 'x', status };
+    const rendered = renderRecord(record);
+    assert.equal(rendered.split('\n').filter((each) => each.startsWith('- status:')).join('\n'), line);
+    assert.doesNotMatch(rendered, /^Parked:|^- state:/m);
+    assert.deepEqual(parseRecord(rendered), record);
+    assert.deepEqual(validateRecord(JSON.parse(JSON.stringify(record))), record);
+  });
+}
+
+test('a legacy Parked: marker reads as status parked, and the record renders it as the status line, without the marker', () => {
+  const record = parseRecord(ledgerText({ slug: 'x', next: 'Parked: 2026-11-10 — waiting for review\nRun the tests.' }));
+  assert.deepEqual(record.status, { value: 'parked', date: '2026-11-10', detail: 'waiting for review' });
+  assert.equal(record.next, 'Run the tests.');
+  const rendered = renderRecord(record);
+  assert.match(rendered, /^- status: parked 2026-11-10 — waiting for review$/m);
+  assert.doesNotMatch(rendered, /Parked:/);
+  assert.deepEqual(parseRecord(ledgerText({ slug: 'x', next: 'Parked: 2026-11-10 —\nRun the tests.' })).status, { value: 'parked', date: '2026-11-10' });
+});
+
+test('a legacy - state: bullet with a status value reads as that status and renders as the status line; another state value stays as it is', () => {
+  const withState = (value: string): string => ledgerText({ slug: 'x' }).replace('- design refs: none', `- design refs: none\n- state: ${value}`);
+  const done = parseRecord(withState('done'));
+  assert.deepEqual(done.status, { value: 'done' });
+  assert.equal(done.state, undefined);
+  assert.match(renderRecord(done), /^- status: done$/m);
+  assert.doesNotMatch(renderRecord(done), /- state:/);
+  const active = parseRecord(withState('active'));
+  assert.equal(active.status, undefined);
+  assert.equal(active.state, 'active');
+  assert.equal(renderRecord(active), withState('active'));
+});
+
+test('the status line wins over a legacy - state: bullet, which stays as a note, and over a Parked: marker, which stays the next step', () => {
+  const markdown = ledgerText({ slug: 'x', next: 'Parked: 2026-11-10 — old\nRun the tests.' }).replace('- design refs: none', '- design refs: none\n- state: done\n- status: blocked 2026-11-22 — the API');
+  const record = parseRecord(markdown);
+  assert.deepEqual(record.status, { value: 'blocked', date: '2026-11-22', detail: 'the API' });
+  assert.equal(record.state, undefined);
+  assert.deepEqual(record.notes, ['## Location', '- state: done']);
+  assert.equal(record.next, 'Parked: 2026-11-10 — old\nRun the tests.');
+  assert.deepEqual(parseRecord(renderRecord(record)), record);
+});
+
+test('a stored record with the legacy parked or state field reads as status; the status field wins over both', () => {
+  const { status: _status, state: _state, ...bare } = JSON.parse(JSON.stringify(FULL)) as TaskRecord;
+  const read = (fields: object): TaskRecord => readRecordJson(JSON.stringify({ ...bare, ...fields }), 'old.json');
+  assert.deepEqual(read({ parked: { date: '2026-11-21', reason: 'waiting for review' } }).status, { value: 'parked', date: '2026-11-21', detail: 'waiting for review' });
+  assert.deepEqual(read({ parked: { date: '2026-11-21', reason: '' } }).status, { value: 'parked', date: '2026-11-21' });
+  assert.equal('parked' in read({ parked: { date: '2026-11-21', reason: 'r' } }), false);
+  const done = read({ state: 'done' });
+  assert.deepEqual([done.status, done.state], [{ value: 'done' }, undefined]);
+  const active = read({ state: 'active' });
+  assert.deepEqual([active.status, active.state], [undefined, 'active']);
+  assert.deepEqual(read({ state: 'done', parked: { date: '2026-11-21', reason: 'r' }, status: { value: 'waiting' } }).status, { value: 'waiting' });
+});
+
+test('validateRecord rejects a status the line cannot carry: an unknown value, a date in another form, a field it has not', () => {
+  const valid = JSON.parse(JSON.stringify(FULL)) as Record<string, unknown>;
+  const rejects = (status: unknown): void => assert.throws(() => validateRecord({ ...valid, status }), /status/);
+  rejects({ value: 'active' });
+  rejects({ value: 'parked', date: '23.11.2026' });
+  rejects({ value: 'parked', reason: 'old name' });
+  rejects({ value: 'done', detail: 'two\nlines' });
+});
+
+test('a status detail is one line of text without spaces at either end: validateRecord says so for any other, and such a line is a note', () => {
+  const valid = JSON.parse(JSON.stringify(FULL)) as Record<string, unknown>;
+  for (const detail of ['', ' ', ' padded', 'padded ', '\tpadded'])
+    assert.throws(() => validateRecord({ ...valid, status: { value: 'blocked', detail } }), /status\.detail is not one line of text without spaces at either end/, JSON.stringify(detail));
+  const markdown = ledgerText({ slug: 'x' }).replace('- design refs: none', '- design refs: none\n- status: blocked —  padded');
+  const record = parseRecord(markdown);
+  assert.equal(record.status, undefined);
+  assert.deepEqual(record.notes, ['## Location', '- status: blocked —  padded']);
+  assert.deepEqual(validateRecord(JSON.parse(JSON.stringify(record))), record);
 });
 
 test('a Windows line ending reads as the same record', () => {

@@ -107,7 +107,7 @@ test('notes and park write the active record', (t) => {
 
   const record = JSON.parse(readFileSync(store().active.location(key, 'epic'), 'utf8'));
   assert.ok(record.decisions.some(({ text }: { text: string }) => text === 'Keep records'));
-  assert.equal(record.parked.reason, 'waiting for review');
+  assert.deepEqual(record.status, { value: 'parked', date: record.status.date, detail: 'waiting for review' });
   const { tasks } = json(ledger(h, app, 'list', '--json')) as { tasks: { slug: string; status: string }[] };
   assert.equal(tasks.find(({ slug }) => slug === 'epic')?.status, 'parked');
   noLedgerFile(epic);

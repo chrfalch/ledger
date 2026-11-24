@@ -7,17 +7,17 @@ import {
   addLocationBullet,
   fillLedger,
   markStarted,
-  park,
   placeChildren,
   removeChildren,
   removeLine,
   setLocationBullet,
+  setStatus,
   unpark,
   withChildMain,
   withDesignRefsBullet,
   withoutClaim,
 } from './edit.js';
-import { fail } from './failure.js';
+import { fail, Failure } from './failure.js';
 import { exists, isFolder, readText, writeAtomic } from './files.js';
 import { installPackages } from './install.js';
 import { findSection, isNewSlug, isReadableSlug, isRepoKeyShape, parseDependencies, parseLedger, showDependencies, type Child, type ChildMark, type Claim, type Dependency, type Location, type TaskRef } from './format.js';
@@ -32,6 +32,7 @@ import {
   isBranchName,
   mainCheckout,
   originHead,
+  prState,
   removeWorktree,
   shortCommit,
 } from './git.js';
@@ -381,7 +382,7 @@ function promote(context: Context, slug: string, main: string, repo: string): St
 /**
  * What `ledger go` did. `chain` runs from the named task down to the child it started instead, empty when it started the
  * named task itself. `parent` is the started task's parent and `children` its own child tasks. `marked` is the parent
- * that now marks the task started; `unparked` the marker it removed. `installed` is the install command it ran.
+ * that now marks the task started; `unparked` the parked status it removed. `installed` is the install command it ran.
  * `tookOverFrom` is the live claim of another session it took over; `unclaimed` says why the session given was not claimed.
  */
 export type GoResult = {
@@ -432,7 +433,7 @@ const liveLedger = (tasks: Task[], ref: Ref): Task | undefined => {
 
 /**
  * Starts a task, as /ledger:go does: a parent with a child still in the backlog starts that child instead, a backlog
- * task gets its worktree, a task with a worktree is only gone to. Then its parked marker is removed and its parent marks
+ * task gets its worktree, a task with a worktree is only gone to. Then its parked status is removed and its parent marks
  * it started; a parent that cannot be marked is a warning, not a failure. A parent in the backlog with no child left
  * there fails, as there is nothing to start. The slug names a ledger that exists, so the reading rule applies. The task is
  * claimed for `session`; a task with a worktree that another session holds live is refused with Held, unless `takeOver`.
@@ -478,7 +479,8 @@ export function goTask(context: Context, slug: string, repo: string | undefined,
   const unclaimed = session !== undefined && !inCwdRepo ? `the task is in another repo, so a session in ${target.main} claims it with ledger go ${target.slug}` : undefined;
 
   const { active } = context.store;
-  const { parked, location } = parseLedger(active.read(record.repo, record.name)?.text ?? fail(`The ledger ${place.ledger} is gone.`));
+  const { location } = parseLedger(active.read(record.repo, record.name)?.text ?? fail(`The ledger ${place.ledger} is gone.`));
+  const parked = parkedOf(location);
   if (parked !== undefined) updateActive(context, record, unpark);
   const warnings: string[] = [];
   let marked: GoResult['marked'];
@@ -501,7 +503,7 @@ export function goTask(context: Context, slug: string, repo: string | undefined,
     chain,
     ...(parent === undefined ? {} : { parent }),
     children,
-    ...(parked === undefined ? {} : { unparked: { date: parked.date, reason: parked.reason } }),
+    ...(parked === undefined ? {} : { unparked: parked }),
     ...(marked === undefined ? {} : { marked }),
     ...(installed === undefined ? {} : { installed }),
     ...(tookOverFrom === undefined ? {} : { tookOverFrom }),
@@ -529,35 +531,58 @@ export function liveTask(context: Context, name: string): Linked & { tasks: Task
   return { task: theTask(tasks, ref, { live: true }), ref, tasks };
 }
 
+/** A parked status as `ledger go`, `park`, `unpark` and `list --json` give it, a field the status line leaves out as empty. */
 type ParkedMark = { date: string; reason: string };
+
+export const parkedOf = ({ status }: Location): ParkedMark | undefined =>
+  status?.value === 'parked' ? { date: status.date ?? '', reason: status.detail ?? '' } : undefined;
 
 export type ParkResult = Ref & { ledger: string; parked: ParkedMark };
 
-/** `parked` is the marker removed; unparked is false when there was none. */
+/** `parked` is the parked status removed; unparked is false when there was none. */
 export type UnparkResult = Ref & { ledger: string; unparked: boolean; parked?: ParkedMark };
 
 export function parkTask(context: Context, name: string, reason: string): ParkResult {
   if (oneLine(reason) === '') fail('A parked task needs a reason: ledger task park <slug> --reason <text>');
   const { task, ref } = liveTask(context, name);
   const parked = { date: today(), reason: oneLine(reason) };
-  updateLedger(context, task, (text) => park(withoutClaim(text), parkMarker(parked)));
+  updateLedger(context, task, (text) => setStatus(withoutClaim(text), { value: 'parked', date: parked.date, detail: parked.reason }) ?? fail(`${task.file} has no ## Location section.`));
   return { ...ref, ledger: task.file, parked };
 }
 
-const parkMarker = ({ date, reason }: ParkedMark): string => `Parked: ${date} — ${reason}`;
-
-export const parkText = ({ slug, parked }: ParkResult): string => `Parked ${slug}. ${parkMarker(parked)}`;
+export const parkText = ({ slug, parked: { date, reason } }: ParkResult): string => `Parked ${slug}. Parked: ${date} — ${reason}`;
 
 export function unparkTask(context: Context, name: string): UnparkResult {
   const { task, ref } = liveTask(context, name);
-  const { parked } = task.ledger;
+  const parked = parkedOf(task.ledger.location);
   if (parked === undefined) return { ...ref, ledger: task.file, unparked: false };
   updateLedger(context, task, unpark);
-  return { ...ref, ledger: task.file, unparked: true, parked: { date: parked.date, reason: parked.reason } };
+  return { ...ref, ledger: task.file, unparked: true, parked };
 }
 
 export const unparkText = ({ slug, parked }: UnparkResult): string =>
-  parked === undefined ? `${slug} is not parked.` : `Unparked ${slug}. It was parked on ${parked.date}${parked.reason ? `: ${parked.reason}` : ''}.`;
+  parked === undefined ? `${slug} is not parked.` : `Unparked ${slug}. It was parked${parked.date ? ` on ${parked.date}` : ''}${parked.reason ? `: ${parked.reason}` : ''}.`;
+
+/** `notice` is the line for stderr: the hint to finalize a task marked done, or why a merged one was not marked. */
+export type MergedCheck = { marked: boolean; notice?: string };
+
+/**
+ * Marks `task` done when it is waiting, names its PR, and gh says that PR is merged. gh is asked about no other task,
+ * and not about one with no live git worktree of its repo on this machine (`elsewhere`), as one of another machine. A
+ * write that fails is no failure: `ledger list` and `ledger show` go on with the task as read.
+ */
+export function markMergedDone(context: Context, task: Task): MergedCheck {
+  const { pr } = task.ledger.location;
+  if (task.status !== 'waiting' || pr === undefined || task.elsewhere) return { marked: false };
+  if (prState(task.main ?? context.cwd, pr) !== 'merged') return { marked: false };
+  try {
+    const marked = updateLedger(context, task, (text) => (parseLedger(text).location.status?.value === 'waiting' ? setStatus(text, { value: 'done', date: today() }) : undefined));
+    return marked ? { marked, notice: `${task.slug}: PR merged; marked done. Finalize with /ledger:retire ${task.slug}.` } : { marked };
+  } catch (error) {
+    if (!(error instanceof Failure)) throw error;
+    return { marked: false, notice: `warning: ${task.slug}: its PR is merged, but it was not marked done: ${oneLine(error.message)}` };
+  }
+}
 
 export type ParentAction = 'add' | 'remove' | 'start' | 'next';
 

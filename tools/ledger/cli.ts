@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { claimResultText, claimTask, Held, knownSession, releaseAll, releaseTask, requiredSession, touchAll, touchTask, type AllResult } from './claims.js';
 import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
-import { planProgress } from './format.js';
+import { parseLedger, planProgress } from './format.js';
 import { GATE_NAMES, gateQuestion } from './gates.js';
 import { mainCheckout } from './git.js';
 import { logHookFailure, oneLine } from './hook-failures.js';
@@ -80,9 +80,11 @@ import {
   dependsText,
   goTask,
   goText,
+  markMergedDone,
   orderChildren,
   orderText,
   parentChangeText,
+  parkedOf,
   parkTask,
   parkText,
   setDependencies,
@@ -99,6 +101,7 @@ const newestFirst = (a: Task, b: Task): number => b.mtimeMs - a.mtimeMs;
 function listed(task: Task) {
   const { ledger } = task;
   const parent = ledger.location.parent;
+  const parked = parkedOf(ledger.location);
   const parentMain = parent?.main ?? task.main;
   return {
     slug: task.slug,
@@ -116,7 +119,7 @@ function listed(task: Task) {
     goal: ledger.goal,
     next: ledger.next,
     ...planProgress(ledger),
-    ...(ledger.parked === undefined ? {} : { parked: { date: ledger.parked.date, reason: ledger.parked.reason } }),
+    ...(parked === undefined ? {} : { parked }),
     ...(ledger.location.lost === undefined ? {} : { lost: ledger.location.lost }),
     ...(task.archived === undefined ? {} : { archived: task.archived }),
   };
@@ -294,17 +297,22 @@ export async function main(argv: string[]): Promise<number> {
       });
   const listCommand = (command: Command): Command =>
     command
-      .description('List the live tasks of every known repo: active, parked and backlog. Retired tasks are in ledger task archive.')
+      .description(
+        'List the live tasks of every known repo: active, parked, blocked, waiting, done, lost and backlog. A waiting task whose PR gh says is merged is marked done first. Retired tasks are in ledger task archive.',
+      )
       .option('--archived', 'list the retired tasks too')
       .option('--json', JSON_HELP)
       .action(({ archived = false }: { archived?: boolean }) => {
-        const tasks = list(context, archived);
+        const found = list(context, archived);
+        const checks = found.map((task) => markMergedDone(context, task));
+        const tasks = checks.some(({ marked }) => marked) ? list(context, archived) : found;
+        for (const { notice } of checks) if (notice !== undefined) console.error(notice);
         if (json) printJson({ tasks: realMains(tasks.map(listed)) });
         else console.log(listView(tasks));
       });
   const showCommand = (command: Command): Command =>
     command
-      .description("Print a task's ledger from this repo: its active ledger, whichever clone holds its worktree, else its backlog ledger, else its newest archive copy.")
+      .description("Print a task's ledger from this repo: its active ledger, whichever clone holds its worktree, else its backlog ledger, else its newest archive copy. A waiting task whose PR gh says is merged is marked done first.")
       .argument('[slug]', 'the task, or a full archive name <date>-<slug>[-N] for that one copy; by default the task of the worktree you are in')
       .option('--repo <repo>', 'read the ledgers of another repo: its key, such as github.com/me/app, an alias, or its short label, such as me/app')
       .addOption(new Option('--evidence [file]', "list the archive copy's evidence files, one path per line, or print the bytes of one").conflicts('json'))
@@ -314,12 +322,15 @@ export async function main(argv: string[]): Promise<number> {
         try {
           if (slug === undefined && (repo !== undefined || evidence !== undefined)) fail('--repo and --evidence name a task of their own: ledger show <slug>');
           const found = slug === undefined ? ownLedger(context) : shownLedger(context, slug, { repo, archived: evidence !== undefined });
+          if (found.notice !== undefined) console.error(found.notice);
           if (evidence === true) process.stdout.write(context.store.archive.evidenceFiles(found.repo, found.name).map((file) => `${file}\n`).join(''));
           else if (evidence !== undefined) {
             const bytes = context.store.archive.readEvidence(found.repo, found.name, evidence) ?? fail(`${evidence} is not an evidence file of ${slug}, archived as ${found.name} in the repo ${repoLabel(found.repo)}.`);
             process.stdout.write(bytes);
-          } else if (json) printJson({ repo: found.repo, name: found.name, location: found.location, ...(found.host === undefined ? {} : { host: found.host }), text: found.text });
-          else {
+          } else if (json) {
+            const { status } = parseLedger(found.text).location;
+            printJson({ repo: found.repo, name: found.name, location: found.location, ...(found.host === undefined ? {} : { host: found.host }), ...(status === undefined ? {} : { status }), text: found.text });
+          } else {
             if (found.host !== undefined) console.log(`${found.name} is in a worktree on ${found.host}. This is a read-only copy of its ledger:`);
             process.stdout.write(found.text);
           }
@@ -382,14 +393,14 @@ export async function main(argv: string[]): Promise<number> {
     });
   taskGroup
     .command('park')
-    .description('Mark a task parked: a "Parked: <date> — <reason>" line first under ## Next step. Its claim is removed.')
+    .description('Mark a task parked: a "- status: parked <date> — <reason>" line under ## Location. Its claim is removed.')
     .argument('<slug>', 'the task in this repo, or <slug>@<path> for the repo at <path>')
     .requiredOption('--reason <text>', 'why the task waits')
     .option('--json', JSON_HELP)
     .action((slug: string, { reason }: { reason: string }) => show(parkTask(context, slug, reason), parkText));
   taskGroup
     .command('unpark')
-    .description('Remove the parked mark from a task.')
+    .description('Remove the parked status from a task.')
     .argument('<slug>', 'the task in this repo, or <slug>@<path> for the repo at <path>')
     .option('--json', JSON_HELP)
     .action((slug: string) => show(unparkTask(context, slug), unparkText));

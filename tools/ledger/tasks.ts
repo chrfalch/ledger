@@ -1,14 +1,14 @@
 import path from 'node:path';
 import { fail } from './failure.js';
 import { isFolder, type TimedText } from './files.js';
-import { isReadableSlug, parseLedger, type Child, type Dependency, type Ledger, type TaskRef } from './format.js';
+import { isReadableSlug, parseLedger, type Child, type Dependency, type Ledger, type StatusValue, type TaskRef } from './format.js';
 import { mainCheckout, worktrees, type Worktree } from './git.js';
 import { mainOfTaskWorktree, parseArchiveName, samePath } from './paths.js';
 import { repoKey } from './repo-key.js';
 import { keyAndAliases, readable, type LedgerStore, type StoredLedger } from './store.js';
 
 export type Place = 'active' | 'backlog' | 'archive';
-export type TaskStatus = 'active' | 'parked' | 'lost' | 'backlog' | 'retired';
+export type TaskStatus = 'active' | StatusValue | 'lost' | 'backlog' | 'retired';
 
 /** One task ledger. `main` is unknown for a backlog or archive ledger that does not name it. */
 export type Task = {
@@ -61,7 +61,7 @@ type Found = {
 function toTask({ file, name, place, repo, aliases, fallbackSlug, mainOf, branch, worktree, elsewhere, host }: Found, { text, mtimeMs, birthtimeMs }: TimedText): Task {
   const ledger = parseLedger(text);
   const currentRepo = aliases.get(repo);
-  const status: TaskStatus = place === 'archive' ? 'retired' : place === 'backlog' ? 'backlog' : ledger.location.lost ? 'lost' : ledger.parked ? 'parked' : 'active';
+  const status: TaskStatus = place === 'archive' ? 'retired' : place === 'backlog' ? 'backlog' : ledger.location.lost ? 'lost' : (ledger.location.status?.value ?? 'active');
   const main = mainOf(ledger);
   const knownBranch = branch ?? ledger.location.branch;
   const archived = place === 'archive' ? parseArchiveName(name)?.date : undefined;
@@ -308,4 +308,4 @@ export function dependencyTask(tasks: Task[], { slug, repo }: Required<Dependenc
 }
 
 /** A task no ledger names is not done: it may not be made yet. */
-export const isDone = (task: Task | undefined): boolean => task !== undefined && (task.status === 'retired' || task.ledger.location.state === 'done');
+export const isDone = (task: Task | undefined): boolean => task !== undefined && (task.status === 'retired' || task.ledger.location.status?.value === 'done');

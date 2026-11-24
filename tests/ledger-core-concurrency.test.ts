@@ -205,7 +205,7 @@ function inProcess(t: TestContext, storage: Storage) {
   return { h, app, key, real, context };
 }
 
-const parked = (text: string): boolean => /Parked: \d{4}-\d\d-\d\d — paused/.test(text);
+const parked = (text: string): boolean => /^- status: parked \d{4}-\d\d-\d\d — paused$/m.test(text);
 
 /** The pid of a process that has exited. */
 const deadPid = (): number => spawnSync(process.execPath, ['-e', '']).pid;

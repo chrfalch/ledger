@@ -127,14 +127,14 @@ for (const storage of ['file', 'sqlite', 'git'] as const) {
     assert.equal(read((store) => store.active.byWorktree(sameSlug.folder)), undefined);
   });
 
-  test(`${storage} store: migrate --active turns the parked marker under Next step into the record's parked field`, { skip }, (t) => {
+  test(`${storage} store: migrate --active turns the parked marker under Next step into the record's status`, { skip }, (t) => {
     const { h, app, key, read } = setup(t, storage);
     legacyWorktree(h, app, 'resting', ledgerText({ slug: 'resting', next: 'Parked: 2026-11-01 — waiting on review.\nResume at step 2.' }));
 
     ok(migrate(h, app));
 
     const record = parseRecord(read((store) => store.active.read(key, 'resting')?.text) ?? '');
-    assert.deepEqual(record.parked, { date: '2026-11-01', reason: 'waiting on review.' });
+    assert.deepEqual(record.status, { value: 'parked', date: '2026-11-01', detail: 'waiting on review.' });
     assert.equal(record.next, 'Resume at step 2.');
   });
 }

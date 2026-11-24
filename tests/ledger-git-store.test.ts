@@ -336,7 +336,7 @@ test('task, park, parent add and retire under git storage each commit in the clo
   const files = remoteFiles(bare);
   for (const file of [`backlog/${APP}/fix-login.json`, `backlog/${APP}/epic.json`, `archive/${APP}/${today()}-idea.json`]) assert.ok(files.includes(file), `${file} in ${files.join(', ')}`);
   assert.ok(!files.includes(`backlog/${APP}/idea.json`));
-  assert.match(remoteLedger(bare, `backlog/${APP}/fix-login.json`), /Parked: .* — waits for design/);
+  assert.match(remoteLedger(bare, `backlog/${APP}/fix-login.json`), /^- status: parked .* — waits for design$/m);
   assert.match(remoteLedger(bare, `backlog/${APP}/fix-login.json`), /- parent: epic/);
   assert.match(remoteLedger(bare, `backlog/${APP}/epic.json`), /fix-login/);
   assert.equal(existsSync(a.status), false);

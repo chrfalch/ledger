@@ -227,6 +227,23 @@ function listPrs(folder: string, branch: string, state: string, fields: string, 
   return { error: 'gh pr list printed something that is not a JSON list' };
 }
 
+/** `ledger list` and `ledger show` ask it, so a gh that hangs must not hang them. */
+const PR_STATE_TIMEOUT_MS = 10_000;
+
+/** Whether gh says the PR `pr`, a number or URL, is merged; unknown when gh does not run, fails or prints no state. */
+export function prState(folder: string, pr: string): 'merged' | 'not merged' | 'unknown' {
+  const result = gh(folder, ['pr', 'view', pr, '--json', 'state'], { timeoutMs: PR_STATE_TIMEOUT_MS });
+  if (!result.ok) return 'unknown';
+  try {
+    const parsed: unknown = JSON.parse(result.stdout);
+    const state = isRecord(parsed) ? parsed.state : undefined;
+    if (typeof state === 'string') return state === 'MERGED' ? 'merged' : 'not merged';
+  } catch {
+    // Not JSON: the same answer as JSON without a state.
+  }
+  return 'unknown';
+}
+
 /** gh lists 30 PRs unless told otherwise; a branch reused for years can have more merged ones than that. */
 const MERGED_PR_LIMIT = 1000;
 

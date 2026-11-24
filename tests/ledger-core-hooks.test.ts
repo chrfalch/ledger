@@ -401,7 +401,7 @@ test('session-start in a main checkout names the parent or children under each l
   assert.deepEqual(
     context.split('\n=== ').slice(1),
     ledgers.map((ledger) => {
-      const next = ledger === childB ? 'Parked: 2026-10-02 — later.\nA step.' : 'A step.';
+      const next = ledger === childB ? '- status: parked 2026-10-02 — later.\nA step.' : 'A step.';
       return [summaryHead(ledger).slice('=== '.length), ...(relations[ledger] ?? []), 'A goal.', '', next, ''].join('\n');
     }),
   );

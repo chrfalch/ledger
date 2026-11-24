@@ -139,14 +139,17 @@ function relationLines(task: Task, tasks: Task[]): string[] {
   return [...parentLines, ...childLines];
 }
 
-/** The lines under ## Goal and ## Next step, as written. */
-function summary({ lines, sections }: Ledger): string {
+/** The lines under ## Goal, then the status line and the lines under ## Next step, as written. */
+function summary({ lines, sections, statusLine }: Ledger): string {
   const count = lines.at(-1) === '' ? lines.length - 1 : lines.length;
   const body = (name: string): readonly string[] => {
     const section = findSection(sections, name);
     return section === undefined ? [] : lines.slice(section.start + 1, Math.min(section.end, count));
   };
-  return [...body('Goal'), ...body('Next step')].map((line) => `${line}\n`).join('');
+  const next = findSection(sections, 'Next step');
+  const marker = next !== undefined && statusLine !== undefined && statusLine > next.start && statusLine < next.end;
+  const status = statusLine === undefined || marker ? [] : [lines[statusLine]];
+  return [...body('Goal'), ...status, ...body('Next step')].map((line) => `${line}\n`).join('');
 }
 
 /**

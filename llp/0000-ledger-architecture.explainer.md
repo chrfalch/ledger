@@ -34,17 +34,32 @@ The system has five parts:
 5. The rules and agents, in `rules/` and `agents/`, which tell the agent what
    to do.
 
-A task has one ledger at a time. Where the ledger is tells the task's status:
+A task has one ledger at a time. Where the ledger is tells the task's status,
+and inside active, its status line tells the detail:
 
 | Where the ledger is | Status |
 |---|---|
 | Backlog, in the store | `backlog` |
-| Active, in the store, naming its worktree | `active`, or `parked` with a parked mark |
+| Active, in the store, naming its worktree | `active`, or the value of its status line: `parked`, `blocked`, `waiting` or `done` |
 | Active, in the store, with a lost mark | `lost` |
 | Archive, in the store | `retired` |
 
-`toTask` in `tools/ledger/tasks.ts` sets the status this way. A lost mark wins
-over a parked mark. `ledger store repair <slug> --lost` writes the mark, a
+`toTask` in `tools/ledger/tasks.ts` sets the status this way. The tool writes
+the status line under `## Location` as
+`- status: <value>[ <date>][ — <detail>]`, such as
+`- status: parked 2026-11-23 — waiting on design`. A line in any other form is
+a note. An older ledger may still have a `Parked: <date> — <reason>` line
+first under `## Next step`, or a `- state:` line with one of those values. It
+reads as that status, and the next write saves it as the status line. When a
+waiting task names its PR in `- pr:`, `ledger show` and `ledger list` ask gh
+about that PR, and mark the task done once it is merged
+(`markMergedDone` in `tools/ledger/write.ts`). They skip a task that has no live
+git worktree of its repo on this machine, such as one of another machine, one
+whose folder is gone, or one whose folder git does not list as a worktree. A write of the done mark that fails is a warning on stderr,
+and the command goes on with the task as read.
+
+A lost mark wins over the status line.
+`ledger store repair <slug> --lost` writes the mark, a
 Location line `- lost: <date> — folder <path> not found`, or `- lost: <date>`
 for a task that records no worktree. A `- lost:` line counts as the mark only
 in the exact form written for the recorded worktree. Any other `- lost:` line
@@ -78,7 +93,8 @@ each:
     done (`firstToStart` in `tools/ledger/write.ts`).
   - `claim`, `touch`, `release`: take, refresh and remove this session's
     claim on a task (see Claims under [The plugin](#the-plugin)).
-  - `park`, `unpark`: add or remove the parked mark under `## Next step`.
+  - `park`, `unpark`: write the status line `parked <date> — <reason>`, or
+    remove it when the task is parked.
   - `retire`: archives the ledger (see [Retire and archive](#retire-and-archive)).
   - `show`, `list`, `archive`: print a task's ledger, list the live tasks, or
     list the archived ledgers.

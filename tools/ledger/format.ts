@@ -44,11 +44,18 @@ export type Location = {
   mainLine?: number;
   parent?: TaskRef & { line: number };
   claim?: Claim;
-  state?: string;
+  pr?: string;
+  status?: Status;
   order?: number;
   dependencies?: Dependency[];
   lost?: Lost;
 };
+
+export const STATUS_VALUES = ['parked', 'blocked', 'waiting', 'done'] as const;
+export type StatusValue = (typeof STATUS_VALUES)[number];
+
+/** Where an active task stands, written by the tool as `- status: <value>[ <date>][ — <detail>]`; none is plain active. */
+export type Status = { value: StatusValue; date?: string; detail?: string };
 
 /** An active task whose folder is gone for good, by `ledger store repair --lost`. */
 export type Lost = { date: string };
@@ -57,8 +64,6 @@ export type ChildMark = { kind: 'retired' | 'started'; date: string };
 
 /** A line under ## Children. `suffix` is the text after the slug and main, as written. `mark` is only a hint. */
 export type Child = TaskRef & { line: number; suffix: string; mark?: ChildMark };
-
-export type Parked = { line: number; date: string; reason: string };
 
 /**
  * One ledger file. `lines` is the text split on \n, each line keeping its own \r, so serializing is a join and an edit
@@ -70,7 +75,8 @@ export type Ledger = {
   sections: readonly Section[];
   location: Location;
   children: readonly Child[];
-  parked?: Parked;
+  /** The line `location.status` is read from: its `- status:` bullet, a legacy `- state:` bullet, or a legacy `Parked:` marker. */
+  statusLine?: number;
   goal: string;
   next: string;
   report: readonly string[];
@@ -86,6 +92,7 @@ const ORDER = /^(0|[1-9]\d*)$/;
 const CHILD = /^- ([A-Za-z0-9._-]+)(?:[ \t]*@[ \t]*(\/\S*))?(?:[ \t]+(\(.*))?$/;
 const MARK = /^\((retired|started) (\d{4}-\d\d-\d\d)\b/;
 const PARKED = /^Parked:[ \t]*(\d{4}-\d{2}-\d{2})[ \t]*[—-][ \t]*(.*)$/;
+const STATUS = /^([a-z]+)(?: (\d{4}-\d\d-\d\d))?(?: — (\S(?:.*\S)?))?$/;
 const CLAIM = /^session (\S+) since (\S+), active (\S+)$/;
 
 export const isPlaceholder = (text: string): boolean => /^<.*>$/.test(text);
@@ -130,6 +137,16 @@ export const LOST_BULLET = '- lost: ';
 export const lostMark = (line: string, worktree: string | undefined): Lost | undefined =>
   line.startsWith(LOST_BULLET) ? parseLost(line.slice(LOST_BULLET.length), worktree) : undefined;
 
+export const isStatusValue = (value: unknown): value is StatusValue => STATUS_VALUES.some((each) => each === value);
+
+/** The value of a `- status:` bullet, exactly as `statusText` writes it; undefined for any other text. */
+export function parseStatus(text: string): Status | undefined {
+  const [, value, date, detail] = STATUS.exec(text) ?? [];
+  return isStatusValue(value) ? { value, ...(date === undefined ? {} : { date }), ...(detail === undefined ? {} : { detail }) } : undefined;
+}
+
+export const statusText = ({ value, date, detail }: Status): string => `${value}${date === undefined ? '' : ` ${date}`}${detail === undefined ? '' : ` — ${detail}`}`;
+
 /** The value of an `- order:` bullet: a whole number. */
 export const parseOrder = (text: string): number | undefined => (ORDER.test(text) ? Number(text) : undefined);
 
@@ -171,16 +188,18 @@ export function parseLedger(text: string): Ledger {
       .map((index) => plain[index].trim())
       .filter((line) => line !== '' && !isPlaceholder(line));
   const titled = plain.map((line) => TITLE.exec(line)?.[1].trim()).find((slug) => slug !== undefined);
-  const { parked } = parseParked(plain, range('Next step'));
+  const { location, status: bullet } = parseLocation(plain, range('Location'));
+  const status = bullet ?? parseParked(plain, range('Next step'));
+  if (status !== undefined) location.status = status.status;
   return {
     lines,
     ...(titled !== undefined && isReadableSlug(titled) ? { slug: titled } : {}),
     sections,
-    location: parseLocation(plain, range('Location')),
+    location,
     children: parseChildren(plain, range('Children')),
-    ...(parked === undefined ? {} : { parked }),
+    ...(status === undefined ? {} : { statusLine: status.line }),
     goal: texts('Goal')[0] ?? '',
-    next: texts('Next step', parked?.line)[0] ?? '',
+    next: texts('Next step', status?.line)[0] ?? '',
     report: range('Report').map((index) => plain[index]).filter((line) => line.trim() !== '' && !isPlaceholder(line.trim())),
   };
 }
@@ -268,9 +287,14 @@ function mainPath(raw: string): string | undefined {
   return main.startsWith('/') ? main : undefined;
 }
 
-function parseLocation(plain: string[], range: number[]): Location {
+type StatusAt = { status: Status; line: number };
+
+/** The status is its `- status:` bullet, else a legacy `- state:` bullet with a status value, wherever each stands. */
+function parseLocation(plain: string[], range: number[]): { location: Location; status?: StatusAt } {
   const location: Location = {};
   const lost: string[] = [];
+  let bullet: StatusAt | undefined;
+  let state: StatusAt | undefined;
   for (const index of range) {
     const [, name, raw] = FIELD.exec(plain[index].trim()) ?? [];
     const value = raw?.trim();
@@ -281,7 +305,7 @@ function parseLocation(plain: string[], range: number[]): Location {
       if (main !== undefined) location.main = main;
     }
     else if (name === 'worktree') location.worktree ??= unquoted(value);
-    else if (name === 'host' || name === 'branch') location[name] ??= value;
+    else if (name === 'host' || name === 'branch' || name === 'pr') location[name] ??= value;
     else if (name === 'base' && location.base === undefined) {
       const [ref, commit] = value.split(/[ \t]+@[ \t]+/);
       location.base = commit === undefined ? { ref } : { ref, commit };
@@ -289,7 +313,10 @@ function parseLocation(plain: string[], range: number[]): Location {
       const [, slug, main] = REF.exec(value) ?? [];
       if (slug !== undefined) location.parent = { slug, ...(main === undefined ? {} : { main }), line: index };
     } else if (name === 'claim') location.claim ??= parseClaim(value);
-    else if (name === 'state') location.state ??= value;
+    else if (name === 'status' && bullet === undefined) {
+      const status = parseStatus(value);
+      if (status !== undefined) bullet = { status, line: index };
+    } else if (name === 'state' && state === undefined && isStatusValue(value)) state = { status: { value }, line: index };
     else if (name === 'order' && location.order === undefined) {
       const order = parseOrder(value);
       if (order !== undefined) location.order = order;
@@ -301,7 +328,8 @@ function parseLocation(plain: string[], range: number[]): Location {
   // Read once the worktree is known, as a lost mark names it.
   const mark = lost.flatMap((line) => lostMark(line, location.worktree) ?? [])[0];
   if (mark !== undefined) location.lost = mark;
-  return location;
+  const status = bullet ?? state;
+  return status === undefined ? { location } : { location, status };
 }
 
 function parseMark(suffix: string): ChildMark | undefined {
@@ -318,10 +346,11 @@ function parseChildren(plain: string[], range: number[]): Child[] {
   });
 }
 
-/** Parked only counts as the first text under ## Next step. */
-function parseParked(plain: string[], range: number[]): { parked?: Parked } {
+/** The legacy parked marker, which only counts as the first text under ## Next step. */
+function parseParked(plain: string[], range: number[]): StatusAt | undefined {
   const line = range.find((index) => plain[index].trim() !== '');
-  if (line === undefined) return {};
+  if (line === undefined) return undefined;
   const [, date, reason] = PARKED.exec(plain[line].trim()) ?? [];
-  return date === undefined ? {} : { parked: { line, date, reason: reason.trim() } };
+  const detail = reason?.trim();
+  return date === undefined ? undefined : { status: { value: 'parked', date, ...(detail ? { detail } : {}) }, line };
 }
