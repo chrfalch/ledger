@@ -1,4 +1,21 @@
-import { claimText, findSection, isPlaceholder, LOST_BULLET, lostMark, lostText, parseLedger, plainLine as plain, serializeLedger, type Child, type Claim, type Ledger, type Lost, type Section } from './format.js';
+import {
+  claimText,
+  findSection,
+  isPlaceholder,
+  LOST_BULLET,
+  lostMark,
+  lostText,
+  parseLedger,
+  plainLine as plain,
+  serializeLedger,
+  statusText,
+  type Child,
+  type Claim,
+  type Ledger,
+  type Lost,
+  type Section,
+  type Status,
+} from './format.js';
 
 /**
  * Line edits of a ledger. Each one returns the new text, changes only the lines it names, and gives every line it adds
@@ -82,18 +99,31 @@ export function withDesignRefsBullet(text: string): string | undefined {
 
 export const addDecision = (text: string, line: string): string => appendTo(parseLedger(text), 'Decisions', [line]);
 
-/** Puts `marker` first under ## Next step, in place of the marker there, and adds the section when there is none. */
-export function park(text: string, marker: string): string {
-  const unparked = parseLedger(unpark(text));
-  const next = findSection(unparked.sections, 'Next step');
-  return next ? insert(unparked, next.start + 1, [marker]) : appendTo(unparked, 'Next step', [marker]);
+/** `ledger` without the line its status is read from, a legacy `- state:` bullet or `Parked:` marker included. */
+const withoutStatus = (ledger: Ledger): Ledger => (ledger.statusLine === undefined ? ledger : parseLedger(without(ledger, (index) => index === ledger.statusLine)));
+
+/**
+ * `text` with `status` as its `- status:` bullet: in place of the bullet its status is read from, else at the end of
+ * ## Location, a legacy form of it dropped. Undefined when the ledger has no ## Location.
+ */
+export function setStatus(text: string, status: Status): string | undefined {
+  const ledger = parseLedger(text);
+  const bullet = `- status: ${statusText(status)}`;
+  const { statusLine } = ledger;
+  if (statusLine !== undefined && /^\s*- status:/.test(ledger.lines[statusLine])) {
+    const lines = [...ledger.lines];
+    lines[statusLine] = replaced(lines[statusLine], bullet);
+    return lines.join('\n');
+  }
+  const cleared = withoutStatus(ledger);
+  const location = findSection(cleared.sections, 'Location');
+  return location && insert(cleared, afterLastText(cleared, location), [bullet]);
 }
 
-/** Drops the marker, the first text under ## Next step; a later `Parked:` line is a note and stays. */
+/** Drops a parked status, of a legacy form too; a later `Parked:` line under ## Next step is a note and stays. */
 export function unpark(text: string): string {
   const ledger = parseLedger(text);
-  const marker = ledger.parked?.line;
-  return marker === undefined ? text : without(ledger, (index) => index === marker);
+  return ledger.location.status?.value === 'parked' ? serializeLedger(withoutStatus(ledger)) : text;
 }
 
 /** Adds a bullet at the end of ## Location; undefined when the ledger has no such section. */

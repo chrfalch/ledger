@@ -44,7 +44,6 @@ test('the template has no slug, and every placeholder reads as not set', () => {
   assert.equal(ledger.slug, undefined);
   assert.deepEqual(ledger.location, {});
   assert.deepEqual(ledger.children, []);
-  assert.equal(ledger.parked, undefined);
   assert.equal(ledger.goal, '');
   assert.equal(ledger.next, '');
   assert.deepEqual(ledger.report, []);
@@ -149,23 +148,51 @@ test('Children lines with CRLF endings parse the same', () => {
   assert.equal(crlf.location.branch, 'me/epic');
 });
 
-test('Parked: the first text under ## Next step, with an em dash or a hyphen; the next step skips it', () => {
+test('a legacy Parked: marker, the first text under ## Next step with an em dash or a hyphen, reads as status parked; the next step skips it', () => {
   const ledger = parseLedger(FILLED);
-  assert.deepEqual(ledger.parked && { date: ledger.parked.date, reason: ledger.parked.reason }, { date: '2026-11-10', reason: 'waiting for review' });
+  assert.deepEqual(ledger.location.status, { value: 'parked', date: '2026-11-10', detail: 'waiting for review' });
   assert.equal(ledger.next, '');
   const hyphen = parseLedger(ledgerText({ slug: 'x', next: 'Parked: 2026-11-10 - later\nRun the tests.' }));
-  assert.equal(hyphen.parked?.reason, 'later');
+  assert.deepEqual(hyphen.location.status, { value: 'parked', date: '2026-11-10', detail: 'later' });
   assert.equal(hyphen.next, 'Run the tests.');
-  assert.equal(parseLedger(ledgerText({ slug: 'x', next: 'Run the tests.\nParked: 2026-11-10 — late' })).parked, undefined);
+  assert.deepEqual(parseLedger(ledgerText({ slug: 'x', next: 'Parked: 2026-11-10 —\nRun the tests.' })).location.status, { value: 'parked', date: '2026-11-10' });
+  assert.equal(parseLedger(ledgerText({ slug: 'x', next: 'Run the tests.\nParked: 2026-11-10 — late' })).location.status, undefined);
 });
 
 test('the next step skips only the parked marker: a later "Parked:" line is the next step when it comes first', () => {
   const twice = parseLedger(ledgerText({ slug: 'x', next: 'Parked: 2026-11-12 — now\nParked: 2026-11-01 — an old note\nRun the tests.' }));
-  assert.equal(twice.parked?.reason, 'now');
+  assert.equal(twice.location.status?.detail, 'now');
   assert.equal(twice.next, 'Parked: 2026-11-01 — an old note');
   const unparked = parseLedger(ledgerText({ slug: 'x', next: '<what comes next>\nParked: 2026-11-01 — an old note\nRun the tests.' }));
-  assert.equal(unparked.parked, undefined);
+  assert.equal(unparked.location.status, undefined);
   assert.equal(unparked.next, 'Parked: 2026-11-01 — an old note');
+});
+
+/** A ledger with `lines` at the end of ## Location. */
+const located = (next: string, ...lines: string[]): string => ledgerText({ slug: 'x', next }).replace('- design refs: none', ['- design refs: none', ...lines].join('\n'));
+
+test('a - status: line under ## Location is the status: a value, then a date and a detail after an em dash, each optional', () => {
+  const status = (value: string) => parseLedger(located('Run the tests.', `- status: ${value}`)).location.status;
+  assert.deepEqual(status('parked 2026-11-23 — waiting on design'), { value: 'parked', date: '2026-11-23', detail: 'waiting on design' });
+  assert.deepEqual(status('blocked — the API team'), { value: 'blocked', detail: 'the API team' });
+  assert.deepEqual(status('waiting 2026-11-20'), { value: 'waiting', date: '2026-11-20' });
+  assert.deepEqual(status('done'), { value: 'done' });
+  for (const value of ['active', 'Done', 'done yesterday', 'parked 2026-11-23 waiting', 'parked 23.11.2026', 'parked - later']) assert.equal(status(value), undefined, value);
+});
+
+test('a legacy - state: bullet with a status value reads as that status; any other state value is no status', () => {
+  assert.deepEqual(parseLedger(located('Run the tests.', '- state: done')).location.status, { value: 'done' });
+  assert.deepEqual(parseLedger(located('Run the tests.', '- state: active', '- state: waiting')).location.status, { value: 'waiting' });
+  assert.equal(parseLedger(located('Run the tests.', '- state: active')).location.status, undefined);
+});
+
+test('the status line wins over the legacy forms: a - state: bullet, and a Parked: marker, which stays the next step', () => {
+  const both = parseLedger(located('Parked: 2026-11-10 — old\nRun the tests.', '- state: done', '- status: blocked 2026-11-22 — the API'));
+  assert.deepEqual(both.location.status, { value: 'blocked', date: '2026-11-22', detail: 'the API' });
+  assert.equal(both.next, 'Parked: 2026-11-10 — old');
+  const legacy = parseLedger(located('Parked: 2026-11-10 — old\nRun the tests.', '- state: done'));
+  assert.deepEqual(legacy.location.status, { value: 'done' }, 'a - state: bullet comes before a marker');
+  assert.equal(legacy.next, 'Parked: 2026-11-10 — old');
 });
 
 test('a ## line inside a ``` code fence is not a heading, and the bytes still round-trip', () => {

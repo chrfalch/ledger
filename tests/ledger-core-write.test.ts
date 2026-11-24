@@ -352,18 +352,20 @@ test('ledger go starts from the base a backlog ledger names', (t) => {
   assert.match(read(activeFile(h, app, 'on-feature')), new RegExp(`^- base: feature @ ${short(h, app, 'feature')}$`, 'm'));
 });
 
-test('ledger park puts one marker first under Next step; unpark restores the exact bytes', (t) => {
+/** `text` with `status` as its status line, which a record renders right after the worktree line. */
+const withStatus = (text: string, status: string): string => text.replace(/^(- worktree: .*)$/m, `$1\n- status: ${status}`);
+
+test('ledger park writes one status line under ## Location; park again replaces it; unpark restores the exact bytes', (t) => {
   const { h, app } = setup(t);
   const file = worktreeTask(h, app, { slug: 'epic' });
   const before = read(file);
   const stdout = ok(ledger(h, app, 'task', 'park', 'epic', '--reason', 'waiting for review'));
-  const marker = `Parked: ${today()} — waiting for review`;
-  assert.match(stdout, new RegExp(`${marker}`));
-  assert.equal(read(file), inserted(before, '## Next step', marker));
+  assert.equal(stdout, `Parked epic. Parked: ${today()} — waiting for review\n`);
+  assert.equal(read(file), withStatus(before, `parked ${today()} — waiting for review`));
   const listed = (JSON.parse(ok(ledger(h, app, 'list', '--json'))) as { tasks: { slug: string; status: string }[] }).tasks;
   assert.equal(listed.find(({ slug }) => slug === 'epic')?.status, 'parked');
   ok(ledger(h, app, 'task', 'park', 'epic', '--reason', 'still waiting'));
-  assert.equal(read(file), inserted(before, '## Next step', `Parked: ${today()} — still waiting`));
+  assert.equal(read(file), withStatus(before, `parked ${today()} — still waiting`));
   ok(ledger(h, app, 'task', 'unpark', 'epic'));
   assert.equal(read(file), before);
 });
@@ -374,8 +376,31 @@ test('park and unpark work on a backlog task kept as Markdown with CRLF line end
   const before = read(file);
   writeFileSync(file, before.replace(/\n/g, '\r\n'));
   ok(ledger(h, app, 'task', 'park', 'idea', '--reason', 'no time'));
-  assert.equal(read(file), before.replace('\n## Next step\n', `\n## Next step\nParked: ${today()} — no time\n`));
+  assert.equal(read(file), withStatus(before, `parked ${today()} — no time`));
   ok(ledger(h, app, 'task', 'unpark', 'idea'));
+  assert.equal(read(file), before);
+});
+
+test('a legacy Parked: marker is rewritten as the status line by the next write, and unpark removes it', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic', next: 'Parked: 2026-11-10 — waiting for review\nRun the tests.' });
+  const unparked = ledgerText({ slug: 'epic', next: 'Run the tests.' });
+  assert.equal(parseLedger(read(file)).location.status?.value, 'parked');
+  ok(ledger(h, app, 'notes', 'decide', 'Keep it', '--because', 'it works', '--tag', 'observed', '--task', 'epic'));
+  assert.match(read(file), /^- status: parked 2026-11-10 — waiting for review$/m);
+  assert.doesNotMatch(read(file), /^Parked:/m);
+  const stdout = ok(ledger(h, app, 'task', 'unpark', 'epic'));
+  assert.equal(stdout, 'Unparked epic. It was parked on 2026-11-10: waiting for review.\n');
+  assert.doesNotMatch(read(file), /- status:|Parked:/);
+  assert.equal(parseLedger(read(file)).next, parseLedger(unparked).next);
+});
+
+test('unpark leaves a status that is not parked as it is', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  writeLedgerFile(file, withStatus(read(file), 'blocked 2026-11-20 — the API'));
+  const before = read(file);
+  assert.match(ok(ledger(h, app, 'task', 'unpark', 'epic')), /not parked/);
   assert.equal(read(file), before);
 });
 
@@ -393,20 +418,19 @@ test('a later "Parked:" note under ## Next step is no marker: park and unpark le
   const file = worktreeTask(h, app, { slug: 'epic', next: 'Run the tests.\nParked: 2026-11-10 — an old note' });
   const before = read(file);
   ok(ledger(h, app, 'task', 'park', 'epic', '--reason', 'later'));
-  assert.equal(read(file), inserted(before, '## Next step', `Parked: ${today()} — later`));
+  assert.equal(read(file), withStatus(before, `parked ${today()} — later`));
   ok(ledger(h, app, 'task', 'unpark', 'epic'));
   assert.equal(read(file), before);
 });
 
-test('park adds ## Next step when a ledger has none; unpark of a task that is not parked changes nothing', (t) => {
+test('park of a ledger without ## Next step writes the status line; unpark of a task that is not parked changes nothing', (t) => {
   const { h, app } = setup(t);
   const file = worktreeTask(h, app, { slug: 'epic' });
   const full = read(file);
-  const before = full.slice(0, full.indexOf('## Next step'));
-  writeLedgerFile(file, before);
+  writeLedgerFile(file, full.slice(0, full.indexOf('## Next step')));
   ok(ledger(h, app, 'task', 'park', 'epic', '--reason', 'later'));
-  // A task record always has a ## Next step, so the one it is read with holds the marker first.
-  assert.match(read(file), new RegExp(`\n## Next step\nParked: ${today()} — later\n`));
+  assert.match(read(file), new RegExp(`^- status: parked ${today()} — later$`, 'm'));
+  assert.doesNotMatch(read(file), /^Parked:/m);
   writeLedgerFile(file, full);
   const stdout = ok(ledger(h, app, 'task', 'unpark', 'epic'));
   assert.match(stdout, /not parked/);
@@ -863,6 +887,20 @@ test('tree next picks the first child by order whose dependencies are done: reti
   assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic c\n');
   rmSync(api);
   assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic a\n', 'an unknown dependency is not done, so c and b wait');
+});
+
+test('tree next counts a dependency done by its status line, and by no other status', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'epic', children: ['- a'] });
+  located(backlogTask(h, app, { slug: 'a', parent: 'epic' }), '- depends on: shipped');
+  const shipped = worktreeTask(h, app, { slug: 'shipped' });
+  for (const status of ['waiting 2026-11-20', 'blocked', 'parked 2026-11-20 — later']) {
+    located(shipped, `- status: ${status}`);
+    assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), '', status);
+    writeLedgerFile(shipped, read(shipped).replace(/^- status: .*\n/m, ''));
+  }
+  located(shipped, '- status: done 2026-11-22');
+  assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic a\n');
 });
 
 test('tree next finds a done dependency in a repo without remote that only the dependency names, in a worktree or the archive', (t) => {

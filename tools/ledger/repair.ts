@@ -31,7 +31,7 @@ const onOtherMachine = ({ host }: Task): boolean => host !== undefined && host !
 
 /** The active tasks of this machine, neither parked nor lost, whose recorded folder is gone. */
 const missingTasks = (store: LedgerStore): Task[] =>
-  activeTasks(store).filter((task) => task.status === 'active' && task.worktree !== undefined && !isFolder(task.worktree) && !onOtherMachine(task));
+  activeTasks(store).filter((task) => task.status !== 'parked' && task.status !== 'lost' && task.worktree !== undefined && !isFolder(task.worktree) && !onOtherMachine(task));
 
 /** The key the repo at `main` has now, when `main` is still a main checkout. */
 function keyNow(main: string): string | undefined {
@@ -236,7 +236,7 @@ function pointTo(context: Context, writable: () => LedgerStore, name: string, to
   const task = activeNamed(context, name);
   const folder = path.resolve(context.cwd, to);
   // By its parked mark, not its status, which a lost mark decides: --to must not make a parked task active.
-  if (task.ledger.parked !== undefined) fail(`${task.slug} is parked, so it was not pointed at ${folder}: --to repairs only a task that is active or lost.`);
+  if (task.ledger.location.status?.value === 'parked') fail(`${task.slug} is parked, so it was not pointed at ${folder}: --to repairs only a task that is active or lost.`);
   if (!isFolder(folder)) fail(`${folder} does not exist, so ${task.slug} was not pointed at it.`);
   const root = checkoutRoot(folder);
   const main = mainCheckout(folder);
@@ -284,7 +284,7 @@ function pointTo(context: Context, writable: () => LedgerStore, name: string, to
 function markLost(context: Context, writable: () => LedgerStore, name: string, dryRun: boolean, print: Print): void {
   const task = activeNamed(context, name);
   // A parked task goes back to active only; --to, which removes a lost mark, refuses it.
-  if (task.ledger.parked !== undefined) fail(`${task.slug} is parked, so it was not marked lost: --lost marks only an active task.`);
+  if (task.ledger.location.status?.value === 'parked') fail(`${task.slug} is parked, so it was not marked lost: --lost marks only an active task.`);
   const refuseThere = (worktree: string | undefined): void => {
     if (worktree !== undefined && isFolder(worktree)) {
       fail(`The folder of ${task.slug}, ${worktree}, is there, so it is not lost. If the task moved, point it at its new folder: ledger store repair ${refOf(context, task)} --to <folder>`);

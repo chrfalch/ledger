@@ -311,7 +311,7 @@ test('park removes the claim, whichever session holds it', (t) => {
   withClaim(file, claimLine('s1', T0, T0));
   exits(run(h, app, { now: later(1), session: 's2' }, 'task', 'park', 'fix-login', '--reason', 'waiting'), 0);
   assert.equal(claimOf(file), undefined);
-  assert.match(readLedgerFile(file), /^Parked: /m);
+  assert.match(readLedgerFile(file), /^- status: parked /m);
 });
 
 test('retire removes the claim, whichever session holds it: the archive copy has none', (t) => {
@@ -346,7 +346,7 @@ test('go --take-over replaces the claim of the other session with its own and go
   withClaim(file, claimLine('s1', T0, later(10)));
   exits(run(h, app, { now: later(20), session: 's2' }, 'go', 'fix-login', '--take-over'), 0);
   assert.equal(claimOf(file), claimLine('s2', later(20), later(20)));
-  assert.doesNotMatch(readLedgerFile(file), /^Parked: /m);
+  assert.doesNotMatch(readLedgerFile(file), /^Parked: |^- status: /m);
 });
 
 test('go --take-over says whose claim it took over, in its output and as "tookOverFrom" in --json', (t) => {

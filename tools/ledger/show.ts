@@ -5,7 +5,7 @@ import { withHint } from './migrate-repo-ids.js';
 import { isRepoKey, repoKey, repoLabel } from './repo-key.js';
 import { keyAndAliases, type Archive, type LedgerStore, type StoredLedger } from './store.js';
 import { asActiveTask } from './tasks.js';
-import { currentTask, type Context } from './write.js';
+import { currentTask, markMergedDone, type Context } from './write.js';
 
 const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -44,18 +44,24 @@ function namedRepos(store: LedgerStore, named: string, main: string | undefined)
 }
 
 /** The ledger `ledger show` prints without a slug: that of the active task of the worktree you are in. */
-export function ownLedger({ cwd, store }: Context): ShownLedger {
+export function ownLedger(context: Context): ShownLedger {
+  const { cwd, store } = context;
   const task = currentTask(store, cwd) ?? fail('No active task has the worktree you are in, so name one: ledger show <slug>');
-  return shownActive(store, store.active.read(task.repo, task.name) ?? fail(`The ledger ${task.file} is gone.`));
+  return shownActive(context, store.active.read(task.repo, task.name) ?? fail(`The ledger ${task.file} is gone.`));
 }
 
-/** `host` names the machine whose worktree holds the ledger of an active task that is not on this one. */
-export type ShownLedger = StoredLedger & { host?: string };
+/**
+ * `host` names the machine whose worktree holds the ledger of an active task that is not on this one. `notice` is the
+ * stderr line of the merged-PR check: that showing it marked the task done, or why it did not.
+ */
+export type ShownLedger = StoredLedger & { host?: string; notice?: string };
 
-/** `entry`, an active record, with the machine its task is on when that is another one. */
-function shownActive(store: LedgerStore, entry: StoredLedger): ShownLedger {
-  const { host } = asActiveTask(store, entry);
-  return host === undefined ? entry : { ...entry, host };
+/** `entry`, an active record, marked done when its merged PR makes it so, with the machine its task is on when that is another one. */
+function shownActive(context: Context, entry: StoredLedger): ShownLedger {
+  const task = asActiveTask(context.store, entry);
+  const { marked, notice } = markMergedDone(context, task);
+  const shown = marked ? (context.store.active.read(entry.repo, entry.name) ?? entry) : entry;
+  return { ...shown, ...(task.host === undefined ? {} : { host: task.host }), ...(notice === undefined ? {} : { notice }) };
 }
 
 /**
@@ -64,10 +70,11 @@ function shownActive(store: LedgerStore, entry: StoredLedger): ShownLedger {
  * archive copy of `slug`. The store is searched under the repo's key and its old keys together. With `archived`, the
  * active and backlog ledgers are skipped.
  */
-export function shownLedger({ cwd, store }: Context, slug: string, { repo: named, archived = false }: { repo?: string; archived?: boolean }): ShownLedger {
+export function shownLedger(context: Context, slug: string, { repo: named, archived = false }: { repo?: string; archived?: boolean }): ShownLedger {
+  const { cwd, store } = context;
   const active = (repo: string): ShownLedger | undefined => {
     const entry = store.active.read(repo, slug);
-    return entry && shownActive(store, entry);
+    return entry && shownActive(context, entry);
   };
   if (!isPlainName(slug)) fail(`"${slug}" cannot name a ledger. A name is not empty and holds no .., / or \\.`);
   if (named !== undefined && !isRepoKey(named)) fail(`--repo "${named}" cannot name a repo. A repo is not empty, holds no \\, and has no . or .. between slashes.`);

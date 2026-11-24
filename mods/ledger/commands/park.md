@@ -38,7 +38,7 @@ start a task.
 3. Roll each finished step into one line:
    `ledger notes step <n> --note "<one line>"`. Keep the ledger under about 4k
    tokens.
-4. Do not write a `Parked:` line. The ledger mod adds it under `## Next step`
+4. Do not write a status line. The ledger mod parks the task under `## Location`
    after this turn.
 5. End your reply with one line saying the ledger is updated, the task is
    parked, and the session clears automatically after this turn. Do not ask

@@ -11,6 +11,7 @@ The store keeps its string API as an adapter.
 ## Location
 - main: /repos/ledger
 - worktree: /repos/ledger/.claude/worktrees/wf-task-records
+- status: parked 2026-11-21 — waiting for review
 - branch: wf-task-records
 - base: origin/main @ 5c5a860
 - design refs: 0,1
@@ -61,7 +62,6 @@ Records land in all three stores.
   PR https://github.com/chrfalch/ledger/pull/109
 
 ## Next step
-Parked: 2026-11-21 — waiting for review
 Run the reviewer at medium effort.
 
 ## Notes

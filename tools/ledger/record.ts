@@ -8,6 +8,7 @@ import {
   isParkedMarker,
   isReadableSlug,
   isRepoKeyShape,
+  isStatusValue,
   lostMark,
   lostText,
   parseClaim,
@@ -16,14 +17,18 @@ import {
   parseLost,
   parseOrder,
   parseRef,
+  parseStatus,
   plainLine,
   showDependencies,
+  STATUS_VALUES,
+  statusText,
   titleText,
   type ChildMark,
   type Claim,
   type Dependency,
   type Lost,
   type Section,
+  type Status,
   type TaskRef,
 } from './format.js';
 
@@ -46,6 +51,7 @@ export type TaskRecord = {
   slug: string;
   title?: string;
   kind?: string;
+  /** A person's `- state:` line from before the status line; one with a status value reads as `status`. */
   state?: string;
   stage?: string;
   parent?: TaskRef;
@@ -62,7 +68,7 @@ export type TaskRecord = {
   main?: string;
   /** 'none' is a task that touches no LLP; unset is a ledger with no design refs line, as in a repo without llp/. */
   designRefs?: string[] | 'none';
-  parked?: { date: string; reason: string };
+  status?: Status;
   lost?: Lost;
   goal: string;
   /** `exampleRow` is false for a plan without steps that lacks the template's example row too, which the plugin reads as a step. */
@@ -99,7 +105,7 @@ const FIELDS = [
   'base',
   'main',
   'designRefs',
-  'parked',
+  'status',
   'lost',
   'goal',
   'plan',
@@ -153,7 +159,7 @@ function tidy(lines: readonly string[]): string[] {
   return kept;
 }
 
-type LocationKey = 'main' | 'worktree' | 'host' | 'branch' | 'base' | 'designRefs' | 'parent' | 'title' | 'kind' | 'state' | 'stage' | 'order' | 'dependencies' | 'claim' | 'pr' | 'repo' | 'lost';
+type LocationKey = 'main' | 'worktree' | 'host' | 'branch' | 'base' | 'designRefs' | 'parent' | 'title' | 'kind' | 'state' | 'stage' | 'order' | 'dependencies' | 'claim' | 'pr' | 'repo' | 'status' | 'lost';
 
 /**
  * A `- <name>: <value>` bullet under ## Location. `template` is the value ledger.template.md gives it, which reads as
@@ -203,9 +209,23 @@ function parseBase(value: string): TaskRecord['base'] {
   return commit.length === 0 ? { ref } : { ref, commit: commit.join(' @ ') };
 }
 
+const plainState = bullet('state', 'state', asText, asText);
+
+/** A `- state:` bullet with a status value is the status from before the status line, unless the record has one. */
+const stateBullet: Bullet = {
+  ...plainState,
+  read: (record, value) => {
+    if (!isStatusValue(value)) return plainState.read(record, value);
+    if (record.status !== undefined) return false;
+    record.status = { value };
+    return true;
+  },
+};
+
 const BULLETS: Bullet[] = [
   bullet('main', 'main', asText, asText),
   bullet('worktree', 'worktree', asText, asText, { template: '<path>' }),
+  bullet('status', 'status', parseStatus, statusText),
   {
     name: 'lost',
     written: true,
@@ -226,7 +246,7 @@ const BULLETS: Bullet[] = [
   bullet('parent', 'parent', parseRef, showRef),
   bullet('title', 'title', asText, asText),
   bullet('kind', 'kind', asText, asText),
-  bullet('state', 'state', asText, asText),
+  stateBullet,
   bullet('stage', 'stage', asText, asText),
   bullet('order', 'order', parseOrder, String),
   bullet('depends on', 'dependencies', parseDependencies, showDependencies),
@@ -249,9 +269,13 @@ function readLocation(record: TaskRecord, lines: string[]): string[] {
     if (value === field.template) return false;
     return (READ_BY_PLUGIN.includes(field.name) && value.startsWith('<')) || !field.read(record, value);
   };
-  // A lost mark names the worktree, so it is read after the worktree bullet, wherever that stands.
-  const isLost = (line: string): boolean => FIELD.exec(line.trim())?.[1] === 'lost';
-  const order = [...lines.keys()].sort((a, b) => Number(isLost(lines[a])) - Number(isLost(lines[b])));
+  // A lost mark names the worktree, so it is read after the worktree bullet, wherever that stands; the status line is
+  // read first, as it wins over a legacy `- state:` bullet.
+  const rank = (line: string): number => {
+    const name = FIELD.exec(line.trim())?.[1];
+    return name === 'status' ? 0 : name === 'lost' ? 2 : 1;
+  };
+  const order = [...lines.keys()].sort((a, b) => rank(lines[a]) - rank(lines[b]));
   const left = new Set(order.filter((index) => fitsNone(lines[index])));
   return lines.filter((_, index) => left.has(index));
 }
@@ -360,7 +384,7 @@ const KNOWN = ['Goal', 'Location', 'Children', 'Plan', 'Decisions', 'Constraints
 type Known = (typeof KNOWN)[number];
 
 /** Reads a section's lines into `record`, and gives the lines it could not place. */
-type Reader = (record: TaskRecord, lines: string[], context: { start: number; heading: string; parked?: number; children: ChildLine[]; childLines: number[] }) => string[];
+type Reader = (record: TaskRecord, lines: string[], context: { start: number; heading: string; marker?: number; children: ChildLine[]; childLines: number[] }) => string[];
 
 /** The text of `lines`, without the template's `placeholder` line. */
 const texts = (lines: string[], placeholder: string): string => tidy(lines.filter((line) => line.trim() !== placeholder)).join('\n');
@@ -404,9 +428,9 @@ const READERS: Record<Exclude<Known, 'Notes'>, Reader> = {
     record.report = tidy(lines.filter((line) => line.trim() !== REPORT));
     return [];
   },
-  'Next step': (record, lines, { start, parked }) => {
+  'Next step': (record, lines, { start, marker }) => {
     record.next = texts(
-      lines.filter((_, offset) => start + 1 + offset !== parked),
+      lines.filter((_, offset) => start + 1 + offset !== marker),
       NEXT,
     );
     return [];
@@ -423,9 +447,12 @@ export function parseRecord(markdown: string): TaskRecord {
   const ledger = parseLedger(markdown);
   const plain = ledger.lines.map(plainLine);
   const record: TaskRecord = { version: 1, slug: ledger.slug ?? '', goal: '', plan: { steps: [], exampleRow: false }, decisions: [], constraints: [], questions: [], stepReports: [], report: [], children: [], notes: [], next: '' };
-  if (ledger.parked !== undefined) record.parked = { date: ledger.parked.date, reason: ledger.parked.reason };
+  // A status read from no Location bullet is the legacy marker under ## Next step, which the Next step reader skips.
+  const next = findSection(ledger.sections, 'Next step');
+  const marker = ledger.statusLine !== undefined && next !== undefined && ledger.statusLine > next.start && ledger.statusLine < next.end ? ledger.statusLine : undefined;
+  if (marker !== undefined) record.status = ledger.location.status;
   const children = ledger.children.map(({ slug, main, suffix, mark }) => defined({ slug, main, suffix, mark }));
-  const context = { parked: ledger.parked?.line, children, childLines: ledger.children.map(({ line }) => line) };
+  const context = { marker, children, childLines: ledger.children.map(({ line }) => line) };
 
   const general: string[] = [];
   const groups: string[] = [];
@@ -470,14 +497,10 @@ function spaced(lines: string[]): string[] {
 
 /** The record as a ledger in the layout of ledger.template.md, which parseLedger and the editors of edit.ts read. */
 export function renderRecord(record: TaskRecord): string {
-  const { parked, next, notes, plan } = record;
+  const { status, next, notes, plan } = record;
   const nextLines = linesOf(next);
-  // Without the placeholder above it, a next step that reads like a parked marker would be read as one.
-  const nextStep = [
-    ...(parked === undefined ? [] : [`Parked: ${parked.date} —${parked.reason ? ` ${parked.reason}` : ''}`]),
-    ...(parked === undefined && nextLines.length > 0 && isParkedMarker(nextLines[0]) ? [NEXT] : []),
-    ...orPlaceholder(nextLines, NEXT),
-  ];
+  // Without the placeholder above it, a next step that reads like the legacy parked marker would be read as one.
+  const nextStep = [...(status === undefined && nextLines.length > 0 && isParkedMarker(nextLines[0]) ? [NEXT] : []), ...orPlaceholder(nextLines, NEXT)];
   // A heading copied into the notes reads back as a repeat only after its own section, so that section is written even
   // when empty: ## Children, and ## Notes, which notes that start with a copied heading otherwise go without.
   const copies = parseLedger(notes.join('\n')).sections;
@@ -541,6 +564,8 @@ const isTrue = passes((value) => value === true, 'is not true');
 const isSlug = passes((value) => typeof value === 'string' && isReadableSlug(value), 'is not a slug');
 const isKey = passes((value) => typeof value === 'string' && isRepoKeyShape(value), 'is not a repo key such as github.com/owner/repo or the path of a main checkout');
 const isTime = passes((value) => typeof value === 'string' && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value, 'is not a time such as 2026-11-20T12:00:00.000Z');
+const isDate = passes((value) => typeof value === 'string' && /^\d{4}-\d\d-\d\d$/.test(value), 'is not a date such as 2026-11-23');
+const isTrimmedLine = passes((value) => typeof value === 'string' && /^\S(?:.*\S)?$/.test(value), 'is not one line of text without spaces at either end');
 const isClaimStamp = passes((value) => typeof value === 'string' && isClaimTime(value), 'is not a time such as 2026-11-20T10:00:00Z');
 const isOne = (...allowed: unknown[]): Check => passes((value) => allowed.includes(value), `is not ${allowed.map((each) => JSON.stringify(each)).join(' or ')}`);
 const listOfChecks = (item: Check): Check => (value, where) => {
@@ -587,10 +612,26 @@ const isRecord = shape(
     dependencies: listOfChecks(shape({ slug: isSlug }, { repo: isKey })),
     base: shape({ ref: isText }, { commit: isText }),
     designRefs: isDesignRefs,
-    parked: shape({ date: isText, reason: isText }),
+    status: shape({ value: isOne(...STATUS_VALUES) }, { date: isDate, detail: isTrimmedLine }),
     lost: shape({ date: isText }),
   },
 );
+
+const isLegacyParked = shape({ date: isText, reason: isText });
+
+/**
+ * `value` with the fields of a record from before the status line as its status: `parked`, and a `state` with a status
+ * value. The status a record has wins over both, as the status line does in Markdown, where `state` comes first.
+ */
+function withStatus(value: object): object {
+  const { parked, state, ...rest } = value as { parked?: unknown; state?: unknown; status?: unknown };
+  if (parked !== undefined) isLegacyParked(parked, 'parked');
+  const old = parked as { date: string; reason: string } | undefined;
+  const fromState = isStatusValue(state) ? { value: state } : undefined;
+  const reason = old?.reason.trim();
+  const fromParked = old && { value: 'parked', date: old.date, ...(reason ? { detail: reason } : {}) };
+  return defined({ ...rest, state: fromState === undefined ? state : undefined, status: rest.status ?? fromState ?? fromParked });
+}
 
 /** The first field of `record` that would not read back the same from the Markdown it renders to. */
 function unstableField(record: TaskRecord): keyof TaskRecord | undefined {
@@ -633,10 +674,11 @@ export function readStoredRecord(json: string, where: string): StoredRecord {
     return fail(`${where} is no task record: it is not valid JSON (${(error as Error).message}).`);
   }
   try {
-    if (typeof value !== 'object' || value === null || !('created' in value)) return { record: validateRecord(value) };
+    if (typeof value !== 'object' || value === null) return { record: validateRecord(value) };
+    if (!('created' in value)) return { record: validateRecord(withStatus(value)) };
     const { created, ...record } = value;
     isTime(created, 'created');
-    return { record: validateRecord(record), created: created as string };
+    return { record: validateRecord(withStatus(record)), created: created as string };
   } catch (error) {
     if (!(error instanceof Failure)) throw error;
     return fail(`${where}: ${error.message}`);

@@ -6,7 +6,7 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { FORMAT } from '../tools/ledger/clone.js';
-import { park } from '../tools/ledger/edit.js';
+import { setStatus } from '../tools/ledger/edit.js';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { parseLedger } from '../tools/ledger/format.js';
@@ -583,7 +583,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     await delay(20);
 
     store.backlog.write('app', 'written', text('written'));
-    assert.ok(store.backlog.update('app', 'parked', (current) => park(current, 'Parked: 2026-11-22 — on hold')));
+    assert.ok(store.backlog.update('app', 'parked', (current) => setStatus(current, { value: 'parked', date: '2026-11-22', detail: 'on hold' })));
     assert.deepEqual([created('written'), created('parked')], born);
     assert.deepEqual(store.backlog.markdownNames?.('app'), []);
   });
@@ -1400,7 +1400,7 @@ test('the core reads and writes backlog ledgers through the store it is given, a
   calls.length = 0;
   parkTask(context, 'fix-login', 'waits for the API');
   includesAll(calls, [`backlog.list ${key}`, `backlog.update ${key} fix-login`]);
-  assert.match(store.backlog.read(key, 'fix-login')?.text ?? '', /Parked: .* — waits for the API/);
+  assert.match(store.backlog.read(key, 'fix-login')?.text ?? '', /^- status: parked .* — waits for the API$/m);
 
   createTask(context, 'add-cache', { goal: 'Pages load slowly.' });
   calls.length = 0;

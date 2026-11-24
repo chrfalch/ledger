@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { REPO } from './helpers.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
-import { activeFile, archivedTask, backlogTask, git, home, ledger, ledgerText, lineWith, readLedgerFile, recordFile, repoKeyOf, repository, storeFolder, worktreeOf, worktreeTask, writeLedgerFile, type Fields, type Ran } from './ledger-core-fixtures.js';
+import { activeFile, archivedTask, backlogTask, git, home, ledger, ledgerText, lineWith, ok, readLedgerFile, recordFile, repoKeyOf, repository, storeFolder, worktreeOf, worktreeTask, writeLedgerFile, type Fields, type Ran } from './ledger-core-fixtures.js';
 
 /** A HOME with the template and ~/repos/app, whose build/ and .claude/ folders git ignores. */
 function setup(t: TestContext) {
@@ -90,6 +90,142 @@ test('list --json gives the tasks with plan progress and parked state; --archive
   assert.equal(old?.archived, '2026-10-01');
   assert.equal(old?.worktree, undefined);
   assert.equal(old?.path, undefined);
+});
+
+/** An active task `slug` whose Location also holds `bullets`; gives its file. */
+function locatedTask(h: string, app: string, slug: string, ...bullets: string[]): string {
+  const file = worktreeTask(h, app, { slug });
+  writeLedgerFile(file, read(file).replace('- design refs: none', ['- design refs: none', ...bullets].join('\n')));
+  return file;
+}
+
+test('list gives the status of an active task from its status line, a legacy - state: done too; a lost mark wins over it', (t) => {
+  const { h, app } = setup(t);
+  locatedTask(h, app, 'held', '- status: blocked 2026-11-20 — the API team');
+  locatedTask(h, app, 'review', '- status: waiting 2026-11-21');
+  locatedTask(h, app, 'shipped', '- status: done 2026-11-22');
+  locatedTask(h, app, 'legacy', '- state: done');
+  locatedTask(h, app, 'resting', '- status: parked 2026-11-19 — no time');
+  locatedTask(h, app, 'plain', '- state: active');
+  const gone = locatedTask(h, app, 'gone', '- status: waiting');
+  writeLedgerFile(gone, read(gone).replace('- design refs: none', `- design refs: none\n- lost: 2026-11-22 — folder ${worktreeOf(app, 'gone')} not found`));
+
+  const bySlug = new Map((done(json(h, app, 'list')).tasks as Record<string, unknown>[]).map((task) => [task.slug, task]));
+  const statuses = Object.fromEntries([...bySlug].map(([slug, task]) => [slug, task.status]));
+  assert.deepEqual(statuses, { held: 'blocked', review: 'waiting', shipped: 'done', legacy: 'done', resting: 'parked', plain: 'active', gone: 'lost' });
+  assert.deepEqual(bySlug.get('resting')?.parked, { date: '2026-11-19', reason: 'no time' });
+  assert.equal(bySlug.get('held')?.parked, undefined);
+
+  const listed = ok(ledger(h, app, 'list'));
+  assert.match(listed, /7 tasks: 1 active, 1 parked, 1 blocked, 1 waiting, 2 done, 1 lost, 0 backlog/);
+  assert.match(lineWith(listed, 'held'), /\bblocked\b/);
+  assert.match(lineWith(listed, 'review'), /\bwaiting\b/);
+});
+
+test('list counts only the statuses inside active that some task has', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'plain' });
+  assert.match(ok(ledger(h, app, 'list')), /1 task: 1 active, 0 parked, 0 backlog/);
+});
+
+/** Replaces the `gh` on PATH with a shell script that first notes its arguments in `calls`. */
+function stubGh(h: string, calls: string, script: string): void {
+  const file = path.join(h, 'stub-bin/gh');
+  writeFileSync(file, `#!/bin/sh\necho "$@" >> ${JSON.stringify(calls)}\n${script}\n`);
+  chmodSync(file, 0o755);
+}
+
+const prState = (state: string): string => `case "$*" in "pr view 42 --json state") echo '{"state":"${state}"}' ;; *) exit 1 ;; esac`;
+const mergedHint = (slug: string): string => `${slug}: PR merged; marked done. Finalize with /ledger:retire ${slug}.\n`;
+
+test('list and show mark a waiting task done when gh says its PR is merged, and say to finalize it', (t) => {
+  const { h, app } = setup(t);
+  const calls = path.join(h, 'gh-calls');
+  stubGh(h, calls, prState('MERGED'));
+  const listedFile = locatedTask(h, app, 'review', '- status: waiting 2026-11-20', '- pr: 42');
+  const shownFile = locatedTask(h, app, 'other', '- status: waiting 2026-11-20', '- pr: 42');
+
+  const listed = ledger(h, app, 'list');
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.deepEqual(listed.stderr.split(/(?<=\n)/).sort(), [mergedHint('other'), mergedHint('review')]);
+  assert.match(lineWith(listed.stdout, 'review'), /\bdone\b/);
+  assert.match(read(listedFile), new RegExp(`^- status: done ${today()}$`, 'm'));
+  assert.match(read(shownFile), new RegExp(`^- status: done ${today()}$`, 'm'));
+
+  const again = ledger(h, app, 'list');
+  assert.equal(again.stderr, '', 'a task marked done is not checked again');
+
+  locatedTask(h, app, 'third', '- status: waiting', '- pr: 42');
+  const shown = ledger(h, app, 'show', 'third');
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.equal(shown.stderr, mergedHint('third'));
+  assert.match(shown.stdout, new RegExp(`^- status: done ${today()}$`, 'm'));
+});
+
+test('with --json, list and show give the task as done in the JSON, and print the hint on stderr', (t) => {
+  const { h, app } = setup(t);
+  stubGh(h, path.join(h, 'gh-calls'), prState('MERGED'));
+  locatedTask(h, app, 'review', '- status: waiting 2026-11-20', '- pr: 42');
+  const listed = json(h, app, 'list');
+  assert.equal(listed.stderr, mergedHint('review'));
+  assert.equal((done(listed).tasks as Record<string, unknown>[])[0].status, 'done');
+
+  locatedTask(h, app, 'other', '- status: waiting 2026-11-20', '- pr: 42');
+  const shown = ledger(h, app, 'show', 'other', '--json');
+  assert.equal(shown.stderr, mergedHint('other'));
+  assert.match(String(done(shown).text), new RegExp(`^- status: done ${today()}$`, 'm'));
+});
+
+test('a merged PR whose done mark cannot be written fails neither list nor show: one warning line, and the task stays waiting', (t) => {
+  const { h, app } = setup(t);
+  stubGh(h, path.join(h, 'gh-calls'), prState('MERGED'));
+  const file = locatedTask(h, app, 'review', '- status: waiting 2026-11-20', '- pr: 42');
+  const before = read(file);
+  // A lock that a live process holds makes the write give up, as a lock of another ledger command would.
+  writeFileSync(`${file}.lock`, JSON.stringify({ pid: process.pid, since: new Date().toISOString() }));
+  for (const command of [['list'], ['list', '--json'], ['show', 'review'], ['show', 'review', '--json']]) {
+    const ran = ledger(h, app, ...command);
+    assert.equal(ran.status, 0, ran.stderr);
+    assert.match(ran.stderr, /^warning: review: its PR is merged, but it was not marked done: Gave up waiting for the lock [^\n]*\n$/, command.join(' '));
+    assert.equal(read(file), before, command.join(' '));
+  }
+  assert.equal((done(json(h, app, 'list')).tasks as Record<string, unknown>[])[0].status, 'waiting');
+});
+
+test('a waiting task whose PR is open, or for which gh fails, stays waiting and gets no hint', (t) => {
+  const { h, app } = setup(t);
+  const calls = path.join(h, 'gh-calls');
+  const file = locatedTask(h, app, 'review', '- status: waiting 2026-11-20', '- pr: 42');
+  const before = read(file);
+  for (const script of [prState('OPEN'), prState('CLOSED'), 'echo "gh: not logged in" >&2; exit 4', 'echo not json', `echo '{"state":"MERGED"}'; exit 1`]) {
+    stubGh(h, calls, script);
+    for (const command of [['list'], ['show', 'review']]) {
+      const ran = ledger(h, app, ...command);
+      assert.equal(ran.status, 0, ran.stderr);
+      assert.equal(ran.stderr, '', `${script}: ${command.join(' ')}`);
+      assert.equal(read(file), before, script);
+    }
+  }
+  assert.match(read(calls), /^pr view 42 --json state$/m);
+});
+
+test('gh is asked about no task that is not waiting with a PR: active, blocked, parked or done with one, waiting without one, a waiting backlog task', (t) => {
+  const { h, app } = setup(t);
+  const calls = path.join(h, 'gh-calls');
+  stubGh(h, calls, prState('MERGED'));
+  locatedTask(h, app, 'plain', '- pr: 42');
+  locatedTask(h, app, 'held', '- status: blocked', '- pr: 42');
+  locatedTask(h, app, 'resting', '- status: parked 2026-11-19 — no time', '- pr: 42');
+  locatedTask(h, app, 'shipped', '- status: done', '- pr: 42');
+  locatedTask(h, app, 'nopr', '- status: waiting');
+  const idea = backlogTask(h, app, { slug: 'idea' });
+  writeFileSync(idea, readFileSync(idea, 'utf8').replace('- design refs: none', '- design refs: none\n- status: waiting\n- pr: 42'));
+  for (const command of [['list'], ['list', '--json'], ['show', 'held'], ['show', 'nopr'], ['show', 'idea']]) {
+    const ran = ledger(h, app, ...command);
+    assert.equal(ran.status, 0, ran.stderr);
+    assert.equal(ran.stderr, '', command.join(' '));
+  }
+  assert.equal(existsSync(calls), false, existsSync(calls) ? readFileSync(calls, 'utf8') : '');
 });
 
 test('archive --json lists the archived ledgers with date, branch, goal and the matching line; outside a repo it fails', (t) => {
