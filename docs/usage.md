@@ -683,7 +683,7 @@ active. When no
 active child task remains, the command prints:
 
 ```
-Parent <parent> has no active children left. Retire it with /ledger:retire <parent>.
+Parent <parent> has no active children left. Finalize it with the question from `ledger task gate finalize <parent>`.
 ```
 
 It does not retire the parent task itself. To retire a parent task that still

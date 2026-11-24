@@ -24,5 +24,5 @@ export function checkTransition(slug: string, from: ActiveState, to: ActiveState
   const next = NEXT[from];
   if (next.includes(to)) return;
   const refused = `${slug} is ${from}, so it cannot become ${to}.`;
-  fail(next.length === 0 ? `${refused} Finalize it with /ledger:retire ${slug}.` : `${refused} A ${from} task can become ${either(next)}.`);
+  fail(next.length === 0 ? `${refused} Finalize it with the question from \`ledger task gate finalize ${slug}\`.` : `${refused} A ${from} task can become ${either(next)}.`);
 }

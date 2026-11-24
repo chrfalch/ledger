@@ -637,7 +637,7 @@ export function markMergedDone(context: Context, task: Task): MergedCheck {
   if (prState(task.main ?? context.cwd, pr) !== 'merged') return { marked: false };
   try {
     const marked = updateLedger(context, task, (text) => (stateOf(parseLedger(text).location) === 'waiting' ? movedTo(task, text, { value: 'done', date: today() }) : undefined));
-    return marked ? { marked, notice: `${task.slug}: PR merged; marked done. Finalize with /ledger:retire ${task.slug}.` } : { marked };
+    return marked ? { marked, notice: `${task.slug}: PR merged; marked done. Finalize it with the question from \`ledger task gate finalize ${task.slug}\`.` } : { marked };
   } catch (error) {
     if (!(error instanceof Failure)) throw error;
     return { marked: false, notice: `warning: ${task.slug}: its PR is merged, but it was not marked done: ${oneLine(error.message)}` };
@@ -917,6 +917,10 @@ function firstToStart(tasks: Task[], parent: Linked, blocked: Blocked[], chain: 
   }
   return undefined;
 }
+
+/** The task `ledger tree next` would start under `parent`, with `skip` passed over; it starts nothing. */
+export const nextToStart = (tasks: Task[], parent: Linked, skip?: Ref): Ref | undefined =>
+  firstToStart(tasks, parent, [], skip === undefined ? [parent.ref] : [parent.ref, skip])?.at(-1);
 
 /** What `ledger tree order` set: the children of `parent`, first to last. */
 export type OrderResult = { action: 'order'; parent: Ref; children: Ref[] };

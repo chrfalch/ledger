@@ -74,10 +74,17 @@ const GATES: readonly GateDefinition[] = [
   },
 ];
 
+/** The gates whose question is the same for every task, so `gateQuestion` builds it from the name alone. */
 export const GATE_NAMES: readonly string[] = GATES.map(({ name }) => name);
+
+/** The gate whose actions come from the task's tree and repo, which finalize.ts reads from the store. */
+export const FINALIZE_GATE = 'finalize';
+
+/** Every gate `ledger task gate` asks. */
+export const ALL_GATE_NAMES: readonly string[] = [...GATE_NAMES, FINALIZE_GATE];
 
 /** The widget question of the gate `name` for the task `slug`; fails for a name no gate has. */
 export function gateQuestion(name: string, slug?: string): GateQuestion {
-  const gate = GATES.find((candidate) => candidate.name === name) ?? fail(`No gate is named "${name}". Gates: ${GATE_NAMES.join(', ')}.`);
+  const gate = GATES.find((candidate) => candidate.name === name) ?? fail(`No gate is named "${name}". Gates: ${ALL_GATE_NAMES.join(', ')}.`);
   return buildGate(gate, slug);
 }

@@ -738,7 +738,7 @@ test('ledger retire marks the child retired in its parent, copies its report, an
   assert.match(text, new RegExp(`^- part \\(retired ${today()}\\)$`, 'm'));
   assert.match(text, /^- other$/m);
   assert.match(text, /## Child reports\n### part\nPR #12 merged\.\n\\# not a heading\n/);
-  assert.match(stdout, /^Parent epic has no active children left\. Retire it with \/ledger:retire epic\.$/m);
+  assert.match(stdout, /^Parent epic has no active children left\. Finalize it with the question from `ledger task gate finalize epic`\.$/m);
 });
 
 test('ledger retire keeps a hand-written suffix when it marks the parent line, and gives no hint while a sibling is active', (t) => {
@@ -761,7 +761,7 @@ test('ledger retire marks a child retired in a parent in another repo, and copie
   const text = read(epic);
   assert.match(text, new RegExp(`^- part @ ${app.replaceAll('/', '\\/')} \\(retired ${today()}\\)$`, 'm'));
   assert.match(text, new RegExp(`### part@${app.replaceAll('/', '\\/')}\\nDone in app\\.`));
-  assert.match(stdout, new RegExp(`^Parent epic @ ${lib.replaceAll('/', '\\/')} has no active children left\\.`, 'm'));
+  assert.match(stdout, new RegExp(`^Parent epic @ ${lib.replaceAll('/', '\\/')} has no active children left\\. Finalize it from a session in ${lib.replaceAll('/', '\\/')} with the question from \`ledger task gate finalize epic\`\\.$`, 'm'));
 });
 
 test('ledger retire only warns when the parent named in the ledger is not found', (t) => {

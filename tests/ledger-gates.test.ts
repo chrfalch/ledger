@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 
 import { buildGate, GATE_NAMES, gateQuestion, type GateDefinition, type GateQuestion } from '../tools/ledger/gates.js';
-import { home, ledger, ok, readLedgerFile, repository, worktreeOf, worktreeTask, writeLedgerFile } from './ledger-core-fixtures.js';
+import { archivedTask, backlogTask, home, ledger, ledgerText, ok, putActive, readLedgerFile, repository, worktreeOf, worktreeTask, writeLedgerFile } from './ledger-core-fixtures.js';
 
 const pick: GateDefinition = {
   name: 'pick',
@@ -174,4 +174,136 @@ test('ledger task gate with an unknown name exits 1 and lists the gates', (t) =>
   assert.equal(ran.stdout, '');
   assert.match(ran.stderr, /"merge"/);
   assert.match(ran.stderr, /plan, pr/);
+});
+
+/** The finalize question `ledger task gate finalize [slug]` prints, run in `cwd`. */
+function finalize(h: string, cwd: string, ...slug: string[]): GateQuestion {
+  const question = JSON.parse(ok(ledger(h, cwd, 'task', 'gate', 'finalize', ...slug))) as GateQuestion;
+  assertQuestionShape(question);
+  assert.equal(question.header, 'Finalize');
+  assert.equal(question.multiSelect, true);
+  return question;
+}
+
+const description = (question: GateQuestion, label: string): string =>
+  question.options.find((option) => option.label.replace(/ \(Recommended\)$/, '') === label)?.description ?? assert.fail(`no "${label}" option in ${labels(question).join(', ')}`);
+
+/** Marks the task of the ledger `file` done, as the merged-PR check writes it. */
+function markDone(file: string): void {
+  writeLedgerFile(file, readLedgerFile(file).replace('- design refs: none', '- design refs: none\n- status: done 2026-11-20'));
+}
+
+function tree(t: TestContext) {
+  const h = home(t);
+  const app = repository(h, path.join(h, 'repos/app'));
+  return { h, app };
+}
+
+test('the finalize gate of a child with a sibling in the backlog offers to retire it, then to start the sibling', (t) => {
+  const { h, app } = tree(t);
+  backlogTask(h, app, { slug: 'epic', children: ['- part (started 2026-11-01)', '- next-part'] });
+  worktreeTask(h, app, { slug: 'part', parent: 'epic' });
+  backlogTask(h, app, { slug: 'next-part', parent: 'epic' });
+  const question = finalize(h, app, 'part');
+  assert.deepEqual(labels(question), ['Retire part (Recommended)', 'Start next-part', 'Close']);
+  assert.equal(question.question, 'part is finished. What should happen next?');
+  assert.match(description(question, 'Retire part'), /archive.*ledger.*worktree and branch.*dry run finds no problem/i);
+  assert.match(description(question, 'Start next-part'), /`\/ledger:go next-part`.*after.*ticked retire/i);
+});
+
+test('the finalize gate of the last child offers to retire it, then to finalize the parent', (t) => {
+  const { h, app } = tree(t);
+  backlogTask(h, app, { slug: 'epic', children: ['- part (started 2026-11-01)', '- old-part (retired 2026-11-02)'] });
+  worktreeTask(h, app, { slug: 'part', parent: 'epic' });
+  archivedTask(h, app, '2026-11-02', { slug: 'old-part', parent: 'epic' });
+  const question = finalize(h, app, 'part');
+  assert.deepEqual(labels(question), ['Retire part (Recommended)', 'Finalize epic', 'Close']);
+  assert.match(description(question, 'Finalize epic'), /epic has no child left.*asked again for epic/i);
+});
+
+test('the finalize gate groups the other done tasks of the repo into one action that names each', (t) => {
+  const { h, app } = tree(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  markDone(worktreeTask(h, app, { slug: 'fix-logout' }));
+  markDone(worktreeTask(h, app, { slug: 'fix-signup' }));
+  worktreeTask(h, app, { slug: 'busy' });
+  const question = finalize(h, app, 'fix-login');
+  assert.deepEqual(labels(question), ['Retire fix-login (Recommended)', 'Retire the other done tasks', 'Close']);
+  assert.equal(description(question, 'Retire the other done tasks'), 'Retire fix-logout and fix-signup, each after a dry run finds no problem.');
+  assert.doesNotMatch(JSON.stringify(question), /busy/);
+});
+
+test('the finalize gate leaves out a done task whose worktree is on another machine, as it cannot be retired here', (t) => {
+  const { h, app } = tree(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  markDone(worktreeTask(h, app, { slug: 'fix-signup' }));
+  const remote = ledgerText({ slug: 'fix-logout', main: app, worktree: worktreeOf(app, 'fix-logout'), branch: 'me/fix-logout' });
+  putActive(h, app, 'fix-logout', remote.replace('- design refs: none', '- design refs: none\n- host: other-mac\n- status: done 2026-11-20'));
+  const question = finalize(h, app, 'fix-login');
+  assert.equal(description(question, 'Retire the other done tasks'), 'Retire fix-signup after a dry run finds no problem.');
+  assert.doesNotMatch(JSON.stringify(question), /fix-logout/);
+});
+
+test('the finalize gate leaves out the other done tasks when there are none, and never offers this task or its parent as one', (t) => {
+  const { h, app } = tree(t);
+  markDone(worktreeTask(h, app, { slug: 'epic', children: ['- part (started 2026-11-01)'] }));
+  markDone(worktreeTask(h, app, { slug: 'part', parent: 'epic' }));
+  worktreeTask(h, app, { slug: 'busy' });
+  assert.deepEqual(labels(finalize(h, app, 'part')), ['Retire part (Recommended)', 'Finalize epic', 'Close']);
+});
+
+test('the finalize gate of a task with no parent says it is the top of its tree, and offers nothing up the tree', (t) => {
+  const { h, app } = tree(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const question = finalize(h, app, 'fix-login');
+  assert.deepEqual(labels(question), ['Retire fix-login (Recommended)', 'Close']);
+  assert.match(question.question, /^fix-login is finished\. .*top of its tree.*retiring it finishes the tree\. What should happen next\?$/i);
+});
+
+test('the finalize gate says the session leaves the worktree first only when it runs inside the worktree it retires', (t) => {
+  const { h, app } = tree(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const inside = finalize(h, worktreeOf(app, 'fix-login'));
+  assert.match(inside.question, /^fix-login is finished\./);
+  assert.match(description(inside, 'Retire fix-login'), /session leaves the worktree first/i);
+  assert.doesNotMatch(description(finalize(h, app, 'fix-login'), 'Retire fix-login'), /leaves the worktree/i);
+});
+
+test('the finalize gate of a backlog task says retiring it archives the ledger, with no worktree to remove', (t) => {
+  const { h, app } = tree(t);
+  backlogTask(h, app, { slug: 'idea' });
+  const retire = description(finalize(h, app, 'idea'), 'Retire idea');
+  assert.match(retire, /archive.*ledger/i);
+  assert.doesNotMatch(retire, /worktree|branch/i);
+});
+
+test('the finalize gate of a parent with a child not retired offers no retire, and starts its next child', (t) => {
+  const { h, app } = tree(t);
+  worktreeTask(h, app, { slug: 'epic', children: ['- part (started 2026-11-01)', '- later'] });
+  worktreeTask(h, app, { slug: 'part', parent: 'epic' });
+  backlogTask(h, app, { slug: 'later', parent: 'epic' });
+  assert.deepEqual(labels(finalize(h, app, 'epic')), ['Start later (Recommended)', 'Close']);
+});
+
+test('ledger task gate finalize with nothing to offer exits 1 with a plain message', (t) => {
+  const { h, app } = tree(t);
+  worktreeTask(h, app, { slug: 'epic', children: ['- part (started 2026-11-01)'] });
+  worktreeTask(h, app, { slug: 'part', parent: 'epic' });
+  const ran = ledger(h, app, 'task', 'gate', 'finalize', 'epic');
+  assert.equal(ran.status, 1);
+  assert.equal(ran.stdout, '');
+  assert.match(ran.stderr, /^epic has nothing left to finalize\./m);
+});
+
+test('ledger task gate finalize outside a task, with no slug, says to name one', (t) => {
+  const { h } = tree(t);
+  const ran = ledger(h, h, 'task', 'gate', 'finalize');
+  assert.equal(ran.status, 1);
+  assert.match(ran.stderr, /ledger task gate finalize <slug>/);
+});
+
+test('ledger task gate names the finalize gate in its help and when a name is unknown', (t) => {
+  const h = home(t);
+  assert.match(ok(ledger(h, h, 'task', 'gate', '--help')), /plan, pr, finalize/);
+  assert.match(ledger(h, h, 'task', 'gate', 'merge').stderr, /plan, pr, finalize/);
 });

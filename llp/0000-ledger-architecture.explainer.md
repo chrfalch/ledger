@@ -104,7 +104,9 @@ each:
     repo's archive, newest first, and can keep only the ledgers that contain
     a term.
   - `gate`: prints the question for a gate, such as plan approval, as JSON
-    the question widget takes. `tools/ledger/gates.ts` defines each gate.
+    the question widget takes. `tools/ledger/gates.ts` defines each gate;
+    `tools/ledger/finalize.ts` works out the finalize gate's actions from the
+    task tree.
 - `notes`: writes one item of a task's ledger (see
   [The notes commands](#the-notes-commands)).
 - `tree`: `show` prints a parent task with the status of each child task.
@@ -756,7 +758,7 @@ name the `ledger` command and the `/ledger:` commands. The code does not read
 the rules. The agent follows them.
 
 At a gate, the agent asks the operator with the question widget. For the gates
-that `ledger task gate <name>` knows, `plan` and `pr` today, the question comes
+that `ledger task gate <name>` knows, `plan`, `pr` and `finalize` today, the question comes
 from that command, not from the rule text. The agent writes any other gate
 itself, by the same rules: one to three actions, the recommended one first, and
 Close last.
