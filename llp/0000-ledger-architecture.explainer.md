@@ -290,9 +290,11 @@ as nothing else can be accepted. A backlog or active ledger is never accepted,
 nor is a finished task that stays for any other reason, such as a taken name,
 another disk or an ambiguous folder name.
 
-The main checkout of a ledger is its `- main:` line. People add notes to it, so
-a value that ends in `)` loses all from its first ` (`, unless the whole value
-is a folder on disk, as a folder named `engine (legacy)` can be. Other notes,
+The main checkout of a ledger is its `- main:` line. People and agents often
+write a path as code, so one pair of backticks around the path of a `- main:` or
+`- worktree:` line is removed first: `` `/repos/app` `` reads as /repos/app.
+People add notes to a `- main:` line, so a value that ends in `)` loses all
+from its first ` (`, unless the whole value is a folder on disk, as a folder named `engine (legacy)` can be. Other notes,
 such as one after a dash, are not recognised and make the value a path that is
 not there. A value that is then no absolute path, such as `.`, names no main,
 and the worktree and the records decide instead, as for a ledger with no
