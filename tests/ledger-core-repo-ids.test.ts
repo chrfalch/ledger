@@ -1764,3 +1764,90 @@ test('evidence under the folder name of an archive copy whose worktree path is r
   assert.equal(sessionStart(h, app), '');
   assert.doesNotMatch(ok(ledger(h, app, 'store', 'migrate', '--repo-ids')), new RegExp(key.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
+
+test('rollback preserves a replaced target record', (t) => {
+  const { h, store } = appWorld(t);
+  store.backlog.write('app', 'x', 'mine\n');
+  writeFileSync(path.join(store.backlog.repoLocation('app'), 'x.md'), 'hidden\n');
+  const moving = fileStore(ledgerPaths(h), {
+    link: (from, to) => {
+      if (from.endsWith('.md')) throw Object.assign(new Error('Markdown link failed'), { code: 'EIO' });
+      linkSync(from, to);
+      writeFileSync(`${to}.writer`, recordJson(recordToWrite('writer\n', to)));
+      renameSync(`${to}.writer`, to);
+    },
+  });
+
+  try {
+    assert.throws(() => moving.backlog.move('app', 'x', OTHER), /Markdown link failed/, 'the move must report the failed link');
+  } finally {
+    assert.equal(store.backlog.read(OTHER, 'x')?.text, storedText('writer\n'), 'rollback removed the writer’s target record');
+  }
+});
+
+test('a writer reclaiming the source lock keeps its update', (t) => {
+  const { h, store } = appWorld(t);
+  store.active.write('app', 'x', 'mine\n');
+  const moving = fileStore(ledgerPaths(h), {
+    link: (from, to) => {
+      linkSync(from, to);
+      writeFileSync(`${from}.lock`, JSON.stringify({ pid: process.pid, since: new Date(Date.now() - 120_000).toISOString() }));
+      assert.ok(store.active.update('app', 'x', () => 'writer\n'));
+    },
+  });
+
+  const moved = moving.active.move('app', 'x', OTHER);
+  assert.equal(store.active.read(moved ? OTHER : 'app', 'x')?.text, storedText('writer\n'), 'the move lost the writer’s update');
+  assert.equal(store.active.has(moved ? 'app' : OTHER, 'x'), false);
+});
+
+test('rollback preserves a record another mover finished moving', (t) => {
+  const { h, store } = appWorld(t);
+  store.backlog.write('app', 'x', 'mine\n');
+  writeFileSync(path.join(store.backlog.repoLocation('app'), 'x.md'), 'hidden\n');
+  const moving = fileStore(ledgerPaths(h), {
+    link: (from, to) => {
+      if (from.endsWith('.md')) throw Object.assign(new Error('Markdown link failed'), { code: 'EIO' });
+      linkSync(from, to);
+      rmSync(from);
+    },
+  });
+  assert.throws(() => moving.backlog.move('app', 'x', OTHER), /Markdown link failed/);
+  assert.equal(store.backlog.read(OTHER, 'x')?.text, storedText('mine\n'), 'rollback removed the completed move’s only record');
+});
+
+test('rollback takes back moved Markdown a writer turned into a record at the source', (t) => {
+  const { h, store } = appWorld(t);
+  const source = store.backlog.repoLocation('app');
+  mkdirSync(source, { recursive: true });
+  writeFileSync(path.join(source, 'x.md'), 'mine\n');
+  const moving = fileStore(ledgerPaths(h), {
+    link: (from, to) => {
+      linkSync(from, to);
+      const record = from.replace(/\.md$/, '.json');
+      writeFileSync(record, recordJson(recordToWrite('writer\n', record)));
+      rmSync(from);
+    },
+  });
+
+  assert.equal(moving.backlog.move('app', 'x', OTHER), false);
+  assert.equal(existsSync(path.join(store.backlog.repoLocation(OTHER), 'x.md')), false, 'rollback kept the stale Markdown under the new key');
+  assert.equal(store.backlog.read('app', 'x')?.text, storedText('writer\n'), 'the writer’s record left the old key');
+});
+
+test('rollback keeps the target Markdown when a directory replaces the source', (t) => {
+  const h = home(t);
+  const { backlog } = fileStore(ledgerPaths(h), {
+    link: (from, to) => {
+      linkSync(from, to);
+      rmSync(from);
+      mkdirSync(from);
+    },
+  });
+  const source = backlog.repoLocation('old');
+  mkdirSync(source, { recursive: true });
+  writeFileSync(path.join(source, 'x.md'), 'mine\n');
+
+  assert.equal(backlog.move('old', 'x', 'new'), false);
+  assert.ok(existsSync(path.join(backlog.repoLocation('new'), 'x.md')), 'rollback removed new/x.md');
+});

@@ -585,12 +585,10 @@ Decided 2026-11-19:
   stops between the two steps leaves the ledger under both keys, never under
   neither. A move onto another disk fails at the link, with nothing changed,
   and is left to do by hand.
-  Result (2026-11-23): the move holds the record locks of the ledger under
-  both keys throughout, taken in path order, and every create, write and
-  archive copy takes the same lock, so no command of the ledger's own comes
-  between a move's check and its last step. A file of the ledger that is a
-  symbolic link fails the move. A source folder the move emptied but cannot
-  remove no longer fails the move, so the alias stays and a rerun finishes. A
+  Result (2026-11-23): the move takes the record locks under both keys in
+  path order. Creates, writes and archive copies take the same locks.
+  A symbolic link among the ledger files fails the move. A source folder
+  the move emptied but cannot remove no longer fails the move, so the alias stays and a rerun finishes. A
   failed git commit keeps the alias also when a move failed. A rerun that
   finds the alias recorded commits whatever a killed run left uncommitted, or
   exits 1 with the sync message.
@@ -604,15 +602,32 @@ Decided 2026-11-19:
   store, as a key and its URI encoding are, makes `--remote` refuse before it
   writes anything, and a move between such keys gives false, as it would
   remove the ledger it moves.
-  The git commit a rerun makes treats the paths of those moves as its own, so
-  it commits a moved record of another machine and never puts it back, and
-  checks HEAD holds each path as the disk does: a removal git left out exits
-  1 on every rerun. A dry run fails for a symbolic link, as the move does. A
-  repo folder of the old key that cannot be read fails the run, where it read
+  After the commit, repair checks HEAD holds each moved path as the disk
+  does. A removal git left out exits 1 on every rerun. A dry run fails for a
+  symbolic link, as the move does. A repo folder of the old key that cannot be read fails the run, where it read
   as empty; every other command still passes such a folder over. The
   search skips `node_modules`, `.git` and `.claude/worktrees/.build` in any
   case, and any folder named inside one. `--to` records the main checkout by the record it reads under the
   lock.
+  Result (2026-11-23): repair names an unreadable old-key evidence folder
+  and exits 1. A record or Markdown linked under both keys finishes moving
+  even if its checkout has gone. Before removing a source or taking back a
+  target link, the move sets it aside and checks its inode. A writer that
+  takes over a lock after 60 seconds keeps its replacement, except in the
+  limits LLP 0000 records. Repair, ordinary commands and sync recognise a
+  pending git move by the old → new alias, an old path in HEAD that is gone on
+  disk, and a new file with the exact spelling of the new path and the same
+  blob. HEAD may hold the new path only with that same blob and that spelling;
+  the old path's removal is then still committed as the move's last half.
+  2026-11-23: rollback, case-variant HEAD paths, a committed move's late
+  removal, the half-moved slug check and case-variant evidence folders were
+  fixed; three crash-and-takeover windows are recorded as accepted limits.
+  The half-moved slug check now compares each ledger against every other
+  ledger. It leaves out only the ledger's own half-moved copy, found by the
+  file its name resolves to. Three layouts are recorded as limits in LLP 0000:
+  JavaScript lower-casing as the case test, a symbolic link used as a store
+  folder inside the clone, and a destination staged in one case spelling and
+  on disk in another.
 - **D11** (revised) Hooks still let actions through when they fail; a hook
   failure log reports them at session start (section 10).
 - **D12** LLP 0000 stays current: a PR that changes how the system works
@@ -764,7 +779,7 @@ Decided 2026-11-19:
 | State storage (D7) | location only; parked line; lost line (`- lost: <date> — folder <path> not found`, or `- lost: <date>` when no worktree is recorded; any other `- lost:` line is a note) | tool-written `- status:` line; GitHub check |
 | Task records (D8, D29) | Markdown files are the source; task list is a cache parsed from them; active ledger only in the worktree | one structured record per task in the store; Markdown rendered by `ledger show`; no worktree copy; one-time conversion |
 | Task list (D9) | a query over the store: `findTasks` in `tools/ledger/tasks.ts` reads every task from it each time, scans no folders, and nothing caches the result; each active record names its repo and worktree; `ledger store repair` (`tools/ledger/repair.ts`) points a task whose folder moved to its new folder, or marks it lost | none |
-| Repo identity (D10) | remote address, normalized by `remoteKey` in `tools/ledger/repo-key.ts` as D10 says, else the main checkout's path; a remote that is a local path keeps its case; `ledger store migrate --repo-ids` converts old tasks once and keeps an alias map; `ledger store repair --remote` files a renamed remote's tasks under the new key and keeps the old address as an alias; a task stays under the old key when its main checkout is gone or belongs to another repo, when it names no main and no alias exists yet, or when the new key has a live task with its title's slug; it refuses the whole command, moving nothing, when an alias of the old key files a live task whose slug the new key has, or when the new key is an alias of a third key already, as that would chain two aliases; it also moves evidence left under the old key whose archive copy is under the new key, and leaves an unreadable record there, names it and exits 1; it writes the aliases before the moves when the plan moves everything, so a run that stops after the moves leaves the alias a rerun finds, and takes them back when a move fails; evidence whose archive copy is under neither key stays and does not block the alias; on git storage a failed commit exits 1, keeps the aliases, which are never committed, and says to run `ledger store sync`, also when a move failed too; a rerun that finds the alias commits the moves a killed run left uncommitted, as its own also for another machine's record, or exits 1 with that message, and finishes a move killed between its link and its removal, also removing Markdown it left under the old key without judging the checkout that Markdown names; it refuses, writing nothing, an old key that is the same repository folder as the new key in a file or git store; a store move holds the record locks of the ledger under both keys; a dependency that names the old key names the task filed under the new one | none |
+| Repo identity (D10) | remote address, normalized by `remoteKey` in `tools/ledger/repo-key.ts` as D10 says, else the main checkout's path; a remote that is a local path keeps its case; `ledger store migrate --repo-ids` converts old tasks once and keeps an alias map; `ledger store repair --remote` files a renamed remote's tasks under the new key and keeps the old address as an alias; before a move starts, a task stays under the old key when its main checkout is gone or belongs to another repo, when it names no main and no alias exists yet, or when the new key has a live task with its title's slug; it refuses the whole command, moving nothing, when an alias of the old key files a live task whose slug the new key has, or when the new key is an alias of a third key already, as that would chain two aliases; it also moves evidence left under the old key whose archive copy is under the new key, and leaves an unreadable record there, names it and exits 1; it writes the aliases before the moves when the plan moves everything, so a run that stops after the moves leaves the alias a rerun finds, and takes them back when a move fails; evidence whose archive copy is under neither key stays and does not block the alias; on git storage a failed commit exits 1, keeps the aliases, which are never committed, and says to run `ledger store sync`, also when a move failed too; repair, commands and sync recognise pending moves when the alias points to the new key, the old HEAD path is gone on disk, HEAD has nothing at the new path or the same blob there under the same spelling, and the new file matches the new path by exact spelling and has the same blob; repair names an unreadable old evidence folder and exits 1; a rerun finishes a record or Markdown linked under both keys without checking the checkout again; it refuses an old key that shares the new key's store folder; file moves check the inode before removing a source or taking back a target, so a writer can reclaim a stale lock and keep its update, except in the limits LLP 0000 records; a dependency that names the old key names the task filed under the new one | none |
 | Hook failures (D11) | allowed, error not visible | failure log at session start |
 | LLP 0000 upkeep (D12) | the rule in `CONTRIBUTING.md`; the reviewer check in `agents/reviewer.md`; the `npm run llp` warning (`llp0000Warnings` in `tools/llp-refs.ts`); the other `npm run llp` checks, in [LLP 0000, Checks](0000-ledger-architecture.explainer.md#checks) | none |
 | Design refs (D46) | `designRefs`, a field of the task record (`tools/ledger/record.ts`), set by `ledger task new --design-refs` with the LLPs that `/ledger:task` and `/ledger:go` pick | none |
