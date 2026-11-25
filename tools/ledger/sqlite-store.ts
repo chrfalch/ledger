@@ -70,7 +70,7 @@ const SQLITE_WARNING = 'SQLite is an experimental feature and might change at an
 
 type Place = 'backlog' | 'active' | 'archive';
 /** One entry of an evidence folder: a file with its bytes, a folder, or a symbolic link with its text as bytes. */
-type EvidenceEntry = { path: string; kind: 'file' | 'folder' | 'link'; data: Uint8Array };
+export type EvidenceEntry = { path: string; kind: 'file' | 'folder' | 'link'; data: Uint8Array };
 
 /** The type of a warning, from any of the forms process.emitWarning takes. */
 const warningType = (warning: string | Error, options: unknown): string | undefined =>
@@ -122,7 +122,7 @@ function openDatabase(file: string, home: string, readOnly: boolean): DatabaseSy
 }
 
 /** The entries of `folder` by relative path. Throws for anything at `folder` but a folder, and for any other kind of entry. */
-function evidenceIn(folder: string): EvidenceEntry[] {
+export function evidenceIn(folder: string): EvidenceEntry[] {
   if (!lstatSync(folder).isDirectory()) fail(`${folder} is not a folder.`);
   return treeEntries(folder).map((entry): EvidenceEntry => {
     const file = path.join(entry.parentPath, entry.name);
@@ -134,7 +134,7 @@ function evidenceIn(folder: string): EvidenceEntry[] {
   });
 }
 
-function sameEvidence(a: EvidenceEntry[], b: EvidenceEntry[]): boolean {
+export function sameEvidence(a: EvidenceEntry[], b: EvidenceEntry[]): boolean {
   const byPath = new Map(b.map((entry) => [entry.path, entry]));
   return (
     a.length === b.length &&
@@ -158,6 +158,31 @@ function realFolderIn(root: string, relative: string, outside: () => never): str
     else if (realpathSync.native(folder) !== folder) outside();
   }
   return folder;
+}
+
+/**
+ * Writes `entries`, the evidence kept at `where`, to the folder `to` as `Archive.copyEvidence` does. Fails, writing
+ * nothing, for a path that leads outside `to`, and stops at a folder that is a link.
+ */
+export function writeEvidence(entries: EvidenceEntry[], to: string, where: string): void {
+  const links = new Set(entries.flatMap((entry) => (entry.kind === 'link' ? [entry.path] : [])));
+  for (const { path: relative } of entries) {
+    const parts = relative.split('/');
+    const throughLink = parts.slice(0, -1).some((_, index) => links.has(parts.slice(0, index + 1).join('/')));
+    if (path.isAbsolute(relative) || parts.some((part) => ['', '.', '..'].includes(part)) || throughLink) {
+      fail(`The evidence path ${relative} of ${where} leads outside its folder, so no evidence was copied.`);
+    }
+  }
+  if (entries.length === 0) return;
+  mkdirSync(to, { recursive: true });
+  const root = realpathSync.native(to);
+  for (const entry of entries) {
+    const throughLink = (): never => fail(`The evidence path ${entry.path} of ${where} leads outside its folder through a link, so the copy in ${to} stopped there.`);
+    const folder = realFolderIn(root, entry.kind === 'folder' ? entry.path : path.posix.dirname(entry.path), throughLink);
+    const target = path.join(folder, path.posix.basename(entry.path));
+    if (entry.kind === 'file') writeFileSync(target, entry.data, { flag: 'wx' });
+    if (entry.kind === 'link') symlinkSync(Buffer.from(entry.data), target);
+  }
 }
 
 /**
@@ -450,27 +475,7 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
         const row = one<{ data: Uint8Array }>(`SELECT data FROM evidence WHERE repo = ? AND name = ? AND path = ? AND kind = 'file'`, repo, name, relative);
         return row && Buffer.from(row.data);
       },
-      copyEvidence: (repo, name, to) => {
-        const entries = archived(repo, name);
-        const links = new Set(entries.flatMap((entry) => (entry.kind === 'link' ? [entry.path] : [])));
-        for (const { path: relative } of entries) {
-          const parts = relative.split('/');
-          const throughLink = parts.slice(0, -1).some((_, index) => links.has(parts.slice(0, index + 1).join('/')));
-          if (path.isAbsolute(relative) || parts.some((part) => ['', '.', '..'].includes(part)) || throughLink) {
-            fail(`The evidence path ${relative} of ${evidenceLocation(repo, name)} leads outside its folder, so no evidence was copied.`);
-          }
-        }
-        if (entries.length === 0) return;
-        mkdirSync(to, { recursive: true });
-        const root = realpathSync.native(to);
-        for (const entry of entries) {
-          const throughLink = (): never => fail(`The evidence path ${entry.path} of ${evidenceLocation(repo, name)} leads outside its folder through a link, so the copy in ${to} stopped there.`);
-          const folder = realFolderIn(root, entry.kind === 'folder' ? entry.path : path.posix.dirname(entry.path), throughLink);
-          const target = path.join(folder, path.posix.basename(entry.path));
-          if (entry.kind === 'file') writeFileSync(target, entry.data, { flag: 'wx' });
-          if (entry.kind === 'link') symlinkSync(Buffer.from(entry.data), target);
-        }
-      },
+      copyEvidence: (repo, name, to) => writeEvidence(archived(repo, name), to, evidenceLocation(repo, name)),
       remove: (repo, name, expected) =>
         transaction(() => {
           if (!archive.has(repo, name)) fail(`${archive.location(repo, name)} does not exist.`);

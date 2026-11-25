@@ -20,6 +20,7 @@ import { findTasks } from '../tools/ledger/tasks.js';
 import { createTask, goTask, orderChildren, parkTask, type Context } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
 import { archivedTask, home, ledgerText, noSqlite, repoKeyOf, repository } from './ledger-core-fixtures.js';
+import { memoryStore } from './memory-store.js';
 
 const text = (slug: string): string => ledgerText({ slug, main: '/repos/app' });
 /** Every byte value once, so no text decoding can pass the bytes through unchanged. */
@@ -44,9 +45,13 @@ function plantMarkdown(h: string, store: LedgerStore, place: 'backlog' | 'archiv
   writeFileSync(path.join(folder, `${name}.md`), markdown);
 }
 
-/** The behaviour every store shares, whatever keeps the ledgers. `open` opens the store of a HOME; `skip` says why it cannot run here. */
-function storeContract(name: string, open: (home: string) => LedgerStore, skip: string | false = false): void {
+/**
+ * The behaviour every store shares, whatever keeps the ledgers. `open` opens the store of a HOME; `skip` says why it
+ * cannot run here. A store with `markdown: false` keeps no ledgers from before task records, so their tests skip it.
+ */
+function storeContract(name: string, open: (home: string) => LedgerStore, { skip = false, markdown = true }: { skip?: string | false; markdown?: boolean } = {}): void {
   const makeStore = (t: TestContext): LedgerStore => open(home(t));
+  const skipMarkdown = skip || (!markdown && `${name} keeps no Markdown from before task records`);
 
   /** A folder under `h` with a file, a binary file, a file and an empty folder in subfolders, and a relative link. */
   const evidenceFolder = (h: string): string => {
@@ -343,8 +348,10 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     store.archive.write('app', '2026-11-01-stray', STRAY);
     assert.equal(store.backlog.read('app', 'stray')?.text, rendered(STRAY));
     assert.equal(store.archive.read('app', '2026-11-01-stray')?.text, rendered(STRAY));
-    assert.deepEqual(store.backlog.markdownNames?.('app'), []);
-    assert.deepEqual(store.archive.markdownNames?.('app'), []);
+    if (markdown) {
+      assert.deepEqual(store.backlog.markdownNames?.('app'), []);
+      assert.deepEqual(store.archive.markdownNames?.('app'), []);
+    }
   });
 
   test(`${name}: a claim reads back as written, in the backlog and in the archive`, { skip }, (t) => {
@@ -357,7 +364,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     }
   });
 
-  test(`${name}: a ledger kept as Markdown from before records reads as its record, rendered, and lists with the records`, { skip }, (t) => {
+  test(`${name}: a ledger kept as Markdown from before records reads as its record, rendered, and lists with the records`, { skip: skipMarkdown }, (t) => {
     const h = home(t);
     const store = open(h);
     store.backlog.write('app', 'b-record', text('b-record'));
@@ -380,7 +387,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.deepEqual(store.archive.markdownNames?.('app'), ['2026-11-01-old']);
   });
 
-  test(`${name}: write and update replace a Markdown ledger with a record; create and an archive write refuse its name`, { skip }, (t) => {
+  test(`${name}: write and update replace a Markdown ledger with a record; create and an archive write refuse its name`, { skip: skipMarkdown }, (t) => {
     const h = home(t);
     const store = open(h);
     plantMarkdown(h, store, 'backlog', 'app', 'written', STRAY);
@@ -401,7 +408,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     );
   });
 
-  test(`${name}: remove of a Markdown ledger takes its rendered text as expected, and leaves nothing of it`, { skip }, (t) => {
+  test(`${name}: remove of a Markdown ledger takes its rendered text as expected, and leaves nothing of it`, { skip: skipMarkdown }, (t) => {
     const h = home(t);
     const store = open(h);
     plantMarkdown(h, store, 'backlog', 'app', 'gone', STRAY);
@@ -415,7 +422,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.deepEqual(store.archive.list('app'), []);
   });
 
-  test(`${name}: toRecord rewrites a Markdown ledger as a record, its text and modified time as they were, and is false for a record`, { skip }, (t) => {
+  test(`${name}: toRecord rewrites a Markdown ledger as a record, its text and modified time as they were, and is false for a record`, { skip: skipMarkdown }, (t) => {
     const h = home(t);
     const store = open(h);
     plantMarkdown(h, store, 'archive', 'app', '2026-11-01-old', STRAY);
@@ -429,7 +436,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.equal(after?.mtimeMs, Date.parse('2026-11-01T12:00:00Z'));
   });
 
-  test(`${name}: a record wins over a Markdown ledger of the same name`, { skip }, (t) => {
+  test(`${name}: a record wins over a Markdown ledger of the same name`, { skip: skipMarkdown }, (t) => {
     const h = home(t);
     const store = open(h);
     store.backlog.write('app', 'both', text('both'));
@@ -442,7 +449,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.deepEqual(store.backlog.markdownNames?.('app'), []);
   });
 
-  test(`${name}: a write over a record that hides a Markdown ledger of the same name keeps the Markdown, and hiddenMarkdown names it`, { skip }, (t) => {
+  test(`${name}: a write over a record that hides a Markdown ledger of the same name keeps the Markdown, and hiddenMarkdown names it`, { skip: skipMarkdown }, (t) => {
     const h = home(t);
     const store = open(h);
     store.backlog.write('app', 'both', text('both'));
@@ -456,7 +463,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.equal(store.backlog.read('app', 'both')?.text, text('once-more'));
   });
 
-  test(`${name}: remove refuses a task whose record hides Markdown, names the conflict and ledger store migrate --records, and changes nothing`, { skip }, (t) => {
+  test(`${name}: remove refuses a task whose record hides Markdown, names the conflict and ledger store migrate --records, and changes nothing`, { skip: skipMarkdown }, (t) => {
     const h = home(t);
     const store = open(h);
     const from = evidenceFolder(h);
@@ -478,7 +485,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.deepEqual(store.archive.hiddenMarkdown?.('app'), ['2026-11-01-both']);
   });
 
-  test(`${name}: a move takes the Markdown a record hides along, so neither repo shows it`, { skip }, (t) => {
+  test(`${name}: a move takes the Markdown a record hides along, so neither repo shows it`, { skip: skipMarkdown }, (t) => {
     const h = home(t);
     const store = open(h);
     store.backlog.write('app', 'both', text('both'));
@@ -494,7 +501,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.deepEqual(store.archive.hiddenMarkdown?.('lib'), ['2026-11-01-both']);
   });
 
-  test(`${name}: a Markdown ledger moves to another repo and still reads there`, { skip }, (t) => {
+  test(`${name}: a Markdown ledger moves to another repo and still reads there`, { skip: skipMarkdown }, (t) => {
     const h = home(t);
     const store = open(h);
     plantMarkdown(h, store, 'backlog', 'app', 'moving', STRAY);
@@ -506,7 +513,36 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.equal(store.backlog.has('app', 'moving'), false);
   });
 
-  test(`${name}: a ledger with a repeated section is the same record converted or written, its repeat a note, and it stays listed`, { skip }, (t) => {
+  test(`${name}: a ledger with a repeated section is written as its record, its repeat a note`, { skip }, (t) => {
+    const store = makeStore(t);
+    store.backlog.write('app', 'written', REPEATED_CHILDREN);
+    const stored = store.backlog.read('app', 'written')?.text ?? '';
+    assert.equal(stored, rendered(REPEATED_CHILDREN));
+    assert.deepEqual(parseLedger(stored).children, []);
+    assert.deepEqual(store.backlog.list('app').map(({ name }) => name), ['written']);
+  });
+
+  test(`${name}: a write, update, create or archive write whose record would not read back the same fails, names the ledger, and changes nothing`, { skip }, (t) => {
+    const h = home(t);
+    const store = open(h);
+    store.backlog.write('app', 'kept', text('kept'));
+    const before = store.backlog.list('app').map(({ name, text: stored }) => [name, stored]);
+    const refused = (where: string) => (error: unknown) => error instanceof Failure && error.message.includes(where) && /would not read back the same/.test(error.message);
+
+    assert.throws(() => store.backlog.write('app', 'kept', UNSTABLE), refused(store.backlog.location('app', 'kept')));
+    assert.throws(() => store.backlog.update('app', 'kept', () => UNSTABLE), refused(store.backlog.location('app', 'kept')));
+    assert.throws(() => store.backlog.create('app', 'new', UNSTABLE), refused(store.backlog.location('app', 'new')));
+    assert.throws(() => store.archive.write('app', '2026-11-01-new', UNSTABLE, evidenceFolder(h)), refused(store.archive.location('app', '2026-11-01-new')));
+
+    assert.deepEqual(
+      store.backlog.list('app').map(({ name, text: stored }) => [name, stored]),
+      before,
+    );
+    assert.equal(store.archive.nameTaken('app', '2026-11-01-new'), false);
+    assert.deepEqual(store.archive.orphanEvidence(), []);
+  });
+
+  test(`${name}: a ledger with a repeated section is the same record converted or written, its repeat a note, and it stays listed`, { skip: skipMarkdown }, (t) => {
     const h = home(t);
     const store = open(h);
     plantMarkdown(h, store, 'backlog', 'app', 'converted', REPEATED_CHILDREN);
@@ -524,7 +560,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.deepEqual(store.backlog.markdownNames?.('app'), []);
   });
 
-  test(`${name}: a write whose record would not read back the same fails, names the ledger, and changes nothing`, { skip }, (t) => {
+  test(`${name}: a write whose record would not read back the same fails, names the ledger, and changes nothing`, { skip: skipMarkdown }, (t) => {
     const h = home(t);
     const store = open(h);
     store.backlog.write('app', 'kept', text('kept'));
@@ -548,7 +584,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.deepEqual(store.archive.orphanEvidence(), []);
   });
 
-  test(`${name}: toRecord keeps the birth time of the Markdown it converts as the created time, also through a later write`, { skip }, async (t) => {
+  test(`${name}: toRecord keeps the birth time of the Markdown it converts as the created time, also through a later write`, { skip: skipMarkdown }, async (t) => {
     const h = home(t);
     const store = open(h);
     plantMarkdown(h, store, 'backlog', 'app', 'old', STRAY);
@@ -570,7 +606,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, skip: 
     assert.equal(store.backlog.read('app', 'old')?.text, text('updated'));
   });
 
-  test(`${name}: a write or an update over a Markdown ledger, such as a park, keeps the Markdown's birth time as the created time, as toRecord does`, { skip }, async (t) => {
+  test(`${name}: a write or an update over a Markdown ledger, such as a park, keeps the Markdown's birth time as the created time, as toRecord does`, { skip: skipMarkdown }, async (t) => {
     const h = home(t);
     const store = open(h);
     for (const slug of ['written', 'parked']) plantMarkdown(h, store, 'backlog', 'app', slug, STRAY);
@@ -603,8 +639,9 @@ const openGitStore = (h: string): LedgerStore => {
 };
 
 storeContract('file store', (h) => fileStore(ledgerPaths(h)));
-storeContract('sqlite store', (h) => sqliteStore({ home: h }), noSqlite);
+storeContract('sqlite store', (h) => sqliteStore({ home: h }), { skip: noSqlite });
 storeContract('git store', openGitStore);
+storeContract('memory store', (h) => memoryStore({ home: h }), { markdown: false });
 
 test('file and git store: the old task list reads back from ~/.claude/ledgers.json and ~/.claude/ledgers-git.json', (t) => {
   const h = home(t);

@@ -220,18 +220,26 @@ is 5 to 10 such tests, not the roughly 60 that wait today.
 
 ### 3. A memory store
 
-`memoryStore()` implements `LedgerStore` (`tools/ledger/store.ts:295`) with
-maps. It joins the existing store contract suite `storeContract`
-(`tests/ledger-core-store.test.ts:48`). That suite already runs about 38 tests
-against the file, SQLite and git stores [observed]. It also joins the
-active-record loop in `tests/ledger-active-store.test.ts`.
+`memoryStore({ home })` in `tests/memory-store.ts` implements `LedgerStore`
+(`tools/ledger/store.ts:297`) with maps. It lives in `tests/`, as only tests
+use it. There is one per HOME, so a store opened again on the same HOME reads
+what the first one wrote. It joins the store contract suite `storeContract`
+(`tests/ledger-core-store.test.ts:52`), which runs 40 tests against the file,
+SQLite and git stores [observed]. It also joins the active-record loop in
+`tests/ledger-active-store.test.ts`.
+
+The memory store keeps no Markdown from before task records. So it leaves out
+`markdownNames`, `markdownText`, `toRecord` and `hiddenMarkdown`, and the
+suite runs it with `{ markdown: false }`. That skips the 13 tests that plant
+such Markdown. The other 27 pass [confirmed].
 
 What a memory store does not cover, so those tests stay on a real store
 [observed]:
 
 - **Archive evidence** is real folders. A memory store holds the files' bytes.
-  Tests of folder handling, such as symbolic links or taken names, stay on
-  the file store.
+  It reads and writes the folders with the SQLite store's helpers. Tests of
+  folder handling, such as symbolic links or taken names, stay on the file
+  store.
 - **Settings** are read from disk under `home`. In-process tests still get a
   temporary home with a settings file. This is cheap: no git, no process.
 - **Paths in messages.** `location()` and `repoLocation()` return paths, so
@@ -242,14 +250,25 @@ What a memory store does not cover, so those tests stay on a real store
   - background sync;
   - the session-start pull;
   - everything in `sync.ts` and `clone.ts`.
-- **Locks and folders.** File locks that sit outside the store, and
-  `sharesFolder`, which checks two keys that share a folder.
+- **Locks and folders.** File locks that sit outside the store;
+  `sharesFolder`, which checks two keys that share a folder; and
+  `movedHalfway` and `acrossDisks`, as a move in memory is no link.
+- **Host labels.** The store has no `host`, so no record counts as another
+  machine's by its host alone.
 
-**Fixture seeding.** Test fixtures that write store files directly would write
-through the store instead. These are `backlogTask`, `archivedTask`,
-`writeLedgerFile` and `activeFile` in `tests/ledger-core-fixtures.ts`, and the
-heaviest users are `core-write`, `core-json`, `core-claims` and `core-hooks`
-[observed]. Then the same fixture works for every store.
+**Fixture seeding.** `backlogTask`, `archivedTask`, `activeFile` and
+`writeLedgerFile` in `tests/ledger-core-fixtures.ts` take an optional
+`{ store }` last. With a store they write through it and give the store's
+location. `writeLedgerFile` then takes that location and rewrites the backlog
+or active ledger there. `runInProcessWith` takes a `store` too, and the run
+uses it in place of the one the settings name.
+
+Without a store the fixtures still write legacy Markdown files and give their
+paths. The tests call them about 260 times, and most callers read the files
+back from disk [observed]. Those callers move to the store with their file in
+step 4. The heaviest users are `core-write`, `core-json`, `core-retire`,
+`core-cli` and `core-claims`. `core-hooks` does not use them: it seeds with
+`writeFileSync` directly [observed].
 
 ### 4. A quick run and a full run
 
@@ -310,8 +329,9 @@ Each step is one PR and one task, under one parent task.
    - Real hangs: shortened limits through the preload, for the real-process
      hang tests.
 3. **Memory store.**
-   - Changes: `memoryStore()` in the contract suite, and fixtures that seed
-     through the store.
+   - Changes: `memoryStore()` in `tests/`, in the contract suite without its
+     Markdown tests, and fixtures that take an optional store to seed
+     through.
 4. **Move test files.**
    - One file per PR, slowest first, by the step 1 times.
    - Candidates (from code reading, not yet measured): `core-write`,
