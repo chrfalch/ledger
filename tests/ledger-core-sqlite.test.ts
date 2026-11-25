@@ -136,20 +136,20 @@ for (const storage of ['file', 'sqlite'] as const) {
     keptIn(h, storage);
   });
 
-  test(`${storage} store: the SessionStart hook names a backlog child and an archived child with the status the store gives them`, { skip }, (t) => {
+  test(`${storage} store: the SessionStart hook counts a backlog child as open and an archived child as not, by the status the store gives them`, { skip }, (t) => {
     const { h, app, store } = setup(t, storage);
     const epic = worktreeOf(app, 'epic');
     git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/epic', epic, 'main');
     store().active.write(keyOf(h, 'app'), 'epic', ledgerText({ slug: 'epic', main: app, worktree: epic, children: ['- idea', '- old'] }));
     ok(ledger(h, app, 'task', 'new', 'idea', '--goal', 'An idea.'));
     store().archive.write(keyOf(h, 'app'), '2026-10-01-old', ledgerText({ slug: 'old', main: app, worktree: path.join(app, '.claude/worktrees/old'), parent: 'epic' }));
-    const input = JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup', cwd: epic });
+    const input = JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup', cwd: app });
     const result = spawnSync(LEDGER_BIN, ['hook', 'session-start'], { cwd: h, env: { ...process.env, HOME: h, GIT_CONFIG_GLOBAL: path.join(h, '.gitconfig') }, input, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stderr, '');
     const { additionalContext } = (JSON.parse(result.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput;
-    assert.match(additionalContext, /^Child task: idea \(backlog\)\.$/m);
-    assert.match(additionalContext, /^Child task: old \(retired 2026-10-01\)\.$/m);
+    assert.match(additionalContext, /^- epic active — 1 open child$/m);
+    assert.match(additionalContext, /^- idea backlog$/m);
     keptIn(h, storage);
   });
 

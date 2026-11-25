@@ -123,6 +123,8 @@ The **task ledger** records the task. See `ledger --help`.
   the operator to type `/clear`, then `go`. After the last review verdict,
   accept; no clear point.
 - **Resume.** On "go" or `go <slug>`, continue from the ledger's Next step.
+  Session start gives a short report; `ledger show` gives the plan,
+  decisions and reports.
   With several ledgers, "go" first asks which task. `go <slug>` never asks: it
   enters the ledger's Location with `EnterWorktree`, unless already there. A
   backlog task has no worktree: run `/ledger:go <slug>` yourself. If the task

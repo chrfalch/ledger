@@ -1,8 +1,9 @@
 // @ref LLP 0001#7-the-lifecycle — step 7: what the session start does with the PR of each waiting task (D20).
+import { finalizeCommand } from './awareness.js';
 import { limitCloneGitCalls } from './clone.js';
 import { prViews, type PrView } from './git.js';
 import { limitLockWaits } from './lock.js';
-import { findNamed, listedChildren, type Task } from './tasks.js';
+import { findNamed, listedChildren, storedRepoOf, type Task } from './tasks.js';
 import { markWaitingDone, sendBackToBuild, type Context } from './write.js';
 
 /** gh gets this long for every PR together; the session start's git calls have their own limit. */
@@ -43,20 +44,24 @@ export function prOutcome({ state, reviewDecision, checks }: PrView): PrOutcome 
 
 type Placed = { task: Task; main: string };
 
-/** `own`, then its root task, found up its parent lines, and every task below that root. */
+/**
+ * `own`, then its root task, found up its parent lines, and every task below that root. A task in another repo is found
+ * by the store alone, as the session start runs no git there.
+ */
 function treeOf(tasks: Task[], own: Task, main: string): Task[] {
+  const repoOf = storedRepoOf(tasks, { main, key: own.currentRepo ?? own.repo });
   let root: Placed = { task: own, main };
   const above = new Set([own.file]);
   for (let parent = own.ledger.location.parent; parent !== undefined; parent = root.task.ledger.location.parent) {
     const ref = { slug: parent.slug, main: parent.main ?? root.main };
-    const found = findNamed(tasks, ref).find(({ place }) => place !== 'archive');
+    const found = findNamed(tasks, ref, repoOf).find(({ place }) => place !== 'archive');
     if (found === undefined || above.has(found.file)) break;
     above.add(found.file);
     root = { task: found, main: ref.main };
   }
   const tree = [root];
   for (const { task, main: at } of tree) {
-    for (const child of listedChildren(task, at, tasks)) {
+    for (const child of listedChildren(task, at, tasks, repoOf)) {
       const { task: found } = child;
       if (found !== undefined && !tree.some(({ task: known }) => known.file === found.file)) tree.push({ task: found, main: child.ref.main });
     }
@@ -85,20 +90,25 @@ function waitingPrs({ tasks, own }: SessionTasks, onDisk: Task[]): WaitingPr[] {
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').replace(/[.\s]+$/, '');
 
-function outcomeLine(context: Context, task: Task, outcome: PrOutcome): string | undefined {
+/** A line of what the PR check found; `done` is the store location of the task it made done, as the line gives its finalize advice. */
+export type CheckedLine = { text: string; done?: string };
+
+function outcomeLine(context: Context, task: Task, outcome: PrOutcome, repo: string): CheckedLine | undefined {
   const { slug } = task;
   switch (outcome.kind) {
     case 'merged':
-      return markWaitingDone(context, task) ? `${slug}: PR merged; the task is done. Finalize it with the question from \`ledger task gate finalize ${slug}\`.` : undefined;
+      return markWaitingDone(context, task)
+        ? { text: `${slug}: PR merged; the task is done. Finalize it with the question from \`${finalizeCommand(task, repo)}\`.`, done: task.file }
+        : undefined;
     case 'fix': {
       const why = outcome.checksFailed ? `PR checks failed${outcome.changesRequested ? ' and review asked for changes' : ''}` : 'PR review asked for changes';
       const moved = sendBackToBuild(context, task);
-      return moved === undefined ? undefined : `${slug}: ${why}; the task is ${moved === 'build' ? 'back at build' : 'active again'}.`;
+      return moved === undefined ? undefined : { text: `${slug}: ${why}; the task is ${moved === 'build' ? 'back at build' : 'active again'}.` };
     }
     case 'closed':
-      return `${slug}: PR closed without merging.`;
+      return { text: `${slug}: PR closed without merging.` };
     case 'ready':
-      return `${slug}: PR checks and review passed; ready to merge.`;
+      return { text: `${slug}: PR checks and review passed; ready to merge.` };
     case 'pending':
       return undefined;
   }
@@ -110,10 +120,12 @@ function outcomeLine(context: Context, task: Task, outcome: PrOutcome): string |
  * needs the operator. `onDisk` is every task of the store, as the session start read them. Never throws: a failure is a
  * line too. Once gh is done, it sets this process's limit on lock waits and git calls in the clone anew, for the writes.
  */
-export function prCheckLines(context: Context, session: SessionTasks, onDisk: Task[]): string[] {
+export function prCheckLines(context: Context, session: SessionTasks, onDisk: Task[]): CheckedLine[] {
   try {
     const waiting = waitingPrs(session, onDisk);
     if (waiting.length === 0) return [];
+    const [first] = session.tasks;
+    const repo = first.currentRepo ?? first.repo;
     const views = prViews(
       waiting.map(({ task, pr }) => ({ folder: task.main ?? context.cwd, pr })),
       prCheckMs,
@@ -123,14 +135,14 @@ export function prCheckLines(context: Context, session: SessionTasks, onDisk: Ta
     limitCloneGitCalls(updatesEnd);
     return waiting.flatMap(({ task }, index) => {
       const view = views[index];
-      if ('error' in view) return [`${task.slug}: could not check the PR (${view.error}).`];
+      if ('error' in view) return [{ text: `${task.slug}: could not check the PR (${view.error}).` }];
       try {
-        return outcomeLine(context, task, prOutcome(view)) ?? [];
+        return outcomeLine(context, task, prOutcome(view), repo) ?? [];
       } catch (error) {
-        return [`${task.slug}: could not update the task (${messageOf(error)}).`];
+        return [{ text: `${task.slug}: could not update the task (${messageOf(error)}).` }];
       }
     });
   } catch (error) {
-    return [`Could not check the PRs of the waiting tasks (${messageOf(error)}).`];
+    return [{ text: `Could not check the PRs of the waiting tasks (${messageOf(error)}).` }];
   }
 }

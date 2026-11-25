@@ -500,7 +500,7 @@ test('session-start says once how to convert when ledgers still use folder names
   const { h, epic } = hintWorld(t);
   const text = sessionStartText(h, epic);
   assert.equal(text.split('\n').filter((line) => line === HINT).length, 1, text);
-  assert.match(text, /Task ledger — epic/);
+  assert.match(text, /^Task epic in /m);
 });
 
 test('session-start gives the hint also in a session that has no ledger', (t) => {

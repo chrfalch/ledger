@@ -53,6 +53,6 @@ const unreadable = <T extends object>(): T =>
 test('the PR check never throws: a failure before gh answers is one line', () => {
   for (const own of [false, true]) {
     const task = unreadable<Task>();
-    assert.deepEqual(prCheckLines(unreadable<Context>(), { tasks: [task], own }, [task]), ['Could not check the PRs of the waiting tasks (it cannot be read).'], String(own));
+    assert.deepEqual(prCheckLines(unreadable<Context>(), { tasks: [task], own }, [task]), [{ text: 'Could not check the PRs of the waiting tasks (it cannot be read).' }], String(own));
   }
 });

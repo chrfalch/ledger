@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { fail } from './failure.js';
-import { isFolder, type TimedText } from './files.js';
+import { exists, isFolder, type TimedText } from './files.js';
 import { isReadableSlug, parseLedger, type Child, type Dependency, type Ledger, type StatusValue, type TaskRef } from './format.js';
 import { mainCheckout, worktrees, type Worktree } from './git.js';
 import { mainOfTaskWorktree, parseArchiveName, samePath } from './paths.js';
@@ -121,11 +121,12 @@ function checkoutFinder(): (main: string, folder: string) => Worktree | undefine
 /** How a task names the machine of an active record that names none, as one from before records named their host. */
 export const UNKNOWN_HOST = 'unknown host';
 
-type ActiveContext = { aliases: ReadonlyMap<string, string>; checkoutOf: ReturnType<typeof checkoutFinder>; host: string | undefined; ownHosts: ReadonlySet<string> };
+/** Without `checkoutOf`, active records become tasks from the store and the file system alone, with no git call. */
+type ActiveContext = { aliases: ReadonlyMap<string, string>; checkoutOf?: ReturnType<typeof checkoutFinder>; host: string | undefined; ownHosts: ReadonlySet<string> };
 
-const activeContext = (store: LedgerStore): ActiveContext => ({
+const activeContext = (store: LedgerStore, { git = true } = {}): ActiveContext => ({
   aliases: store.aliases.read(),
-  checkoutOf: checkoutFinder(),
+  ...(git ? { checkoutOf: checkoutFinder() } : {}),
   host: store.host,
   ownHosts: store.ownHosts ?? new Set(store.host === undefined ? [] : [store.host]),
 });
@@ -134,20 +135,22 @@ const activeContext = (store: LedgerStore): ActiveContext => ({
  * `entry` as a task. Its clone comes from the worktree's path, else from the record's main, and only then from git. It
  * is `elsewhere` when its record names a host that is none of this machine's, and unless git lists its worktree folder
  * as a checkout of that clone, a clone of the record's repo. Two machines can see one disk, so a worktree folder that is
- * here proves no record this machine's; the host does.
+ * here proves no record this machine's; the host does. Without git, a folder there that holds a .git entry stands in for
+ * git's listing, as a plain folder left at the path is no checkout.
  */
 function activeOf(entry: StoredLedger, { aliases, checkoutOf, host: thisHost, ownHosts }: ActiveContext): Task {
   const { location } = parseLedger(entry.text);
   const { worktree } = location;
-  const exists = worktree !== undefined && isFolder(worktree);
-  const main = (worktree === undefined ? undefined : mainOfTaskWorktree(worktree)) ?? location.main ?? (exists ? mainCheckout(worktree) : undefined);
+  const folder = worktree !== undefined && isFolder(worktree);
+  const main = (worktree === undefined ? undefined : mainOfTaskWorktree(worktree)) ?? location.main ?? (folder && checkoutOf !== undefined ? mainCheckout(worktree) : undefined);
   const otherHost = location.host !== undefined && thisHost !== undefined && !ownHosts.has(location.host);
   const resolved = (key: string): string => aliases.get(key) ?? key;
   // A lost task's old path may hold another task's worktree now, which must never count as this task's.
-  const ownsFolder = exists && location.lost === undefined;
-  const checkout = !otherHost && ownsFolder && main !== undefined && resolved(repoKey(main)) === resolved(entry.repo) ? checkoutOf(main, worktree) : undefined;
-  const host = otherHost ? location.host : checkout === undefined && location.host === undefined ? UNKNOWN_HOST : undefined;
-  const found = { file: entry.location, name: entry.name, place: 'active', repo: entry.repo, aliases, fallbackSlug: entry.name, mainOf: () => main, branch: checkout?.branch, worktree, elsewhere: checkout === undefined, host } as const;
+  const here = !otherHost && folder && location.lost === undefined && exists(path.join(worktree, '.git'));
+  const checkout = here && checkoutOf !== undefined && main !== undefined && resolved(repoKey(main)) === resolved(entry.repo) ? checkoutOf(main, worktree) : undefined;
+  const elsewhere = checkoutOf === undefined ? !here : checkout === undefined;
+  const host = otherHost ? location.host : elsewhere && location.host === undefined ? UNKNOWN_HOST : undefined;
+  const found = { file: entry.location, name: entry.name, place: 'active', repo: entry.repo, aliases, fallbackSlug: entry.name, mainOf: () => main, branch: checkout?.branch, worktree, elsewhere, host } as const;
   return toTask(found, entry);
 }
 
@@ -182,34 +185,81 @@ export const notOnThisMachine = ({ slug, worktree, host }: Pick<Task, 'slug' | '
  * of an active task is left out: the task has started, here or on another machine.
  */
 export function findTasks(store: LedgerStore): Task[] {
-  const active = activeTasks(store);
+  return withStarted(store, activeTasks(store));
+}
+
+function withStarted(store: LedgerStore, active: Task[]): Task[] {
   const key = (task: Task): string => `${task.currentRepo ?? task.repo}\n${task.slug}`;
   const started = new Set(active.map(key));
   return [...active, ...backlogTasks(store).filter((task) => !started.has(key(task))), ...archivedTasks(store)];
 }
 
 /**
+ * findTasks from the store and the file system alone, with no git call, for the session start, which must not wait on
+ * git once per task or in another repo. An active task is elsewhere when its record names another machine, or its folder
+ * is gone, holds no .git entry, or is lost. Its main is its worktree's by path or its record's, else `main` for a task of
+ * that repo, else the main another live task of its repo names.
+ */
+export function storedTasks(store: LedgerStore, main?: string): Task[] {
+  const context = activeContext(store, { git: false });
+  const tasks = withStarted(store, store.active.repos().flatMap((repo) => store.active.list(repo).map((entry) => activeOf(entry, context))));
+  const mains = new Map(tasks.flatMap((task) => (task.main === undefined || task.place === 'archive' ? [] : [[keyOf(task), task.main] as const])));
+  if (main !== undefined) {
+    const key = repoKey(main);
+    mains.set(context.aliases.get(key) ?? key, main);
+  }
+  return tasks.map((task) => {
+    const known = task.place === 'active' && task.main === undefined ? mains.get(keyOf(task)) : undefined;
+    return known === undefined ? task : { ...task, main: known };
+  });
+}
+
+/**
  * Whether `task` is a task of the repo at `main`: a task of one repo key is one of each clone of the repo, by its key with
  * an alias of either resolved, never by the main it names, as that path may be a clone of another origin now.
  */
-export const inRepo = (task: Task, main: string): boolean => task.repoKeys.includes(repoKey(main));
+export function inRepo(task: Task, main: string, repoOf: RepoOf = repoKey): boolean {
+  const key = repoOf(main);
+  return key !== undefined && task.repoKeys.includes(key);
+}
+
+/** The repo key of the checkout at `main`, undefined when it is unknown: repoKey asks git, storedRepoOf only the store. */
+export type RepoOf = (main: string) => string | undefined;
+
+/**
+ * repoKey from the store alone, for the session start, which must run no git in another repo: the key `known` has for
+ * its main, else that of a live task whose main is `main`, else undefined, so a task there counts as not found.
+ */
+export function storedRepoOf(tasks: Task[], known?: { main: string; key: string }): RepoOf {
+  const live = tasks.filter((task) => task.main !== undefined && task.place !== 'archive');
+  const keys = new Map<string, string | undefined>();
+  const find = (main: string): string | undefined => {
+    if (known !== undefined && samePath(main, known.main)) return known.key;
+    const task = live.find((each) => each.main !== undefined && samePath(each.main, main));
+    return task && keyOf(task);
+  };
+  return (main) => {
+    if (!keys.has(main)) keys.set(main, find(main));
+    return keys.get(main);
+  };
+}
 
 const PRECEDENCE: Place[] = ['active', 'backlog', 'archive'];
 
 /** A parent line without a main names a parent in the task's own repo. */
-function namesParent(task: Task, parent: Required<TaskRef>): boolean {
+function namesParent(task: Task, parent: Required<TaskRef>, repoOf: RepoOf): boolean {
   const named = task.ledger.location.parent;
   if (named === undefined || named.slug !== parent.slug) return false;
-  return named.main === undefined ? inRepo(task, parent.main) : samePath(named.main, parent.main);
+  return named.main === undefined ? inRepo(task, parent.main, repoOf) : samePath(named.main, parent.main);
 }
 
 /**
  * The child `child` of `parent`: an active task beats a backlog ledger, which beats an archive copy, the same rule
  * `ledger list` follows. A slug can be reused, so an archive copy counts only when it names this parent or no parent.
  */
-export function locateChild(tasks: Task[], child: Required<TaskRef>, parent: Required<TaskRef>): Task | undefined {
-  const named = tasks.filter((task) => task.slug === child.slug && inRepo(task, child.main));
-  const counts = (task: Task): boolean => task.place !== 'archive' || namesParent(task, parent) || task.ledger.location.parent === undefined;
+export function locateChild(tasks: Task[], child: Required<TaskRef>, parent: Required<TaskRef>, repoOf: RepoOf = repoKey): Task | undefined {
+  const named = tasks.filter((task) => task.slug === child.slug && inRepo(task, child.main, repoOf));
+  const counts = (task: Task): boolean => task.place !== 'archive' || namesParent(task, parent, repoOf) || task.ledger.location.parent === undefined;
   for (const place of PRECEDENCE) {
     const found = named.filter((task) => task.place === place && counts(task)).sort((a, b) => b.mtimeMs - a.mtimeMs)[0];
     if (found !== undefined) return found;
@@ -219,7 +269,7 @@ export function locateChild(tasks: Task[], child: Required<TaskRef>, parent: Req
 
 /** An archive copy of `child` names `parent`: a new task with that slug would share the parent's line with the retired one. */
 export const wasChildOf = (tasks: Task[], child: Required<TaskRef>, parent: Required<TaskRef>): boolean =>
-  tasks.some((task) => task.place === 'archive' && task.slug === child.slug && inRepo(task, child.main) && namesParent(task, parent));
+  tasks.some((task) => task.place === 'archive' && task.slug === child.slug && inRepo(task, child.main) && namesParent(task, parent, repoKey));
 
 export const notASlug = (slug: string): string => `"${slug}" is not a slug. A slug has only letters, digits, dots, underscores and hyphens. It does not start with a dot.`;
 
@@ -248,8 +298,8 @@ export function theTask(tasks: Task[], ref: Required<TaskRef>, { live = false } 
 export const sameTask = (a: Required<TaskRef>, b: Required<TaskRef>): boolean => a.slug === b.slug && (samePath(a.main, b.main) || repoKey(a.main) === repoKey(b.main));
 
 /** The live ledgers of `ref` (active or backlog), else its newest archive copy. */
-export function findNamed(tasks: Task[], { slug, main }: Required<TaskRef>): Task[] {
-  const named = tasks.filter((task) => task.slug === slug && inRepo(task, main));
+export function findNamed(tasks: Task[], { slug, main }: Required<TaskRef>, repoOf: RepoOf = repoKey): Task[] {
+  const named = tasks.filter((task) => task.slug === slug && inRepo(task, main, repoOf));
   const live = named.filter((task) => task.place !== 'archive');
   return live.length > 0 ? live : named.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 1);
 }
@@ -270,16 +320,21 @@ export function inOrder<T>(items: readonly T[], orderOf: (item: T) => number | u
 export type ListedChild = { line: Child; ref: Required<TaskRef>; task?: Task };
 
 /** The children `parent` names, in the order of their lines. A line without a main is in the parent's repo, `parentMain`. */
-export function listedChildren(parent: Task, parentMain: string, tasks: Task[]): ListedChild[] {
+export function listedChildren(parent: Task, parentMain: string, tasks: Task[], repoOf: RepoOf = repoKey): ListedChild[] {
   return namedChildren(parent, tasks).map((line) => {
     const ref = { slug: line.slug, main: line.main ?? parentMain };
-    return { line, ref, task: locateChild(tasks, ref, { slug: parent.slug, main: parentMain }) };
+    return { line, ref, task: locateChild(tasks, ref, { slug: parent.slug, main: parentMain }, repoOf) };
   });
 }
 
 /** listedChildren by the order of each child: its own `- order:`, or what `orderOf` gives, for an order `tasks` predates. */
-export const orderedChildren = (parent: Task, parentMain: string, tasks: Task[], orderOf = (task: Task): number | undefined => task.ledger.location.order): ListedChild[] =>
-  inOrder(listedChildren(parent, parentMain, tasks), ({ task }) => task && orderOf(task));
+export const orderedChildren = (
+  parent: Task,
+  parentMain: string,
+  tasks: Task[],
+  orderOf = (task: Task): number | undefined => task.ledger.location.order,
+  repoOf: RepoOf = repoKey,
+): ListedChild[] => inOrder(listedChildren(parent, parentMain, tasks, repoOf), ({ task }) => task && orderOf(task));
 
 /** The children `parent` lists, each with its status from disk, by order. */
 export function childrenOf(parent: Task, parentMain: string, tasks: Task[]): ChildView[] {

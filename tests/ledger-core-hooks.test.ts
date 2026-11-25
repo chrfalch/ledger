@@ -57,19 +57,6 @@ function worktree(h: string, main: string, location: string): string {
   return location;
 }
 
-/** The active ledgers of the linked worktrees of `main`, in the order git lists the worktrees. */
-function linkedLedgers(h: string, main: string): string[] {
-  const { active } = fileStore(ledgerPaths(h));
-  return git(h, main, 'worktree', 'list', '--porcelain')
-    .split('\n')
-    .filter((line) => line.startsWith('worktree '))
-    .slice(1)
-    .flatMap((line) => {
-      const key = active.byWorktree(line.slice('worktree '.length));
-      return key === undefined ? [] : [active.location(key.repo, key.slug)];
-    });
-}
-
 /**
  * `text` as the active ledger of the task whose worktree is `folder`, filed under the repo that holds the folder, or under
  * the folder outside a git repository; its slug is the heading's, else the folder's name. Gives the record's file.
@@ -107,22 +94,28 @@ function archiveCopy(h: string, repo: string, name: string, text: string): strin
   return copy;
 }
 
-/** How session-start names the task of an active ledger file: its slug and its worktree. */
-const taskOf = (ledger: string): string => `${path.basename(ledger, '.json')} in the worktree ${(JSON.parse(readFileSync(ledger, 'utf8')) as { worktree: string }).worktree}`;
+const slugOf = (ledger: string): string => path.basename(ledger, '.json');
 
-const fullLedgerText = (ledger: string): string =>
-  `A task ledger exists for ${taskOf(ledger)}. It is kept in the ledger store; its contents follow. If it has open steps, continue from Next step without re-verifying finished steps. Write to it with \`ledger notes\`, never by editing a file.\n\n${readLedgerFile(ledger)}`;
+/** The first line of the session-start report on the task of an active ledger file. */
+const reportHead = (ledger: string, state = 'active, stage plan (code)'): string =>
+  `Task ${slugOf(ledger)} in ${(JSON.parse(readFileSync(ledger, 'utf8')) as { worktree: string }).worktree} — ${state}. Details: \`ledger show\`. Write with \`ledger notes\`, never by editing a file.`;
 
-const SUMMARIES_HEAD =
-  'task ledgers exist. Summary of each follows. If asked what we are working on, answer from this. Before continuing one, ask which, then read its full ledger. Each is kept in the ledger store: read it with `ledger show <slug>`, and write to it with `ledger notes`, never by editing a file.\n';
+/** The session-start report on a task with no parent and nothing for the operator. */
+const soloReport = (ledger: string, next = 'A step.'): string => [reportHead(ledger), 'Needs you: nothing.', `Where: **${slugOf(ledger)}** (no parent)`, `Next: ${next}`].join('\n');
 
-/** The line that heads the summary of an active ledger file when session-start lists several. */
-const summaryHead = (ledger: string): string => `=== ${taskOf(ledger).replace(' in the worktree ', ' in ')}`;
+/** The session-start report on a child task with nothing for the operator: `lines` from its Where line on. */
+const childReport = (ledger: string, ...lines: string[]): string => [reportHead(ledger), 'Needs you: nothing.', ...lines].join('\n');
 
-function relationText(ledger: string, ...lines: string[]): string {
-  const [first, ...contents] = fullLedgerText(ledger).split('\n');
-  return [first, ...lines, ...contents].join('\n');
-}
+/** The open trees of the repo, as session-start lists them outside any task. */
+const treesText = (...lines: string[]): string =>
+  [
+    'Open task trees in this repo:',
+    ...lines,
+    'Ask the operator in one question widget: continue one of these trees (name it), make a new task, or quick work (a small change with no task).',
+  ].join('\n');
+
+/** What session-start says outside any task in a repo with no open tree. */
+const noTreesText = 'No open task trees in this repo.\nAsk the operator in one question widget: make a new task, or quick work (a small change with no task).';
 
 type SessionStartOutput = { hookSpecificOutput: { hookEventName: string; additionalContext: string; sessionTitle?: string } };
 
@@ -142,22 +135,18 @@ test('a main checkout\'s own ledger is never read back or named on compaction', 
   worktree(h, main, path.join(h, 'sibling'));
   ledgerIn(h, main);
 
-  assert.equal(hook(h, 'session-start', { cwd: main }), '');
+  assert.equal(sessionStart(h, main).additionalContext, noTreesText);
   assert.equal(preCompact(h, main), '');
 });
 
-test('session-start from a main checkout summarises worktree ledgers inside and outside it, but not its own', (t) => {
+test('session-start from a main checkout lists the tasks of worktrees inside and outside it as open trees, but not its own', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const own = ledgerIn(h, main);
-  const inside = ledgerIn(h, worktree(h, main, path.join(main, '.claude/worktrees/inside')));
-  const sibling = ledgerIn(h, worktree(h, main, path.join(h, 'sibling')));
+  ledgerIn(h, main);
+  ledgerIn(h, worktree(h, main, path.join(main, '.claude/worktrees/inside')));
+  ledgerIn(h, worktree(h, main, path.join(h, 'sibling')));
 
-  const context = sessionStart(h, main).additionalContext;
-
-  assert.ok(!context.includes(summaryHead(own)), `main checkout ledger shown:\n${context}`);
-  assert.ok(context.includes(`${summaryHead(inside)}\n`), `worktree ledger missing:\n${context}`);
-  assert.ok(context.includes(`${summaryHead(sibling)}\n`), `sibling ledger missing:\n${context}`);
+  assert.equal(sessionStart(h, main).additionalContext, treesText('- inside active', '- sibling active'));
 });
 
 test('session-start from a subdirectory of a main checkout ignores a ledger file in that subdirectory', (t) => {
@@ -165,15 +154,15 @@ test('session-start from a subdirectory of a main checkout ignores a ledger file
   const main = checkout(h, 'main');
   mkdirSync(path.join(main, 'sub/.claude'), { recursive: true });
   writeFileSync(path.join(main, 'sub/.claude/ledger.md'), '# Task ledger — sub\n');
-  const sibling = ledgerIn(h, worktree(h, main, path.join(h, 'sibling')));
+  ledgerIn(h, worktree(h, main, path.join(h, 'sibling')));
 
   const output = sessionStart(h, path.join(main, 'sub'));
 
-  assert.equal(output.additionalContext, fullLedgerText(sibling));
+  assert.equal(output.additionalContext, treesText('- sibling active'));
   assert.equal('sessionTitle' in output, false);
 });
 
-test('session-start in a linked worktree shows only its own ledger and titles the session with the slug', (t) => {
+test('session-start in a linked worktree reports only on its own task and titles the session with the slug', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
   ledgerIn(h, main);
@@ -184,7 +173,7 @@ test('session-start in a linked worktree shows only its own ledger and titles th
   const output = sessionStart(h, sibling);
 
   assert.equal(output.sessionTitle, 'window-title');
-  assert.equal(output.additionalContext, fullLedgerText(ledger));
+  assert.equal(output.additionalContext, soloReport(ledger, 'none written'));
 });
 
 test('session-start accepts a hyphen instead of an em dash in the ledger heading', (t) => {
@@ -203,7 +192,7 @@ test('session-start omits the title when the ledger has no heading', (t) => {
   const output = sessionStart(h, sibling);
 
   assert.equal('sessionTitle' in output, false);
-  assert.equal(output.additionalContext, fullLedgerText(ledger));
+  assert.equal(output.additionalContext, soloReport(ledger, 'none written'));
 });
 
 test('session-start omits the title when the heading has an empty slug or one that is no slug', (t) => {
@@ -218,7 +207,7 @@ test('session-start omits the title when the heading has an empty slug or one th
   assert.equal('sessionTitle' in sessionStart(h, odd), false);
 });
 
-test('session-start in a main checkout summarises several worktree ledgers without a title', (t) => {
+test('session-start in a main checkout lists several worktree tasks as open trees without a title', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
   ledgerIn(h, worktree(h, main, path.join(h, 'first')));
@@ -227,24 +216,18 @@ test('session-start in a main checkout summarises several worktree ledgers witho
   const output = sessionStart(h, main);
 
   assert.equal('sessionTitle' in output, false);
-  assert.equal(
-    output.additionalContext,
-    `2 ${SUMMARIES_HEAD}` +
-      linkedLedgers(h, main)
-        .map((ledger) => `\n${summaryHead(ledger)}\nA goal.\n\nA step.\n`)
-        .join(''),
-  );
+  assert.equal(output.additionalContext, treesText('- first active', '- second active'));
 });
 
-test('session-start in a main checkout with one worktree ledger shows it in full without a title', (t) => {
+test('session-start in a main checkout with one worktree task lists it without a title', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const ledger = ledgerIn(h, worktree(h, main, path.join(h, 'sibling')));
+  ledgerIn(h, worktree(h, main, path.join(h, 'sibling')));
 
   const output = sessionStart(h, main);
 
   assert.equal('sessionTitle' in output, false);
-  assert.equal(output.additionalContext, fullLedgerText(ledger));
+  assert.equal(output.additionalContext, treesText('- sibling active'));
 });
 
 test('session-start outside a git repository shows no ledger, not even a .claude/ledger.md there', (t) => {
@@ -256,20 +239,16 @@ test('session-start outside a git repository shows no ledger, not even a .claude
   assert.equal(hook(h, 'session-start', { cwd: plain }), '');
 });
 
-test('session-start says the ledgers are kept in the store and written with ledger notes, and names no .claude/ledger.md', (t) => {
+test('session-start says to read the task with ledger show and write it with ledger notes, and names no .claude/ledger.md', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
   const first = worktree(h, main, path.join(h, 'first'));
   ledgerIn(h, first);
-  const one = sessionStart(h, first).additionalContext;
-  ledgerIn(h, worktree(h, main, path.join(h, 'second')));
-  const several = sessionStart(h, main).additionalContext;
 
-  for (const context of [one, several]) {
-    assert.match(context, /kept in the ledger store/);
-    assert.match(context, /`ledger notes`, never by editing a file/);
-    assert.ok(!context.includes('.claude/ledger.md'), context);
-  }
+  const context = sessionStart(h, first).additionalContext;
+
+  assert.match(context, /Details: `ledger show`\. Write with `ledger notes`, never by editing a file\./);
+  assert.ok(!context.includes('.claude/ledger.md'), context);
 });
 
 /** A linked worktree of `main` that still holds its ledger as .claude/ledger.md, with no active record. */
@@ -329,126 +308,115 @@ test('session-start whose git worktree listing does not answer gives no hint and
   assert.doesNotMatch(ran.stdout, /still kept in/);
 });
 
-test('session-start in a child task names its parent and the parent status', (t) => {
+test('session-start in a child task shows the path to its parent, and that the parent finalizes after the last child', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
   const child = worktree(h, main, path.join(h, 'child'));
   const ledger = ledgerIn(h, child, familyLedger('child', ['- parent: epic']));
   ledgerIn(h, worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], '## Children\n- child\n\n## Next step\nParked: 2026-10-01 — waiting.\nA step.\n'));
 
-  assert.equal(sessionStart(h, child).additionalContext, relationText(ledger, 'Parent task: epic (parked).'));
+  assert.equal(sessionStart(h, child).additionalContext, childReport(ledger, 'Where: epic › **child**', 'Next: A step.', 'Then: last child: the parent finalizes next'));
 });
 
-test('session-start in a child task whose parent has no ledger names the parent as missing, with CRLF line ends', (t) => {
+test('session-start in a child task whose parent has no ledger still names the parent, with CRLF line ends', (t) => {
   const h = home(t);
   const child = worktree(h, checkout(h, 'main'), path.join(h, 'child'));
   const ledger = ledgerIn(h, child, familyLedger('child', ['- parent: epic']).replace(/\n/g, '\r\n'));
 
-  assert.equal(sessionStart(h, child).additionalContext, relationText(ledger, 'Parent task: epic (missing).'));
+  assert.equal(sessionStart(h, child).additionalContext, childReport(ledger, 'Where: epic › **child**', 'Next: A step.'));
 });
 
-test('session-start in a parent task names each child in list order with its status from disk, and skips a bullet that names no known task', (t) => {
+test('session-start in a child task lists its open siblings in order with their status from disk, and skips a retired one and a bullet that names no known task', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const epic = worktree(h, main, path.join(h, 'epic'));
   const children = '## Children\n- child-a\n- child-b\n- old (retired 2026-10-01)\n- lost\n\n## Next step\nA step.\n';
-  const ledger = ledgerIn(h, epic, familyLedger('epic', [], children));
-  ledgerIn(h, worktree(h, main, path.join(h, 'child-a')), familyLedger('child-a', ['- parent: epic']));
+  ledgerIn(h, worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], children));
+  const childA = worktree(h, main, path.join(h, 'child-a'));
+  const ledger = ledgerIn(h, childA, familyLedger('child-a', ['- parent: epic']));
   ledgerIn(h, worktree(h, main, path.join(h, 'child-b')), familyLedger('child-b', ['- parent: epic'], '## Next step\n\nParked: 2026-10-02 - later.\n'));
   archiveCopy(h, 'main', '2026-10-01-old', familyLedger('old', [`- main: ${main}`, `- worktree: ${path.join(main, '.claude/worktrees/old')}`, '- parent: epic']));
 
   assert.equal(
-    sessionStart(h, epic).additionalContext,
-    relationText(ledger, 'Child task: child-a (active).', 'Child task: child-b (parked).', 'Child task: old (retired 2026-10-01).'),
+    sessionStart(h, childA).additionalContext,
+    childReport(ledger, 'Where: epic › **child-a**', 'Siblings: child-b parked', 'Next: A step.', 'Then: child-b (parked)'),
   );
 });
 
-test('session-start shows a child marked retired with its date, not the status of a live task with the same slug', (t) => {
+test('session-start skips a sibling marked retired, not counting a live task with the same slug', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const epic = worktree(h, main, path.join(h, 'epic'));
-  const ledger = ledgerIn(h, epic, familyLedger('epic', [], '## Children\n- reused (retired 2026-10-01)\n\n## Next step\nA step.\n'));
+  ledgerIn(h, worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], '## Children\n- reused (retired 2026-10-01)\n- current\n\n## Next step\nA step.\n'));
   ledgerIn(h, worktree(h, main, path.join(h, 'reused')), familyLedger('reused', ['- parent: epic']));
+  const current = worktree(h, main, path.join(h, 'current'));
+  const ledger = ledgerIn(h, current, familyLedger('current', ['- parent: epic']));
 
-  assert.equal(sessionStart(h, epic).additionalContext, relationText(ledger, 'Child task: reused (retired 2026-10-01).'));
+  assert.equal(sessionStart(h, current).additionalContext, childReport(ledger, 'Where: epic › **current**', 'Next: A step.', 'Then: last child: the parent finalizes next'));
 });
 
-test('session-start in a parent task names a child marked started, with or without a note, with its status', (t) => {
+test('session-start lists a sibling marked started, with or without a note, with its status', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const epic = worktree(h, main, path.join(h, 'epic'));
-  const children = '## Children\n- child-a (started 2026-10-20)\n- child-b (started 2026-10-20; PR #31 is open)\n- lost (started 2026-10-21)\n\n## Next step\nA step.\n';
-  const ledger = ledgerIn(h, epic, familyLedger('epic', [], children));
+  const children = '## Children\n- child-a (started 2026-10-20)\n- child-b (started 2026-10-20; PR #31 is open)\n- lost (started 2026-10-21)\n- current\n\n## Next step\nA step.\n';
+  ledgerIn(h, worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], children));
   ledgerIn(h, worktree(h, main, path.join(h, 'child-a')), familyLedger('child-a', ['- parent: epic']));
   ledgerIn(h, worktree(h, main, path.join(h, 'child-b')), familyLedger('child-b', ['- parent: epic']));
+  const current = worktree(h, main, path.join(h, 'current'));
+  ledgerIn(h, current, familyLedger('current', ['- parent: epic']));
 
-  assert.equal(sessionStart(h, epic).additionalContext, relationText(ledger, 'Child task: child-a (active).', 'Child task: child-b (active).'));
+  assert.ok(sessionStart(h, current).additionalContext.split('\n').includes('Siblings: child-a active, child-b active'));
 });
 
-test('session-start in a main checkout names the parent or children under each ledger summary', (t) => {
+test('session-start in a main checkout lists a tree once, by its root task, with its open children', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const epic = ledgerIn(h, worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], '## Children\n- child-a\n- child-b\n\n## Next step\nA step.\n'));
-  const childA = ledgerIn(h, worktree(h, main, path.join(h, 'child-a')), familyLedger('child-a', ['- parent: epic']));
-  const childB = ledgerIn(h, worktree(h, main, path.join(h, 'child-b')), familyLedger('child-b', ['- parent: epic'], '## Next step\nParked: 2026-10-02 — later.\nA step.\n'));
-  const relations: Record<string, string[]> = {
-    [epic]: ['Child task: child-a (active).', 'Child task: child-b (parked).'],
-    [childA]: ['Parent task: epic (active).'],
-    [childB]: ['Parent task: epic (active).'],
-  };
-  const ledgers = linkedLedgers(h, main);
+  ledgerIn(h, worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], '## Children\n- child-a\n- child-b\n\n## Next step\nA step.\n'));
+  ledgerIn(h, worktree(h, main, path.join(h, 'child-a')), familyLedger('child-a', ['- parent: epic']));
+  ledgerIn(h, worktree(h, main, path.join(h, 'child-b')), familyLedger('child-b', ['- parent: epic'], '## Next step\nParked: 2026-10-02 — later.\nA step.\n'));
 
-  const context = sessionStart(h, main).additionalContext;
-
-  assert.equal(ledgers.length, 3);
-  assert.deepEqual(
-    context.split('\n=== ').slice(1),
-    ledgers.map((ledger) => {
-      const next = ledger === childB ? '- status: parked 2026-10-02 — later.\nA step.' : 'A step.';
-      return [summaryHead(ledger).slice('=== '.length), ...(relations[ledger] ?? []), 'A goal.', '', next, ''].join('\n');
-    }),
-  );
+  assert.equal(sessionStart(h, main).additionalContext, treesText('- epic active — 2 open children'));
 });
 
-test('session-start names a parent in another repository with that repository and its status there, not that of a local ledger of its slug', (t) => {
+test('session-start finds a parent in another repository there, not a local ledger of its slug', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
   const child = worktree(h, main, path.join(h, 'child'));
   const other = checkout(h, 'app');
   const ledger = ledgerIn(h, child, familyLedger('child', [`- parent: epic @ ${other}`]));
   ledgerIn(h, worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], '## Children\n- child\n\n## Next step\nA step.\n'));
-  ledgerIn(h, worktree(h, other, path.join(h, 'app-epic')), familyLedger('epic', [], '## Next step\nParked: 2026-10-02 — later.\n'));
+  ledgerIn(h, worktree(h, other, path.join(other, '.claude/worktrees/epic')), familyLedger('epic', ['- status: blocked 2026-10-02 — waiting on the app team']));
 
-  assert.equal(sessionStart(h, child).additionalContext, relationText(ledger, `Parent task: epic @ ${other} (parked).`));
+  // The local epic lists the child and would add a Then line; only the epic of the other repository is blocked.
+  assert.equal(
+    sessionStart(h, child).additionalContext,
+    [reportHead(ledger), 'Needs you:', '- Blocked: epic — waiting on the app team', 'Where: epic › **child**', 'Next: A step.'].join('\n'),
+  );
 });
 
-test('session-start names a parent in a repository that is gone as missing', (t) => {
+test('session-start names a parent in a repository that is gone', (t) => {
   const h = home(t);
   const child = worktree(h, checkout(h, 'main'), path.join(h, 'child'));
   const other = path.join(h, 'elsewhere/app');
   const ledger = ledgerIn(h, child, familyLedger('child', [`- parent: epic @ ${other}`]));
 
-  assert.equal(sessionStart(h, child).additionalContext, relationText(ledger, `Parent task: epic @ ${other} (missing).`));
+  assert.equal(sessionStart(h, child).additionalContext, childReport(ledger, 'Where: epic › **child**', 'Next: A step.'));
 });
 
-test('session-start names tasks in a repository whose git does not answer as unknown, waiting for that repository once', (t) => {
+test('session-start runs no git in another repository that tasks name, so one whose git does not answer costs nothing', (t) => {
   const h = home(t);
   const child = worktree(h, checkout(h, 'main'), path.join(h, 'child'));
   const slow = path.join(h, 'slow/app');
   const parts = ['part-a', 'part-b', 'part-c', 'part-d'];
   const ledger = ledgerIn(h, child, familyLedger('child', [`- parent: epic @ ${slow}`], `## Children\n${parts.map((part) => `- ${part} @ ${slow}\n`).join('')}\n## Next step\nA step.\n`));
 
-  const { ran, took } = sessionStartWithHangingGit(h, child, slow);
+  const { ran, took, hung } = sessionStartWithHangingGit(h, child, slow);
 
   assert.equal(ran.status, 0, ran.stderr);
   assert.ok(took < HOOK_MS + 4_000, `took ${took} ms`);
-  assert.equal(
-    (JSON.parse(ran.stdout) as SessionStartOutput).hookSpecificOutput.additionalContext,
-    relationText(ledger, `Parent task: epic @ ${slow} (unknown).`, ...parts.map((part) => `Child task: ${part} @ ${slow} (unknown).`)),
-  );
+  assert.equal(hung.length, 0, `git hung for: ${hung.join(' | ')}`);
+  assert.equal((JSON.parse(ran.stdout) as SessionStartOutput).hookSpecificOutput.additionalContext, childReport(ledger, 'Where: epic › **child**', 'Next: A step.'));
 });
 
-test('session-start waits once for a hanging repository, also when tasks name its worktrees', (t) => {
+test('session-start runs no git in another repository, also when tasks name its worktrees', (t) => {
   const h = home(t);
   const child = worktree(h, checkout(h, 'main'), path.join(h, 'child'));
   const slow = path.join(h, 'slow/app');
@@ -456,91 +424,159 @@ test('session-start waits once for a hanging repository, also when tasks name it
   const children = `## Children\n- part-a @ ${slow}\n- part-b @ ${worktreeOf('part-b')}\n\n## Next step\nA step.\n`;
   const ledger = ledgerIn(h, child, familyLedger('child', [`- parent: epic @ ${worktreeOf('epic')}`], children));
 
-  const { ran, took } = sessionStartWithHangingGit(h, child, slow);
+  const { ran, took, hung } = sessionStartWithHangingGit(h, child, slow);
 
   assert.equal(ran.status, 0, ran.stderr);
   assert.ok(took < HOOK_MS + 4_000, `took ${took} ms`);
+  assert.equal(hung.length, 0, `git hung for: ${hung.join(' | ')}`);
+  assert.equal((JSON.parse(ran.stdout) as SessionStartOutput).hookSpecificOutput.additionalContext, childReport(ledger, 'Where: epic › **child**', 'Next: A step.'));
+});
+
+test('session-start finds a parent in another repository from the store alone, with no git call there', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const slow = checkout(h, 'slow/app');
+  const child = worktree(h, main, path.join(h, 'child'));
+  const ledger = ledgerIn(h, child, familyLedger('child', [`- parent: epic @ ${slow}`]));
+  const epic = familyLedger('epic', ['- status: blocked 2026-10-02 — waiting on the app team'], `## Children\n- child @ ${main}\n\n## Next step\nA step.\n`);
+  ledgerIn(h, worktree(h, slow, path.join(slow, '.claude/worktrees/epic')), epic);
+
+  const { ran, took, hung } = sessionStartWithHangingGit(h, child, slow);
+
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.ok(took < HOOK_MS + 4_000, `took ${took} ms`);
+  assert.equal(hung.length, 0, `git hung for: ${hung.join(' | ')}`);
   assert.equal(
     (JSON.parse(ran.stdout) as SessionStartOutput).hookSpecificOutput.additionalContext,
-    relationText(ledger, `Parent task: epic @ ${worktreeOf('epic')} (unknown).`, `Child task: part-a @ ${slow} (unknown).`, `Child task: part-b @ ${worktreeOf('part-b')} (unknown).`),
+    [reportHead(ledger), 'Needs you:', '- Blocked: epic — waiting on the app team', 'Where: epic › **child**', 'Next: A step.', 'Then: last child: the parent finalizes next'].join('\n'),
   );
 });
 
-/** session-start with a git that hangs for any folder in `slow`; the test gives up after 20 s, so a hook without a limit fails, not hangs. */
-function sessionStartWithHangingGit(h: string, cwd: string, slow: string): { ran: Ran; took: number } {
-  const stubs = path.join(h, 'hanging-git');
-  mkdirSync(stubs);
-  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
-  writeFileSync(path.join(stubs, 'git'), `#!/bin/sh\nfor arg in "$@"; do case "$arg" in '${slow}'*) exec sleep 30 ;; esac; done\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
-  const started = Date.now();
-  const ran = runHook(h, 'session-start', JSON.stringify({ cwd }), { PATH: `${stubs}${path.delimiter}${process.env.PATH ?? ''}`, ...shortLimits({ hookMs: HOOK_MS }) }, 20_000);
-  return { ran, took: Date.now() - started };
-}
-
-test('session-start in a parent task names each child in another repository with that repository and its status there', (t) => {
+test('session-start checks the PRs of a tree whose root is in another repository, with no git call there', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const epic = worktree(h, main, path.join(h, 'epic'));
+  const slow = checkout(h, 'slow/app');
+  const own = waitingTask(h, main, 'own', 1, `- parent: epic @ ${slow}`);
+  waitingTask(h, main, 'sib', 2, `- parent: epic @ ${slow}`);
+  ledgerIn(h, worktree(h, slow, path.join(slow, '.claude/worktrees/epic')), familyLedger('epic', [], `## Children\n- own @ ${main}\n- sib @ ${main}\n\n## Next step\nA step.\n`));
+  const readyPr = { json: open([checkRun('SUCCESS')], 'APPROVED') };
+  const { env } = stubPrs(h, { [prUrl(1)]: readyPr, [prUrl(2)]: readyPr });
+
+  const { ran, hung } = sessionStartWithHangingGit(h, own.folder, slow, env.PATH);
+
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(hung.length, 0, `git hung for: ${hung.join(' | ')}`);
+  const context = (JSON.parse(ran.stdout) as SessionStartOutput).hookSpecificOutput.additionalContext;
+  assert.deepEqual(needsYou(context), ['- own: PR checks and review passed; ready to merge.', '- sib: PR checks and review passed; ready to merge.'], context);
+});
+
+test('session-start reads the other tasks from the store alone: no git call in their folders or in their other repository', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const app = checkout(h, 'app');
+  const task = (repo: string, name: string, text?: string): string => {
+    const folder = worktree(h, repo, path.join(h, name));
+    ledgerIn(h, folder, text);
+    return folder;
+  };
+  const epic = task(main, 'epic', familyLedger('epic', [], '## Children\n- child\n- sibling\n\n## Next step\nA step.\n'));
+  const child = task(main, 'child', familyLedger('child', ['- parent: epic']));
+  const others = [epic, task(main, 'sibling', familyLedger('sibling', ['- parent: epic'])), task(main, 'solo-a'), task(main, 'solo-b')];
+  const foreign = [app, task(app, 'app-a'), task(app, 'app-b'), task(app, 'app-c')];
+
+  for (const cwd of [child, main]) {
+    const calls = sessionStartGitCalls(h, cwd);
+    const stray = calls.filter((call) => [...others, ...foreign].some((folder) => call.startsWith(`-C ${folder} `)));
+    assert.deepEqual(stray, [], `${cwd}:\n${calls.join('\n')}`);
+  }
+});
+
+/** The arguments of each git call of one session-start in `cwd`. */
+function sessionStartGitCalls(h: string, cwd: string): string[] {
+  const stubs = path.join(h, 'logging-git');
+  const calls = path.join(h, 'logging-git-calls');
+  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  mkdirSync(stubs, { recursive: true });
+  writeFileSync(path.join(stubs, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+  writeFileSync(calls, '');
+  const ran = runHook(h, 'session-start', JSON.stringify({ cwd }), { PATH: `${stubs}${path.delimiter}${process.env.PATH ?? ''}` });
+  assert.equal(ran.status, 0, ran.stderr);
+  return readFileSync(calls, 'utf8').split('\n').filter(Boolean);
+}
+
+/**
+ * session-start with a git that hangs for any folder in `slow`; the test gives up after 20 s, so a hook without a limit
+ * fails, not hangs. `hung` is the arguments of each git call that hung.
+ */
+function sessionStartWithHangingGit(h: string, cwd: string, slow: string, searchPath = process.env.PATH ?? ''): { ran: Ran; took: number; hung: string[] } {
+  const stubs = path.join(h, 'hanging-git');
+  const calls = path.join(h, 'hanging-git-calls');
+  mkdirSync(stubs);
+  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  writeFileSync(path.join(stubs, 'git'), `#!/bin/sh\nfor arg in "$@"; do case "$arg" in '${slow}'*) printf '%s\\n' "$*" >> '${calls}'; exec sleep 30 ;; esac; done\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+  const started = Date.now();
+  const ran = runHook(h, 'session-start', JSON.stringify({ cwd }), { PATH: `${stubs}${path.delimiter}${searchPath}`, ...shortLimits({ hookMs: HOOK_MS }) }, 20_000);
+  const took = Date.now() - started;
+  return { ran, took, hung: existsSync(calls) ? readFileSync(calls, 'utf8').split('\n').filter(Boolean) : [] };
+}
+
+test('session-start lists siblings in another repository with their status there', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
   const lib = checkout(h, 'lib');
   const children = `## Children\n- child-a\n- child-a @ ${lib}\n- begun @ ${lib} (started 2026-10-20)\n- old @ ${lib} (retired 2026-10-01)\n- gone @ ${lib}\n\n## Next step\nA step.\n`;
-  const ledger = ledgerIn(h, epic, familyLedger('epic', [], children).replace(/\n/g, '\r\n'));
-  ledgerIn(h, worktree(h, main, path.join(h, 'child-a')), familyLedger('child-a', ['- parent: epic']));
+  ledgerIn(h, worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], children).replace(/\n/g, '\r\n'));
+  const childA = worktree(h, main, path.join(h, 'child-a'));
+  const ledger = ledgerIn(h, childA, familyLedger('child-a', ['- parent: epic']));
   backlogLedger(h, 'main', 'begun', main);
   backlogLedger(h, 'lib', 'child-a', lib);
   ledgerIn(h, worktree(h, lib, path.join(h, 'lib-begun')), familyLedger('begun', [`- parent: epic @ ${main}`]));
   archiveCopy(h, 'lib', '2026-10-01-old', familyLedger('old', [`- main: ${lib}`, `- worktree: ${path.join(lib, '.claude/worktrees/old')}`, `- parent: epic @ ${main}`]));
 
   assert.equal(
-    sessionStart(h, epic).additionalContext,
-    relationText(
-      ledger,
-      'Child task: child-a (active).',
-      `Child task: child-a @ ${lib} (backlog).`,
-      `Child task: begun @ ${lib} (active).`,
-      `Child task: old @ ${lib} (retired 2026-10-01).`,
-      `Child task: gone @ ${lib} (missing).`,
-    ),
+    sessionStart(h, childA).additionalContext,
+    childReport(ledger, 'Where: epic › **child-a**', 'Siblings: child-a backlog, begun active', 'Next: A step.', 'Then: child-a (backlog)'),
   );
 });
 
-test('session-start names a parent in this repository\'s backlog as backlog', (t) => {
+test('session-start finds a parent in this repository\'s backlog', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
   const child = worktree(h, main, path.join(h, 'child'));
   const ledger = ledgerIn(h, child, familyLedger('child', ['- parent: epic']));
-  backlogLedger(h, 'main', 'epic', main);
+  backlogLedger(h, 'main', 'epic', main, ['- parent: root']);
+  backlogLedger(h, 'main', 'root', main);
 
-  assert.equal(sessionStart(h, child).additionalContext, relationText(ledger, 'Parent task: epic (backlog).'));
+  assert.equal(sessionStart(h, child).additionalContext, childReport(ledger, 'Where: root › epic › **child**', 'Next: A step.'));
 });
 
-test('session-start names a backlog child as backlog, but not one of another repository with the same folder name', (t) => {
+test('session-start counts a backlog child as open, but not one of another repository with the same folder name', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
-  const epic = worktree(h, main, path.join(h, 'epic'));
-  const ledger = ledgerIn(h, epic, familyLedger('epic', [], '## Children\n- idea\n- foreign\n\n## Next step\nA step.\n'));
+  ledgerIn(h, worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], '## Children\n- idea\n- foreign\n\n## Next step\nA step.\n'));
   backlogLedger(h, 'main', 'idea', main, ['- parent: epic']);
   backlogLedger(h, 'elsewhere/main', 'foreign', path.join(h, 'elsewhere/main'), ['- parent: epic']);
 
-  assert.equal(sessionStart(h, epic).additionalContext, relationText(ledger, 'Child task: idea (backlog).', 'Child task: foreign (missing).'));
+  assert.equal(sessionStart(h, main).additionalContext, treesText('- epic active — 1 open child'));
 });
 
-test('session-start reads only the Location parent bullet, and a Children bullet that names no known task adds no line', (t) => {
+test('session-start reads only the Location parent bullet', (t) => {
   const h = home(t);
   const sibling = worktree(h, checkout(h, 'main'), path.join(h, 'sibling'));
   const ledger = ledgerIn(h, sibling, familyLedger('sibling', ['- parent: <slug>'], '## Children (old)\n- child-a\n\n## Notes\n- parent: epic\n'));
 
-  assert.equal(sessionStart(h, sibling).additionalContext, fullLedgerText(ledger));
+  assert.equal(sessionStart(h, sibling).additionalContext, soloReport(ledger, 'none written'));
 });
 
-test('session-start prints nothing when there is no ledger', (t) => {
+test('session-start with no ledger in the repo still asks: a new task or quick work', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
   worktree(h, main, path.join(h, 'sibling'));
 
-  assert.equal(hook(h, 'session-start', { cwd: main }), '');
+  assert.equal(sessionStart(h, main).additionalContext, noTreesText);
 });
 
-test('session-start leaves out backlog tasks, both their ledger files and their entries in the old task list', (t) => {
+test('session-start lists a backlog task as an open tree once, from its ledger and not from the old task list', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
   const backlog = path.join(h, '.claude/ledger-backlog', repoFolder(h, 'main'), 'idea.md');
@@ -549,23 +585,22 @@ test('session-start leaves out backlog tasks, both their ledger files and their 
   const entry = { repo: main, slug: 'idea', path: backlog, branch: '', status: 'backlog', main, created: '2026-10-01T00:00:00.000Z', updated: '2026-10-01T00:00:00.000Z' };
   writeFileSync(path.join(h, '.claude/ledgers.json'), JSON.stringify([entry]));
 
-  assert.equal(hook(h, 'session-start', { cwd: main }), '');
+  assert.equal(sessionStart(h, main).additionalContext, treesText('- idea backlog'));
 
-  const sibling = ledgerIn(h, worktree(h, main, path.join(h, 'sibling')));
-  const context = sessionStart(h, main).additionalContext;
-  assert.ok(context.includes(taskOf(sibling)), `worktree ledger missing:\n${context}`);
-  assert.ok(!context.includes(backlog) && !context.includes('A backlog goal.'), `backlog task shown:\n${context}`);
+  ledgerIn(h, worktree(h, main, path.join(h, 'sibling')));
+  assert.equal(sessionStart(h, main).additionalContext, treesText('- sibling active', '- idea backlog'));
 });
 
 test('session-start keeps quotes, backslashes, tabs and non-ASCII text intact', (t) => {
   const h = home(t);
   const sibling = worktree(h, checkout(h, 'main'), path.join(h, 'sibling'));
-  const ledger = ledgerIn(h, sibling, '# Task ledger — quoted\n\n## Goal\nSay "hi" \\n then \\ and \ttab — ✓ æøå\n');
+  const next = 'Say "hi" \\n then \\ and \ttab — ✓ æøå';
+  const ledger = ledgerIn(h, sibling, `# Task ledger — quoted\n\n## Goal\nA goal.\n\n## Next step\n${next}\n`);
 
   const output = sessionStart(h, sibling);
 
   assert.equal(output.sessionTitle, 'quoted');
-  assert.equal(output.additionalContext, fullLedgerText(ledger));
+  assert.equal(output.additionalContext, soloReport(ledger, next));
 });
 
 test('pre-compact names the one task by slug and worktree, kept in the store, and writes no task list', (t) => {
@@ -648,14 +683,15 @@ function startedWith(h: string, cwd: string, env: NodeJS.ProcessEnv): string {
   return (JSON.parse(ran.stdout) as SessionStartOutput).hookSpecificOutput.additionalContext;
 }
 
-/** The lines of the Needs you block that opens `context`, in any order; undefined when it has none. */
+/** The items of the report's one Needs you section, in any order; undefined when it says nothing needs the operator or is not there. */
 function needsYou(context: string): string[] | undefined {
-  if (!context.startsWith('Needs you:\n')) {
-    assert.ok(!context.includes('Needs you:'), context);
-    return undefined;
-  }
-  const [block] = context.split('\n\n');
-  return block.split('\n').slice(1).sort();
+  const lines = context.split('\n');
+  const sections = lines.flatMap((line, index) => (line.startsWith('Needs you') ? [index] : []));
+  assert.ok(sections.length <= 1, context);
+  const [at] = sections;
+  if (at === undefined || lines[at] === 'Needs you: nothing.') return undefined;
+  const end = lines.findIndex((line, index) => index > at && !line.startsWith('- '));
+  return lines.slice(at + 1, end === -1 ? undefined : end).sort();
 }
 
 function localToday(): string {
@@ -703,7 +739,7 @@ test('session-start in a main checkout checks the PR of every waiting task of th
     '- no-state: could not check the PR (gh pr view printed no PR state).',
     '- ready: PR checks and review passed; ready to merge.',
   ]);
-  assert.match(context, /\n\n\d+ task ledgers exist\./);
+  assert.match(context, /^Needs you:\n(- .*\n){9}Open task trees in this repo:\n/);
   assert.deepEqual(storedLocation(merged).status, { value: 'done', date: localToday() });
   for (const ledger of [failing, changes, both]) {
     assert.equal(storedLocation(ledger).status, undefined, ledger);
@@ -735,7 +771,7 @@ test('session-start in a task checks the waiting tasks of its tree only: its roo
 
   assert.deepEqual(needsYou(context), ['- a: PR checks and review passed; ready to merge.', '- g: PR checks and review passed; ready to merge.']);
   assert.ok(!readFileSync(calls, 'utf8').includes(prUrl(3)));
-  assert.ok(context.includes('A task ledger exists for a'), context);
+  assert.ok(context.startsWith(`${reportHead(a.ledger, 'waiting, stage plan (code)')}\nNeeds you:\n`), context);
 });
 
 test('session-start asks gh about every PR at once, and counts a call not done in 3 s as an error', (t) => {
@@ -765,8 +801,47 @@ test('session-start adds no Needs you block when no PR needs the operator, and l
   const context = startedWith(h, folder, env);
 
   assert.equal(needsYou(context), undefined);
-  assert.equal(context, fullLedgerText(ledger));
+  assert.equal(context, [reportHead(ledger, 'waiting, stage plan (code)'), 'Needs you: nothing.', 'Where: **quiet** (no parent)', 'Next: A step.'].join('\n'));
   assert.equal(readFileSync(calls, 'utf8'), `pr view ${prUrl(1)} --json state,reviewDecision,statusCheckRollup\n`);
+});
+
+test('session-start in a task lists what the PR check found in the report\'s one Needs you section, within 20 lines', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const kids = ['k1', 'k2', 'k3', 'k4', 'k5', 'k6'];
+  const epic = path.join(h, '.claude/ledger-backlog', repoFolder(h, 'app'), 'epic.md');
+  mkdirSync(path.dirname(epic), { recursive: true });
+  writeFileSync(epic, familyLedger('epic', [`- main: ${main}`, '- worktree: <path>'], `## Children\n${['own', ...kids].map((kid) => `- ${kid}\n`).join('')}\n## Next step\nA step.\n`));
+  const readyPr = { json: open([checkRun('SUCCESS')], 'APPROVED') };
+  const own = waitingTask(h, main, 'own', 1, '- parent: epic');
+  kids.forEach((kid, index) => waitingTask(h, main, kid, index + 2, '- parent: epic'));
+  const { env } = stubPrs(h, Object.fromEntries([1, 2, 3, 4, 5, 6, 7].map((n) => [prUrl(n), readyPr])));
+
+  const lines = startedWith(h, own.folder, env).split('\n');
+
+  assert.ok(lines.length <= 20, lines.join('\n'));
+  assert.deepEqual(lines.slice(0, 3), [reportHead(own.ledger, 'waiting, stage plan (code)'), 'Needs you:', '- own: PR checks and review passed; ready to merge.']);
+  assert.equal(lines.filter((line) => line.startsWith('Needs you')).length, 1, lines.join('\n'));
+  assert.equal(lines[7], '- +2 more');
+  assert.equal(lines[8], 'Where: epic › **own**');
+});
+
+test('session-start in a main checkout lists what the PR check found above the open trees, in one Needs you section within 20 lines', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const names = Array.from({ length: 16 }, (_, index) => `wait-${String(index).padStart(2, '0')}`);
+  names.forEach((name, index) => waitingTask(h, main, name, index + 1));
+  const readyPr = { json: open([checkRun('SUCCESS')], 'APPROVED') };
+  const { env } = stubPrs(h, Object.fromEntries(names.map((_, index) => [prUrl(index + 1), readyPr])));
+
+  const lines = startedWith(h, main, env).split('\n');
+
+  assert.equal(lines.length, 20, lines.join('\n'));
+  assert.equal(lines[0], 'Needs you:');
+  assert.equal(lines.filter((line) => line.startsWith('Needs you')).length, 1, lines.join('\n'));
+  assert.deepEqual(lines.slice(15, 18), ['- +2 more', 'Open task trees in this repo:', '- wait-00 waiting']);
+  assert.match(lines[18], /^- \+15 more — `ledger list`$/);
+  assert.match(lines[19], /^Ask the operator in one question widget: /);
 });
 
 test('session-start never asks gh about a waiting task of another machine, in a main checkout and in a task of its tree', (t) => {
@@ -781,6 +856,93 @@ test('session-start never asks gh about a waiting task of another machine, in a 
     assert.deepEqual(needsYou(startedWith(h, cwd, env)), ['- here: PR checks and review passed; ready to merge.'], cwd);
     assert.equal(readFileSync(calls, 'utf8'), `pr view ${prUrl(1)} --json state,reviewDecision,statusCheckRollup\n`, cwd);
   }
+});
+
+const mergedPr = { json: { state: 'MERGED', reviewDecision: 'APPROVED', statusCheckRollup: [] } };
+
+test('session-start in a task reports from the store after the PR check: a just-merged task is done, and named once', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const own = waitingTask(h, main, 'own', 1);
+  const { env } = stubPrs(h, { [prUrl(1)]: mergedPr });
+
+  const lines = startedWith(h, own.folder, env).split('\n');
+
+  assert.match(lines[0], /^Task own in \S+ — done, /);
+  assert.deepEqual(lines.slice(1), [
+    'Needs you:',
+    '- own: PR merged; the task is done. Finalize it with the question from `ledger task gate finalize own`.',
+    'Where: **own** (no parent)',
+    'Next: A step.',
+  ]);
+});
+
+test('session-start in a task whose PR another session marked done meanwhile still asks to finalize it', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const own = waitingTask(h, main, 'own', 1);
+  const done = path.join(h, 'done.json');
+  writeFileSync(done, recordJson({ ...parseRecord(familyLedger('own', ['- status: done 2026-11-21', `- pr: ${prUrl(1)}`])), worktree: own.folder }));
+  const stubs = path.join(h, 'racing-gh');
+  mkdirSync(stubs);
+  writeFileSync(path.join(stubs, 'gh'), `#!/bin/sh\ncp '${done}' '${own.ledger}'\nprintf '%s\\n' '${JSON.stringify(mergedPr.json)}'\n`, { mode: 0o755 });
+
+  const lines = startedWith(h, own.folder, { PATH: `${stubs}${path.delimiter}${process.env.PATH ?? ''}` }).split('\n');
+
+  assert.match(lines[0], /^Task own in \S+ — done, /);
+  assert.deepEqual(lines.slice(1, 3), ['Needs you:', '- PR merged: own — finalize with the question from `ledger task gate finalize own`']);
+});
+
+test('session-start in a main checkout lists a just-merged task as done in its tree, not as waiting', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  waitingTask(h, main, 'merged', 1);
+  const { env } = stubPrs(h, { [prUrl(1)]: mergedPr });
+
+  const lines = startedWith(h, main, env).split('\n');
+
+  assert.ok(lines.includes('- merged done'), lines.join('\n'));
+});
+
+test('session-start in a task names a just-merged task of another repo for finalize by its slug and main checkout', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const api = checkout(h, 'api');
+  const own = waitingTask(h, main, 'own', 1, `- parent: epic @ ${api}`);
+  ledgerIn(h, worktree(h, api, path.join(api, '.claude/worktrees/epic')), familyLedger('epic', [], `## Children\n- own @ ${main}\n- sib\n\n## Next step\nA step.\n`));
+  ledgerIn(h, worktree(h, api, path.join(api, '.claude/worktrees/sib')), familyLedger('sib', ['- status: waiting 2026-11-20', `- pr: ${prUrl(2)}`, '- parent: epic']));
+  const { env } = stubPrs(h, { [prUrl(1)]: { json: open([checkRun('', 'QUEUED')]) }, [prUrl(2)]: mergedPr });
+
+  const context = startedWith(h, own.folder, env);
+
+  assert.deepEqual(needsYou(context), [`- sib: PR merged; the task is done. Finalize it with the question from \`ledger task gate finalize sib@${api}\`.`], context);
+});
+
+test('session-start never asks gh about a waiting task whose worktree folder is now a plain folder with no .git', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const { folder } = waitingTask(h, main, 'stale', 1);
+  rmSync(folder, { recursive: true });
+  mkdirSync(folder);
+  const { env, calls } = stubPrs(h, { [prUrl(1)]: mergedPr });
+
+  startedWith(h, main, env);
+
+  assert.equal(readFileSync(calls, 'utf8'), '');
+});
+
+test('session-start in a task lists what the PR check found before the open questions, so five questions never hide it', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const questions = Array.from({ length: 5 }, (_, index) => `- Question number ${index + 1}?`);
+  const folder = worktree(h, main, path.join(h, 'own'));
+  ledgerIn(h, folder, familyLedger('own', ['- status: waiting 2026-11-20', `- pr: ${prUrl(1)}`], `## Open questions\n${questions.join('\n')}\n\n## Next step\nA step.\n`));
+  const { env } = stubPrs(h, { [prUrl(1)]: { json: open([checkRun('FAILURE')]) } });
+
+  const lines = startedWith(h, folder, env).split('\n');
+
+  assert.deepEqual(lines.slice(1, 4), ['Needs you:', '- own: PR checks failed; the task is back at build.', '- Question 1: Question number 1?']);
+  assert.equal(lines[7], '- +1 more');
 });
 
 test('session-start runs no gh when no task is waiting, in a main checkout and in a task', (t) => {
@@ -3081,29 +3243,29 @@ test('session-start reports the unreported hook failures above the ledger, once'
   writeFileSync(failureLog(h), failureLine('2026-11-01T10:00:00Z') + failureLine('2026-11-02T11:00:00Z', 'usage-pace.sh'));
 
   const first = sessionStartIn(h, sibling);
-  assert.equal(first?.additionalContext, `${failureReport('2 hook failures', '2026-11-01T10:00:00Z')}\n\n${fullLedgerText(ledger)}`);
+  assert.equal(first?.additionalContext, `${failureReport('2 hook failures', '2026-11-01T10:00:00Z')}\n\n${soloReport(ledger)}`);
   assert.equal(first?.sessionTitle, 'sibling');
-  assert.equal(sessionStartIn(h, sibling)?.additionalContext, fullLedgerText(ledger));
+  assert.equal(sessionStartIn(h, sibling)?.additionalContext, soloReport(ledger));
 
   writeFileSync(failureLog(h), failureLine('2026-11-03T12:00:00Z'), { flag: 'a' });
-  assert.equal(sessionStartIn(h, sibling)?.additionalContext, `${failureReport('1 hook failure', '2026-11-03T12:00:00Z')}\n\n${fullLedgerText(ledger)}`);
+  assert.equal(sessionStartIn(h, sibling)?.additionalContext, `${failureReport('1 hook failure', '2026-11-03T12:00:00Z')}\n\n${soloReport(ledger)}`);
 });
 
 test('session-start with no ledger reports the hook failures alone, then prints nothing', (t) => {
   const h = home(t);
-  const main = checkout(h, 'main');
+  const outside = h;
   writeFileSync(failureLog(h), failureLine('2026-11-01T10:00:00Z'));
 
-  assert.deepEqual(sessionStartIn(h, main), { hookEventName: 'SessionStart', additionalContext: failureReport('1 hook failure', '2026-11-01T10:00:00Z') });
-  assert.equal(hook(h, 'session-start', { cwd: main }), '');
+  assert.deepEqual(sessionStartIn(h, outside), { hookEventName: 'SessionStart', additionalContext: failureReport('1 hook failure', '2026-11-01T10:00:00Z') });
+  assert.equal(hook(h, 'session-start', { cwd: outside }), '');
 });
 
 test('session-start reports a crash of an earlier ledger hook', (t) => {
   const h = home(t);
-  const main = checkout(h, 'main');
+  const outside = h;
   assertFailedOpen(runHook(h, 'session-start', '{not json'), 'session-start');
 
-  assert.match(sessionStartIn(h, main)?.additionalContext ?? '', /^⚠ 1 hook failure since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ, not yet reported\. Log: ~\/\.claude\/ledger-hook-failures\.log$/);
+  assert.match(sessionStartIn(h, outside)?.additionalContext ?? '', /^⚠ 1 hook failure since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ, not yet reported\. Log: ~\/\.claude\/ledger-hook-failures\.log$/);
 });
 
 test('session-start whose ledger part throws still reports the earlier failures alone, and logs its own for the next report', (t) => {
@@ -3130,30 +3292,30 @@ test('session-start whose ledger part throws with no unreported failures fails o
 
 test('session-start reports the whole log again when it is shorter than the part already reported', (t) => {
   const h = home(t);
-  const main = checkout(h, 'main');
+  const outside = h;
   writeFileSync(failureLog(h), failureLine('2026-11-01T10:00:00Z') + failureLine('2026-11-02T10:00:00Z'));
-  sessionStartIn(h, main);
+  sessionStartIn(h, outside);
 
   writeFileSync(failureLog(h), failureLine('2026-11-05T10:00:00Z'));
-  assert.equal(sessionStartIn(h, main)?.additionalContext, failureReport('1 hook failure', '2026-11-05T10:00:00Z'));
+  assert.equal(sessionStartIn(h, outside)?.additionalContext, failureReport('1 hook failure', '2026-11-05T10:00:00Z'));
 });
 
 test('session-start that cannot record what it reported still reports and exits 0', (t) => {
   const h = home(t);
-  const main = checkout(h, 'main');
+  const outside = h;
   writeFileSync(failureLog(h), failureLine('2026-11-01T10:00:00Z'));
   mkdirSync(path.join(h, '.claude/ledger-hook-failures.reported'));
 
-  assert.equal(sessionStartIn(h, main)?.additionalContext, failureReport('1 hook failure', '2026-11-01T10:00:00Z'));
-  assert.equal(sessionStartIn(h, main)?.additionalContext, failureReport('1 hook failure', '2026-11-01T10:00:00Z'));
+  assert.equal(sessionStartIn(h, outside)?.additionalContext, failureReport('1 hook failure', '2026-11-01T10:00:00Z'));
+  assert.equal(sessionStartIn(h, outside)?.additionalContext, failureReport('1 hook failure', '2026-11-01T10:00:00Z'));
 });
 
 test('session-start that cannot read the log prints what it prints with no failures', (t) => {
   const h = home(t);
-  const main = checkout(h, 'main');
+  const outside = h;
   mkdirSync(failureLog(h));
 
-  assert.equal(hook(h, 'session-start', { cwd: main }), '');
+  assert.equal(hook(h, 'session-start', { cwd: outside }), '');
 });
 
 test('a path the gates cannot check counts as no ledger on disk, and the rest of the command is still checked', (t) => {
@@ -3200,6 +3362,14 @@ test('ledger hook with no installed dependencies runs no npm ci: it prints nothi
     assert.match(result.stderr, /npm ci/, event);
   }
   assert.equal(existsSync(npmRan), false, 'npm ran in hook mode');
+});
+
+test('ledger statusline with no installed dependencies runs no npm ci: it prints nothing and exits 0', (t) => {
+  const h = home(t);
+  const { bin, npmRan, env } = uninstalledLedger(h);
+  const result = spawnSync(bin, ['statusline', h], { cwd: h, env, encoding: 'utf8' });
+  assert.deepEqual({ status: result.status, stdout: result.stdout, stderr: result.stderr }, { status: 0, stdout: '', stderr: '' });
+  assert.equal(existsSync(npmRan), false, 'npm ran for the status line');
 });
 
 test('ledger outside hook mode still runs npm ci when the dependencies are missing, and exits with its code', (t) => {

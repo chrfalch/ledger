@@ -1761,7 +1761,7 @@ test('evidence under the folder name of an archive copy whose worktree path is r
   writeFileSync(path.join(folder, 'red.txt'), 'failing\n');
   const evidence = pendingFrom(h, app).find(({ from }) => from === 'evidence expo/2026-01-01-old');
   assert.deepEqual(evidence, { kind: 'repo-ids', from: 'evidence expo/2026-01-01-old', to: 'repo address', auto: false, reason: 'notes of a finished task whose ledger is not in the store', accepted: true });
-  assert.equal(sessionStart(h, app), '');
+  assert.equal(sessionStart(h, app), 'No open task trees in this repo.\nAsk the operator in one question widget: make a new task, or quick work (a small change with no task).');
   assert.doesNotMatch(ok(ledger(h, app, 'store', 'migrate', '--repo-ids')), new RegExp(key.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 

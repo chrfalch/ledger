@@ -9,7 +9,8 @@ ask whether you need all of it.
 - Read ranges, not whole files. Use `Read` with `offset`/`limit`, or `sed -n '120,180p'`.
   Reserve whole-file reads for files under ~200 lines.
 - Never re-read a file already in this session's context. Scroll back instead.
-- The ledger is injected at SessionStart. Re-read it with `ledger show` only when a `/ledger:` command says to.
+- The session start gives a short report on the task, not the whole ledger. Read the ledger
+  with `ledger show` when you need its plan, decisions or reports, or when a `/ledger:` command says to.
 - Narrow output at the source — `grep -n`, `head`, `--name-only` — rather than reading
   everything and filtering afterwards.
 

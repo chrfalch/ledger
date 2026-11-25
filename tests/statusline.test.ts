@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, test } from 'node:test';
 import { freshHome, REPO } from './helpers.js';
@@ -49,6 +49,50 @@ for (const shell of shells) {
       assert.equal(git.status, 0);
       assert.equal(statusline(home, { cwd: '/project', rate_limits: { seven_day: { used_percentage: 20, resets_at: 2000000000 } } }), '\x1b[0;34m/project\x1b[0m \x1b[0;32msample\x1b[0m [\x1b[0;36m\x1b[0m week:20%]');
       assert.equal(JSON.parse(readFileSync(path.join(home, '.claude/state/usage-snapshot.json'), 'utf8')).five_hour, null);
+    });
+
+    /** A fake ~/.claude/bin/ledger that notes its arguments and runs `script`. */
+    function fakeLedger(home: string, script: string): string {
+      const bin = path.join(home, '.claude/bin');
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(path.join(bin, 'ledger'), `#!/bin/sh\nprintf '%s\\n' "$@" > "$HOME/ledger-args"\n${script}\n`, { mode: 0o755 });
+      return path.join(home, 'ledger-args');
+    }
+
+    test('D28: status line shows the task and stage that ledger statusline prints for the raw cwd, after the branch', (t) => {
+      const home = freshHome(t);
+      assert.equal(spawnSync('git', ['init', '--quiet', '--initial-branch=sample'], { cwd: home, env: { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig') } }).status, 0);
+      const args = fakeLedger(home, "printf 'fix-login · build\\n'");
+      const output = statusline(home, { workspace: { current_dir: `${home}/project` }, model: { display_name: 'Opus' } });
+      assert.equal(output, '\x1b[0;34m~/project\x1b[0m \x1b[0;32msample\x1b[0m \x1b[0;35mfix-login · build\x1b[0m [\x1b[0;36mOpus\x1b[0m]');
+      assert.equal(readFileSync(args, 'utf8'), `statusline\n${home}/project\n`);
+    });
+
+    for (const [name, script] of [['prints nothing', 'exit 0'], ['fails', "echo 'broken' >&2; exit 1"]]) {
+      test(`D28: status line is unchanged when ledger statusline ${name}`, (t) => {
+        const home = freshHome(t);
+        fakeLedger(home, script);
+        assert.equal(statusline(home, { cwd: '/project', model: { display_name: 'Opus' } }), '\x1b[0;34m/project\x1b[0m [\x1b[0;36mOpus\x1b[0m]');
+      });
+    }
+
+    test('D28: status line runs no npm ci when ledger has no installed dependencies, and shows no task', (t) => {
+      const home = freshHome(t);
+      const repo = path.join(home, 'ledger-repo');
+      mkdirSync(path.join(repo, 'bin'), { recursive: true });
+      for (const file of ['package.json', 'bin/package.json', 'bin/ledger']) writeFileSync(path.join(repo, file), readFileSync(path.join(REPO, file)), { mode: 0o755 });
+      mkdirSync(path.join(home, '.claude/bin'), { recursive: true });
+      symlinkSync(path.join(repo, 'bin/ledger'), path.join(home, '.claude/bin/ledger'));
+      const stubs = path.join(home, 'npm-stub');
+      mkdirSync(stubs);
+      writeFileSync(path.join(stubs, 'npm'), `#!/bin/sh\ntouch '${path.join(home, 'npm-ran')}'\n`, { mode: 0o755 });
+      const result = spawnSync(shell, [path.join(REPO, 'hooks/statusline.sh')], {
+        cwd: home, env: { ...process.env, HOME: home, PATH: `${stubs}${path.delimiter}${process.env.PATH ?? ''}`, GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'), GIT_CONFIG_NOSYSTEM: '1' },
+        input: JSON.stringify({ cwd: '/project', model: { display_name: 'Opus' } }), encoding: 'utf8',
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, '\x1b[0;34m/project\x1b[0m [\x1b[0;36mOpus\x1b[0m]');
+      assert.equal(existsSync(path.join(home, 'npm-ran')), false, 'npm ran for the status line');
     });
 
     test('snapshot failure does not affect status line output', (t) => {

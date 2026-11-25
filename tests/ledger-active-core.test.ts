@@ -518,7 +518,7 @@ test('session-start in a main checkout names no undefined worktree for an active
 
   const context: string = JSON.parse(hook(h, 'session-start', { cwd: app })).hookSpecificOutput.additionalContext;
 
-  assert.match(context, /=== bare\n/);
+  assert.match(context, /^- bare active$/m);
   assert.doesNotMatch(context, /undefined/);
 });
 

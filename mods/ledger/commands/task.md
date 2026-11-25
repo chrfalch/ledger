@@ -89,8 +89,8 @@ parent task.
    stop. Then move this session into the new worktree with the EnterWorktree tool. Set `path`
    to the path on the `worktree` line that `ledger go` printed, or that the
    script printed for `--stack`. Read its ledger with `ledger show` in
-   the new worktree: the SessionStart hook does not put it in context in this
-   case. Then continue with the operator's request in this session, through
+   the new worktree: no session start report covers a worktree entered in
+   the middle of a session. Then continue with the operator's request in this session, through
    the normal pipeline. When the task changes more than one file or involves
    a design choice, get the plan approved with the widget question that
    `ledger task gate plan` prints. Then write the plan into the ledger with
