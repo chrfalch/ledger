@@ -10,6 +10,20 @@ const PR_CHECK_MS = 3000;
 /** The writes gh's answers ask for get this long from when gh is done, as the session start's git time may be up by then. */
 const PR_UPDATE_MS = 2000;
 
+let prCheckMs = PR_CHECK_MS;
+let prUpdateMs = PR_UPDATE_MS;
+
+/**
+ * For tests only: how long gh gets for every PR together; the writes after it get the same share of that time. A module
+ * the tests preload calls it. Gives the limit it replaces.
+ */
+export function limitPrCheckTimeForTests(ms: number): number {
+  const replaced = prCheckMs;
+  prCheckMs = ms;
+  prUpdateMs = (ms * PR_UPDATE_MS) / PR_CHECK_MS;
+  return replaced;
+}
+
 const FAILED_CONCLUSIONS = new Set(['FAILURE', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE']);
 const PASSED_CONCLUSIONS = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
 const FAILED_STATES = new Set(['FAILURE', 'ERROR']);
@@ -102,9 +116,9 @@ export function prCheckLines(context: Context, session: SessionTasks, onDisk: Ta
     if (waiting.length === 0) return [];
     const views = prViews(
       waiting.map(({ task, pr }) => ({ folder: task.main ?? context.cwd, pr })),
-      PR_CHECK_MS,
+      prCheckMs,
     );
-    const updatesEnd = Date.now() + PR_UPDATE_MS;
+    const updatesEnd = Date.now() + prUpdateMs;
     limitLockWaits(updatesEnd);
     limitCloneGitCalls(updatesEnd);
     return waiting.flatMap(({ task }, index) => {

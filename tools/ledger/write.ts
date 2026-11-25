@@ -43,7 +43,7 @@ import { withHint } from './migrate-repo-ids.js';
 import { hasStage, isKind, KINDS, type Kind } from './kinds.js';
 import { parseRecord, storedText } from './record.js';
 import { remoteKey, repoKey } from './repo-key.js';
-import { runConsole } from './run-io.js';
+import { runClock, runConsole } from './run-io.js';
 import { holdsUnmovedLedger } from './unmoved.js';
 import { hostProblem, noteOwnHost } from './settings.js';
 import { checkPrLink, checkTransition, stateOf } from './states.js';
@@ -126,10 +126,7 @@ export const takenText = (slug: string, worktree: string | undefined, location: 
   `The task ${slug} is active already, in the worktree ${worktree ?? 'its ledger names'}, so no other task can take its name: ${location}`;
 
 /** The local date, as the old scripts wrote it. */
-export function today(): string {
-  const now = new Date();
-  return [now.getFullYear(), now.getMonth() + 1, now.getDate()].map((part) => String(part).padStart(2, '0')).join('-');
-}
+export const today = (): string => runClock().today();
 
 const oneLine = (text: string): string => text.trim().split(/\s+/).join(' ');
 

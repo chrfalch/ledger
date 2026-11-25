@@ -14,7 +14,7 @@ import { retireTask } from '../tools/ledger/retire.js';
 import * as settings from '../tools/ledger/settings.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { REPO } from './helpers.js';
-import { git, home, ledgerText, ok, readLedgerFile, writeLedgerFile, type Fields } from './ledger-core-fixtures.js';
+import { git, home, ledgerText, ok, readLedgerFile, shortLimits, writeLedgerFile, type Fields } from './ledger-core-fixtures.js';
 import {
   answerGh,
   APP,
@@ -29,6 +29,7 @@ import {
   lineOf,
   machine,
   plainClone,
+  quietEnv,
   remote,
   remoteFiles,
   remoteHead,
@@ -710,17 +711,18 @@ test('with a "host" that is no label, the session start still ends by its deadli
   setUpAs(a, 'host-a');
   startTask(a);
   writeSettings(a, { storage: 'git', host: 'Work Laptop' });
-  // The pull uses up its time, and so leaves the ledgers 1.5 s; git in the repo then hangs.
+  // The pull uses up its time, and so leaves the ledgers a fifth of the hook's limit; git in the repo then hangs.
   stubGit(a, '*" fetch "*|*"worktree list"*', 'exec sleep 10');
+  const hookMs = 2000;
 
   const began = Date.now();
-  const ran = run(a, ['hook', 'session-start'], { cwd: worktreeOf(a), input: JSON.stringify({ hook_event_name: 'SessionStart', cwd: worktreeOf(a) }) });
+  const ran = run(a, ['hook', 'session-start'], { cwd: worktreeOf(a), env: { ...quietEnv(a), ...shortLimits({ hookMs }) }, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd: worktreeOf(a) }) });
   const took = Date.now() - began;
   unstubGit(a);
 
   assert.equal(ran.status, 0, ran.stderr);
-  // 5 s for the hook, and some time for node to start.
-  assert.ok(took < 7_000, `the session start took ${took} ms`);
+  // The hook's limit, and some time for node to start.
+  assert.ok(took < hookMs + 2_000, `the session start took ${took} ms`);
 });
 
 // --------------------------------------------------------------------------------------- clones from before records

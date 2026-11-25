@@ -4,7 +4,7 @@ import { fail, Failure } from './failure.js';
 import { claimText, parseLedger, type Claim } from './format.js';
 import { checkoutRoot, mainCheckout } from './git.js';
 import { repoKey } from './repo-key.js';
-import { runEnv } from './run-io.js';
+import { runClock, runEnv } from './run-io.js';
 import { readClaimExpiryMinutes } from './settings.js';
 import { activeTasks, activeTask as worktreeTask, findNamed, findTasks, notOnThisMachine, taskRef, theTask, type Task } from './tasks.js';
 import { updateActive, type Context } from './write.js';
@@ -12,21 +12,13 @@ import { updateActive, type Context } from './write.js';
 /** How old the activity of a claim must be before touch writes it again, so a hook that touches at every turn rarely writes. */
 const TOUCH_MINUTES = 15;
 
-/** The time now; LEDGER_NOW, an ISO time, stands in for it. */
-export function now(): Date {
-  const fixed = runEnv().LEDGER_NOW;
-  if (!fixed) return new Date();
-  const time = new Date(fixed);
-  return Number.isNaN(time.getTime()) ? fail(`LEDGER_NOW is not a time such as 2026-11-20T10:00:00Z: ${fixed}`) : time;
-}
-
 const stamp = (time: Date): string => time.toISOString().replace(/\.\d{3}Z$/, 'Z');
 const minutesSince = (time: string, at: Date): number => (at.getTime() - Date.parse(time)) / 60_000;
 
 /** What tells a live claim from an expired one. */
 export type ClaimClock = { now: Date; expiryMinutes: number };
 
-export const claimClock = (home: string): ClaimClock => ({ now: now(), expiryMinutes: readClaimExpiryMinutes(home) });
+export const claimClock = (home: string): ClaimClock => ({ now: runClock().now(), expiryMinutes: readClaimExpiryMinutes(home) });
 
 const liveClaim = (claim: Claim | undefined, { now: at, expiryMinutes }: ClaimClock): Claim | undefined =>
   claim !== undefined && minutesSince(claim.active, at) < expiryMinutes ? claim : undefined;

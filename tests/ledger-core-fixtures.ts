@@ -7,6 +7,7 @@ import path from 'node:path';
 import type { TestContext } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { runLedger } from '../tools/ledger/cli.js';
+import type { Clock } from '../tools/ledger/clock.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { parseRecord, readRecordJson, recordJson, renderRecord } from '../tools/ledger/record.js';
@@ -112,6 +113,25 @@ export function commandEnv(home: string): NodeJS.ProcessEnv {
   return env;
 }
 
+/** NODE_OPTIONS that load the test preload, which reads the LEDGER_TEST_* variables ledger itself ignores, into a ledger command. */
+export const PRELOAD_OPTIONS = `${process.env.NODE_OPTIONS ?? ''} --import ${pathToFileURL(path.join(REPO, 'tests/fixtures/git-test-remote.mjs')).href}`.trim();
+
+/** Time limits a test of a hang lowers, so that it does not wait as long as ledger does in use. */
+export type ShortLimits = { hookMs?: number; prCheckMs?: number; lockWaitMs?: number; busyWaitMs?: number };
+
+const LIMIT_VARIABLES = {
+  hookMs: 'LEDGER_TEST_HOOK_TIME_MS',
+  prCheckMs: 'LEDGER_TEST_PR_CHECK_TIME_MS',
+  lockWaitMs: 'LEDGER_TEST_LOCK_WAIT_MS',
+  busyWaitMs: 'LEDGER_TEST_BUSY_WAIT_MS',
+} as const satisfies Record<keyof ShortLimits, string>;
+
+/** The variables to add to the environment of a ledger command, so that it runs with `limits`. */
+export function shortLimits(limits: ShortLimits): NodeJS.ProcessEnv {
+  const variables = Object.entries(limits).map(([name, ms]) => [LIMIT_VARIABLES[name as keyof ShortLimits], String(ms)]);
+  return { NODE_OPTIONS: PRELOAD_OPTIONS, ...Object.fromEntries(variables) };
+}
+
 /** Runs git and gh in this process as the CLI runs them under the HOME `h`, with its stub gh first on PATH. */
 export function asCli(t: TestContext, h: string): void {
   const saved = { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL };
@@ -141,9 +161,41 @@ export function ledger(home: string, cwd: string, ...args: string[]): Ran {
 }
 
 /** Runs the ledger command line as `ledger` does, but inside this process, without the cost of starting one. */
-export async function runInProcess(home: string, cwd: string, ...args: string[]): Promise<Ran> {
-  const { code, stdout, stderr } = await runLedger(args, { home, cwd, env: commandEnv(home) });
+export const runInProcess = (home: string, cwd: string, ...args: string[]): Promise<Ran> => runInProcessWith(home, cwd, {}, ...args);
+
+/** What a test may give an in-process run: the clock it reads, variables added to its environment, and its stdin. */
+export type InProcessOptions = { clock?: Clock; env?: NodeJS.ProcessEnv; input?: string };
+
+/** runInProcess with the clock, extra environment and stdin of `options`. */
+export async function runInProcessWith(home: string, cwd: string, { clock, env, input }: InProcessOptions, ...args: string[]): Promise<Ran> {
+  const { code, stdout, stderr } = await runLedger(args, { home, cwd, env: { ...commandEnv(home), ...env }, clock, stdin: input });
   return { status: code, stdout, stderr };
+}
+
+/** A clock that stands still at `startIso` until the test moves it. */
+export type FakeClock = Clock & { advance(ms: number): void; set(iso: string): void };
+
+export function fakeClock(startIso: string): FakeClock {
+  const parse = (iso: string): number => {
+    const time = Date.parse(iso);
+    assert.ok(Number.isFinite(time), `not a time: ${iso}`);
+    return time;
+  };
+  let at = parse(startIso);
+  const now = (): Date => new Date(at);
+  return {
+    now,
+    today: () => {
+      const date = now();
+      return [date.getFullYear(), date.getMonth() + 1, date.getDate()].map((part) => String(part).padStart(2, '0')).join('-');
+    },
+    advance: (ms) => {
+      at += ms;
+    },
+    set: (iso) => {
+      at = parse(iso);
+    },
+  };
 }
 
 export function ok(ran: Ran): string {

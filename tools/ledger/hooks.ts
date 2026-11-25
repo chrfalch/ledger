@@ -59,14 +59,28 @@ const GIT_TIMEOUT_MS = 5000;
 /** What the session start keeps of its 5 s for the ledgers, after the pull of git storage. */
 const AFTER_PULL_MS = 1000;
 
+let gitTimeoutMs = GIT_TIMEOUT_MS;
+let afterPullMs = AFTER_PULL_MS;
+
+/**
+ * For tests only: the time limit of a hook, of which the session start keeps the same share for the ledgers after the
+ * pull. A module the tests preload calls it. Gives the limit it replaces.
+ */
+export function limitHookTimeForTests(ms: number): number {
+  const replaced = gitTimeoutMs;
+  gitTimeoutMs = ms;
+  afterPullMs = (ms * AFTER_PULL_MS) / GIT_TIMEOUT_MS;
+  return replaced;
+}
+
 /**
  * What the hook prints on stdout for Claude Code's JSON `stdin`: hook JSON, plain text for pre-compact, or nothing.
  * Throws on input it cannot read and on any other error; the caller decides how a hook fails. Limits every later git
  * call of the process, so a repository that hangs cannot stall Claude Code.
  */
 export function answerHook(event: HookEvent, stdin: string, context: HookContext): string {
-  const deadline = Date.now() + GIT_TIMEOUT_MS;
-  limitGitCalls(GIT_TIMEOUT_MS);
+  const deadline = Date.now() + gitTimeoutMs;
+  limitGitCalls(gitTimeoutMs);
   const input = parseHookInput(stdin);
   const json = (output: object | undefined): string => (output === undefined ? '' : `${JSON.stringify(output)}\n`);
   switch (event) {
@@ -193,8 +207,8 @@ function sessionLedgerContext(input: HookInput, context: HookContext, deadline: 
   limitCloneGitCalls(deadline);
   // Opened first, as git in the session folder may use up the time that is left after the pull.
   void context.store;
-  pullForSession(context.paths, deadline - AFTER_PULL_MS);
-  limitGitCalls(GIT_TIMEOUT_MS, deadline);
+  pullForSession(context.paths, deadline - afterPullMs);
+  limitGitCalls(gitTimeoutMs, deadline);
   // After the pull, which may bring ledgers under folder names.
   const conversion = conversionHint(context.store);
   const notice = syncNotice(context.paths);
@@ -220,7 +234,7 @@ const needsYouBlock = (lines: string[]): string | undefined => (lines.length ===
  * output is built. When the pull or the ledger part throws, the report still goes out alone and the new failure waits
  * for the next one.
  */
-export function sessionStart(input: HookInput, context: HookContext, deadline = Date.now() + GIT_TIMEOUT_MS): SessionStartOutput | undefined {
+export function sessionStart(input: HookInput, context: HookContext, deadline = Date.now() + gitTimeoutMs): SessionStartOutput | undefined {
   const failures = unreportedHookFailures(context.paths);
   let ledgers: { needsYou?: string; hint?: string; text?: string; title?: string };
   try {

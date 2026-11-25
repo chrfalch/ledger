@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claimResultText, claimTask, Held, knownSession, releaseAll, releaseTask, requiredSession, touchAll, touchTask, type AllResult } from './claims.js';
 import { limitCloneGitCalls } from './clone.js';
+import { systemClock, type Clock } from './clock.js';
 import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
 import { finalizeQuestion } from './finalize.js';
@@ -250,22 +251,22 @@ function sessionForAll(slug: string | undefined, session: string | undefined): s
   return requiredSession(session);
 }
 
-export type LedgerIo = { home: string; cwd: string; env: NodeJS.ProcessEnv; store?: LedgerStore; stdin?: string };
+export type LedgerIo = { home: string; cwd: string; env: NodeJS.ProcessEnv; store?: LedgerStore; stdin?: string; clock?: Clock };
 export type LedgerRun = { code: number; stdout: string; stderr: string };
 
 /** A run's inputs, with stdin read only by a command that needs it, and the streams it prints to. */
-type RunInputs = Omit<LedgerIo, 'stdin'> & { stdin: () => string; stdout: NodeJS.WritableStream; stderr: NodeJS.WritableStream };
+type RunInputs = Omit<LedgerIo, 'stdin' | 'clock'> & { stdin: () => string; clock: Clock; stdout: NodeJS.WritableStream; stderr: NodeJS.WritableStream };
 
 /** Runs the `ledger` command line `argv`, without the node and script paths, and returns its exit code. */
 export async function main(argv: string[]): Promise<number> {
-  return run(argv, { home: process.env.HOME || homedir(), cwd: process.cwd(), env: process.env, stdin: () => readFileSync(0, 'utf8'), stdout: process.stdout, stderr: process.stderr });
+  return run(argv, { home: process.env.HOME || homedir(), cwd: process.cwd(), env: process.env, stdin: () => readFileSync(0, 'utf8'), clock: systemClock, stdout: process.stdout, stderr: process.stderr });
 }
 
 /** Runs `argv` as main does, inside this process: with the inputs of `io`, and with what it prints collected. A store given in `io` stays open. */
-export async function runLedger(argv: string[], { stdin = '', ...io }: LedgerIo): Promise<LedgerRun> {
+export async function runLedger(argv: string[], { stdin = '', clock = systemClock, ...io }: LedgerIo): Promise<LedgerRun> {
   const stdout = new Collected();
   const stderr = new Collected();
-  const code = await run(argv, { ...io, stdin: () => stdin, stdout, stderr });
+  const code = await run(argv, { ...io, stdin: () => stdin, clock, stdout, stderr });
   return { code, stdout: stdout.text(), stderr: stderr.text() };
 }
 
@@ -280,7 +281,7 @@ function resetRunState(): void {
 
 function run(argv: string[], io: RunInputs): Promise<number> {
   resetRunState();
-  return inRun({ env: io.env, console: new Console({ stdout: io.stdout, stderr: io.stderr }) }, () => commandLine(argv, io));
+  return inRun({ env: io.env, console: new Console({ stdout: io.stdout, stderr: io.stderr }), clock: io.clock }, () => commandLine(argv, io));
 }
 
 async function commandLine(argv: string[], { home, cwd, store: given, stdin, stdout, stderr }: RunInputs): Promise<number> {
