@@ -5,6 +5,7 @@ import { fail, Failure } from './failure.js';
 import { exists, writeAtomic } from './files.js';
 import { withLock } from './lock.js';
 import { ledgerPaths } from './paths.js';
+import { runConsole } from './run-io.js';
 
 export const STORAGES = ['file', 'sqlite', 'git'] as const;
 export type Storage = (typeof STORAGES)[number];
@@ -137,7 +138,7 @@ export function noteOwnHost(home: string, host: string): void {
     });
   } catch (error) {
     // The record is written; only a later change of "host" would miss this label.
-    console.error(`warning: could not add the host ${host} to ${ledgerPaths(home).tilde(ownHostsFile(home))}: ${(error as Error).message}`);
+    runConsole().error(`warning: could not add the host ${host} to ${ledgerPaths(home).tilde(ownHostsFile(home))}: ${(error as Error).message}`);
   }
 }
 

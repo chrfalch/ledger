@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { redacted } from './clone.js';
 import { mainOfTaskWorktree } from './paths.js';
+import { runEnv } from './run-io.js';
 
 let timeoutMs: number | undefined;
 let deadline = Infinity;
@@ -16,6 +17,13 @@ const unanswered = new Set<string>();
 export function limitGitCalls(ms: number, until = Infinity): void {
   timeoutMs = ms;
   deadline = until;
+}
+
+/** Lifts the limits of limitGitCalls, and forgets which folders did not answer. */
+export function resetGitLimits(): void {
+  timeoutMs = undefined;
+  deadline = Infinity;
+  unanswered.clear();
 }
 
 /** Whether a git call in `folder` or a folder that holds it was stopped by the limit of limitGitCalls. */
@@ -38,7 +46,7 @@ function run(folder: string, args: string[]): { ok: boolean; stdout: string; std
     markUnanswered();
     return unanswering;
   }
-  const result = spawnSync('git', ['-C', folder, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout });
+  const result = spawnSync('git', ['-C', folder, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout, env: runEnv() });
   if (result.error !== undefined && 'code' in result.error && result.error.code === 'ETIMEDOUT') markUnanswered();
   return { ok: result.status === 0, stdout: result.stdout ?? '', stderr: (result.stderr ?? '').trim() };
 }
@@ -204,7 +212,7 @@ function ghResult(args: string[], { status, stdout, stderr, timedOut, spawnError
 
 /** gh in `folder`; with `timeoutMs`, it is stopped then, and that is an error too. */
 export function gh(folder: string, args: string[], { timeoutMs }: { timeoutMs?: number } = {}): GhResult {
-  const result = spawnSync('gh', args, { cwd: folder, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs });
+  const result = spawnSync('gh', args, { cwd: folder, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, env: runEnv() });
   const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT';
   return ghResult(args, { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '', timedOut, spawnError: timedOut ? undefined : result.error?.message }, timeoutMs);
 }
@@ -231,7 +239,7 @@ const GH_AT_ONCE_SLACK_MS = 2000;
 /** Runs every gh call at once; one not done in `timeoutMs` is an error, as with gh(). */
 function ghAtOnce(calls: { folder: string; args: string[] }[], timeoutMs: number): GhResult[] {
   if (calls.length === 0) return [];
-  const result = spawnSync(process.execPath, ['-e', GH_AT_ONCE], { input: JSON.stringify({ calls, timeoutMs }), encoding: 'utf8', timeout: timeoutMs + GH_AT_ONCE_SLACK_MS });
+  const result = spawnSync(process.execPath, ['-e', GH_AT_ONCE], { input: JSON.stringify({ calls, timeoutMs }), encoding: 'utf8', timeout: timeoutMs + GH_AT_ONCE_SLACK_MS, env: runEnv() });
   let runs: unknown;
   try {
     runs = JSON.parse(result.stdout ?? '');

@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { TestContext } from 'node:test';
 import { pathToFileURL } from 'node:url';
+import { runLedger } from '../tools/ledger/cli.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { parseRecord, readRecordJson, recordJson, renderRecord } from '../tools/ledger/record.js';
@@ -137,6 +138,12 @@ export function spawn(home: string, cwd: string, command: string, args: string[]
 
 export function ledger(home: string, cwd: string, ...args: string[]): Ran {
   return spawn(home, cwd, LEDGER_BIN, args);
+}
+
+/** Runs the ledger command line as `ledger` does, but inside this process, without the cost of starting one. */
+export async function runInProcess(home: string, cwd: string, ...args: string[]): Promise<Ran> {
+  const { code, stdout, stderr } = await runLedger(args, { home, cwd, env: commandEnv(home) });
+  return { status: code, stdout, stderr };
 }
 
 export function ok(ran: Ran): string {

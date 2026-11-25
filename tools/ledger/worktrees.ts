@@ -6,6 +6,7 @@ import { exists, folderEntries, isFolder, writeAtomic } from './files.js';
 import { parseLedger, planProgress } from './format.js';
 import { branchPrs, changedFiles, checkoutRoot, gitDir, ignoredPaths, inMainCheckout, lastCommitDate, mainCheckout, worktrees, type PullRequest, type Worktree } from './git.js';
 import { samePath, type LedgerPaths } from './paths.js';
+import { runConsole, runEnv } from './run-io.js';
 import { findTasks, locateChild, namedChildren, type Task } from './tasks.js';
 import { heading, plural, table } from './views.js';
 import { today, type Context } from './write.js';
@@ -113,8 +114,8 @@ function trashCan(): { move: (folder: string, trashParent: string) => void; empt
     empty() {
       const folders = trashes.splice(0);
       if (folders.length === 0) return;
-      spawn('rm', ['-rf', '--', ...folders], { detached: true, stdio: 'ignore' })
-        .on('error', (error) => console.error(`warning: rm could not start, so ${folders.join(', ')} ${folders.length === 1 ? 'is' : 'are'} left behind (${error.message}). Delete by hand.`))
+      spawn('rm', ['-rf', '--', ...folders], { detached: true, stdio: 'ignore', env: runEnv() })
+        .on('error', (error) => runConsole().error(`warning: rm could not start, so ${folders.join(', ')} ${folders.length === 1 ? 'is' : 'are'} left behind (${error.message}). Delete by hand.`))
         .unref();
     },
   };
@@ -122,7 +123,7 @@ function trashCan(): { move: (folder: string, trashParent: string) => void; empt
 
 /** du counts blocks in use; it exits non-zero when it cannot read some file, yet still prints the total of what it could. */
 function sizeGb(folder: string): number | undefined {
-  const kib = /^\d+/.exec(spawnSync('du', ['-sk', folder], { encoding: 'utf8' }).stdout ?? '')?.[0];
+  const kib = /^\d+/.exec(spawnSync('du', ['-sk', folder], { encoding: 'utf8', env: runEnv() }).stdout ?? '')?.[0];
   return kib === undefined ? undefined : (Number(kib) * 1024) / 1e9;
 }
 

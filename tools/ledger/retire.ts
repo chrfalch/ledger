@@ -23,6 +23,7 @@ import {
 import { ledgerBin, realPath, samePath } from './paths.js';
 import { parseRecord, renderRecord, storedText, type TaskRecord } from './record.js';
 import { repoKey } from './repo-key.js';
+import { runConsole } from './run-io.js';
 import type { Archive } from './store.js';
 import { findNamed, findTasks, inRepo, locateChild, namedChildren, sameTask, type Task } from './tasks.js';
 import { plural } from './views.js';
@@ -695,7 +696,7 @@ export function planView({ verb, slug, ledger, worktree, blockers, steps }: Reti
 
 export type Output = { line: (text: string) => void; warn: (text: string) => void };
 
-const consoleOutput: Output = { line: (text) => console.log(text), warn: (text) => console.error(`warning: ${text}`) };
+const consoleOutput: Output = { line: (text) => runConsole().log(text), warn: (text) => runConsole().error(`warning: ${text}`) };
 
 const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 

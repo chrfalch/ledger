@@ -4,6 +4,7 @@ import { fail, Failure } from './failure.js';
 import { claimText, parseLedger, type Claim } from './format.js';
 import { checkoutRoot, mainCheckout } from './git.js';
 import { repoKey } from './repo-key.js';
+import { runEnv } from './run-io.js';
 import { readClaimExpiryMinutes } from './settings.js';
 import { activeTasks, activeTask as worktreeTask, findNamed, findTasks, notOnThisMachine, taskRef, theTask, type Task } from './tasks.js';
 import { updateActive, type Context } from './write.js';
@@ -13,7 +14,7 @@ const TOUCH_MINUTES = 15;
 
 /** The time now; LEDGER_NOW, an ISO time, stands in for it. */
 export function now(): Date {
-  const fixed = process.env.LEDGER_NOW;
+  const fixed = runEnv().LEDGER_NOW;
   if (!fixed) return new Date();
   const time = new Date(fixed);
   return Number.isNaN(time.getTime()) ? fail(`LEDGER_NOW is not a time such as 2026-11-20T10:00:00Z: ${fixed}`) : time;
@@ -44,7 +45,7 @@ export class Held extends Failure {
 }
 
 /** The session a command acts for: `option`, else CLAUDE_CODE_SESSION_ID. */
-export const knownSession = (option: string | undefined): string | undefined => option ?? (process.env.CLAUDE_CODE_SESSION_ID || undefined);
+export const knownSession = (option: string | undefined): string | undefined => option ?? (runEnv().CLAUDE_CODE_SESSION_ID || undefined);
 
 export function requiredSession(option: string | undefined): string {
   const session = knownSession(option) ?? fail('No session id: pass --session <id>, or run this in a Claude Code session, which sets CLAUDE_CODE_SESSION_ID.', 2);

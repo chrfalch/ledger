@@ -902,6 +902,13 @@ a worktree are the main repository's.
   headings (`tools/llp-refs.ts`).
 - `npm test` runs `tests/*.test.ts`. The plugin's own tests, in
   `mods/ledger/hooks/`, run with `claude plugin test`.
+- `runLedger` in `tools/ledger/cli.ts` runs a command line inside the test
+  process.
+  - Inputs: the home folder, working folder, environment, store and stdin.
+  - Output: collected and returned, together with the exit code.
+  - Each run first clears the time limits and caches an earlier run left.
+
+  LLP 0002 sets out the design.
 
 ## Data and storage
 
