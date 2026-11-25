@@ -10,6 +10,7 @@ import { ledgerPaths } from '../tools/ledger/paths.js';
 import { parseRecord, recordJson, storedText } from '../tools/ledger/record.js';
 import { loadSqlite, sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
 import { git, home, ledger, ledgerText, noSqlite, ok } from './ledger-core-fixtures.js';
+import { memoryStore } from './memory-store.js';
 
 function openGit(h: string) {
   const clone = path.join(h, '.claude/ledger-data');
@@ -22,6 +23,7 @@ const stores = {
   file: (h: string) => fileStore(ledgerPaths(h)),
   sqlite: (h: string) => sqliteStore({ home: h }),
   git: openGit,
+  memory: (h: string) => memoryStore({ home: h }),
 };
 
 for (const [kind, open] of Object.entries(stores)) {
@@ -39,7 +41,7 @@ for (const [kind, open] of Object.entries(stores)) {
     assert.deepEqual(active.repos(), [repo]);
     assert.equal(active.read(repo, slug)?.text, storedText(source));
     assert.deepEqual(active.list(repo), [active.read(repo, slug)]);
-    if (kind !== 'sqlite') {
+    if (kind === 'file' || kind === 'git') {
       const root = kind === 'file' ? 'ledger-active' : 'ledger-data/active';
       const file = path.join(h, '.claude', root, 'org%2Fapp/task.json');
       assert.equal(active.location(repo, slug), file);

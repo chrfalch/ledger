@@ -13,6 +13,7 @@ import { ledgerPaths } from '../tools/ledger/paths.js';
 import { parseRecord, readRecordJson, recordJson, renderRecord } from '../tools/ledger/record.js';
 import { repoKey } from '../tools/ledger/repo-key.js';
 import { hostLabel } from '../tools/ledger/settings.js';
+import type { LedgerStore } from '../tools/ledger/store.js';
 import { freshHome, REPO } from './helpers.js';
 
 export const LEDGER_BIN = path.join(REPO, 'bin/ledger');
@@ -163,12 +164,12 @@ export function ledger(home: string, cwd: string, ...args: string[]): Ran {
 /** Runs the ledger command line as `ledger` does, but inside this process, without the cost of starting one. */
 export const runInProcess = (home: string, cwd: string, ...args: string[]): Promise<Ran> => runInProcessWith(home, cwd, {}, ...args);
 
-/** What a test may give an in-process run: the clock it reads, variables added to its environment, and its stdin. */
-export type InProcessOptions = { clock?: Clock; env?: NodeJS.ProcessEnv; input?: string };
+/** What a test may give an in-process run: the clock it reads, variables added to its environment, its stdin, and the store it uses in place of the one the settings name. */
+export type InProcessOptions = { clock?: Clock; env?: NodeJS.ProcessEnv; input?: string; store?: LedgerStore };
 
-/** runInProcess with the clock, extra environment and stdin of `options`. */
-export async function runInProcessWith(home: string, cwd: string, { clock, env, input }: InProcessOptions, ...args: string[]): Promise<Ran> {
-  const { code, stdout, stderr } = await runLedger(args, { home, cwd, env: { ...commandEnv(home), ...env }, clock, stdin: input });
+/** runInProcess with the clock, extra environment, stdin and store of `options`. */
+export async function runInProcessWith(home: string, cwd: string, { clock, env, input, store }: InProcessOptions, ...args: string[]): Promise<Ran> {
+  const { code, stdout, stderr } = await runLedger(args, { home, cwd, env: { ...commandEnv(home), ...env }, clock, stdin: input, store });
   return { status: code, stdout, stderr };
 }
 
@@ -249,8 +250,14 @@ export function putActive(h: string, main: string, slug: string, markdown: strin
   return active.location(repo, slug);
 }
 
-/** The file of the active record `slug` of the repo at `main` in the file store. */
-export const activeFile = (h: string, main: string, slug: string): string => fileStore(ledgerPaths(h)).active.location(repoKey(main), slug);
+/**
+ * The store a fixture seeds through. Without one, it writes the files of the file store under the HOME, the backlog and
+ * archive as Markdown from before task records, as most tests read those files back.
+ */
+export type Seeding = { store?: LedgerStore };
+
+/** The file of the active record `slug` of the repo at `main` in the file store, or its location in `store`. */
+export const activeFile = (h: string, main: string, slug: string, { store = fileStore(ledgerPaths(h)) }: Seeding = {}): string => store.active.location(repoKey(main), slug);
 
 export const worktreeOf = (main: string, slug: string): string => path.join(main, '.claude/worktrees', slug);
 
@@ -270,20 +277,37 @@ export function repoKeyOf(main: string): string {
 export const storeFolder = (h: string, place: 'ledger-backlog' | 'ledger-archive', main: string): string =>
   path.join(h, '.claude', place, encodeURIComponent(repoKeyOf(main)));
 
-export function backlogTask(h: string, main: string, fields: Omit<Fields, 'main'>): string {
+/** A backlog ledger; gives its file, or its location in `store`. */
+export function backlogTask(h: string, main: string, fields: Omit<Fields, 'main'>, { store }: Seeding = {}): string {
+  const text = ledgerText({ ...fields, main, branch: fields.branch ?? fields.slug });
+  if (store !== undefined) {
+    const repo = repoKeyOf(main);
+    store.backlog.write(repo, fields.slug, text);
+    return store.backlog.location(repo, fields.slug);
+  }
   const file = path.join(storeFolder(h, 'ledger-backlog', main), `${fields.slug}.md`);
   mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, ledgerText({ ...fields, main, branch: fields.branch ?? fields.slug }));
+  writeFileSync(file, text);
   return file;
 }
 
-/** An archive copy named <date>-<name>.md; `name` defaults to the slug. Its worktree is gone. */
-export function archivedTask(h: string, main: string, date: string, fields: Fields, name = fields.slug): string {
+/** An archive copy named <date>-<name>, modified at noon UTC on `date`; `name` defaults to the slug. Its worktree is gone. Gives its file, or its location in `store`. */
+export function archivedTask(h: string, main: string, date: string, fields: Fields, name = fields.slug, { store }: Seeding = {}): string {
+  const worktree = path.join(main, '.claude/worktrees', name);
+  const text = ledgerText({ worktree, branch: `me/${name}`, base: 'origin/main @ 1234567', ...fields });
+  const time = new Date(`${date}T12:00:00Z`);
+  if (store !== undefined) {
+    const { archive } = store;
+    const repo = repoKeyOf(main);
+    const copy = `${date}-${name}`;
+    assert.ok(archive.setModified, 'the store cannot set the time of an archive copy');
+    archive.write(repo, copy, text);
+    archive.setModified(repo, copy, time.getTime());
+    return archive.location(repo, copy);
+  }
   const file = path.join(storeFolder(h, 'ledger-archive', main), `${date}-${name}.md`);
   mkdirSync(path.dirname(file), { recursive: true });
-  const worktree = path.join(main, '.claude/worktrees', name);
-  writeFileSync(file, ledgerText({ worktree, branch: `me/${name}`, base: 'origin/main @ 1234567', ...fields }));
-  const time = new Date(`${date}T12:00:00Z`);
+  writeFileSync(file, text);
   utimesSync(file, time, time);
   return file;
 }
@@ -300,9 +324,17 @@ export function readLedgerFile(file: string): string {
   return existsSync(record) && (record !== file || file.endsWith('.json')) ? renderRecord(readRecordJson(readFileSync(record, 'utf8'), record)) : readFileSync(file, 'utf8');
 }
 
-/** Writes `markdown` to a ledger file of the file store as the store keeps it: a task record for <name>.json, else as it is. */
-export function writeLedgerFile(file: string, markdown: string): void {
-  writeFileSync(file, file.endsWith('.json') ? recordJson(parseRecord(markdown)) : markdown);
+/**
+ * Writes `markdown` to a ledger file of the file store as the store keeps it: a task record for <name>.json, else as it
+ * is. With `store`, `file` is the location of a backlog or active ledger there, which is written through the store.
+ */
+export function writeLedgerFile(file: string, markdown: string, { store }: Seeding = {}): void {
+  if (store === undefined) return writeFileSync(file, file.endsWith('.json') ? recordJson(parseRecord(markdown)) : markdown);
+  for (const place of ['backlog', 'active'] as const) {
+    const found = store[place].repos().flatMap((repo) => store[place].list(repo)).find(({ location }) => location === file);
+    if (found !== undefined) return store[place].write(found.repo, found.name, markdown);
+  }
+  assert.fail(`The store has no backlog or active ledger at ${file}.`);
 }
 
 /** Whether the store holds the ledger of `file`, as <name>.md from before task records or as its record <name>.json. */
