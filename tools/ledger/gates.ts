@@ -73,6 +73,26 @@ const GATES: readonly GateDefinition[] = [
     ],
   },
   {
+    name: 'merge',
+    header: 'Merge',
+    question: (task) => `The PR of ${task} passed its checks and review. Merge it now?`,
+    multiSelect: false,
+    actions: [
+      { label: 'Merge now', description: 'Merge the pull request. The task becomes done and the finalize question follows.' },
+      { label: 'Not yet', description: 'Nothing is merged. The PR stays open and the task stays waiting.' },
+    ],
+  },
+  {
+    name: 'goal',
+    header: 'Goal',
+    question: (task) => `Every stage of ${task} has passed. Is its goal met?`,
+    multiSelect: false,
+    actions: [
+      { label: 'Goal met', description: 'Mark the task done. The finalize question follows.' },
+      { label: 'Not yet', description: 'The task stays active. Say what is left to do.' },
+    ],
+  },
+  {
     name: 'abandon',
     header: 'Abandon',
     question: (task) => `Abandon ${task}? Its ledger is archived and nothing is merged.`,

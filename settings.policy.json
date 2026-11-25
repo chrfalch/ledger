@@ -106,6 +106,7 @@
       "Bash(ledger task block:*)",
       "Bash(ledger task unblock:*)",
       "Bash(ledger task pr:*)",
+      "Bash(ledger task done:*)",
       "Bash(ledger task show:*)",
       "Bash(ledger task list:*)",
       "Bash(ledger task archive:*)",

@@ -8,7 +8,7 @@ import { parseRecord, type TaskRecord } from './record.js';
 import { repoKey } from './repo-key.js';
 import { dependenciesOf, dependencyTask, findNamed, inRepo, isDone, namedChildren, orderedChildren, storedRepoOf, type ListedChild, type RepoOf, type Task } from './tasks.js';
 import { joined, plural } from './views.js';
-import { shellWord } from './write.js';
+import { gateCommand } from './write.js';
 
 /** The live claim of another session on a task, if any. */
 export type HeldElsewhere = (task: Task) => Claim | undefined;
@@ -36,16 +36,8 @@ const openTask = ({ line, task }: ListedChild): Task[] => (task !== undefined &&
 
 const isLive = ({ place, status }: Task): boolean => place !== 'archive' && status !== 'lost';
 
-/**
- * The finalize gate of `task`, as `<slug>@<main>` when it is not a task of `repo`, the session's, so it names that repo's
- * task; the slug alone when the store knows no main checkout of its repo. A slug that starts with `-` follows `--`, or
- * the CLI would read it as an option.
- */
-export function finalizeCommand(task: Task, repo: string): string {
-  const { slug, main } = task;
-  const ref = task.repoKeys.includes(repo) || main === undefined ? slug : shellWord(`${slug}@${main}`);
-  return `ledger task gate finalize ${slug.startsWith('-') ? `-- ${ref}` : ref}`;
-}
+/** The finalize gate of `task`, named for the session of `repo` as `gateCommand` names it. */
+export const finalizeCommand = (task: Task, repo: string): string => gateCommand('finalize', task, repo);
 
 /** The tasks the report reads, and how it tells the repo of a checkout from them alone, as it runs no git in another repo. */
 type Known = { tasks: Task[]; repoOf: RepoOf };

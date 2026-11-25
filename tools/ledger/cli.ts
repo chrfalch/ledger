@@ -87,6 +87,8 @@ import {
   createTask,
   currentTask,
   dependsText,
+  doneTask,
+  doneText,
   goTask,
   goText,
   markMergedDone,
@@ -496,6 +498,14 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
     .option('--task <slug>', 'the task in this repo, or <slug>@<path> for the repo at <path>; by default the task of the worktree you are in')
     .option('--json', JSON_HELP)
     .action((url: string, { task }: { task?: string }) => show(recordPr(context, task, url), recordPrText));
+  taskGroup
+    .command('done')
+    .description(
+      'Mark a task done: a "- status: done <date>" line under ## Location. A task with no PR becomes done at once, as the operator answered "Goal met"; a task with a PR only once gh says the PR is merged.',
+    )
+    .argument('[slug]', ACTIVE_SLUG)
+    .option('--json', JSON_HELP)
+    .action((slug: string | undefined) => show(doneTask(context, slug), doneText));
   taskGroup
     .command('retire')
     .description(

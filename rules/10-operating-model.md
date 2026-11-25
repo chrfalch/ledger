@@ -130,10 +130,18 @@ The **task ledger** records the task. See `ledger --help`.
   backlog task has no worktree: run `/ledger:go <slug>` yourself. If the task
   has a parent or children, show its tree with `/ledger:parent <parent>`. Do not re-read
   files or rerun tests to re-establish state. When every plan step is done,
-  ask with `ledger task gate pr`.
-- **End of task.** When the work is merged, or the operator calls it
-  finished, ask the question `ledger task gate finalize` prints. It is
-  multi-select. A ticked option is the operator's approval to run it.
+  ask with `ledger task gate pr`. A task with no PR asks
+  `ledger task gate goal` instead.
+- **Merge.** When the PR check says a task's checks and review passed, ask
+  the question `ledger task gate merge` prints. Merge only on "Merge now":
+  merge the PR, run `ledger task done <slug>`, then follow End of task.
+- **Goal met.** A task with no PR is done only when the operator answers
+  "Goal met". When its last stage passes, or the operator calls it
+  finished, ask the question `ledger task gate goal` prints. On "Goal met",
+  run `ledger task done`, then follow End of task.
+- **End of task.** When a task becomes done, ask the question
+  `ledger task gate finalize` prints. It is multi-select. A ticked option is
+  the operator's approval to run it.
   1. Run `/ledger:retire <slug> --dry-run` for each ticked retire. Stop on any
      problem it names, and say what is missing. Ask before you discard any
      change.
