@@ -90,6 +90,8 @@ import {
   parkedOf,
   parkTask,
   parkText,
+  recordPr,
+  recordPrText,
   setDependencies,
   unblockTask,
   unblockText,
@@ -347,7 +349,7 @@ export async function main(argv: string[]): Promise<number> {
       });
 
   const program = new Command('ledger').description('Read and change the task ledgers on this machine.').enablePositionalOptions().exitOverride();
-  const taskGroup = program.command('task').description('Make, start, claim, park, block, retire and read tasks.');
+  const taskGroup = program.command('task').description('Make, start, claim, park, block, retire and read tasks, and record their PRs.');
   taskGroup
     .command('new')
     .description('Write a backlog ledger for a new task, from ~/.claude/ledger.template.md. /ledger:go <slug> starts it.')
@@ -422,6 +424,15 @@ export async function main(argv: string[]): Promise<number> {
     .argument('<slug>', 'the task in this repo, or <slug>@<path> for the repo at <path>')
     .option('--json', JSON_HELP)
     .action((slug: string) => show(unblockTask(context, slug), unblockText));
+  taskGroup
+    .command('pr')
+    .description(
+      'Record the PR of an active or waiting task: a "- pr:" line under ## Location. The task moves to its pr stage and becomes waiting: a "- status: waiting <date>" line. A code task cannot become waiting without it.',
+    )
+    .argument('<url>', 'the PR as https://github.com/<owner>/<repo>/pull/<number>')
+    .option('--task <slug>', 'the task in this repo, or <slug>@<path> for the repo at <path>; by default the task of the worktree you are in')
+    .option('--json', JSON_HELP)
+    .action((url: string, { task }: { task?: string }) => show(recordPr(context, task, url), recordPrText));
   taskGroup
     .command('retire')
     .description(

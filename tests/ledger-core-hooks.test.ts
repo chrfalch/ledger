@@ -595,6 +595,239 @@ test('pre-compact names several tasks by slug and worktree, most recently update
   assert.ok(!text.includes(path.join(h, '.claude')) && !text.includes('.claude/ledger.md'), text);
 });
 
+// D20: the session start checks the PR of each waiting task.
+
+const prUrl = (n: number): string => `https://github.com/acme/app/pull/${n}`;
+
+/** `meet`: the answer waits until that many calls wait together, which only calls run at once reach. */
+type PrAnswer = { json: object | string; meet?: number } | { exit: number } | { hang: true };
+
+/**
+ * A gh first on PATH that answers `gh pr view <url> --json state,reviewDecision,statusCheckRollup` for each url, logs
+ * every call to the file `calls`, and fails for anything else. A hanging answer execs sleep, so a kill ends it.
+ */
+function stubPrs(h: string, answers: Record<string, PrAnswer>): { env: NodeJS.ProcessEnv; calls: string } {
+  const stubs = path.join(h, 'pr-stubs');
+  const calls = path.join(h, 'gh-calls');
+  const meeting = path.join(h, 'gh-meeting');
+  mkdirSync(stubs, { recursive: true });
+  mkdirSync(meeting, { recursive: true });
+  writeFileSync(calls, '');
+  const quoted = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`;
+  const cases = Object.entries(answers).map(([url, answer]) => {
+    const body =
+      'hang' in answer
+        ? 'exec sleep 30'
+        : 'exit' in answer
+          ? `echo 'HTTP 404: Not Found' >&2; exit ${answer.exit}`
+          : `${answer.meet === undefined ? '' : `: > ${quoted(meeting)}/$$; while [ "$(ls ${quoted(meeting)} | wc -l | tr -d ' ')" -lt ${answer.meet} ]; do sleep 0.1; done; `}printf '%s\\n' ${quoted(typeof answer.json === 'string' ? answer.json : JSON.stringify(answer.json))}`;
+    return `  ${quoted(`pr view ${url} --json state,reviewDecision,statusCheckRollup`)}) ${body} ;;`;
+  });
+  writeFileSync(path.join(stubs, 'gh'), ['#!/bin/sh', `echo "$*" >> ${quoted(calls)}`, 'case "$*" in', ...cases, '  *) echo "unexpected gh call" >&2; exit 9 ;;', 'esac', ''].join('\n'), { mode: 0o755 });
+  return { env: { PATH: `${stubs}${path.delimiter}${process.env.PATH ?? ''}` }, calls };
+}
+
+const checkRun = (conclusion: string, status = 'COMPLETED') => ({ __typename: 'CheckRun', name: 'ci', status, conclusion });
+const statusContext = (state: string) => ({ __typename: 'StatusContext', context: 'ci', state });
+const open = (statusCheckRollup: object[], reviewDecision: string | null = '') => ({ state: 'OPEN', reviewDecision, statusCheckRollup });
+
+/** A linked worktree `name` of `main` whose active ledger is waiting on PR `pr`, with more Location lines. */
+function waitingTask(h: string, main: string, name: string, pr: number | undefined, ...location: string[]): { folder: string; ledger: string } {
+  const folder = worktree(h, main, path.join(h, name));
+  const ledger = ledgerIn(h, folder, familyLedger(name, ['- status: waiting 2026-11-20', ...(pr === undefined ? [] : [`- pr: ${prUrl(pr)}`]), ...location]));
+  return { folder, ledger };
+}
+
+function startedWith(h: string, cwd: string, env: NodeJS.ProcessEnv): string {
+  const ran = runHook(h, 'session-start', JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup', cwd }), env, 30_000);
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(ran.stderr, '');
+  return (JSON.parse(ran.stdout) as SessionStartOutput).hookSpecificOutput.additionalContext;
+}
+
+/** The lines of the Needs you block that opens `context`, in any order; undefined when it has none. */
+function needsYou(context: string): string[] | undefined {
+  if (!context.startsWith('Needs you:\n')) {
+    assert.ok(!context.includes('Needs you:'), context);
+    return undefined;
+  }
+  const [block] = context.split('\n\n');
+  return block.split('\n').slice(1).sort();
+}
+
+function localToday(): string {
+  const now = new Date();
+  return [now.getFullYear(), now.getMonth() + 1, now.getDate()].map((part) => String(part).padStart(2, '0')).join('-');
+}
+
+const storedLocation = (ledger: string) => parseLedger(readLedgerFile(ledger)).location;
+const storedStage = (ledger: string): string | undefined => (JSON.parse(readFileSync(ledger, 'utf8')) as { stage?: string }).stage;
+
+test('session-start in a main checkout checks the PR of every waiting task of the repo and says what needs the operator first', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const answers: Record<string, PrAnswer> = {};
+  const task = (name: string, n: number, answer: PrAnswer, ...location: string[]) => {
+    answers[prUrl(n)] = answer;
+    return waitingTask(h, main, name, n, ...location).ledger;
+  };
+  const merged = task('merged', 1, { json: { state: 'MERGED', reviewDecision: 'APPROVED', statusCheckRollup: [checkRun('SUCCESS')] } });
+  const failing = task('failing', 2, { json: open([checkRun('SUCCESS'), checkRun('FAILURE')]) }, '- stage: pr');
+  const changes = task('changes', 3, { json: open([checkRun('SUCCESS')], 'CHANGES_REQUESTED') }, '- stage: pr');
+  const both = task('both', 4, { json: open([statusContext('ERROR')], 'CHANGES_REQUESTED') }, '- stage: pr');
+  const ready = task('ready', 5, { json: open([checkRun('SUCCESS'), statusContext('SUCCESS')], null) });
+  const closed = task('closed', 6, { json: { state: 'CLOSED', reviewDecision: '', statusCheckRollup: [] } });
+  const pending = task('pending', 7, { json: open([checkRun('SUCCESS'), checkRun('', 'IN_PROGRESS')]) });
+  task('broken', 8, { exit: 1 });
+  task('garbage', 9, { json: 'not json' });
+  task('no-state', 10, { json: { reviewDecision: '' } });
+  const { env, calls } = stubPrs(h, answers);
+  const unlinked = waitingTask(h, main, 'unlinked', undefined).ledger;
+  ledgerIn(h, worktree(h, main, path.join(h, 'plain')), familyLedger('plain', [`- pr: ${prUrl(30)}`]));
+  rmSync(waitingTask(h, main, 'far', 31).folder, { recursive: true });
+  const [pendingBefore, closedBefore, readyBefore, unlinkedBefore] = [pending, closed, ready, unlinked].map(readLedgerFile);
+
+  const context = startedWith(h, main, env);
+
+  assert.deepEqual(needsYou(context), [
+    '- both: PR checks failed and review asked for changes; the task is back at build.',
+    '- broken: could not check the PR (gh pr view failed (exit 1): HTTP 404: Not Found).',
+    '- changes: PR review asked for changes; the task is back at build.',
+    '- closed: PR closed without merging.',
+    '- failing: PR checks failed; the task is back at build.',
+    '- garbage: could not check the PR (gh pr view printed no PR state).',
+    '- merged: PR merged; the task is done. Finalize it with the question from `ledger task gate finalize merged`.',
+    '- no-state: could not check the PR (gh pr view printed no PR state).',
+    '- ready: PR checks and review passed; ready to merge.',
+  ]);
+  assert.match(context, /\n\n\d+ task ledgers exist\./);
+  assert.deepEqual(storedLocation(merged).status, { value: 'done', date: localToday() });
+  for (const ledger of [failing, changes, both]) {
+    assert.equal(storedLocation(ledger).status, undefined, ledger);
+    assert.equal(storedStage(ledger), 'build', ledger);
+  }
+  assert.deepEqual([pending, closed, ready, unlinked].map(readLedgerFile), [pendingBefore, closedBefore, readyBefore, unlinkedBefore]);
+  const asked = readFileSync(calls, 'utf8').trim().split('\n').sort();
+  assert.equal(asked.length, Object.keys(answers).length, asked.join('\n'));
+  assert.ok(!asked.some((call) => call.includes(prUrl(30)) || call.includes(prUrl(31))), asked.join('\n'));
+});
+
+test('session-start in a task checks the waiting tasks of its tree only: its root, every descendant and itself', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const backlog = (slug: string, location: string[], children: string[]): void => {
+    const ledger = path.join(h, '.claude/ledger-backlog', repoFolder(h, 'app'), `${slug}.md`);
+    mkdirSync(path.dirname(ledger), { recursive: true });
+    writeFileSync(ledger, familyLedger(slug, [`- main: ${main}`, '- worktree: <path>', ...location], `## Children\n${children.map((child) => `- ${child}\n`).join('')}\n## Next step\nA step.\n`));
+  };
+  backlog('epic', [], ['a', 'b']);
+  backlog('b', ['- parent: epic'], ['g']);
+  const readyPr = { json: open([checkRun('SUCCESS')], 'APPROVED') };
+  const a = waitingTask(h, main, 'a', 1, '- parent: epic');
+  waitingTask(h, main, 'g', 2, '- parent: b');
+  waitingTask(h, main, 'c', 3);
+  const { env, calls } = stubPrs(h, { [prUrl(1)]: readyPr, [prUrl(2)]: readyPr, [prUrl(3)]: readyPr });
+
+  const context = startedWith(h, a.folder, env);
+
+  assert.deepEqual(needsYou(context), ['- a: PR checks and review passed; ready to merge.', '- g: PR checks and review passed; ready to merge.']);
+  assert.ok(!readFileSync(calls, 'utf8').includes(prUrl(3)));
+  assert.ok(context.includes('A task ledger exists for a'), context);
+});
+
+test('session-start asks gh about every PR at once, and counts a call not done in 3 s as an error', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const together = { json: open([checkRun('SUCCESS')], 'APPROVED'), meet: 2 };
+  for (const [name, n] of [['one', 1], ['two', 2], ['hangs', 3]] as const) waitingTask(h, main, name, n);
+  const { env } = stubPrs(h, { [prUrl(1)]: together, [prUrl(2)]: together, [prUrl(3)]: { hang: true } });
+  const started = Date.now();
+
+  const context = startedWith(h, main, env);
+
+  assert.ok(Date.now() - started < 25_000, `took ${Date.now() - started} ms; the hung gh sleeps 30 s`);
+  assert.deepEqual(needsYou(context), [
+    '- hangs: could not check the PR (gh did not answer in 3 s).',
+    '- one: PR checks and review passed; ready to merge.',
+    '- two: PR checks and review passed; ready to merge.',
+  ]);
+});
+
+test('session-start adds no Needs you block when no PR needs the operator, and leaves the rest of its text as it was', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const { folder, ledger } = waitingTask(h, main, 'quiet', 1);
+  const { env, calls } = stubPrs(h, { [prUrl(1)]: { json: open([checkRun('', 'QUEUED')]) } });
+
+  const context = startedWith(h, folder, env);
+
+  assert.equal(needsYou(context), undefined);
+  assert.equal(context, fullLedgerText(ledger));
+  assert.equal(readFileSync(calls, 'utf8'), `pr view ${prUrl(1)} --json state,reviewDecision,statusCheckRollup\n`);
+});
+
+test('session-start never asks gh about a waiting task of another machine, in a main checkout and in a task of its tree', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const here = waitingTask(h, main, 'here', 1, '- parent: away');
+  waitingTask(h, main, 'away', 2, '- host: other-mac');
+  const { env, calls } = stubPrs(h, { [prUrl(1)]: { json: open([checkRun('SUCCESS')], 'APPROVED') } });
+
+  for (const cwd of [main, here.folder]) {
+    writeFileSync(calls, '');
+    assert.deepEqual(needsYou(startedWith(h, cwd, env)), ['- here: PR checks and review passed; ready to merge.'], cwd);
+    assert.equal(readFileSync(calls, 'utf8'), `pr view ${prUrl(1)} --json state,reviewDecision,statusCheckRollup\n`, cwd);
+  }
+});
+
+test('session-start runs no gh when no task is waiting, in a main checkout and in a task', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const plain = worktree(h, main, path.join(h, 'plain'));
+  ledgerIn(h, plain, familyLedger('plain', [`- pr: ${prUrl(1)}`]));
+  const { env, calls } = stubPrs(h, {});
+
+  for (const cwd of [main, plain]) {
+    assert.equal(needsYou(startedWith(h, cwd, env)), undefined, cwd);
+    assert.equal(readFileSync(calls, 'utf8'), '', cwd);
+  }
+});
+
+test('session-start says it could not check a PR when gh is not installed', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  waitingTask(h, main, 'lone', 1);
+  const bin = path.join(h, 'no-gh');
+  mkdirSync(bin);
+  for (const tool of ['git', 'node']) symlinkSync(spawnSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim(), path.join(bin, tool));
+
+  const context = startedWith(h, main, { PATH: bin });
+
+  assert.deepEqual(needsYou(context), ['- lone: could not check the PR (gh did not run: spawn gh ENOENT).']);
+});
+
+test('session-start says it could not update a task whose PR is merged when the write fails, and leaves the task as it was', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const { ledger } = waitingTask(h, main, 'stuck', 1);
+  const { env } = stubPrs(h, { [prUrl(1)]: { json: { state: 'MERGED', reviewDecision: '', statusCheckRollup: [] } } });
+  const before = readLedgerFile(ledger);
+  chmodSync(path.dirname(ledger), 0o555);
+
+  const context = (() => {
+    try {
+      return startedWith(h, main, env);
+    } finally {
+      chmodSync(path.dirname(ledger), 0o755);
+    }
+  })();
+
+  const lines = needsYou(context) ?? [];
+  assert.equal(lines.length, 1, context);
+  assert.match(lines[0], /^- stuck: could not update the task \(.+\)\.$/);
+  assert.equal(readLedgerFile(ledger), before);
+});
+
 // UserPromptSubmit
 
 type PromptSubmitInput = { prompt: string; cwd?: string; session_id?: string; session_title?: string };

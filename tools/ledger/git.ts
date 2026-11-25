@@ -187,14 +187,60 @@ export function deleteBranchAt(main: string, branch: string, commit: string): 'd
   return commitOf(main, `refs/heads/${branch}`) === commit ? { error: result.stderr || 'git update-ref failed' } : 'moved';
 }
 
-/** gh in `folder`; with `timeoutMs`, it is stopped then, and that is an error too. */
-export function gh(folder: string, args: string[], { timeoutMs }: { timeoutMs?: number } = {}): { ok: boolean; stdout: string; error: string } {
-  const result = spawnSync('gh', args, { cwd: folder, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs });
-  if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') return { ok: false, stdout: '', error: `gh did not answer in ${(timeoutMs ?? 0) / 1000} s` };
-  if (result.error) return { ok: false, stdout: '', error: `gh did not run: ${result.error.message}` };
+type GhResult = { ok: boolean; stdout: string; error: string };
+
+/** How one gh process ended; `spawnError` says why it did not run. */
+type GhRun = { status: number | null; stdout: string; stderr: string; timedOut: boolean; spawnError?: string };
+
+const ghTimedOut = (timeoutMs: number): GhResult => ({ ok: false, stdout: '', error: `gh did not answer in ${timeoutMs / 1000} s` });
+
+function ghResult(args: string[], { status, stdout, stderr, timedOut, spawnError }: GhRun, timeoutMs = 0): GhResult {
+  if (timedOut) return ghTimedOut(timeoutMs);
+  if (spawnError !== undefined) return { ok: false, stdout: '', error: `gh did not run: ${spawnError}` };
   // One line without a closing period, as callers put it inside their own sentence; gh may name a token.
-  const stderr = redacted((result.stderr ?? '').replace(/\s+/g, ' ').replace(/[.\s]+$/, '').trim());
-  return { ok: result.status === 0, stdout: result.stdout ?? '', error: `gh ${args.slice(0, 2).join(' ')} failed (exit ${result.status ?? 'none'})${stderr ? `: ${stderr}` : ''}` };
+  const shown = redacted(stderr.replace(/\s+/g, ' ').replace(/[.\s]+$/, '').trim());
+  return { ok: status === 0, stdout, error: `gh ${args.slice(0, 2).join(' ')} failed (exit ${status ?? 'none'})${shown ? `: ${shown}` : ''}` };
+}
+
+/** gh in `folder`; with `timeoutMs`, it is stopped then, and that is an error too. */
+export function gh(folder: string, args: string[], { timeoutMs }: { timeoutMs?: number } = {}): GhResult {
+  const result = spawnSync('gh', args, { cwd: folder, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs });
+  const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT';
+  return ghResult(args, { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '', timedOut, spawnError: timedOut ? undefined : result.error?.message }, timeoutMs);
+}
+
+// The hooks are synchronous, so the gh calls run at once in a child Node process, which prints how each one ended.
+const GH_AT_ONCE = `
+const { execFile } = require('node:child_process');
+const { calls, timeoutMs } = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const run = ({ folder, args }) => new Promise((resolve) => {
+  execFile('gh', args, { cwd: folder, timeout: timeoutMs, encoding: 'utf8' }, (error, stdout, stderr) => resolve({
+    status: error ? (typeof error.code === 'number' ? error.code : null) : 0,
+    stdout,
+    stderr,
+    timedOut: Boolean(error && error.killed),
+    spawnError: error && typeof error.code === 'string' ? error.message : undefined,
+  }));
+});
+Promise.all(calls.map(run)).then((runs) => process.stdout.write(JSON.stringify(runs)));
+`;
+
+/** How long the child process may take beyond `timeoutMs` to start and report before it counts as hung. */
+const GH_AT_ONCE_SLACK_MS = 2000;
+
+/** Runs every gh call at once; one not done in `timeoutMs` is an error, as with gh(). */
+function ghAtOnce(calls: { folder: string; args: string[] }[], timeoutMs: number): GhResult[] {
+  if (calls.length === 0) return [];
+  const result = spawnSync(process.execPath, ['-e', GH_AT_ONCE], { input: JSON.stringify({ calls, timeoutMs }), encoding: 'utf8', timeout: timeoutMs + GH_AT_ONCE_SLACK_MS });
+  let runs: unknown;
+  try {
+    runs = JSON.parse(result.stdout ?? '');
+  } catch {
+    // No report: the child process hung or failed, which the answer below says for every call.
+  }
+  if (Array.isArray(runs) && runs.length === calls.length) return (runs as GhRun[]).map((run, index) => ghResult(calls[index].args, run, timeoutMs));
+  const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT';
+  return calls.map(() => (timedOut ? ghTimedOut(timeoutMs) : { ok: false, stdout: '', error: `gh did not run: ${result.error?.message ?? (result.stderr || 'no report').trim()}` }));
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
@@ -242,6 +288,33 @@ export function prState(folder: string, pr: string): 'merged' | 'not merged' | '
     // Not JSON: the same answer as JSON without a state.
   }
   return 'unknown';
+}
+
+/** A check of a PR: a check run has a conclusion once it is done, a commit status has a state; empty when it has none. */
+export type PrCheck = { conclusion: string; state: string };
+
+/** What gh says of a PR: its state, as MERGED, its review decision, empty for none, and its checks. */
+export type PrView = { state: string; reviewDecision: string; checks: PrCheck[] };
+
+const textOf = (value: unknown): string => (typeof value === 'string' ? value : '');
+
+function prView(stdout: string): PrView | { error: string } {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    if (isRecord(parsed) && typeof parsed.state === 'string') {
+      const rollup = Array.isArray(parsed.statusCheckRollup) ? parsed.statusCheckRollup.filter(isRecord) : [];
+      return { state: parsed.state, reviewDecision: textOf(parsed.reviewDecision), checks: rollup.map(({ conclusion, state }) => ({ conclusion: textOf(conclusion), state: textOf(state) })) };
+    }
+  } catch {
+    // Not JSON: the same answer as JSON without a state.
+  }
+  return { error: 'gh pr view printed no PR state' };
+}
+
+/** What gh says of each PR, a number or URL asked in its folder; all are asked at once, and each gets `timeoutMs`. */
+export function prViews(queries: { folder: string; pr: string }[], timeoutMs: number): (PrView | { error: string })[] {
+  const calls = queries.map(({ folder, pr }) => ({ folder, args: ['pr', 'view', pr, '--json', 'state,reviewDecision,statusCheckRollup'] }));
+  return ghAtOnce(calls, timeoutMs).map((result) => (result.ok ? prView(result.stdout) : { error: result.error }));
 }
 
 /** gh lists 30 PRs unless told otherwise; a branch reused for years can have more merged ones than that. */

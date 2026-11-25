@@ -26,3 +26,8 @@ export function checkTransition(slug: string, from: ActiveState, to: ActiveState
   const refused = `${slug} is ${from}, so it cannot become ${to}.`;
   fail(next.length === 0 ? `${refused} Finalize it with the question from \`ledger task gate finalize ${slug}\`.` : `${refused} A ${from} task can become ${either(next)}.`);
 }
+
+/** Fails unless a task of `kind`, code when none, has the PR link it needs to become waiting (LLP 0001 D39). */
+export function checkPrLink(slug: string, { kind = 'code', pr }: { kind?: string; pr?: string }): void {
+  if (kind === 'code' && pr === undefined) fail(`${slug} is a code task without a PR link, so it cannot become waiting. Record the link first: ledger task pr <url>`);
+}

@@ -11,6 +11,7 @@ import { checkoutRoot, gitTimedOut, inMainCheckout, limitGitCalls, mainCheckout,
 import { limitLockWaits, lockFile, reclaimGuard } from './lock.js';
 import { conversionHint } from './migrate-repo-ids.js';
 import { CITATION_ADVICE, realPath, samePath, SESSION_CITATION, type LedgerPaths } from './paths.js';
+import { prCheckLines } from './pr-check.js';
 import { repoKey, repoLabel } from './repo-key.js';
 import { holdsUnmovedLedger, keepsUnmovedLedger } from './unmoved.js';
 import { sqliteFile } from './sqlite-store.js';
@@ -187,7 +188,7 @@ const tasksOnDisk = ({ store }: HookContext): Task[] => findTasks(store);
  * With git storage it pulls first, and a sync problem adds one line before the ledgers. The pull, and every git call and
  * lock wait after it, opening and closing the store too, end by `deadline`.
  */
-function sessionLedgerContext(input: HookInput, context: HookContext, deadline: number): { hint?: string; text?: string; title?: string } {
+function sessionLedgerContext(input: HookInput, context: HookContext, deadline: number): { needsYou?: string; hint?: string; text?: string; title?: string } {
   limitLockWaits(deadline);
   limitCloneGitCalls(deadline);
   // Opened first, as git in the session folder may use up the time that is left after the pull.
@@ -202,12 +203,17 @@ function sessionLedgerContext(input: HookInput, context: HookContext, deadline: 
   let clock: ClaimClock | undefined;
   const heldElsewhere = ({ ledger: { location } }: Task): Claim | undefined =>
     location.claim && otherClaim(location.claim, input.sessionId || undefined, (clock ??= claimClock(context.paths.home)));
-  const ledgers = found.tasks.length === 0 ? undefined : sessionStartText(found, tasksOnDisk(context), heldElsewhere);
+  const onDisk = found.tasks.length === 0 ? [] : tasksOnDisk(context);
+  const ledgers = found.tasks.length === 0 ? undefined : sessionStartText(found, onDisk, heldElsewhere);
   // Last, so a worktree listing that hangs costs the hint and not the ledgers.
   const hint = [conversion, unmovedHint(context.store, cwd)].filter((part) => part !== undefined).join('\n') || undefined;
-  if (ledgers === undefined) return { hint, text: notice };
-  return { hint, text: notice === undefined ? ledgers : `${notice}\n${ledgers}`, title: sessionTitle(found) };
+  // After the ledgers, so gh's own time limit never eats into git's.
+  const needsYou = needsYouBlock(prCheckLines(context, found, onDisk));
+  if (ledgers === undefined) return { needsYou, hint, text: notice };
+  return { needsYou, hint, text: notice === undefined ? ledgers : `${notice}\n${ledgers}`, title: sessionTitle(found) };
 }
+
+const needsYouBlock = (lines: string[]): string | undefined => (lines.length === 0 ? undefined : ['Needs you:', ...lines.map((line) => `- ${line}`)].join('\n'));
 
 /**
  * Hook failures since the last report come first, above the sync notice and the ledgers, and count as reported once the
@@ -216,7 +222,7 @@ function sessionLedgerContext(input: HookInput, context: HookContext, deadline: 
  */
 export function sessionStart(input: HookInput, context: HookContext, deadline = Date.now() + GIT_TIMEOUT_MS): SessionStartOutput | undefined {
   const failures = unreportedHookFailures(context.paths);
-  let ledgers: { hint?: string; text?: string; title?: string };
+  let ledgers: { needsYou?: string; hint?: string; text?: string; title?: string };
   try {
     ledgers = sessionLedgerContext(input, context, deadline);
   } catch (error) {
@@ -224,7 +230,7 @@ export function sessionStart(input: HookInput, context: HookContext, deadline = 
     logHookFailure(context.paths.home, 'ledger hook session-start', error instanceof Error ? error.message : String(error));
     ledgers = {};
   }
-  const additionalContext = [failures?.text, ledgers.hint, ledgers.text].filter((part) => part !== undefined).join('\n\n');
+  const additionalContext = [ledgers.needsYou, failures?.text, ledgers.hint, ledgers.text].filter((part) => part !== undefined).join('\n\n');
   if (additionalContext === '') return undefined;
   if (failures !== undefined) markHookFailuresReported(context.paths.home, failures);
   return {

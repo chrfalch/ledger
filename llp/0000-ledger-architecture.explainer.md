@@ -637,8 +637,13 @@ because its turn end does not clear the session.
 
 - `session-start`: injects the ledgers of the session's folder, read from the
   store, with the status of their parent and child tasks. With git storage it pulls first, and
-  a sync problem adds one line above the ledgers. The whole hook has one
-  five-second deadline. In a main checkout it skips lost tasks.
+  a sync problem adds one line above the ledgers. In a main checkout it skips lost tasks.
+  It then asks gh about the PR of each waiting task (`tools/ledger/pr-check.ts`).
+  A *Needs you:* block comes first in the text, with one line for each PR that
+  needs the operator. The time is set in three parts. The pull, every git call
+  and every lock wait share one five-second deadline. Then gh gets 3 seconds
+  for all PRs at once. The writes that gh's answers ask for then get 2 seconds
+  of their own, from when gh is done, as the five seconds may be up by then.
 - `prompt-submit`: titles the session when the prompt is exactly
   `go <slug>`.
 - `pre-compact`: tells the compaction to keep the task's slug, worktree path
@@ -1031,6 +1036,9 @@ Known limits of task records:
    go on, and name what it waits for. Each refuses a move the state table
    of [LLP 0001 section 5.1](0001-ledger-workflow.plan.md#51-states) does
    not allow (`tools/ledger/states.ts`).
+   `ledger task pr <url>` records the PR link and marks the task waiting. A
+   code task cannot become waiting without that link. Each session start
+   asks GitHub about the PR of each waiting task (`tools/ledger/pr-check.ts`).
 5. `ledger task retire` archives the ledger and removes the worktree.
 
 A parent task stays in the backlog. Its ledger lists its child tasks.

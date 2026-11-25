@@ -9,8 +9,9 @@ import { checkoutRoot, currentBranch, mainCheckout, repairWorktree } from './git
 import { withLock } from './lock.js';
 import { messageOf, moveLedger, namedMain, places, shown, type Place } from './migrate-repo-ids.js';
 import { samePath } from './paths.js';
+import { parseRecord } from './record.js';
 import { isRepoKey, repoKey, repoLabel } from './repo-key.js';
-import { checkTransition, stateOf } from './states.js';
+import { checkPrLink, checkTransition, stateOf } from './states.js';
 import { keyAndAliases, readable, SharedWorktree, type Alias, type LedgerStore } from './store.js';
 import { activeTasks, taskRef, UNKNOWN_HOST, type Task } from './tasks.js';
 import { heading, plural } from './views.js';
@@ -242,6 +243,8 @@ function pointTo(context: Context, writable: () => LedgerStore, name: string, to
   if (task.ledger.location.status?.value === 'parked') fail(`${task.slug} is parked, so it was not pointed at ${folder}: --to repairs only a task that is active or lost.`);
   // A status line under the lost mark stays, as nothing else could clear it on a lost task.
   if (task.status === 'lost') checkTransition(task.slug, 'lost', 'active');
+  // The status line under a lost mark comes back with the folder, so a waiting one is a move to waiting.
+  if (task.status === 'lost' && task.ledger.location.status?.value === 'waiting') checkPrLink(task.slug, parseRecord(readLedger(context, task)));
   if (!isFolder(folder)) fail(`${folder} does not exist, so ${task.slug} was not pointed at it.`);
   const root = checkoutRoot(folder);
   const main = mainCheckout(folder);

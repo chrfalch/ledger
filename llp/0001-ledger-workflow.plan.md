@@ -309,11 +309,20 @@ Every widget also has **Close**.
 6. **PR.** Widget: *Commit, push and open the PR / Not yet / Close*. The agent
    records the PR link with `ledger task pr <url>` (D19). The task moves to waiting.
 7. **Waiting.** At each session start, the tool checks the PR of every waiting
-   task in the tree and reports what changed (D20):
+   task in the tree and reports what changed (D20). In a main checkout, it
+   checks every waiting task of the repo. It asks gh about all PRs at once and
+   waits at most 3 seconds. Each outcome below that has a line goes under
+   *Needs you:*, first in the session-start text:
+   - PR merged, here or elsewhere: the task becomes done and step 8 runs;
    - checks failed or review asked for changes: the task goes back to active
      at stage build;
-   - checks and review passed: widget *Merge now / Not yet / Close* (D4);
-   - PR merged, here or elsewhere: the task becomes done and step 8 runs.
+   - checks and review passed: the PR is ready to merge; widget *Merge now /
+     Not yet / Close* (D4);
+   - PR closed without merging: a line, and nothing changes;
+   - gh failed or did not answer in time: a line, and nothing changes;
+   - checks still running or review still required: no line. A check whose
+     conclusion is STALE, or a commit status that is EXPECTED, counts as
+     still running.
    
    A child whose PR is stacked on its parent's branch is rebased onto the
    default branch after the parent merges. Stacked PRs merge bottom-up.

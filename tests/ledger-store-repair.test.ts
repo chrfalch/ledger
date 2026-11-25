@@ -1031,6 +1031,35 @@ test('store repair <slug> --to of a lost task with a status line removes the los
   assert.equal(taskIn(repair, app, 'fix-login').status, 'blocked');
 });
 
+test('store repair <slug> --to refuses to make a lost code task waiting without a PR link; with a link, or as a docs task, it repairs', (t) => {
+  const { h, app, key } = setup(t);
+  const repair = forStorage(h);
+  const store = fileStore(ledgerPaths(h));
+  const lostWaiting = (slug: string, ...bullets: [string, string][]): string => {
+    const { worktree } = start(repair, app, slug);
+    const moved = path.join(h, 'moved', slug);
+    mkdirSync(path.dirname(moved), { recursive: true });
+    renameSync(worktree, moved);
+    store.active.update(key, slug, (text) =>
+      [['lost', `2026-01-02 — folder ${worktree} not found`], ...bullets].reduce((each, [name, value]) => setLocationBullet(each, name, value) ?? each, setStatus(text, { value: 'waiting', date: '2026-01-01' }) ?? text),
+    );
+    return moved;
+  };
+
+  const bare = lostWaiting('bare');
+  const before = store.active.read(key, 'bare')?.text;
+  fails(repair(app, 'store', 'repair', 'bare', '--to', bare), 'bare is a code task without a PR link, so it cannot become waiting. Record the link first: ledger task pr <url>');
+  assert.equal(store.active.read(key, 'bare')?.text, before);
+
+  const linked = lostWaiting('linked', ['pr', 'https://github.com/acme/app/pull/7']);
+  ok(repair(app, 'store', 'repair', 'linked', '--to', linked));
+  assert.equal(taskIn(repair, app, 'linked').status, 'waiting');
+
+  const docs = lostWaiting('docs', ['kind', 'docs']);
+  ok(repair(app, 'store', 'repair', 'docs', '--to', docs));
+  assert.equal(taskIn(repair, app, 'docs').status, 'waiting');
+});
+
 test('store repair --remote moves a ledger that names no main checkout when the old key is an alias of this repo already', (t) => {
   const { h, app, key, newKey, repair } = renamedRemote(t);
   const store = fileStore(ledgerPaths(h));
