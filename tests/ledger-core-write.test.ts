@@ -1128,6 +1128,47 @@ test('tree next with every child waiting prints nothing and says on stderr what 
   assert.match(ran.stderr, /^ +y waits for nowhere, api@github\.com\/acme\/other\.$/m);
 });
 
+test('tree ready prints the chain to every child that can start now, by order, through a nested parent to its leaves', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'epic', children: ['- a', '- nested', '- b'] });
+  backlogTask(h, app, { slug: 'a', parent: 'epic' });
+  backlogTask(h, app, { slug: 'nested', parent: 'epic', children: ['- deep', '- deeper'] });
+  backlogTask(h, app, { slug: 'deep', parent: 'nested' });
+  backlogTask(h, app, { slug: 'deeper', parent: 'nested' });
+  backlogTask(h, app, { slug: 'b', parent: 'epic' });
+  const ran = ledger(h, app, 'tree', 'ready', 'epic');
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(ran.stdout, 'epic a\nepic nested deep\nepic nested deeper\nepic b\n');
+  assert.equal(ran.stderr, '');
+});
+
+test('tree ready leaves out a child until the task it waits for is retired, and says on stderr which child is running', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'epic', children: ['- busy', '- ui', '- docs'] });
+  worktreeTask(h, app, { slug: 'busy', parent: 'epic' });
+  located(backlogTask(h, app, { slug: 'ui', parent: 'epic' }), '- depends on: api');
+  backlogTask(h, app, { slug: 'docs', parent: 'epic' });
+  const api = backlogTask(h, app, { slug: 'api' });
+  const waiting = ledger(h, app, 'tree', 'ready', 'epic');
+  assert.equal(waiting.status, 0, waiting.stderr);
+  assert.equal(waiting.stdout, 'epic docs\n');
+  assert.equal(waiting.stderr, 'busy is running.\n');
+  rmSync(api);
+  archivedTask(h, app, '2026-11-20', { slug: 'api' });
+  assert.equal(ok(ledger(h, app, 'tree', 'ready', 'epic')), 'epic ui\nepic docs\n');
+});
+
+test('tree ready with no child that can start prints nothing and says on stderr what runs and what each child waits for', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'stuck', children: ['- busy', '- x'] });
+  worktreeTask(h, app, { slug: 'busy', parent: 'stuck' });
+  located(backlogTask(h, app, { slug: 'x', parent: 'stuck' }), '- depends on: busy');
+  const ran = ledger(h, app, 'tree', 'ready', 'stuck');
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(ran.stdout, '');
+  assert.equal(ran.stderr, 'busy is running.\nNo child task of stuck can start yet:\n  x waits for busy.\n');
+});
+
 test('go on a parent starts its first ready child by order; a backlog parent whose children all wait fails and names what they wait for', (t) => {
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'epic', children: ['- a', '- b'] });

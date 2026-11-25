@@ -312,6 +312,30 @@ test('tree order and tree depends --json report what they set; tree next --json 
   refused(json(h, app, 'tree', 'depends', 'first', 'first'), /itself/);
 });
 
+test('tree ready --json names the chain to each child that can start, to each started child, and what each waiting child waits for', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'epic', children: ['- first', '- nested', '- waits'] });
+  backlogTask(h, app, { slug: 'first', parent: 'epic' });
+  backlogTask(h, app, { slug: 'nested', parent: 'epic', children: ['- running', '- deep'] });
+  worktreeTask(h, app, { slug: 'running', parent: 'nested' });
+  backlogTask(h, app, { slug: 'deep', parent: 'nested' });
+  backlogTask(h, app, { slug: 'waits', parent: 'epic' });
+  done(json(h, app, 'tree', 'depends', 'waits', 'later'));
+  const ref = (slug: string) => ({ slug, main: app });
+  const [epic, nested] = [ref('epic'), ref('nested')];
+  assert.deepEqual(done(json(h, app, 'tree', 'ready', 'epic')), {
+    ok: true,
+    action: 'ready',
+    parent: epic,
+    ready: [
+      [epic, ref('first')],
+      [epic, nested, ref('deep')],
+    ],
+    running: [[epic, nested, ref('running')]],
+    blocked: [{ child: ref('waits'), dependencies: [{ slug: 'later', repo: repoKeyOf(app) }] }],
+  });
+});
+
 test('go --json promotes a backlog task and reports its worktree, branch, base and ledger', (t) => {
   const { h, app } = setup(t);
   backlogTask(h, app, { slug: 'fix-login' });

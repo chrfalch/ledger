@@ -322,6 +322,7 @@ test('policy allow rules are exactly the everyday ledger commands', () => {
     ...task.map((command) => `Bash(ledger task ${command}:*)`),
     'Bash(ledger tree show:*)',
     'Bash(ledger tree next:*)',
+    'Bash(ledger tree ready:*)',
   ]);
 });
 

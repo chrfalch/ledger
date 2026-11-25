@@ -111,7 +111,8 @@
       "Bash(ledger task archive:*)",
       "Bash(ledger task gate:*)",
       "Bash(ledger tree show:*)",
-      "Bash(ledger tree next:*)"
+      "Bash(ledger tree next:*)",
+      "Bash(ledger tree ready:*)"
     ]
   }
 }

@@ -602,6 +602,7 @@ test('two /ledger:next calls through the Skill tool that overlap start only the 
 for (const [command, args] of [
   ['ledger:close', ''],
   ['ledger:park', 'waits for review'],
+  ['ledger:fleet', 'umbrella'],
 ] as const) {
   test(`/${command} through the Skill tool stays refused after the pick`, async ($, on) => {
     const w = world(on, { [SESSION]: ownEpic() }, { cwd: CWD })

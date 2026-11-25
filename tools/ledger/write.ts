@@ -695,7 +695,7 @@ export function recordPr(context: Context, name: string | undefined, url: string
 
 export const recordPrText = ({ slug, pr }: PrResult): string => `Recorded PR ${pr} on ${slug}; the task is waiting.`;
 
-export type ParentAction = 'add' | 'remove' | 'start' | 'next';
+export type ParentAction = 'add' | 'remove' | 'start' | 'next' | 'ready';
 
 /** A backlog child passed over because it waits for `dependencies`, which are not done. */
 export type Blocked = { child: Ref; dependencies: Required<Dependency>[] };
@@ -703,12 +703,14 @@ export type Blocked = { child: Ref; dependencies: Required<Dependency>[] };
 /**
  * What `ledger tree <action> <parent>` did. A start that marks nothing says why: the line is `already-marked` with
  * `mark`, or the child is `retired`. A next names the chain from the parent down to the child to start, empty for none;
- * with none, `blocked` names each child that waits for a task not done.
+ * with none, `blocked` names each child that waits for a task not done. A ready names the chain to every child that can
+ * start now and to every child already started, and each child that waits.
  */
 export type ParentChange =
   | { action: 'add' | 'remove'; parent: Ref; child: Ref }
   | { action: 'start'; parent: Ref; child: Ref; ledger: string; marked: boolean; reason?: 'already-marked' | 'retired'; mark?: ChildMark['kind'] }
-  | { action: 'next'; parent: Ref; chain: Ref[]; blocked?: Blocked[] };
+  | { action: 'next'; parent: Ref; chain: Ref[]; blocked?: Blocked[] }
+  | { action: 'ready'; parent: Ref; ready: Ref[][]; running: Ref[][]; blocked: Blocked[] };
 
 /** How messages name a dependency: `<slug>` in the repo of `cwd`, else `<slug>@<repo key>`. */
 function dependencyName(cwd: string) {
@@ -721,6 +723,12 @@ function dependencyName(cwd: string) {
 export function waitingLines(cwd: string, blocked: Blocked[]): string[] {
   const [name, dependency] = [nameFrom(cwd), dependencyName(cwd)];
   return blocked.map(({ child, dependencies }) => `${name(child)} waits for ${dependencies.map(dependency).join(', ')}.`);
+}
+
+/** One `<child> is running.` line per chain to a started child. */
+export function runningLines(cwd: string, running: Ref[][]): string[] {
+  const name = nameFrom(cwd);
+  return running.map((chain) => `${name(chain[chain.length - 1])} is running.`);
 }
 
 /** The line to print, empty for none. */
@@ -737,17 +745,23 @@ export function parentChangeText({ cwd, paths }: Context, change: ParentChange):
       return `${name(change.child)} is already marked ${change.mark} in ${paths.tilde(change.ledger)}.`;
     case 'next':
       return change.chain.map(name).join(' ');
+    case 'ready':
+      return change.ready.map((chain) => chain.map(name).join(' ')).join('\n');
   }
 }
 
 /** `ledger tree <action> <parent> [<child>]`. */
 export function changeParent(context: Context, parentName: string, action: ParentAction, childName: string | undefined): ParentChange {
-  if (action === 'next') {
-    if (childName !== undefined) fail('ledger tree next <parent> takes no child.');
+  if (action === 'next' || action === 'ready') {
+    if (childName !== undefined) fail(`ledger tree ${action} <parent> takes no child.`);
     const { task, ref, tasks } = liveTask(context, parentName);
-    const blocked: Blocked[] = [];
-    const chain = firstToStart(tasks, { task, ref }, blocked) ?? [];
-    return { action, parent: ref, chain, ...(chain.length === 0 && blocked.length > 0 ? { blocked } : {}) };
+    const walk: Walk = { blocked: [], running: [] };
+    if (action === 'ready') {
+      const ready = [...startable(tasks, { task, ref }, walk)];
+      return { action, parent: ref, ready, running: walk.running, blocked: walk.blocked };
+    }
+    const chain = firstToStart(tasks, { task, ref }, walk.blocked) ?? [];
+    return { action, parent: ref, chain, ...(chain.length === 0 && walk.blocked.length > 0 ? { blocked: walk.blocked } : {}) };
   }
   if (childName === undefined) return fail(`ledger tree ${action} <parent> needs a child: ledger tree ${action} ${parentName} <child>`);
   const parentRef = taskRef(context.cwd, parentName);
@@ -950,23 +964,30 @@ function startChildTask(context: Context, tasks: Task[], parent: Linked, childRe
   return mark === undefined ? { ...started, marked: true } : { ...started, marked: false, reason: 'already-marked', mark };
 }
 
+/** What a walk of the children passed over: each child that waits, and the chain to each child already started. */
+type Walk = { blocked: Blocked[]; running: Ref[][] };
+
 /**
- * The chain from the parent down to its first child, by order, that is still in the backlog, by disk, and waits for no
- * task that is not done. A child with children of its own is not started itself: its first such child is. A task
- * already on the chain is a cycle and is skipped. Each child passed over for what it waits for is added to `blocked`.
+ * The chain from the parent down to each child, by order, that is still in the backlog, by disk, and waits for no task
+ * that is not done. A child with children of its own is not started itself: the walk goes on into its children. A task
+ * already on the chain is a cycle and is skipped. Each child passed over is added to `walk`, up to the last chain taken.
  */
-function firstToStart(tasks: Task[], parent: Linked, blocked: Blocked[], chain: Ref[] = [parent.ref]): Ref[] | undefined {
+function* startable(tasks: Task[], parent: Linked, walk: Walk, chain: Ref[] = [parent.ref]): Generator<Ref[]> {
   for (const { ref: child, task: found } of orderedChildren(parent.task, parent.ref.main, tasks)) {
-    if (found?.place !== 'backlog' || chain.some((ref) => sameTask(ref, child))) continue;
+    if (chain.some((ref) => sameTask(ref, child))) continue;
+    if (found?.place === 'active') walk.running.push([...chain, child]);
+    if (found?.place !== 'backlog') continue;
     const waiting = dependenciesOf(found).filter((dependency) => !isDone(dependencyTask(tasks, dependency)));
-    if (waiting.length > 0) {
-      blocked.push({ child, dependencies: waiting });
-      continue;
-    }
-    const picked = namedChildren(found, tasks).length === 0 ? [...chain, child] : firstToStart(tasks, { task: found, ref: child }, blocked, [...chain, child]);
-    if (picked) return picked;
+    if (waiting.length > 0) walk.blocked.push({ child, dependencies: waiting });
+    else if (namedChildren(found, tasks).length === 0) yield [...chain, child];
+    else yield* startable(tasks, { task: found, ref: child }, walk, [...chain, child]);
   }
-  return undefined;
+}
+
+/** The first chain `startable` gives; each child passed over for what it waits for is added to `blocked`. */
+function firstToStart(tasks: Task[], parent: Linked, blocked: Blocked[], chain: Ref[] = [parent.ref]): Ref[] | undefined {
+  const [first] = startable(tasks, parent, { blocked, running: [] }, chain);
+  return first;
 }
 
 /** The task `ledger tree next` would start under `parent`, with `skip` passed over; it starts nothing. */

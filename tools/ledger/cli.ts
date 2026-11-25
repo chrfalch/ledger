@@ -92,12 +92,14 @@ import {
   parkText,
   recordPr,
   recordPrText,
+  runningLines,
   setDependencies,
   unblockTask,
   unblockText,
   unparkTask,
   unparkText,
   waitingLines,
+  type Blocked,
   type Context,
   type ParentAction,
   type TaskOptions,
@@ -582,11 +584,12 @@ export async function main(argv: string[]): Promise<number> {
   const childSlug = 'the child task, as <slug> or <slug>@<path>';
   const changeChildren = (slug: string, action: ParentAction, child?: string): void => {
     const change = changeParent(context, slug, action, child);
-    if (!json && change.action === 'next' && change.chain.length === 0) {
-      const { parent: from, blocked = [] } = change;
-      console.error(
-        blocked.length === 0 ? `No child task of ${from.slug} is left in the backlog.` : [`No child task of ${from.slug} can start yet:`, ...waitingLines(cwd, blocked).map((line) => `  ${line}`)].join('\n'),
-      );
+    const noneToStart = (from: string, blocked: Blocked[]): string =>
+      blocked.length === 0 ? `No child task of ${from} is left in the backlog.` : [`No child task of ${from} can start yet:`, ...waitingLines(cwd, blocked).map((line) => `  ${line}`)].join('\n');
+    if (!json && change.action === 'next' && change.chain.length === 0) console.error(noneToStart(change.parent.slug, change.blocked ?? []));
+    if (!json && change.action === 'ready') {
+      for (const line of runningLines(cwd, change.running)) console.error(line);
+      if (change.ready.length === 0) console.error(noneToStart(change.parent.slug, change.blocked));
     }
     show(change, (done) => parentChangeText(context, done));
   };
@@ -608,6 +611,7 @@ export async function main(argv: string[]): Promise<number> {
         '  ledger tree depends fix-login api     fix-login starts only once api is retired',
         '  ledger tree depends fix-login         fix-login waits for no task',
         '  ledger tree next epic                 print the chain from epic to the child task that starts next',
+        '  ledger tree ready epic                print the chain from epic to each child task that can start now',
         '',
         'A child task added with add goes after the others. The child that starts next is the first, in that order,',
         'that is still in the backlog and waits for no task that is not retired yet.',
@@ -659,6 +663,14 @@ export async function main(argv: string[]): Promise<number> {
     .argument('<slug>', parentSlug)
     .option('--json', JSON_HELP)
     .action((slug: string) => changeChildren(slug, 'next'));
+  treeGroup
+    .command('ready')
+    .description(
+      'Print the chain from <slug> to each child task that can start now, one per line, by order: each still in the backlog and waiting for no task that is not retired. On stderr, each child already started is running; when none can start, stderr says what each child waits for.',
+    )
+    .argument('<slug>', parentSlug)
+    .option('--json', JSON_HELP)
+    .action((slug: string) => changeChildren(slug, 'ready'));
 
   const storeGroup = program.command('store').description('Change where the ledgers are kept, in files, in SQLite or in a private git repository, and sync that repository.');
   storeGroup
