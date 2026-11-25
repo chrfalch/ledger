@@ -192,7 +192,7 @@ const askingTheOperator = () => read('rules/20-writing.md').match(/### Asking th
 
 test('the writing rule takes the widget of each gate ledger task gate knows from it', () => {
   const section = askingTheOperator();
-  assert.match(section, /At a gate that `ledger task gate` knows \(`plan` and `pr` today\), show the question it prints as JSON\. Do not write its options yourself\./);
+  assert.match(section, /At a gate that `ledger task gate` knows \(`plan`, `pr`, `abandon` and `finalize` today\), show the question it prints as JSON\. Do not write its options yourself\./);
   assert.match(section, /Write any other gate yourself, with at most three actions, plus Close\./);
 });
 

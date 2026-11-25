@@ -6,6 +6,7 @@ import { parseLedger } from './format.js';
 import { isKind, KINDS, STAGES } from './kinds.js';
 import { CITATION_ADVICE, realPath, SESSION_CITATION } from './paths.js';
 import { parseRecord, renderRecord, validateRecord, type Constraint, type Decision, type Question, type Step, type TaskRecord } from './record.js';
+import { checkTransition, stateOf } from './states.js';
 import { notOnThisMachine, type Task } from './tasks.js';
 import { currentTask, liveTask, readLedger, today, updateLedger, type Context } from './write.js';
 
@@ -248,6 +249,9 @@ export type StageCall = { outcome?: string; back?: string; skip?: string; step?:
 
 const STEP_STATUS_AFTER: Readonly<Record<string, string>> = { red: 'red', build: 'green', review: 'reviewed' };
 
+/** The rejected review round that blocks the task until the operator decides (D22). */
+const BLOCKING_ROUNDS = 3;
+
 /**
  * Records the outcome of the stage the task is at, which must be `stage`, and moves the task on: to the next stage on
  * pass or skip, to `back` on fail with it. A record with no kind is code; one with no stage is at the first.
@@ -287,15 +291,33 @@ export function recordStage(context: Context, name: string | undefined, stage: s
     record.stage = next;
     const note = reason !== undefined ? `skipped: ${reason}` : back !== undefined ? `fail, back to ${back}` : outcome;
     record.notes.push(`${today()} stage ${stage} ${note}`);
-    return { stage, result, next };
+    if (stage !== 'review' || result !== 'failed') return { stage, result, next };
+
+    const reviewRounds = (record.reviewRounds ?? 0) + 1;
+    record.reviewRounds = reviewRounds;
+    // Only an active task can be blocked: a backlog task stays backlog, whatever status line its ledger has (D7).
+    const blocked = reviewRounds >= BLOCKING_ROUNDS && task.place !== 'backlog';
+    if (blocked && record.status?.value !== 'blocked') {
+      checkTransition(task.slug, stateOf(record), 'blocked');
+      record.status = { value: 'blocked', date: today(), detail: 'review rejected three times' };
+    }
+    return { stage, result, next, reviewRounds, blocked };
   });
 }
 
-export function recordStageText({ slug, stage, result, next }: ReturnType<typeof recordStage>): string {
+/** What a rejected review round asks of the agent (D22): nothing after the first, more effort after the second, the operator after that. */
+function reviewEscalation(slug: string, rounds: number | undefined, blocked: boolean | undefined): string {
+  if (rounds === undefined || rounds < BLOCKING_ROUNDS - 1) return '';
+  const rejected = `Review rejected ${rounds} times:`;
+  if (rounds < BLOCKING_ROUNDS) return ` ${rejected} run the next round at higher effort and tell the operator.`;
+  return ` ${rejected} ${blocked ? `${slug} is blocked; ask` : 'ask'} the operator what to do.`;
+}
+
+export function recordStageText({ slug, stage, result, next, reviewRounds, blocked }: ReturnType<typeof recordStage>): string {
   const onward = next === FINISHED ? `${slug} is ${FINISHED}` : `next is ${next}`;
   if (result === 'skipped') return `Skipped stage ${stage} of ${slug}; ${onward}.`;
   if (result === 'passed') return `Stage ${stage} of ${slug} passed; ${onward}.`;
-  return `Stage ${stage} of ${slug} failed; ${next === stage ? `it stays at ${stage}` : `back to ${next}`}.`;
+  return `Stage ${stage} of ${slug} failed; ${next === stage ? `it stays at ${stage}` : `back to ${next}`}.${reviewEscalation(slug, reviewRounds, blocked)}`;
 }
 
 export type CheckResult = { slug: string; ledger: string; problems: string[] };

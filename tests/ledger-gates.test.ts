@@ -304,6 +304,27 @@ test('ledger task gate finalize outside a task, with no slug, says to name one',
 
 test('ledger task gate names the finalize gate in its help and when a name is unknown', (t) => {
   const h = home(t);
-  assert.match(ok(ledger(h, h, 'task', 'gate', '--help')), /plan, pr, finalize/);
-  assert.match(ledger(h, h, 'task', 'gate', 'merge').stderr, /plan, pr, finalize/);
+  assert.match(ok(ledger(h, h, 'task', 'gate', '--help')), /plan, pr, abandon, finalize/);
+  assert.match(ledger(h, h, 'task', 'gate', 'merge').stderr, /plan, pr, abandon, finalize/);
+});
+
+test('the abandon gate asks to abandon the task, offers Abandon task, Not yet and Close, and closes as the plan gate does', () => {
+  assert.ok(GATE_NAMES.includes('abandon'));
+  const question = gateQuestion('abandon', 'fix-login');
+  assertQuestionShape(question);
+  assert.equal(question.question, 'Abandon fix-login? Its ledger is archived and nothing is merged.');
+  assert.equal(question.header, 'Abandon');
+  assert.equal(question.multiSelect, false);
+  assert.deepEqual(labels(question), ['Abandon task (Recommended)', 'Not yet', 'Close']);
+  assert.equal(question.options.at(-1)?.description, gateQuestion('plan').options.at(-1)?.description);
+  assert.equal(gateQuestion('abandon').question, 'Abandon this task? Its ledger is archived and nothing is merged.');
+});
+
+test('ledger task gate abandon prints the abandon question for the task of the worktree it runs in', (t) => {
+  const h = home(t);
+  const app = repository(h, path.join(h, 'repos/app'));
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const question = JSON.parse(ok(ledger(h, worktreeOf(app, 'fix-login'), 'task', 'gate', 'abandon'))) as GateQuestion;
+  assert.deepEqual(question, gateQuestion('abandon', 'fix-login'));
+  assert.deepEqual(JSON.parse(ok(ledger(h, h, 'task', 'gate', 'abandon', 'fix-login'))), question);
 });

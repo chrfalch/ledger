@@ -4,7 +4,7 @@ import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, read
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { REPO, snapshot } from './helpers.js';
-import { activeFile, archivedTask, asCli, backlogTask, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, ok, putActive, readLedgerFile, repoKeyOf, repository, spawn, storeFolder, worktreeTask, writeLedgerFile, type Ran } from './ledger-core-fixtures.js';
+import { activeFile, archivedTask, asCli, backlogTask, git, home, LEDGER_BIN, ledger, ledgerText, lineWith, ok, putActive, readLedgerFile, repoKeyOf, repository, spawn, storeFolder, THIS_HOST, worktreeTask, writeLedgerFile, type Ran } from './ledger-core-fixtures.js';
 import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
@@ -1045,4 +1045,552 @@ test('ledger retire --dry-run --json names the open PR of a branch that is not m
   assert.equal(merged.worktree.merged, true);
   assert.equal(merged.worktree.openPr, undefined);
   assert.equal(read(calls).includes('--state all'), false, read(calls));
+});
+
+test('ledger task --help lists abandon, and its own help names the slug, --reason, --dry-run and --force', (t) => {
+  const { h } = setup(t);
+  assert.match(ok(ledger(h, h, 'task', '--help')), /^\s+abandon\b/m);
+  const stdout = ok(ledger(h, h, 'task', 'abandon', '--help'));
+  assert.match(stdout, /^Usage: ledger task abandon \[options\] \[slug\]/m);
+  for (const pattern of [/--reason/, /--dry-run/, /--force/]) assert.match(stdout, pattern);
+});
+
+test('ledger task abandon refuses a missing, empty or multi-line --reason, and changes nothing', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const before = snapshot(h);
+  for (const reason of [undefined, '', '   ', 'no longer needed\nby anyone']) {
+    const ran = ledger(h, app, 'task', 'abandon', 'fix-login', ...(reason === undefined ? [] : ['--reason', reason]));
+    assert.notEqual(ran.status, 0, `reason ${JSON.stringify(reason)}; stdout:\n${ran.stdout}`);
+    assert.match(ran.stderr, /reason/, `reason ${JSON.stringify(reason)}`);
+    assert.deepEqual(snapshot(h), before, `reason ${JSON.stringify(reason)}`);
+  }
+});
+
+test('ledger task abandon retires a task whose branch is not merged, without --force, and keeps the branch', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const head = commitIn(h, worktreeOf(app, 'fix-login'));
+  noPr(h);
+  const stdout = ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed'));
+  assert.equal(existsSync(worktreeOf(app, 'fix-login')), false);
+  assert.deepEqual(archiveList(h, app), [`${today()}-fix-login.json`]);
+  assert.match(stdout, /kept +branch me\/fix-login/);
+  assert.doesNotMatch(stdout, /deleted +branch/);
+  assert.equal(git(h, app, 'rev-parse', 'me/fix-login'), head);
+});
+
+test('ledger task abandon with no slug abandons the task of the worktree it runs in', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  commitIn(h, worktreeOf(app, 'fix-login'));
+  noPr(h);
+  ok(ledger(h, worktreeOf(app, 'fix-login'), 'task', 'abandon', '--reason', 'no longer needed'));
+  assert.equal(existsSync(worktreeOf(app, 'fix-login')), false);
+  assert.deepEqual(archiveList(h, app), [`${today()}-fix-login.json`]);
+});
+
+test('ledger task abandon writes "<date> abandoned: <reason>" to the notes of the archived ledger', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  commitIn(h, worktreeOf(app, 'fix-login'));
+  noPr(h);
+  ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', '  the API it fixed was removed  '));
+  const archived = read(path.join(archiveFolder(h, app), `${today()}-fix-login.json`));
+  assert.match(archived, new RegExp(`^## Notes\\n(?:.*\\n)*${today()} abandoned: the API it fixed was removed$`, 'm'));
+});
+
+test('ledger task abandon of a backlog task archives it with the reason', (t) => {
+  const { h, app } = setup(t);
+  const file = backlogTask(h, app, { slug: 'later' });
+  ok(ledger(h, app, 'task', 'abandon', 'later', '--reason', 'done another way'));
+  assert.equal(existsSync(file), false);
+  assert.match(read(path.join(archiveFolder(h, app), `${today()}-later.json`)), new RegExp(`^${today()} abandoned: done another way$`, 'm'));
+});
+
+test('ledger task abandon refuses uncommitted changes without --force, and --force abandons anyway', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'fix-login' });
+  writeFileSync(path.join(worktreeOf(app, 'fix-login'), 'scratch.txt'), 'not committed\n');
+  failed(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed'), /1 uncommitted change[^]*--force/);
+  assert.ok(existsSync(file));
+  assert.deepEqual(archiveList(h, app), []);
+  ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed', '--force'));
+  assert.equal(existsSync(worktreeOf(app, 'fix-login')), false);
+  assert.deepEqual(archiveList(h, app), [`${today()}-fix-login.json`]);
+});
+
+test('ledger task abandon refuses a parent with active children without --force, and --force abandons it', (t) => {
+  const { h, app } = setup(t);
+  const epic = worktreeTask(h, app, { slug: 'epic', children: ['- part'] });
+  backlogTask(h, app, { slug: 'part', parent: 'epic' });
+  failed(ledger(h, app, 'task', 'abandon', 'epic', '--reason', 'no longer needed'), /epic has active children: part\./);
+  assert.ok(existsSync(epic));
+  assert.deepEqual(archiveList(h, app), []);
+  ok(ledger(h, app, 'task', 'abandon', 'epic', '--reason', 'no longer needed', '--force'));
+  assert.equal(existsSync(worktreeOf(app, 'epic')), false);
+});
+
+test('ledger task abandon --dry-run prints the plan and changes nothing; an unmerged branch is no blocker and is kept', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  commitIn(h, worktreeOf(app, 'fix-login'));
+  noPr(h);
+  const before = snapshot(h);
+  const stdout = ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed', '--dry-run'));
+  assert.deepEqual(snapshot(h), before);
+  assert.match(stdout, /dry run/i);
+  assert.match(lineWith(stdout, `${today()}-fix-login.json`), /archive/);
+  assert.match(stdout, /keep the branch me\/fix-login/);
+  assert.doesNotMatch(stdout, /delete the branch/);
+
+  const plan = JSON.parse(ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed', '--dry-run', '--json')));
+  assert.deepEqual(snapshot(h), before);
+  assert.equal(plan.blocked, false);
+  assert.deepEqual(plan.blockers, []);
+  assert.ok(plan.steps.some((step: string) => step.startsWith('keep the branch me/fix-login')), plan.steps.join('\n'));
+  assert.ok(!plan.steps.some((step: string) => step.startsWith('delete the branch')), plan.steps.join('\n'));
+});
+
+test('ledger task abandon --dry-run names uncommitted changes as a blocker and changes nothing', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  commitIn(h, worktreeOf(app, 'fix-login'));
+  writeFileSync(path.join(worktreeOf(app, 'fix-login'), 'scratch.txt'), 'x');
+  noPr(h);
+  const before = snapshot(h);
+  const plan = JSON.parse(ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed', '--dry-run', '--json')));
+  assert.deepEqual(snapshot(h), before);
+  assert.deepEqual(plan.blockers.map(({ kind }: { kind: string }) => kind), ['dirty']);
+});
+
+const abandonCommand = `${escapeRegExp(shellWord(LEDGER_BIN))} task abandon`;
+
+test('ledger task abandon names abandon in its refusals: "Not abandoned:", and to abandon it anyway', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  writeFileSync(path.join(worktreeOf(app, 'fix-login'), 'scratch.txt'), 'not committed\n');
+  failed(
+    ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed'),
+    /^Not abandoned: it has 1 uncommitted change\. Add --force to abandon it anyway\. Uncommitted changes are lost with the worktree\.$/m,
+  );
+});
+
+test('ledger task abandon names the abandon to run again, with its slug and the same reason quoted as one shell word', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const worktree = worktreeOf(app, 'fix-login');
+  mkdirSync(path.join(worktree, '.claude/logs'));
+  symlinkSync('logs', path.join(worktree, '.claude/evidence'));
+  const ran = ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed');
+  failed(ran, new RegExp(`^Not abandoned: .*then run ${abandonCommand} fix-login --reason 'no longer needed' again\\.$`, 'm'));
+  assert.doesNotMatch(ran.stderr, /task retire/);
+});
+
+test('ledger task abandon names abandon in its slug hints', (t) => {
+  const { h, app } = setup(t);
+  failed(ledger(h, app, 'task', 'abandon', '--reason', 'no longer needed'), new RegExp(`^No task ledger in or above .*Give a slug: ${abandonCommand} <slug> --reason 'no longer needed'\\.$`, 'm'));
+  failed(ledger(h, app, 'task', 'abandon', 'nothing', '--reason', 'gone'), /^No task ledger is named "nothing" .*Nothing was abandoned\./m);
+});
+
+/** Abandons the active task `slug`, written as `markdown` with a worktree that is not on this machine: refused, then done with --force. */
+function abandonNotHere(h: string, app: string, slug: string, markdown: string, refusal: RegExp): void {
+  const file = putActive(h, app, slug, markdown);
+  failed(ledger(h, app, 'task', 'abandon', slug, '--reason', 'no longer needed'), refusal);
+  assert.doesNotMatch(read(file), /abandoned:/);
+  assert.deepEqual(archiveList(h, app), []);
+  ok(ledger(h, app, 'task', 'abandon', slug, '--reason', 'no longer needed', '--force'));
+  assert.equal(existsSync(file), false);
+  assert.deepEqual(archiveList(h, app), [`${today()}-${slug}.json`]);
+  assert.match(read(path.join(archiveFolder(h, app), `${today()}-${slug}.json`)), new RegExp(`^${today()} abandoned: no longer needed$`, 'm'));
+}
+
+test('ledger task abandon --force of a task whose worktree is on another machine archives it with the note', (t) => {
+  const { h, app } = setup(t);
+  const worktree = path.join(h, 'other-machine/app/.claude/worktrees/far');
+  abandonNotHere(h, app, 'far', ledgerText({ slug: 'far', main: app, worktree }), /^Not abandoned: .*may be live on another machine\. Add --force/m);
+});
+
+test('ledger task abandon --force of a lost task archives it with the note', (t) => {
+  const { h, app } = setup(t);
+  const worktree = worktreeOf(app, 'gone');
+  const markdown = ledgerText({ slug: 'gone', main: app, worktree }).replace(`- worktree: ${worktree}\n`, `- worktree: ${worktree}\n- lost: 2026-11-01 — folder ${worktree} not found\n`);
+  abandonNotHere(h, app, 'gone', markdown, /^Not abandoned: it is marked lost since 2026-11-01.*Add --force/m);
+});
+
+test('ledger task abandon of a detached HEAD with unmerged commits needs --force, as no branch keeps them and they would be lost', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const worktree = worktreeOf(app, 'fix-login');
+  git(h, worktree, 'checkout', '--quiet', '--detach');
+  commitIn(h, worktree);
+  noPr(h);
+  const plan = JSON.parse(ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed', '--dry-run', '--json')));
+  assert.deepEqual(plan.blockers.map(({ kind, forceable }: { kind: string; forceable: boolean }) => ({ kind, forceable })), [{ kind: 'unmerged', forceable: true }]);
+  assert.match(plan.blockers[0].reason, /would be lost/);
+  failed(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed'), /^Not abandoned: .*would be lost\. Add --force to abandon it anyway\./m);
+  assert.ok(existsSync(worktree));
+  ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed', '--force'));
+  assert.equal(existsSync(worktree), false);
+});
+
+test('ledger task abandon --dry-run says abandoning needs --force, and names what cannot be abandoned even with it', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const worktree = worktreeOf(app, 'fix-login');
+  writeFileSync(path.join(worktree, 'scratch.txt'), 'not committed\n');
+  mkdirSync(path.join(worktree, '.claude/logs'));
+  symlinkSync('logs', path.join(worktree, '.claude/evidence'));
+  const stdout = ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed', '--dry-run'));
+  assert.match(stdout, /^Abandoning it needs --force: it has 1 uncommitted change\.$/m);
+  assert.match(stdout, /^It cannot be abandoned, not even with --force: /m);
+  assert.doesNotMatch(stdout, /retir/i);
+});
+
+test('ledger task abandon says abandon guesses main when neither origin/HEAD nor gh names the default branch', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  git(h, app, 'remote', 'set-head', 'origin', '-d');
+  const ran = ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed', '--dry-run');
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.match(ran.stderr, /^warning: .*default branch.*Abandon guesses main\.$/m);
+});
+
+test('ledger task abandon outside a repository says to run the abandon, with its slug and reason, in the repo of the task', (t) => {
+  const { h } = setup(t);
+  const hint = (slug: string): RegExp => new RegExp(`is not inside a git repository\\. Run ${abandonCommand} ${escapeRegExp(slug)} --reason 'no longer needed' in the repo of the task\\.$`, 'm');
+  failed(ledger(h, h, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed'), hint('fix-login'));
+  failed(ledger(h, h, 'task', 'abandon', '--reason', 'no longer needed'), hint('<slug>'));
+});
+
+test('ledger task abandon deletes a branch that is merged', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const stdout = ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed'));
+  assert.match(stdout, /deleted +branch me\/fix-login/);
+  assert.equal(git(h, app, 'branch', '--list', 'me/fix-login'), '');
+});
+
+test('ledger task abandon of a child marks it retired in its parent and copies its report there', (t) => {
+  const { h, app } = setup(t);
+  const epic = worktreeTask(h, app, { slug: 'epic', children: ['- part (started 2026-11-01)'] });
+  worktreeTask(h, app, { slug: 'part', parent: 'epic', report: ['Dropped: done another way.'] });
+  ok(ledger(h, app, 'task', 'abandon', 'part', '--reason', 'done another way'));
+  const text = read(epic);
+  assert.match(text, new RegExp(`^- part \\(retired ${today()}\\)$`, 'm'));
+  assert.match(text, /## Child reports\n### part\nDropped: done another way\.\n/);
+});
+
+/** The lines of the first section headed `heading`, the ledger's own one, without blank lines; none when it has no such section. */
+function sectionLines(markdown: string, heading: string): string[] {
+  const lines = markdown.split('\n');
+  const start = lines.indexOf(heading);
+  if (start === -1) return [];
+  const end = lines.findIndex((line, index) => index > start && line.startsWith('## '));
+  return lines.slice(start + 1, end === -1 ? undefined : end).filter((line) => line !== '');
+}
+
+test("ledger task abandon adds its note to the live ledger's own ## Notes before it archives, and the archive copy holds that noted ledger", (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'fix-login' });
+  git(h, app, 'worktree', 'lock', worktreeOf(app, 'fix-login'));
+  failed(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed'), /^Could not remove the worktree /m);
+  assert.deepEqual(sectionLines(read(file), '## Notes'), [`${today()} abandoned: no longer needed`]);
+  assert.equal(read(path.join(archiveFolder(h, app), `${today()}-fix-login.json`)), read(file));
+});
+
+test('ledger task abandon run again after a failure, another day with another reason, adds no second note and finds the archive copy it wrote', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'fix-login' });
+  const worktree = worktreeOf(app, 'fix-login');
+  git(h, app, 'worktree', 'lock', worktree);
+  failed(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed'), /^Could not remove the worktree /m);
+  git(h, app, 'worktree', 'unlock', worktree);
+  const copy = path.join(archiveFolder(h, app), `${today()}-fix-login.json`);
+  const noted = read(file).replace(`${today()} abandoned:`, '2000-01-01 abandoned:');
+  for (const ledgerFile of [file, copy]) writeLedgerFile(ledgerFile, noted);
+
+  const stdout = ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'done another way'));
+  assert.match(stdout, /^already archived /m);
+  assert.doesNotMatch(stdout, /added the note/);
+  assert.equal(existsSync(worktree), false);
+  assert.equal(existsSync(file), false);
+  assert.deepEqual(archiveList(h, app), [`${today()}-fix-login.json`]);
+  assert.equal(read(copy), noted);
+  assert.deepEqual(sectionLines(noted, '## Notes'), ['2000-01-01 abandoned: no longer needed']);
+});
+
+test('ledger task abandon --dry-run lists adding the note as its first step and changes nothing; a refused abandon adds no note', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const step = `add the note "${today()} abandoned: no longer needed" to the ledger's ## Notes`;
+  const before = snapshot(h);
+  assert.match(ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed', '--dry-run')), new RegExp(`^1\\. ${escapeRegExp(step)}$`, 'm'));
+  assert.equal(JSON.parse(ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed', '--dry-run', '--json'))).steps[0], step);
+  assert.deepEqual(snapshot(h), before);
+
+  writeFileSync(path.join(worktreeOf(app, 'fix-login'), 'scratch.txt'), 'not committed\n');
+  const dirty = snapshot(h);
+  failed(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed'), /^Not abandoned: it has 1 uncommitted change\./m);
+  assert.deepEqual(snapshot(h), dirty);
+});
+
+test('ledger task abandon adds no note and archives nothing when the ledger changes after it was read', (t) => {
+  const { h, app } = setup(t);
+  const file = backlogTask(h, app, { slug: 'later' });
+  asCli(t, h);
+  const paths = ledgerPaths(h);
+  const context: Context = { paths, cwd: app, store: fileStore(paths) };
+  const plan = planRetire(readRetire(context, 'later', { verb: 'abandon', reason: 'done another way' }), { force: false });
+  writeFileSync(file, `${read(file)}- a late note\n`);
+  assert.throws(
+    () => executeRetire(context, plan, { line: () => {}, warn: () => {} }),
+    (error) =>
+      error instanceof Failure &&
+      new RegExp(`^Could not add the note to .*/later\\.md: the ledger changed after it was read\\. Nothing was changed\\. Run ${abandonCommand} later --reason 'done another way' again\\.$`).test(error.message),
+  );
+  assert.doesNotMatch(read(file), /abandoned:/);
+  assert.deepEqual(archiveList(h, app), []);
+});
+
+/** When a change reaches the ledger of an abandon: once the store has listed it, as the task and its children are read, or once the plan is made. */
+type Moment = 'after reading' | 'after planning';
+
+/** The run of an abandon of the active task `slug`, planned in this process without --force; `meanwhile` changes the store once, at `moment`. */
+function abandonWithChange(h: string, app: string, slug: string, moment: Moment, meanwhile: () => void): () => void {
+  const paths = ledgerPaths(h);
+  const real = fileStore(paths);
+  let pending = moment === 'after reading';
+  const list = (repo: string) => {
+    const listed = real.active.list(repo);
+    if (pending && listed.some(({ name }) => name === slug)) {
+      pending = false;
+      meanwhile();
+    }
+    return listed;
+  };
+  const context: Context = { paths, cwd: app, store: { ...real, active: { ...real.active, list } } };
+  const plan = planRetire(readRetire(context, slug, { verb: 'abandon', reason: 'no longer needed' }), { force: false });
+  assert.equal(plan.blocked, false);
+  if (moment === 'after planning') meanwhile();
+  return () => executeRetire(context, plan, { line: () => {}, warn: () => {} });
+}
+
+function stopsBeforeNote(run: () => void, file: string, slug: string, message?: string): void {
+  assert.throws(
+    run,
+    (error) => {
+      assert.ok(error instanceof Failure);
+      assert.equal(error.message, `Could not add the note to ${file}: the ledger changed after it was read. Nothing was changed. Run ${shellWord(LEDGER_BIN)} task abandon ${slug} --reason 'no longer needed' again.`);
+      return true;
+    },
+    message,
+  );
+}
+
+/** The active task `slug` has no note, no archive copy and its worktree still. */
+function notAbandoned(h: string, app: string, slug: string, file: string): void {
+  assert.doesNotMatch(read(file), /abandoned:/);
+  assert.deepEqual(archiveList(h, app), []);
+  assert.ok(existsSync(worktreeOf(app, slug)));
+}
+
+test('ledger task abandon adds no note, archives nothing and removes nothing when an active ledger changes after it was read', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'fix-login' });
+  asCli(t, h);
+  for (const moment of ['after planning', 'after reading'] as const) {
+    const decision = `- a late decision, ${moment}`;
+    stopsBeforeNote(abandonWithChange(h, app, 'fix-login', moment, () => writeLedgerFile(file, `${read(file)}${decision}\n`)), file, 'fix-login', `no failure ${moment}`);
+    notAbandoned(h, app, 'fix-login', file);
+    assert.ok(read(file).includes(decision), moment);
+  }
+});
+
+test('ledger task abandon adds no note, archives nothing and removes nothing when another session claims the task after the plan is made', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'fix-login' });
+  asCli(t, h);
+  const claim = () => ok(ledger(h, worktreeOf(app, 'fix-login'), 'task', 'claim', '--session', 'other-session'));
+  stopsBeforeNote(abandonWithChange(h, app, 'fix-login', 'after planning', claim), file, 'fix-login');
+  notAbandoned(h, app, 'fix-login', file);
+  assert.match(read(file), /^- claim: session other-session since /m);
+});
+
+test('ledger task abandon of a parent that gains a child link after its children were read adds no note, archives nothing and removes nothing without --force; run again, it names the child', (t) => {
+  const { h, app } = setup(t);
+  const epic = worktreeTask(h, app, { slug: 'epic' });
+  backlogTask(h, app, { slug: 'part', parent: 'epic' });
+  asCli(t, h);
+  const link = () => writeLedgerFile(epic, read(epic).replace('## Report\n', '## Children\n- part\n\n## Report\n'));
+  stopsBeforeNote(abandonWithChange(h, app, 'epic', 'after reading', link), epic, 'epic');
+  notAbandoned(h, app, 'epic', epic);
+  assert.match(read(epic), /^- part$/m);
+  failed(ledger(h, app, 'task', 'abandon', 'epic', '--reason', 'no longer needed'), /^Not abandoned: epic has active children: part\./m);
+});
+
+test('ledger task abandon of a parent that gains a child link and another abandon note after it was read adds no note of its own, archives nothing and removes nothing; run again, it names the child', (t) => {
+  const { h, app } = setup(t);
+  const epic = worktreeTask(h, app, { slug: 'epic' });
+  backlogTask(h, app, { slug: 'part', parent: 'epic' });
+  asCli(t, h);
+  const other = '2000-01-01 abandoned: done another way';
+  const linkAndNote = () => writeLedgerFile(epic, `${read(epic).replace('## Report\n', '## Children\n- part\n\n## Report\n')}\n## Notes\n${other}\n`);
+  stopsBeforeNote(abandonWithChange(h, app, 'epic', 'after reading', linkAndNote), epic, 'epic');
+  assert.deepEqual(sectionLines(read(epic), '## Notes'), [other]);
+  assert.match(read(epic), /^- part$/m);
+  assert.deepEqual(archiveList(h, app), []);
+  assert.ok(existsSync(worktreeOf(app, 'epic')));
+  failed(ledger(h, app, 'task', 'abandon', 'epic', '--reason', 'no longer needed'), /^Not abandoned: epic has active children: part\./m);
+});
+
+test('ledger task abandon archives the ledger it read and noted, though its goal changed and changed back after the read: a rerun finds that one copy', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'fix-login' });
+  const worktree = worktreeOf(app, 'fix-login');
+  git(h, app, 'worktree', 'lock', worktree);
+  asCli(t, h);
+  const original = read(file);
+  const run = abandonWithChange(h, app, 'fix-login', 'after reading', () => writeLedgerFile(file, original.replace('Goal of fix-login.', 'Another goal.')));
+  writeLedgerFile(file, original);
+  assert.throws(run, /Could not remove the worktree /);
+  assert.deepEqual(sectionLines(read(file), '## Notes'), [`${today()} abandoned: no longer needed`]);
+  assert.equal(read(path.join(archiveFolder(h, app), `${today()}-fix-login.json`)), read(file));
+
+  git(h, app, 'worktree', 'unlock', worktree);
+  assert.match(ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed')), /^already archived /m);
+  assert.deepEqual(archiveList(h, app), [`${today()}-fix-login.json`]);
+  assert.equal(existsSync(worktree), false);
+});
+
+test('ledger task abandon adds its note before it archives: an archive write that fails finds the note in the live ledger and leaves no copy', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'fix-login' });
+  asCli(t, h);
+  const paths = ledgerPaths(h);
+  const real = fileStore(paths);
+  let atArchive: string | undefined;
+  const write = (): void => {
+    atArchive = read(file);
+    throw new Error('the disk is full');
+  };
+  const context: Context = { paths, cwd: app, store: { ...real, archive: { ...real.archive, write } } };
+  const plan = planRetire(readRetire(context, 'fix-login', { verb: 'abandon', reason: 'no longer needed' }), { force: false });
+  assert.throws(() => executeRetire(context, plan, { line: () => {}, warn: () => {} }), /Could not archive fix-login: the disk is full\./);
+  assert.deepEqual(sectionLines(atArchive ?? '', '## Notes'), [`${today()} abandoned: no longer needed`]);
+  assert.deepEqual(sectionLines(read(file), '## Notes'), [`${today()} abandoned: no longer needed`]);
+  assert.deepEqual(archiveList(h, app), []);
+  assert.ok(existsSync(worktreeOf(app, 'fix-login')));
+});
+
+/**
+ * A worktree task with evidence, whose record names this machine, and a retire that archived it and removed its
+ * worktree, then stopped, as the store could not delete the active ledger.
+ */
+function retiredWorktreeRemoved(t: TestContext) {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'fix-login' });
+  writeLedgerFile(file, read(file).replace('- design refs: none\n', `- design refs: none\n- host: ${THIS_HOST}\n`));
+  const worktree = worktreeOf(app, 'fix-login');
+  mkdirSync(path.join(worktree, '.claude/evidence'));
+  writeFileSync(path.join(worktree, '.claude/evidence/red.txt'), 'failing\n');
+  asCli(t, h);
+  const paths = ledgerPaths(h);
+  const real = fileStore(paths);
+  const remove = (): boolean => {
+    throw new Error('the disk is full');
+  };
+  const context: Context = { paths, cwd: app, store: { ...real, active: { ...real.active, remove } } };
+  const plan = planRetire(readRetire(context, 'fix-login'), { force: false });
+  assert.throws(() => executeRetire(context, plan, { line: () => {}, warn: () => {} }), /The worktree is removed and the ledger archived, but the active ledger .* is left: the disk is full\./);
+  assert.equal(existsSync(worktree), false);
+  return { h, app, file };
+}
+
+test('ledger task abandon finishes a retire that archived the task and removed its worktree, as a retire run again does, and says the reason is not saved', (t) => {
+  const { h, app, file } = retiredWorktreeRemoved(t);
+  const copy = path.join(archiveFolder(h, app), `${today()}-fix-login.json`);
+  const archived = read(copy);
+  const before = snapshot(h);
+  const plan = JSON.parse(ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed', '--dry-run', '--json')));
+  assert.deepEqual(snapshot(h), before);
+  assert.deepEqual(plan.blockers, []);
+  assert.deepEqual(plan.steps.slice(0, 2), ['add no note: a retire already archived the ledger, so the reason is not saved', `leave the archive as it is: the ledger is archived already at ${copy}`]);
+
+  const ran = ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed');
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.match(ran.stderr, new RegExp(`^warning: the reason is not saved: a retire already archived fix-login to ${escapeRegExp(copy)}, and an archive copy is never changed\\.$`, 'm'));
+  assert.doesNotMatch(ran.stderr, /evidence/);
+  assert.match(ran.stdout, /^already archived /m);
+  assert.equal(existsSync(file), false);
+  assert.deepEqual(archiveList(h, app), [`${today()}-fix-login`, `${today()}-fix-login.json`]);
+  assert.equal(read(copy), archived);
+  assert.equal(read(path.join(archiveFolder(h, app), `${today()}-fix-login/red.txt`)), 'failing\n');
+});
+
+test('ledger task abandon after a retire that archived the ledger but could not remove the worktree removes it, keeps the one archive copy as it is, and says the reason is not saved', (t) => {
+  const { h, app, worktree } = retiredOnceLocked(t);
+  const copy = path.join(archiveFolder(h, app), `${today()}-fix-login.json`);
+  const archived = read(copy);
+  const ran = ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'done another way');
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.match(ran.stderr, /^warning: the reason is not saved: a retire already archived fix-login to /m);
+  assert.equal(existsSync(worktree), false);
+  assert.deepEqual(archiveList(h, app), [`${today()}-fix-login`, `${today()}-fix-login.json`]);
+  assert.equal(read(copy), archived);
+  assert.doesNotMatch(archived, /abandoned:/);
+  assert.equal(read(path.join(archiveFolder(h, app), `${today()}-fix-login/red.txt`)), 'failing\n');
+});
+
+test('ledger task abandon after a retire refuses, as a retire run again does, even with --force, when the worktree has evidence the archive copy lacks, and changes nothing', (t) => {
+  const { h, app, evidence } = retiredOnceLocked(t);
+  writeFileSync(path.join(evidence, 'later.txt'), 'added after the retire\n');
+  const before = snapshot(h);
+  failed(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'done another way', '--force'), /^Not abandoned: .*fix-login\.json is archived already, but its evidence differs from .*\/\.claude\/evidence\/\./m);
+  assert.deepEqual(snapshot(h), before);
+});
+
+/** Abandons the child `part` of `epic`, whose report is `report`, which copies that report to the parent; then abandons `epic`. Gives the archived epic. */
+function abandonParentWithReport(t: TestContext, report: string[]): string {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'epic', children: ['- part'] });
+  worktreeTask(h, app, { slug: 'part', parent: 'epic', report });
+  ok(ledger(h, app, 'task', 'abandon', 'part', '--reason', 'superseded'));
+  ok(ledger(h, app, 'task', 'abandon', 'epic', '--reason', 'no longer needed'));
+  return read(path.join(archiveFolder(h, app), `${today()}-epic.json`));
+}
+
+test('ledger task abandon writes its note to the parent ledger, though a child report copied there has an abandoned: line', (t) => {
+  const archived = abandonParentWithReport(t, ['2026-11-20 abandoned: superseded']);
+  assert.deepEqual(sectionLines(archived, '## Notes'), [`${today()} abandoned: no longer needed`]);
+  assert.deepEqual(sectionLines(archived, '## Child reports'), ['### part', '2026-11-20 abandoned: superseded']);
+});
+
+test("ledger task abandon writes its note to the parent's own ## Notes, not under the last child report copied there", (t) => {
+  const archived = abandonParentWithReport(t, ['Dropped: done another way.']);
+  assert.deepEqual(sectionLines(archived, '## Notes'), [`${today()} abandoned: no longer needed`]);
+  assert.deepEqual(sectionLines(archived, '## Child reports'), ['### part', 'Dropped: done another way.']);
+});
+
+test('ledger task abandon refuses a reason with a line break before or after it, and changes nothing', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  const before = snapshot(h);
+  for (const reason of ['\nno longer needed', 'no longer needed\n', '\r\nno longer needed\r\n']) {
+    failed(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', reason), /^The reason to abandon a task must be one line\.$/m);
+    assert.deepEqual(snapshot(h), before, `reason ${JSON.stringify(reason)}`);
+  }
+});
+
+test('ledger task abandon with an empty reason names its own bin/ledger in the command to run', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'fix-login' });
+  failed(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', ' '), new RegExp(`^An abandoned task needs a reason: ${abandonCommand} <slug> --reason <text>$`, 'm'));
+});
+
+test('ledger task abandon says "Not abandoned:" when active children stop it', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'epic', children: ['- part'] });
+  backlogTask(h, app, { slug: 'part', parent: 'epic' });
+  failed(ledger(h, app, 'task', 'abandon', 'epic', '--reason', 'no longer needed'), /^Not abandoned: epic has active children: part\. Retire them first, or pass --force\.$/m);
 });

@@ -15,7 +15,7 @@ const NEXT: Record<ActiveState, readonly ActiveState[]> = {
 };
 
 /** The state a status line and a lost mark give a task, the lost mark first; active when it has neither. */
-export const stateOf = ({ lost, status }: Location): ActiveState => (lost ? 'lost' : (status?.value ?? 'active'));
+export const stateOf = ({ lost, status }: Pick<Location, 'lost' | 'status'>): ActiveState => (lost ? 'lost' : (status?.value ?? 'active'));
 
 const either = (states: readonly string[]): string => (states.length < 2 ? states.join('') : `${states.slice(0, -1).join(', ')} or ${states.at(-1)}`);
 
