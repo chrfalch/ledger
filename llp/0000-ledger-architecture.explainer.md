@@ -14,8 +14,10 @@ ledger is the notes of one task: its goal, plan, decisions and next step. One
 command, `ledger`, reads and writes all ledgers. A store keeps every ledger,
 as files, in one SQLite database, or in a private git repository that several
 machines share. A Claude Code plugin
-exposes the command as `/ledger:` commands. Hooks show the current ledger at
-session start and block unsafe writes. Rules tell the agent when to use all of
+exposes the command as `/ledger:` commands. At session start, hooks show a
+short report on the current task: what needs the operator, where the task sits
+in its tree, and its next step. `ledger show` prints the whole ledger. Hooks
+also block unsafe writes. Rules tell the agent when to use all of
 this.
 
 [LLP 0001](0001-ledger-workflow.plan.md) is the plan for what comes next. This
@@ -73,7 +75,9 @@ is a note and is kept as it is.
 it. `bin/ledger` checks for Node 20.12 or later and exits 1 on an older
 version, for `ledger hook` too. It runs `npm ci` when the dependencies are
 missing. For `ledger hook` it installs nothing: it reports the missing
-dependencies on stderr and exits 0, so the tool call goes ahead. The commands
+dependencies on stderr and exits 0, so the tool call goes ahead. For `ledger
+statusline` it installs nothing either: it prints nothing and exits 0, as the
+status line refreshes often and must not reach the network. The commands
 are grouped by what they change (D30 in LLP 0001).
 `ledger --help` lists the groups, and `ledger <group> --help` the commands of
 each:
@@ -589,7 +593,8 @@ in a main checkout, starts the new task in the same session, with no clear
 (`mods/ledger/commands/task.md`). Without `--stack`, it runs
 `ledger go <slug>`; with `--stack`, the worktree exists already. It then moves
 the session into the new worktree with the `EnterWorktree` tool and reads the
-ledger with `ledger show`, as the session-start hook does not inject it. Then
+ledger with `ledger show`, as no session-start report covers a worktree
+entered in the middle of a session. Then
 it goes on with the operator's request. With a current ledger, the new task
 stays in the backlog: `ledger task new` adds a line under the current task's
 Decisions that names it, and the reply is the command that starts it.
@@ -646,15 +651,23 @@ because its turn end does not clear the session.
 `ledger hook <event>` answers four Claude Code events. `answerHook` in
 `tools/ledger/hooks.ts` handles them:
 
-- `session-start`: injects the ledgers of the session's folder, read from the
-  store, with the status of their parent and child tasks. With git storage it pulls first, and
-  a sync problem adds one line above the ledgers. In a main checkout it skips lost tasks.
-  It then asks gh about the PR of each waiting task (`tools/ledger/pr-check.ts`).
-  A *Needs you:* block comes first in the text, with one line for each PR that
-  needs the operator. The time is set in three parts. The pull, every git call
-  and every lock wait share one five-second deadline. Then gh gets 3 seconds
-  for all PRs at once. The writes that gh's answers ask for then get 2 seconds
-  of their own, from when gh is done, as the five seconds may be up by then.
+- `session-start`: gives a short report on the task the session's folder
+  owns, read from the store, not the whole ledger (D26 in LLP 0001,
+  `sessionReport` in `tools/ledger/awareness.ts`). A main checkout, or a
+  folder that owns no task, gets the open trees of its repo instead (D27,
+  `openTreesReport`), and with no open tree it still asks: a new task or quick
+  work. Both read every task from the store alone (`storedTasks` in
+  `tools/ledger/tasks.ts`), with no git call per task, and find a parent or
+  child in another repo by the main checkout its record names
+  (`storedRepoOf`), never by git there. With git storage it
+  pulls first, and a sync problem adds one line above the report. It then asks
+  gh about the PR of each waiting task (`tools/ledger/pr-check.ts`). Each PR
+  that needs the operator is a line in the report's one *Needs you:* section,
+  which in the open-trees report comes above the trees. The time
+  is set in three parts. The pull, every git call and every lock wait share one
+  five-second deadline. Then gh gets 3 seconds for all PRs at once. The writes
+  that gh's answers ask for then get 2 seconds of their own, from when gh is
+  done, as the five seconds may be up by then.
 - `prompt-submit`: titles the session when the prompt is exactly
   `go <slug>`.
 - `pre-compact`: tells the compaction to keep the task's slug, worktree path
@@ -682,7 +695,7 @@ The failure is also appended as one line to `~/.claude/ledger-hook-failures.log`
 (`tools/ledger/hook-failures.ts`). The shell hooks run through `hooks/logged.sh`,
 which logs any exit other than 0 or 2 the same way and exits 0. The next
 `session-start` puts the number of failures not yet reported, and the time of
-the first, above the ledgers.
+the first, above the report.
 
 `settings.policy.json` registers the four events. Each entry runs
 `"$HOME"/.claude/bin/ledger hook <event>`. Deploy merges these keys into
@@ -693,7 +706,9 @@ runs through `hooks/logged.sh`, except the status line:
 
 - `statusline.sh` is the status line. It prints the folder, the git branch,
   the model and the five-hour and seven-day usage percentages. It writes those
-  rate limits to `~/.claude/state/usage-snapshot.json`. It reads no ledger.
+  rate limits to `~/.claude/state/usage-snapshot.json`. After the branch it
+  shows what `ledger statusline <folder>` prints: the task and stage, read
+  from the store alone, with no pull and no gh (D28).
 - `usage-pace.sh` runs on each prompt, and only when the Sol or Astra
   implementer agent is deployed. It reads that snapshot and adds a routing
   hint to the prompt when Claude usage runs ahead of an even pace. When Codex

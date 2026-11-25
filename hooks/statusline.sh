@@ -2,6 +2,9 @@
 
 input=$(cat)
 dir=$(printf '%s' "$input" | jq -r '.workspace.current_dir // .cwd // ""' 2>/dev/null)
+task=""
+ledger="$HOME/.claude/bin/ledger"
+[ -n "$dir" ] && [ -x "$ledger" ] && task=$("$ledger" statusline "$dir" 2>/dev/null)
 # Bash 5.2 expands a ~ in a ${var/pattern/~} replacement back to $HOME.
 case "$dir" in "$HOME"*) dir="~${dir#"$HOME"}" ;; esac
 model=$(printf '%s' "$input" | jq -r '.model.display_name // ""' 2>/dev/null)
@@ -17,7 +20,10 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 branch_seg=""
 [ -n "$branch" ] && branch_seg=" \033[0;32m${branch}\033[0m"
-printf '%b' "\033[0;34m${dir}\033[0m${branch_seg} [\033[0;36m${model}\033[0m${sess_seg}${week_seg}]"
+printf '%b' "\033[0;34m${dir}\033[0m${branch_seg}"
+# %s, not %b: the task text is printed as it is.
+[ -n "$task" ] && printf ' \033[0;35m%s\033[0m' "$task"
+printf '%b' " [\033[0;36m${model}\033[0m${sess_seg}${week_seg}]"
 
 if printf '%s' "$input" | jq -e '(.rate_limits.five_hour? != null) or (.rate_limits.seven_day? != null)' >/dev/null 2>&1; then
   state_dir="$HOME/.claude/state"

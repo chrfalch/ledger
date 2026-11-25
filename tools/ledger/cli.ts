@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { statusLineText } from './awareness.js';
 import { claimResultText, claimTask, Held, knownSession, releaseAll, releaseTask, requiredSession, touchAll, touchTask, type AllResult } from './claims.js';
 import { limitCloneGitCalls } from './clone.js';
 import { systemClock, type Clock } from './clock.js';
@@ -13,12 +14,12 @@ import { exists } from './files.js';
 import { finalizeQuestion } from './finalize.js';
 import { parseLedger, planProgress } from './format.js';
 import { ALL_GATE_NAMES, FINALIZE_GATE, gateQuestion } from './gates.js';
-import { mainCheckout, resetGitLimits } from './git.js';
+import { limitGitCalls, mainCheckout, resetGitLimits } from './git.js';
 import { logHookFailure, oneLine } from './hook-failures.js';
 import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookContext, type HookEvent } from './hooks.js';
 import { KINDS, STAGES } from './kinds.js';
 import { limitLockWaits } from './lock.js';
-import { ledgerBin, ledgerPaths, realPath } from './paths.js';
+import { ledgerBin, ledgerPaths, realPath, type LedgerPaths } from './paths.js';
 import { forgetRepoKeys, repoKey, repoLabel } from './repo-key.js';
 import { migrateStorage } from './migrate.js';
 import { migrateActive } from './migrate-active.js';
@@ -224,6 +225,27 @@ function session(store: LedgerStore, folder: string) {
       })),
     })),
   };
+}
+
+const STATUS_LINE_GIT_MS = 2000;
+
+/**
+ * The status line text of `folder` (D28), from the store as it is: no sync, no gh, no network git. It refreshes often, so
+ * any error gives no text rather than a message.
+ */
+function statusLine(paths: LedgerPaths, folder: string): string {
+  let store: LedgerStore | undefined;
+  // A local git that hangs (a lock, a slow mount) would otherwise stall every refresh.
+  limitGitCalls(STATUS_LINE_GIT_MS);
+  limitCloneGitCalls(Date.now() + STATUS_LINE_GIT_MS);
+  try {
+    store = openToRead(paths, readStorage(paths.home));
+    return store === undefined ? '' : statusLineText(sessionLedgers(store, folder));
+  } catch {
+    return '';
+  } finally {
+    store?.close?.();
+  }
 }
 
 function deploy(args: string[]): number {
@@ -938,6 +960,11 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
     .action((folder: string | undefined) =>
       show(realMains(session(context.store, folder === undefined ? cwd : path.resolve(cwd, folder))), ({ ledgers }) => ledgers.flatMap(({ worktree }) => worktree ?? []).join('\n')),
     );
+  program
+    .command('statusline', { hidden: true })
+    .description('Print the task and stage of a folder for the Claude Code status line, from the store alone; nothing when the folder owns no task or on any error.')
+    .argument('<folder>', 'the folder of the Claude Code session')
+    .action((folder: string) => print(statusLine(paths, path.resolve(cwd, folder))));
   program
     .command('hook', { hidden: true })
     .description('Answer a Claude Code hook: read its JSON input on stdin and print the hook output. For settings.json, not for a person.')

@@ -448,21 +448,17 @@ async function sessionStart(h: string, cwd: string, now: string, sessionId: stri
 test('session start adds one line for a ledger held live by another session; its own claim and an expired one add none', async (t) => {
   const { h, file, worktree } = setup(t);
   withClaim(file, claimLine('s1', T0, later(10)));
-  const line = `Held by another session: s1 since ${T0}, active ${later(10)}.`;
+  const line = `- Held by another session: fix-login (s1 since ${T0})`;
   assert.ok((await sessionStart(h, worktree, later(20), 's2')).includes(`${line}\n`));
   assert.ok(!(await sessionStart(h, worktree, later(20), 's1')).includes('Held by another session'));
   assert.ok(!(await sessionStart(h, worktree, later(200), 's2')).includes('Held by another session'));
 });
 
-test('in the summary of several ledgers, the line follows the ledger it is about', async (t) => {
-  const { h, app, file, worktree } = setup(t);
-  worktreeTask(h, app, { slug: 'other' });
+test('the report names a sibling held live by another session', async (t) => {
+  const { h, app, file } = setup(t);
+  worktreeTask(h, app, { slug: 'other', parent: 'epic' });
+  backlogTask(h, app, { slug: 'epic', children: ['- fix-login', '- other'] });
   withClaim(file, claimLine('s1', T0, later(10)));
-  const context = await sessionStart(h, app, later(20), 's2');
-  const blocks = context.split('\n=== ').slice(1);
-  const [heading, otherHeading] = [`fix-login in ${worktree}`, `other in ${worktreeOf(app, 'other')}`];
-  assert.deepEqual(blocks.map((block) => block.split('\n')[0]).sort(), [heading, otherHeading].sort(), context);
-  const held = blocks.filter((block) => block.includes('Held by another session'));
-  assert.deepEqual(held.map((block) => block.split('\n')[0]), [heading]);
-  assert.ok(held[0].includes(`\nHeld by another session: s1 since ${T0}, active ${later(10)}.\n`), held[0]);
+  const context = await sessionStart(h, worktreeOf(app, 'other'), later(20), 's2');
+  assert.ok(context.split('\n').includes(`- Held by another session: fix-login (s1 since ${T0})`), context);
 });

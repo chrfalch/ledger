@@ -703,7 +703,7 @@ test('with a "host" that is no label, the session start in a worktree still prin
 
   const context = hookContext(a, worktreeOf(a));
 
-  assert.match(context, new RegExp(`A task ledger exists for ${SLUG} in the worktree \\S*/${SLUG}\\.`));
+  assert.match(context, new RegExp(`^Task ${SLUG} in \\S*/${SLUG} — `, 'm'));
 });
 
 test('with a "host" that is no label, the session start still ends by its deadline when git stalls', (t) => {

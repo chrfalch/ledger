@@ -24,6 +24,8 @@ if (!existsSync(path.join(repo, 'node_modules/.package-lock.json'))) {
     console.error(`ledger hook ${process.argv[3] ?? ''}: dependencies are not installed. Run npm ci in ${repo}.`);
     process.exit(0);
   }
+  // The status line refreshes often and must not reach the network or change the checkout: it shows no task instead.
+  if (process.argv[2] === 'statusline') process.exit(0);
   const npm = spawnSync('npm', ['ci', '--silent'], { cwd: repo, stdio: ['ignore', process.stderr, 'inherit'] });
   if (npm.error) {
     console.error(`ledger: ${npm.error.message}`);

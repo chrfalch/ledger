@@ -1994,7 +1994,7 @@ test('the whole session start in a linked worktree stays within its 5 s, when th
   const [ran, ms] = timed(() => run(b, ['hook', 'session-start'], { cwd: mine, env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd: mine }) }));
 
   assert.equal(ran.status, 0, ran.stderr);
-  assert.match((JSON.parse(ran.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext, /A task ledger exists for mine in the worktree /);
+  assert.match((JSON.parse(ran.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext, /^Task mine in \S+ — /m);
   assert.ok(existsSync(rewriting), 'the session start did not rebase');
   // The limit starts when the hook starts its work. The second on top is for the work after the last git call, which
   // reads files only, and for start-up times that differ between runs; without one deadline the hook takes about 9 s.
@@ -2031,7 +2031,7 @@ test('a waiting task whose PR gh says is merged after the session start used up 
 
   assert.equal(ran.status, 0, ran.stderr);
   const context = (JSON.parse(ran.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext;
-  assert.ok(context.startsWith('Needs you:\n- mine: PR merged; the task is done.'), context);
+  assert.match(context, /^Needs you:\n- mine: PR merged; the task is done\./m);
   assert.match(ledgerOk(b, 'show', 'mine', '--repo', 'app'), new RegExp(`^- status: done ${today()}$`, 'm'));
   assert.equal(git(b.h, b.clone, 'status', '--porcelain'), '');
 });

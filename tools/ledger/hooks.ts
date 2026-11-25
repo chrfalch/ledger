@@ -1,23 +1,24 @@
 import { statSync, type Stats } from 'node:fs';
 import path from 'node:path';
+import { openTreesReport, sessionReport } from './awareness.js';
 import { claimClock, otherClaim, type ClaimClock } from './claims.js';
 import { clonePaths, limitCloneGitCalls } from './clone.js';
 import { Failure } from './failure.js';
 import { fileStoreRoots } from './file-store.js';
 import { folderEntries } from './files.js';
 import { logHookFailure, markHookFailuresReported, unreportedHookFailures } from './hook-failures.js';
-import { findSection, parseLedger, serializeLedger, type Child, type Claim, type Ledger, type TaskRef } from './format.js';
+import { parseLedger, type Claim } from './format.js';
 import { checkoutRoot, gitTimedOut, inMainCheckout, limitGitCalls, mainCheckout, worktrees } from './git.js';
 import { limitLockWaits, lockFile, reclaimGuard } from './lock.js';
 import { conversionHint } from './migrate-repo-ids.js';
 import { CITATION_ADVICE, realPath, samePath, SESSION_CITATION, type LedgerPaths } from './paths.js';
-import { prCheckLines } from './pr-check.js';
+import { prCheckLines, type CheckedLine } from './pr-check.js';
 import { repoKey, repoLabel } from './repo-key.js';
 import { holdsUnmovedLedger, keepsUnmovedLedger } from './unmoved.js';
 import { sqliteFile } from './sqlite-store.js';
 import { pullForSession, syncNotice } from './sync.js';
 import { keyAndAliases, type LedgerStore } from './store.js';
-import { activeTask, activeTasks, archivedTasks, findNamed, findTasks, locateChild, namedChildren, type Task } from './tasks.js';
+import { activeTask, activeTasks, archivedTasks, inRepo, storedTasks, type Task } from './tasks.js';
 import { plural } from './views.js';
 import type { Context } from './write.js';
 
@@ -101,90 +102,28 @@ export type SessionLedgers = { tasks: Task[]; own: boolean };
 /**
  * The ledgers of a session in `cwd`. In a main checkout: the active tasks of its linked worktrees, wherever they live,
  * never one of its own, as an active task lives only in a linked worktree, and none that is lost. In a linked worktree:
- * its own active task. Outside a git repository: none.
+ * its own active task. Outside a git repository: none. With `stored`, which gives storedTasks for a main checkout, a main
+ * checkout's tasks come from that list, so that git is not asked about each of them.
  */
-export function sessionLedgers(store: LedgerStore, cwd: string): SessionLedgers {
+export function sessionLedgers(store: LedgerStore, cwd: string, stored?: (main: string) => Task[]): SessionLedgers {
   const root = checkoutRoot(cwd);
   const main = mainCheckout(cwd);
   if (root === undefined || main === undefined) return { tasks: [], own: false };
   if (inMainCheckout(cwd)) {
-    const tasks = activeTasks(store, repoKey(main)).filter(({ worktree, status }) => status !== 'lost' && (worktree === undefined || !samePath(worktree, main)));
+    const active = stored?.(main).filter((task) => task.place === 'active' && inRepo(task, main)) ?? activeTasks(store, repoKey(main));
+    const tasks = active.filter(({ worktree, status }) => status !== 'lost' && (worktree === undefined || !samePath(worktree, main)));
     return { tasks, own: false };
   }
   const task = activeTask(store, root);
   // Two machines can see one disk, so a record of another machine can name this folder; it is never the session's own.
-  return { tasks: task === undefined ? [] : [task], own: task !== undefined && !task.elsewhere };
+  // A record of this machine still is when git did not list the worktree in time, as a main checkout that hangs would
+  // otherwise leave the session without its task.
+  const own = task !== undefined && (!task.elsewhere || (task.host === undefined && gitTimedOut(root)));
+  return { tasks: task === undefined ? [] : [task], own };
 }
 
 /** The slug that titles the session: only when its one ledger is its folder's own. */
 export const sessionTitle = ({ tasks, own }: SessionLedgers): string | undefined => (own && tasks.length === 1 ? tasks[0].ledger.slug : undefined);
-
-const shown = ({ slug, main }: TaskRef): string => (main === undefined ? slug : `${slug} @ ${main}`);
-
-/** A task in a repo whose git did not answer in time is unknown, not missing; asking git for its checkout finds that out, once. */
-function statusText(ref: Required<TaskRef> | undefined, find: (ref: Required<TaskRef>) => Task | undefined): string {
-  if (ref === undefined) return 'missing';
-  if (mainCheckout(ref.main) === undefined && gitTimedOut(ref.main)) return 'unknown';
-  const task = find(ref);
-  if (task === undefined) return 'missing';
-  return task.status === 'retired' && task.archived !== undefined ? `retired ${task.archived}` : task.status;
-}
-
-/** An active task beats a backlog ledger, which beats the newest archive copy. */
-function namedTask(tasks: Task[], ref: Required<TaskRef>): Task | undefined {
-  const named = findNamed(tasks, ref);
-  return named.find(({ place }) => place === 'active') ?? named[0];
-}
-
-/**
- * One line for the parent and one per child that names a task, in list order, each with its status from disk; a child
- * line marked retired shows that mark instead. A line without a main is in `task`'s repo.
- */
-function relationLines(task: Task, tasks: Task[]): string[] {
-  const { main, ledger } = task;
-  const refIn = ({ slug, main: written }: TaskRef): Required<TaskRef> | undefined => {
-    const repo = written ?? main;
-    return repo === undefined ? undefined : { slug, main: repo };
-  };
-  const parent = ledger.location.parent;
-  const parentLines = parent === undefined ? [] : [`Parent task: ${shown(parent)} (${statusText(refIn(parent), (ref) => namedTask(tasks, ref))}).`];
-  const findChild = (ref: Required<TaskRef>): Task | undefined => (main === undefined ? namedTask(tasks, ref) : locateChild(tasks, ref, { slug: task.slug, main }));
-  const childStatus = (child: Child): string => (child.mark?.kind === 'retired' ? `retired ${child.mark.date}` : statusText(refIn(child), findChild));
-  const childLines = namedChildren(task, tasks).map((child) => `Child task: ${shown(child)} (${childStatus(child)}).`);
-  return [...parentLines, ...childLines];
-}
-
-/** The lines under ## Goal, then the status line and the lines under ## Next step, as written. */
-function summary({ lines, sections, statusLine }: Ledger): string {
-  const count = lines.at(-1) === '' ? lines.length - 1 : lines.length;
-  const body = (name: string): readonly string[] => {
-    const section = findSection(sections, name);
-    return section === undefined ? [] : lines.slice(section.start + 1, Math.min(section.end, count));
-  };
-  const next = findSection(sections, 'Next step');
-  const marker = next !== undefined && statusLine !== undefined && statusLine > next.start && statusLine < next.end;
-  const status = statusLine === undefined || marker ? [] : [lines[statusLine]];
-  return [...body('Goal'), ...status, ...body('Next step')].map((line) => `${line}\n`).join('');
-}
-
-/**
- * The SessionStart context for one or more ledgers. `tasks` are all known tasks, for the parent and child statuses.
- * `heldElsewhere` gives the live claim of another session on a ledger.
- */
-export function sessionStartText({ tasks: ledgers }: SessionLedgers, tasks: Task[], heldElsewhere: (task: Task) => Claim | undefined): string {
-  const lead = (task: Task): string => {
-    const held = heldElsewhere(task);
-    const heldLine = held === undefined ? [] : [`Held by another session: ${held.session} since ${held.since}, active ${held.active}.`];
-    return [...relationLines(task, tasks), ...heldLine].map((line) => `${line}\n`).join('');
-  };
-  const inWorktree = ({ worktree }: Task, words: string): string => (worktree === undefined ? '' : ` ${words} ${worktree}`);
-  if (ledgers.length === 1) {
-    const [task] = ledgers;
-    return `A task ledger exists for ${task.slug}${inWorktree(task, 'in the worktree')}. It is kept in the ledger store; its contents follow. If it has open steps, continue from Next step without re-verifying finished steps. Write to it with \`ledger notes\`, never by editing a file.\n${lead(task)}\n${serializeLedger(task.ledger)}`;
-  }
-  const summaries = ledgers.map((task) => `\n=== ${task.slug}${inWorktree(task, 'in')}\n${lead(task)}${summary(task.ledger)}`).join('');
-  return `${ledgers.length} task ledgers exist. Summary of each follows. If asked what we are working on, answer from this. Before continuing one, ask which, then read its full ledger. Each is kept in the ledger store: read it with \`ledger show <slug>\`, and write to it with \`ledger notes\`, never by editing a file.\n${summaries}`;
-}
 
 /** A hint for the linked worktrees of the repo of `cwd` whose ledger is still a .claude/ledger.md. A git call that times out lists no worktree. */
 function unmovedHint(store: LedgerStore, cwd: string): string | undefined {
@@ -196,13 +135,25 @@ function unmovedHint(store: LedgerStore, cwd: string): string | undefined {
   return count === 0 ? undefined : `${plural(count, 'ledger')} still kept in .claude/ledger.md; run \`ledger store migrate --active\`.`;
 }
 
-const tasksOnDisk = ({ store }: HookContext): Task[] => findTasks(store);
+/**
+ * The report on the task the folder owns (D26), else the open trees of the repo at `main` (D27); undefined outside a
+ * repo. A main checkout owns no task, so it gets the trees. `checked` is what the PR check found, for its Needs you section.
+ */
+function awarenessText(input: HookInput, context: HookContext, found: SessionLedgers, main: string | undefined, tasks: Task[], checked: CheckedLine[]): string | undefined {
+  if (found.own) {
+    let clock: ClaimClock | undefined;
+    const heldElsewhere = ({ ledger: { location } }: Task): Claim | undefined =>
+      location.claim && otherClaim(location.claim, input.sessionId || undefined, (clock ??= claimClock(context.paths.home)));
+    return sessionReport(found, tasks, heldElsewhere, checked);
+  }
+  return main === undefined ? undefined : openTreesReport(tasks, main, checked);
+}
 
 /**
  * With git storage it pulls first, and a sync problem adds one line before the ledgers. The pull, and every git call and
  * lock wait after it, opening and closing the store too, end by `deadline`.
  */
-function sessionLedgerContext(input: HookInput, context: HookContext, deadline: number): { needsYou?: string; hint?: string; text?: string; title?: string } {
+function sessionLedgerContext(input: HookInput, context: HookContext, deadline: number): { hint?: string; text?: string; title?: string } {
   limitLockWaits(deadline);
   limitCloneGitCalls(deadline);
   // Opened first, as git in the session folder may use up the time that is left after the pull.
@@ -213,21 +164,34 @@ function sessionLedgerContext(input: HookInput, context: HookContext, deadline: 
   const conversion = conversionHint(context.store);
   const notice = syncNotice(context.paths);
   const cwd = folderOf(input, context);
-  const found = sessionLedgers(context.store, cwd);
-  let clock: ClaimClock | undefined;
-  const heldElsewhere = ({ ledger: { location } }: Task): Claim | undefined =>
-    location.claim && otherClaim(location.claim, input.sessionId || undefined, (clock ??= claimClock(context.paths.home)));
-  const onDisk = found.tasks.length === 0 ? [] : tasksOnDisk(context);
-  const ledgers = found.tasks.length === 0 ? undefined : sessionStartText(found, onDisk, heldElsewhere);
+  // The session's own task first, as git in the main checkout may hang; a main checkout's tasks are the stored ones.
+  let stored: Task[] | undefined;
+  const found = sessionLedgers(context.store, cwd, (checkout) => (stored = storedTasks(context.store, checkout)));
+  const main = mainCheckout(cwd);
+  const tasks = stored ?? storedTasks(context.store, main);
   // Last, so a worktree listing that hangs costs the hint and not the ledgers.
   const hint = [conversion, unmovedHint(context.store, cwd)].filter((part) => part !== undefined).join('\n') || undefined;
   // After the ledgers, so gh's own time limit never eats into git's.
-  const needsYou = needsYouBlock(prCheckLines(context, found, onDisk));
-  if (ledgers === undefined) return { needsYou, hint, text: notice };
-  return { needsYou, hint, text: notice === undefined ? ledgers : `${notice}\n${ledgers}`, title: sessionTitle(found) };
+  const checked = prCheckLines(context, found, found.tasks.length === 0 ? [] : tasks);
+  const now = found.tasks.length > 0 && tasks.some(({ status }) => status === 'waiting') ? afterPrCheck(context.store, found, main) : { found, tasks };
+  const ledgers = awarenessText(input, context, now.found, main, now.tasks, checked);
+  if (ledgers === undefined) return { hint, text: notice };
+  return { hint, text: notice === undefined ? ledgers : `${notice}\n${ledgers}`, title: sessionTitle(now.found) };
 }
 
-const needsYouBlock = (lines: string[]): string | undefined => (lines.length === 0 ? undefined : ['Needs you:', ...lines.map((line) => `- ${line}`)].join('\n'));
+/**
+ * `found` and the tasks of the store as they are after the PR check, which may have changed a waiting task or seen that
+ * another session did. The session's own tasks keep what git found; only what their records say is read again.
+ */
+function afterPrCheck(store: LedgerStore, found: SessionLedgers, main: string | undefined): { found: SessionLedgers; tasks: Task[] } {
+  const tasks = storedTasks(store, main);
+  const byFile = new Map(tasks.map((task) => [task.file, task]));
+  const own = found.tasks.map((task) => {
+    const stored = byFile.get(task.file);
+    return stored === undefined ? task : { ...task, slug: stored.slug, status: stored.status, ledger: stored.ledger, mtimeMs: stored.mtimeMs };
+  });
+  return { found: { ...found, tasks: own }, tasks };
+}
 
 /**
  * Hook failures since the last report come first, above the sync notice and the ledgers, and count as reported once the
@@ -236,7 +200,7 @@ const needsYouBlock = (lines: string[]): string | undefined => (lines.length ===
  */
 export function sessionStart(input: HookInput, context: HookContext, deadline = Date.now() + gitTimeoutMs): SessionStartOutput | undefined {
   const failures = unreportedHookFailures(context.paths);
-  let ledgers: { needsYou?: string; hint?: string; text?: string; title?: string };
+  let ledgers: { hint?: string; text?: string; title?: string };
   try {
     ledgers = sessionLedgerContext(input, context, deadline);
   } catch (error) {
@@ -244,7 +208,7 @@ export function sessionStart(input: HookInput, context: HookContext, deadline = 
     logHookFailure(context.paths.home, 'ledger hook session-start', error instanceof Error ? error.message : String(error));
     ledgers = {};
   }
-  const additionalContext = [ledgers.needsYou, failures?.text, ledgers.hint, ledgers.text].filter((part) => part !== undefined).join('\n\n');
+  const additionalContext = [failures?.text, ledgers.hint, ledgers.text].filter((part) => part !== undefined).join('\n\n');
   if (additionalContext === '') return undefined;
   if (failures !== undefined) markHookFailuresReported(context.paths.home, failures);
   return {
