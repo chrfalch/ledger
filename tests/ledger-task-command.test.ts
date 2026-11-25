@@ -176,15 +176,13 @@ test('the Plan gate asks for approval only for a task with more than one file or
   assert.doesNotMatch(gate, /approval before multi-file or architectural work/);
 });
 
+// The finalize question's options come from `ledger task gate finalize`; tests/ledger-gates.test.ts covers them.
 test('a finished task ends with one multi-select question for retire and the next task', () => {
   assert.match(checkpointBullet('**Resume.**'), /When every plan step is done, ask with `ledger task gate pr`\./);
   const bullet = checkpointBullet('**End of task.**');
-  assert.match(bullet, /When the work is merged, or the operator says the task is finished, ask one `multiSelect` widget question\./);
-  assert.match(bullet, /Its options are: retire this task; one option per other finished task; start the next task with `\/ledger:go <slug>`\./);
-  // The multi-select Close rule itself lives in rule 20: rule 10's ledger sections are held to 550 words.
-  assert.match(bullet, /Add Close \(see Asking the operator\)\./);
-  assert.match(bullet, /With a parent, the next task is `\/ledger:go <parent>`\./);
-  assert.match(bullet, /With no child task left, offer to retire the parent task\./);
+  assert.match(bullet, /When the work is merged, or the operator calls it finished, ask the question `ledger task gate finalize` prints\. It is multi-select\./);
+  assert.match(bullet, /Start the next task, if ticked\./);
+  assert.match(bullet, /On "Finalize <parent>", ask `ledger task gate finalize <parent>` and repeat these steps for the parent\./);
   assert.match(bullet, /A ticked option is the operator's approval to run it\./);
 });
 
@@ -219,7 +217,8 @@ test('the writing rule starts an open-answer question with ❓ and keeps the wal
 test('the end-of-task retires leave the worktree only when needed and never retire an unmerged branch', () => {
   const bullet = checkpointBullet('**End of task.**');
   assert.match(bullet, /`ExitWorktree` with `keep`, if a retire removes this session's worktree\./);
-  assert.match(bullet, /Do not retire a branch with no merged PR; say what is missing\./);
+  // The dry run names an unmerged branch as a problem; tests/ledger-core-retire.test.ts covers the refusal.
+  assert.match(bullet, /Stop on any problem it names, and say what is missing\./);
 });
 
 test('ticked options run in a fixed order: dry runs, leave the worktree, retires, then /ledger:go', () => {
@@ -234,7 +233,7 @@ test('the agent retires without --force after a dry run', () => {
   assert.match(archiving, /Never pass `--force`/);
   assert.match(archiving, /Retire a parent task only after all its child tasks are retired/);
   const endOfTask = checkpointBullet('**End of task.**');
-  assert.match(endOfTask, /Run `\/ledger:retire <slug> --dry-run` for each; clear the problems it names/);
+  assert.match(endOfTask, /Run `\/ledger:retire <slug> --dry-run` for each ticked retire\. Stop on any problem it names/);
   assert.doesNotMatch(endOfTask, /Retire this task, then/);
   assert.match(endOfTask, /Ask before you discard any change/);
   assert.match(endOfTask, /A ticked option is the operator's approval to run it/);
