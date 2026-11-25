@@ -520,8 +520,8 @@ for (const { storage, skip } of STORES) {
 
 const CODE_STAGES = 'plan, red, build, verify, review, pr';
 
-/** The worktree task `wt` with `- kind:` and `- stage:` bullets set as given. */
-function withStage(t: TestContext, location: { kind?: string; stage?: string } = {}) {
+/** The worktree task `wt` with Location bullets, such as `- kind:` and `- stage:`, set as given. */
+function withStage(t: TestContext, location: Record<string, string> = {}) {
   const task = withWorktree(t);
   const bullets = Object.entries(location).map(([key, value]) => `- ${key}: ${value}`);
   writeLedgerFile(task.file, task.read().replace('- design refs: none\n', ['- design refs: none', ...bullets, ''].join('\n')));
@@ -721,4 +721,50 @@ test('a failed stage other than review leaves the review rounds alone', (t) => {
   passed(task.notes('stage', 'verify', 'pass'));
   assert.equal(passed(task.notes('stage', 'review', 'fail', '--back', 'build')), 'Stage review of wt failed; back to build.');
   assert.equal(reviewRounds(task.read()), '- review rounds: 1');
+});
+
+test('a fourth rejected review counts 4 and leaves the task blocked', (t) => {
+  const task = withStage(t, { stage: 'review' });
+  passed(task.notes('stage', 'review', 'fail', '--back', 'build'));
+  rejectReview(task);
+  rejectReview(task);
+  const fourth = rejectReview(task);
+  assert.ok(fourth.includes('Review rejected 4 times: wt is blocked; ask the operator what to do.'), fourth);
+  assert.match(task.read(), new RegExp(`^- status: blocked ${TODAY} — review rejected three times$`, 'm'));
+  assert.equal(reviewRounds(task.read()), '- review rounds: 4');
+});
+
+test('a third rejected review of a task that is blocked already keeps its own block reason', (t) => {
+  const task = withStage(t, { stage: 'review', 'review rounds': '2', status: 'blocked 2026-11-01 — waiting for the API key' });
+  const third = passed(task.notes('stage', 'review', 'fail', '--back', 'build'));
+  assert.ok(third.includes('Review rejected 3 times: wt is blocked; ask the operator what to do.'), third);
+  assert.match(task.read(), /^- status: blocked 2026-11-01 — waiting for the API key$/m);
+  assert.equal(reviewRounds(task.read()), '- review rounds: 3');
+});
+
+test('a third rejected review of a parked or waiting task is refused, as it cannot become blocked; a lost task is refused as one not on this machine; neither changes anything', (t) => {
+  const cases: [string, (worktree: string) => string, RegExp][] = [
+    ['parked', () => '- status: parked 2026-11-01 — later', /wt is parked, so it cannot become blocked\./],
+    ['waiting', () => '- status: waiting 2026-11-01', /wt is waiting, so it cannot become blocked\./],
+    ['lost', (worktree) => `- lost: 2026-11-01 — folder ${worktree} not found`, /not on this machine/],
+  ];
+  for (const [state, bullet, refusal] of cases) {
+    const task = withStage(t, { stage: 'review', 'review rounds': '2' });
+    writeLedgerFile(task.file, task.read().replace('- design refs: none\n', `- design refs: none\n${bullet(task.worktree)}\n`));
+    const before = task.read();
+    assert.match(refused(task.run(task.app, 'notes', 'stage', 'review', 'fail', '--back', 'build', '--task', 'wt')), refusal, state);
+    assert.equal(task.read(), before, state);
+  }
+});
+
+test('a third rejected review of a backlog task, named with --task, does not block it and does not say it is blocked', (t) => {
+  const { h, app, run } = setup(t);
+  const file = backlogTask(h, app, { slug: 'later' });
+  writeLedgerFile(file, readLedgerFile(file).replace('- design refs: none\n', '- design refs: none\n- stage: review\n- review rounds: 2\n'));
+  const third = passed(run(app, 'notes', 'stage', 'review', 'fail', '--back', 'build', '--task', 'later'));
+  assert.equal(third, 'Stage review of later failed; back to build. Review rejected 3 times: ask the operator what to do.');
+  assert.doesNotMatch(readLedgerFile(file), /^- status:/m);
+  assert.equal(reviewRounds(readLedgerFile(file)), '- review rounds: 3');
+  const { tasks } = JSON.parse(passed(run(app, 'list', '--json'))) as { tasks: { slug: string; status: string }[] };
+  assert.equal(tasks.find(({ slug }) => slug === 'later')?.status, 'backlog');
 });

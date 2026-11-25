@@ -451,7 +451,7 @@ export async function main(argv: string[]): Promise<number> {
   taskGroup
     .command('abandon')
     .description(
-      'Retire a task that is no longer needed, with nothing merged: as retire does, but an unmerged branch does not stop it and is kept. The archived ledger ends with the note "<date> abandoned: <reason>". Exits 1, with nothing changed, when a check stops it.',
+      'Retire a task that is no longer needed, with nothing merged: as retire does, but an unmerged branch does not stop it and is kept. Its first step adds the note "<date> abandoned: <reason>" to the ## Notes of the ledger, which is then archived. Exits 1, with nothing changed, when a check stops it.',
     )
     .argument('[slug]', 'the task in this repo; by default the task of the worktree you are in')
     .requiredOption('--reason <text>', 'one line: why the task is no longer needed')

@@ -598,5 +598,5 @@ test('the review rounds read from and render as a "- review rounds: <n>" bullet 
 test('validateRecord takes the review rounds only as a whole number from 1', () => {
   const valid = JSON.parse(JSON.stringify(FULL)) as Record<string, unknown>;
   assert.equal(validateRecord({ ...valid, reviewRounds: 2 }).reviewRounds, 2);
-  for (const rounds of ['2', -1, 1.5]) assert.throws(() => validateRecord({ ...valid, reviewRounds: rounds }), /reviewRounds/, String(rounds));
+  for (const rounds of ['2', -1, 1.5, Number('9007199254740993')]) assert.throws(() => validateRecord({ ...valid, reviewRounds: rounds }), /reviewRounds/, String(rounds));
 });

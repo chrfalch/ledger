@@ -295,26 +295,29 @@ export function recordStage(context: Context, name: string | undefined, stage: s
 
     const reviewRounds = (record.reviewRounds ?? 0) + 1;
     record.reviewRounds = reviewRounds;
-    if (reviewRounds >= BLOCKING_ROUNDS && record.status?.value !== 'blocked') {
+    // Only an active task can be blocked: a backlog task stays backlog, whatever status line its ledger has (D7).
+    const blocked = reviewRounds >= BLOCKING_ROUNDS && task.place !== 'backlog';
+    if (blocked && record.status?.value !== 'blocked') {
       checkTransition(task.slug, stateOf(record), 'blocked');
       record.status = { value: 'blocked', date: today(), detail: 'review rejected three times' };
     }
-    return { stage, result, next, reviewRounds };
+    return { stage, result, next, reviewRounds, blocked };
   });
 }
 
 /** What a rejected review round asks of the agent (D22): nothing after the first, more effort after the second, the operator after that. */
-function reviewEscalation(slug: string, rounds: number | undefined): string {
+function reviewEscalation(slug: string, rounds: number | undefined, blocked: boolean | undefined): string {
   if (rounds === undefined || rounds < BLOCKING_ROUNDS - 1) return '';
   const rejected = `Review rejected ${rounds} times:`;
-  return rounds < BLOCKING_ROUNDS ? ` ${rejected} run the next round at higher effort and tell the operator.` : ` ${rejected} ${slug} is blocked; ask the operator what to do.`;
+  if (rounds < BLOCKING_ROUNDS) return ` ${rejected} run the next round at higher effort and tell the operator.`;
+  return ` ${rejected} ${blocked ? `${slug} is blocked; ask` : 'ask'} the operator what to do.`;
 }
 
-export function recordStageText({ slug, stage, result, next, reviewRounds }: ReturnType<typeof recordStage>): string {
+export function recordStageText({ slug, stage, result, next, reviewRounds, blocked }: ReturnType<typeof recordStage>): string {
   const onward = next === FINISHED ? `${slug} is ${FINISHED}` : `next is ${next}`;
   if (result === 'skipped') return `Skipped stage ${stage} of ${slug}; ${onward}.`;
   if (result === 'passed') return `Stage ${stage} of ${slug} passed; ${onward}.`;
-  return `Stage ${stage} of ${slug} failed; ${next === stage ? `it stays at ${stage}` : `back to ${next}`}.${reviewEscalation(slug, reviewRounds)}`;
+  return `Stage ${stage} of ${slug} failed; ${next === stage ? `it stays at ${stage}` : `back to ${next}`}.${reviewEscalation(slug, reviewRounds, blocked)}`;
 }
 
 export type CheckResult = { slug: string; ledger: string; problems: string[] };

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { markRetired, putChildReport, withoutClaim } from './edit.js';
 import { fail } from './failure.js';
 import { folderEntries, holdsAnything, isTaken, treeEntries } from './files.js';
-import { isReadableSlug, parseLedger, type Child } from './format.js';
+import { isReadableSlug, parseLedger, serializeLedger, type Child } from './format.js';
 import {
   branchPrs,
   changedFiles,
@@ -21,7 +21,7 @@ import {
   removeLinkedWorktree,
 } from './git.js';
 import { ledgerBin, realPath, samePath } from './paths.js';
-import { parseRecord, renderRecord, storedText } from './record.js';
+import { parseRecord, renderRecord, storedText, type TaskRecord } from './record.js';
 import { repoKey } from './repo-key.js';
 import type { Archive } from './store.js';
 import { findNamed, findTasks, inRepo, locateChild, namedChildren, sameTask, type Task } from './tasks.js';
@@ -113,26 +113,24 @@ const outsideLine = (command: RetireCommand, slug: string | undefined): string =
 const abandonNote = (date: string, reason: string): string => `${date} abandoned: ${reason}`;
 const isAbandonNote = (note: string): boolean => /^\d{4}-\d{2}-\d{2} abandoned: /.test(note);
 
-/** `text` with `note` as its last general note, unless it holds an abandon note already, of any date and reason. */
+/** The notes of the ledger's own ## Notes: those before the first section copied into the notes, such as ## Child reports. */
+function ownNotes(record: TaskRecord): string[] {
+  const copied = parseLedger(record.notes.join('\n')).sections[0]?.start ?? record.notes.length;
+  return record.notes.slice(0, copied);
+}
+
+/** Whether the ledger's own ## Notes hold an abandon note, of any date and reason. */
+const holdsAbandonNote = (text: string): boolean => ownNotes(parseRecord(text)).some(isAbandonNote);
+
+/** `text` with `note` as the last line of its own ## Notes. */
 function withAbandonNote(text: string, note: string): string {
   const record = parseRecord(text);
-  if (record.notes.some(isAbandonNote)) return text;
-  record.notes.push(note);
+  record.notes.splice(ownNotes(record).length, 0, note);
   return renderRecord(record);
 }
 
-/**
- * Whether the archive copy `copy` holds `ledger` as `command` archives it. An abandon adds its note to the copy alone,
- * so its copy may end with one, of any date and reason: a rerun then finds the copy an earlier run wrote.
- */
-function holds(copy: string, ledger: string, command: RetireCommand): boolean {
-  const archived = storedText(withoutClaim(ledger));
-  if (copy === archived) return true;
-  if (command.verb === 'retire') return false;
-  const record = parseRecord(copy);
-  const last = record.notes.pop();
-  return last !== undefined && isAbandonNote(last) && renderRecord(record) === archived;
-}
+/** Whether the archive copy `copy` holds `ledger` as a retire archives it. */
+const holds = (copy: string, ledger: string): boolean => copy === storedText(withoutClaim(ledger));
 
 /** Each one stops the retire unless --force is given, but the evidence ones: --force never passes them, as evidence would be lost. */
 export type Blocker =
@@ -147,6 +145,13 @@ export type Blocker =
 const isForceable = ({ kind }: Blocker): boolean => kind === 'children' || kind === 'missing-child' || kind === 'dirty' || kind === 'unmerged' || kind === 'elsewhere';
 
 export type RetireAction =
+  /**
+   * `ledger` is the ledger's text as it was read, claim included: the text the task and its children were read from.
+   * The step compares it with the stored text before it writes, and adds no note when the two differ.
+   */
+  | { kind: 'add-note'; repo: string; name: string; place: 'active' | 'backlog'; location: string; note: string; ledger: string }
+  /** An abandon of a ledger that a retire archived already, at `location`, without the note. */
+  | { kind: 'unsaved-note'; slug: string; location: string }
   | { kind: 'archive'; repo: string; name: string; location: string; evidenceLocation: string; text: string; evidence?: string }
   | { kind: 'already-archived'; repo: string; name: string; location: string }
   | { kind: 'remove-worktree'; main: string; folder: string; force: boolean }
@@ -236,6 +241,7 @@ function parentActions({ task, ref, tasks }: RetireFacts, warnings: string[]): R
 /**
  * What retiring would check and do, in order, from facts alone; it reads and writes nothing. An abandon (D25) is not
  * stopped by an unmerged branch, which it keeps; on a detached HEAD no branch keeps the commits, so they stop it too.
+ * Its first step adds its note to the live ledger, which is archived with it.
  */
 export function planRetire(facts: RetireFacts, { force }: { force: boolean }): RetirePlan {
   const { task, ref, text, worktree, tasks } = facts;
@@ -263,6 +269,14 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
 
   const actions: RetireAction[] = [];
   const archived = facts.alreadyArchived;
+  const note = facts.command.verb === 'abandon' && !holdsAbandonNote(text) ? abandonNote(facts.today, facts.command.reason) : undefined;
+  if (note !== undefined) {
+    actions.push(
+      archived === undefined
+        ? { kind: 'add-note', repo: task.repo, name: task.name, place: task.place === 'backlog' ? 'backlog' : 'active', location: task.file, note, ledger: serializeLedger(task.ledger) }
+        : { kind: 'unsaved-note', slug: task.slug, location: archived.location },
+    );
+  }
   if (archived !== undefined) {
     // A rerun after a failed worktree removal lands here. It goes on only when no evidence would be lost.
     actions.push({ kind: 'already-archived', repo: facts.archiveRepo, name: archived.name, location: archived.location });
@@ -278,7 +292,7 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
       name,
       location: facts.archiveLocation(name),
       evidenceLocation: facts.archiveEvidenceLocation(name),
-      text,
+      text: note === undefined ? text : withAbandonNote(text, note),
       ...(worktree?.evidence === undefined ? {} : { evidence: worktree.evidence }),
     });
   }
@@ -475,7 +489,11 @@ function removedWorktreeOf({ store }: Context, task: Task, main: string, warning
   };
 }
 
-/** The facts for `command` on `slug`. For an abandon, the text to archive ends with its note; the live ledger never gets it. */
+/**
+ * The facts for `command` on `slug`. `text` is the live ledger without its claim, also for an abandon, whose plan adds its
+ * note. It is the text the task and its children were read from, not a second read: one that differed would let the plan
+ * check one ledger and archive another.
+ */
 export function readRetire(context: Context, slug: string | undefined, command: RetireCommand = RETIRE): RetireFacts {
   const { cwd, store } = context;
   const main = mainCheckout(cwd) ?? fail(`${cwd} is not inside a git repository. Run ${outsideLine(command, slug)} in the repo of the task.`);
@@ -503,11 +521,9 @@ export function readRetire(context: Context, slug: string | undefined, command: 
       buildFolders: xcode === undefined || xcode.keptBecause !== undefined ? [] : [xcode.path],
     };
   }
-  const date = today();
-  const read = withoutClaim(readLedger(context, task));
-  const text = command.verb === 'retire' ? read : withAbandonNote(read, abandonNote(date, command.reason));
+  const text = withoutClaim(serializeLedger(task.ledger));
   const archiveRepo = repoKey(main);
-  const identical = store.archive.list(archiveRepo).find((copy) => holds(copy.text, read, command));
+  const identical = store.archive.list(archiveRepo).find((copy) => holds(copy.text, text));
   const removedWorktree = identical === undefined ? undefined : removedWorktreeOf(context, task, main, warnings, command.verb);
   return {
     task,
@@ -521,7 +537,7 @@ export function readRetire(context: Context, slug: string | undefined, command: 
     ...(identical === undefined ? {} : { alreadyArchived: { name: identical.name, location: identical.location, losesEvidence: losesEvidence(store.archive, archiveRepo, identical.name, evidence) } }),
     archiveLocation: (name) => store.archive.location(archiveRepo, name),
     archiveEvidenceLocation: (name) => store.archive.evidenceLocation(archiveRepo, name),
-    today: date,
+    today: today(),
     warnings,
     command,
   };
@@ -589,7 +605,10 @@ function refusal({ task, blockers, command }: RetirePlan, force: boolean): strin
   const lines: string[] = [];
   const not = `Not ${WORDS[command.verb].past}:`;
   for (const blocker of blockers) {
-    if (blocker.kind === 'children' && !force) lines.push(`${task.slug} has active children: ${blocker.names.join(', ')}. Retire them first, or pass --force.`);
+    if (blocker.kind === 'children' && !force) {
+      const children = `${task.slug} has active children: ${blocker.names.join(', ')}. Retire them first, or pass --force.`;
+      lines.push(command.verb === 'retire' ? children : `${not} ${children}`);
+    }
     if (blocker.kind === 'missing-child' && !force) lines.push(`${not} ${reasonOf(blocker)}. Remove its line under ## Children, or pass --force.`);
   }
   for (const blocker of blockers) {
@@ -605,6 +624,10 @@ function refusal({ task, blockers, command }: RetirePlan, force: boolean): strin
 
 function stepText(action: RetireAction): string | string[] | undefined {
   switch (action.kind) {
+    case 'add-note':
+      return `add the note "${action.note}" to the ledger's ## Notes`;
+    case 'unsaved-note':
+      return 'add no note: a retire already archived the ledger, so the reason is not saved';
     case 'archive':
       return [`archive the ledger to ${action.location}`, ...(action.evidence === undefined ? [] : [`archive ${action.evidence}/ to ${action.evidenceLocation}/`])];
     case 'already-archived':
@@ -717,7 +740,7 @@ function stopIfChanged(context: Context, plan: RetirePlan, copy: ArchiveCopy, re
   }
   const archived = archive.read(copy.repo, copy.name)?.text;
   const changed = [
-    ...(text === undefined || archived === undefined || !holds(archived, text, plan.command) ? [`the ledger ${plan.task.file}`] : []),
+    ...(text === undefined || archived === undefined || !holds(archived, text) ? [`the ledger ${plan.task.file}`] : []),
     ...(losesEvidence(archive, copy.repo, copy.name, evidence) ? [`the evidence ${evidence}/`] : []),
   ];
   if (text === undefined || changed.length > 0) stopBefore(removal, changed, copy, rerunLine(plan.command, plan.task.slug));
@@ -744,6 +767,23 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
   let checked: string | undefined;
   for (const action of plan.actions) {
     switch (action.kind) {
+      case 'add-note': {
+        const notAdded = `Could not add the note to ${action.location}`;
+        let added: boolean;
+        try {
+          // Not updateLedger: it refuses a lost task and one on another machine, which --force lets through, and it may
+          // rewrite the host line, so the ledger would no longer match its archive copy.
+          added = store[action.place].update(action.repo, action.name, (text) => (text === action.ledger ? withAbandonNote(text, action.note) : undefined));
+        } catch (error) {
+          fail(`${notAdded}: ${sentence(message(error))} Nothing was changed. Run ${again} again.`);
+        }
+        if (!added) fail(`${notAdded}: the ledger changed after it was read. Nothing was changed. Run ${again} again.`);
+        out.line(`added the note "${action.note}" to ${action.location}`);
+        break;
+      }
+      case 'unsaved-note':
+        out.warn(`the reason is not saved: a retire already archived ${action.slug} to ${action.location}, and an archive copy is never changed.`);
+        break;
       case 'archive': {
         const evidenceCopy = `${action.evidenceLocation}/`;
         try {
@@ -903,13 +943,15 @@ export function retireTask(context: Context, slug: string | undefined, options: 
 /**
  * `ledger task abandon [<slug>] --reason <text> [--dry-run] [--force]`: a retire with no merge (D25). It differs from
  * a retire only in that an unmerged branch does not stop it, but on a detached HEAD, and in the note
- * "<date> abandoned: <reason>" that ends the archive copy; the live ledger never gets it, so a lost task or one on another
- * machine is abandoned as it is retired. A reason that is empty or more than one line fails before anything is read.
+ * "<date> abandoned: <reason>". Its first step adds the note to the live ledger's own ## Notes, unless they hold an
+ * abandon note already, so the rest runs as a retire of the noted ledger, and a rerun adds none. When a retire archived
+ * the ledger already, that copy stays as it is: the abandon finishes as a retire run again does and warns that the reason
+ * is not saved. A reason with a line break anywhere, or with nothing but white space, fails before anything is read.
  */
 export function abandonTask(context: Context, slug: string | undefined, { reason, ...options }: RetireOptions & { reason: string }, out: Output = consoleOutput): RetireResult {
+  if (/[\r\n]/.test(reason)) fail('The reason to abandon a task must be one line.');
   const why = reason.trim();
-  if (why === '') fail('An abandoned task needs a reason: ledger task abandon <slug> --reason <text>');
-  if (/[\r\n]/.test(why)) fail('The reason to abandon a task must be one line.');
+  if (why === '') fail(`An abandoned task needs a reason: ${ledgerCommand} task abandon <slug> --reason <text>`);
   return settle(context, slug, options, { verb: 'abandon', reason: why }, out);
 }
 

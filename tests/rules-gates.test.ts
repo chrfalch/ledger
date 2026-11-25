@@ -402,8 +402,10 @@ test('the Failure gate of rule 10 sends a merge conflict back to build, then run
   assert.match(failureGate(), /merge conflict[^]*\bverify\b[^]*\breview\b/i);
 });
 
-test('the Failure gate of rule 10 names ledger task gate abandon and ledger task abandon (D25)', () => {
+test('the Failure gate of rule 10 names ledger task gate abandon, then ledger task abandon (D25)', () => {
   const gate = failureGate();
-  assert.ok(gate.includes('`ledger task gate abandon'), gate);
-  assert.ok(gate.includes('`ledger task abandon'), gate);
+  const [question, abandon] = [gate.indexOf('`ledger task gate abandon'), gate.indexOf('`ledger task abandon')];
+  assert.ok(question !== -1, gate);
+  assert.ok(abandon !== -1, gate);
+  assert.ok(question < abandon, `the gate's question must come before the abandon: ${gate}`);
 });

@@ -565,8 +565,7 @@ const passes = (test: (value: unknown) => boolean, problem: string): Check => (v
 };
 const isText = passes((value) => typeof value === 'string', 'is not a string');
 const isWhole = passes(Number.isInteger, 'is not a whole number');
-const isNumber = (value: unknown): value is number => typeof value === 'number';
-const isCount = passes((value) => isNumber(value) && Number.isInteger(value) && value >= 1, 'is not a whole number from 1');
+const isCount = passes((value) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 1, 'is not a whole number from 1');
 const isTrue = passes((value) => value === true, 'is not true');
 const isSlug = passes((value) => typeof value === 'string' && isReadableSlug(value), 'is not a slug');
 const isKey = passes((value) => typeof value === 'string' && isRepoKeyShape(value), 'is not a repo key such as github.com/owner/repo or the path of a main checkout');

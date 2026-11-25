@@ -77,8 +77,9 @@ the Claude verdict first. Where two reviews disagree, you decide.
   what failed and ask what to do with the question widget; do not retry it.
 - A merge conflict sends the task back to build with `fail --back build`.
   Resolve it there; then verify and review run again.
-- To drop a task, confirm with `ledger task gate abandon` in the widget. Then run
-  `ledger task abandon --reason "<why>"`: the ledger is archived, nothing merges.
+- To drop a task, show the question `ledger task gate abandon` prints in the
+  widget, then run `ledger task abandon --reason "<why>"`: the ledger is
+  archived, nothing merges.
 
 ### Investigation gate
 Wide investigation — tracing across files, non-obvious root cause — belongs in a
