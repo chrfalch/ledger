@@ -313,7 +313,7 @@ test('applying allow rules a second time changes nothing and keeps your own rule
 
 // An exact list, so a new rule is a deliberate choice: retire, worktrees, store, tree changes and deploy must keep asking.
 test('policy allow rules are exactly the everyday ledger commands', () => {
-  const task = ['new', 'go', 'claim', 'touch', 'release', 'park', 'unpark', 'block', 'unblock', 'pr', 'show', 'list', 'archive', 'gate'];
+  const task = ['new', 'go', 'claim', 'touch', 'release', 'park', 'unpark', 'block', 'unblock', 'pr', 'done', 'show', 'list', 'archive', 'gate'];
   assert.deepEqual(policyAllow(), [
     'Bash(ledger notes:*)',
     'Bash(ledger go:*)',

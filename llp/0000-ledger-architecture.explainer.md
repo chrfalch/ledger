@@ -811,7 +811,7 @@ name the `ledger` command and the `/ledger:` commands. The code does not read
 the rules. The agent follows them.
 
 At a gate, the agent asks the operator with the question widget. For the gates
-that `ledger task gate <name>` knows, `plan`, `pr`, `abandon` and `finalize` today, the question comes
+that `ledger task gate <name>` knows, `plan`, `pr`, `merge`, `goal`, `abandon` and `finalize` today, the question comes
 from that command, not from the rule text. The agent writes any other gate
 itself, by the same rules: one to three actions, the recommended one first, and
 Close last.

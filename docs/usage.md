@@ -293,6 +293,13 @@ of the repository: the main checkout or a task worktree.
 When the task you leave with `/ledger:go <name>` has every plan step done,
 the fresh session first shows the same retire line as `/ledger:next`.
 
+A task becomes done in one of two ways. A task with a PR is done once the PR
+merges: when its checks and review pass, the agent asks you "Merge now" with
+the question from `ledger task gate merge`, merges on that answer, and runs
+`ledger task done`. A task with no PR, such as an investigation, is done only
+when you answer "Goal met" to the question from `ledger task gate goal`.
+`ledger task done` refuses a task whose PR gh does not say is merged.
+
 When a task is done, `/ledger:retire <name>` archives its ledger and removes
 its worktree. Add `--dry-run` to see what it would do first. It also deletes
 the local branch when every commit on it is in the default branch or in a

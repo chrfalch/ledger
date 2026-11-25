@@ -104,11 +104,11 @@ function flatRule10(): string {
 
 const OLD_CLEAR_POINT = 'Clear point. Ledger updated.';
 
-test('the ledger sections of rule 10 state policy in 300 to 575 words and point to ledger --help', () => {
+test('the ledger sections of rule 10 state policy in 300 to 650 words and point to ledger --help', () => {
   const text = ruleSource('10-operating-model.md');
   const sections = ['### Checkpoint gate', '### Archiving a ledger', '## Compact Instructions'].map((heading) => section(text, heading)).join('\n');
   const words = sections.split(/\s+/).filter(Boolean).length;
-  assert.ok(words >= 300 && words <= 575, `the three sections hold ${words} words`);
+  assert.ok(words >= 300 && words <= 650, `the three sections hold ${words} words`);
   assert.match(sections, /`ledger --help`/);
 });
 
@@ -374,7 +374,21 @@ test('rule 10 ends a task with the question ledger task gate finalize prints, an
 });
 
 test('rule 20 names every gate ledger task gate knows', () => {
-  assert.match(ruleSource('20-writing.md').replace(/\s+/g, ' '), /\(`plan`, `pr`, `abandon` and `finalize` today\)/);
+  assert.match(ruleSource('20-writing.md').replace(/\s+/g, ' '), /\(`plan`, `pr`, `merge`, `goal`, `abandon` and `finalize` today\)/);
+});
+
+test('rule 10 merges a PR only on "Merge now", and ends a task with no PR only on "Goal met" (D4, D15)', () => {
+  const rule = flatRule10();
+  assert.ok(rule.includes('When every plan step is done, ask with `ledger task gate pr`. A task with no PR asks `ledger task gate goal` instead.'), rule);
+  assert.match(rule, /- \*\*Merge\.\*\* When the PR check says a task's checks and review passed, ask the question `ledger task gate merge` prints\. Merge only on "Merge now": merge the PR, run `ledger task done <slug>`, then follow End of task\./);
+  assert.ok(
+    rule.includes(
+      '- **Goal met.** A task with no PR is done only when the operator answers "Goal met". When its last stage passes, or the operator calls it finished, ask the question `ledger task gate goal` prints. On "Goal met", run `ledger task done`, then follow End of task.',
+    ),
+  );
+  const [merge, goal, end] = ['- **Merge.**', '- **Goal met.**', '- **End of task.**'].map((bullet) => rule.indexOf(bullet));
+  assert.ok(merge < goal && goal < end, 'the Merge and Goal met bullets come right before End of task');
+  assert.match(rule, /- \*\*End of task\.\*\* When a task becomes done, ask the question `ledger task gate finalize` prints\. It is multi-select\./);
 });
 
 /** The Failure gate of rule 10 with each run of whitespace collapsed to one space. */

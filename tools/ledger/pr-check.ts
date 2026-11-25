@@ -4,7 +4,7 @@ import { limitCloneGitCalls } from './clone.js';
 import { prViews, type PrView } from './git.js';
 import { limitLockWaits } from './lock.js';
 import { findNamed, listedChildren, storedRepoOf, type Task } from './tasks.js';
-import { markWaitingDone, sendBackToBuild, type Context } from './write.js';
+import { gateCommand, markWaitingDone, sendBackToBuild, type Context } from './write.js';
 
 /** gh gets this long for every PR together; the session start's git calls have their own limit. */
 const PR_CHECK_MS = 3000;
@@ -108,7 +108,7 @@ function outcomeLine(context: Context, task: Task, outcome: PrOutcome, repo: str
     case 'closed':
       return { text: `${slug}: PR closed without merging.` };
     case 'ready':
-      return { text: `${slug}: PR checks and review passed; ready to merge.` };
+      return { text: `${slug}: PR checks and review passed; ready to merge. Ask the question from \`${gateCommand('merge', task, repo)}\`.` };
     case 'pending':
       return undefined;
   }

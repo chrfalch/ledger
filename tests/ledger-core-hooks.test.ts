@@ -467,7 +467,7 @@ test('session-start checks the PRs of a tree whose root is in another repository
   assert.equal(ran.status, 0, ran.stderr);
   assert.equal(hung.length, 0, `git hung for: ${hung.join(' | ')}`);
   const context = (JSON.parse(ran.stdout) as SessionStartOutput).hookSpecificOutput.additionalContext;
-  assert.deepEqual(needsYou(context), ['- own: PR checks and review passed; ready to merge.', '- sib: PR checks and review passed; ready to merge.'], context);
+  assert.deepEqual(needsYou(context), [readyItem('own'), readyItem('sib')], context);
 });
 
 test('session-start reads the other tasks from the store alone: no git call in their folders or in their other repository', (t) => {
@@ -694,6 +694,8 @@ function needsYou(context: string): string[] | undefined {
   return lines.slice(at + 1, end === -1 ? undefined : end).sort();
 }
 
+const readyItem = (slug: string): string => `- ${slug}: PR checks and review passed; ready to merge. Ask the question from \`ledger task gate merge ${slug}\`.`;
+
 function localToday(): string {
   const now = new Date();
   return [now.getFullYear(), now.getMonth() + 1, now.getDate()].map((part) => String(part).padStart(2, '0')).join('-');
@@ -737,7 +739,7 @@ test('session-start in a main checkout checks the PR of every waiting task of th
     '- garbage: could not check the PR (gh pr view printed no PR state).',
     '- merged: PR merged; the task is done. Finalize it with the question from `ledger task gate finalize merged`.',
     '- no-state: could not check the PR (gh pr view printed no PR state).',
-    '- ready: PR checks and review passed; ready to merge.',
+    readyItem('ready'),
   ]);
   assert.match(context, /^Needs you:\n(- .*\n){9}Open task trees in this repo:\n/);
   assert.deepEqual(storedLocation(merged).status, { value: 'done', date: localToday() });
@@ -769,7 +771,7 @@ test('session-start in a task checks the waiting tasks of its tree only: its roo
 
   const context = startedWith(h, a.folder, env);
 
-  assert.deepEqual(needsYou(context), ['- a: PR checks and review passed; ready to merge.', '- g: PR checks and review passed; ready to merge.']);
+  assert.deepEqual(needsYou(context), [readyItem('a'), readyItem('g')]);
   assert.ok(!readFileSync(calls, 'utf8').includes(prUrl(3)));
   assert.ok(context.startsWith(`${reportHead(a.ledger, 'waiting, stage plan (code)')}\nNeeds you:\n`), context);
 });
@@ -787,8 +789,8 @@ test('session-start asks gh about every PR at once, and counts a call not done i
   assert.ok(Date.now() - started < 1500 + 22_000, `took ${Date.now() - started} ms; the hung gh sleeps 30 s`);
   assert.deepEqual(needsYou(context), [
     '- hangs: could not check the PR (gh did not answer in 1.5 s).',
-    '- one: PR checks and review passed; ready to merge.',
-    '- two: PR checks and review passed; ready to merge.',
+    readyItem('one'),
+    readyItem('two'),
   ]);
 });
 
@@ -820,7 +822,7 @@ test('session-start in a task lists what the PR check found in the report\'s one
   const lines = startedWith(h, own.folder, env).split('\n');
 
   assert.ok(lines.length <= 20, lines.join('\n'));
-  assert.deepEqual(lines.slice(0, 3), [reportHead(own.ledger, 'waiting, stage plan (code)'), 'Needs you:', '- own: PR checks and review passed; ready to merge.']);
+  assert.deepEqual(lines.slice(0, 3), [reportHead(own.ledger, 'waiting, stage plan (code)'), 'Needs you:', readyItem('own')]);
   assert.equal(lines.filter((line) => line.startsWith('Needs you')).length, 1, lines.join('\n'));
   assert.equal(lines[7], '- +2 more');
   assert.equal(lines[8], 'Where: epic › **own**');
@@ -853,7 +855,7 @@ test('session-start never asks gh about a waiting task of another machine, in a 
 
   for (const cwd of [main, here.folder]) {
     writeFileSync(calls, '');
-    assert.deepEqual(needsYou(startedWith(h, cwd, env)), ['- here: PR checks and review passed; ready to merge.'], cwd);
+    assert.deepEqual(needsYou(startedWith(h, cwd, env)), [readyItem('here')], cwd);
     assert.equal(readFileSync(calls, 'utf8'), `pr view ${prUrl(1)} --json state,reviewDecision,statusCheckRollup\n`, cwd);
   }
 });
@@ -916,6 +918,20 @@ test('session-start in a task names a just-merged task of another repo for final
   const context = startedWith(h, own.folder, env);
 
   assert.deepEqual(needsYou(context), [`- sib: PR merged; the task is done. Finalize it with the question from \`ledger task gate finalize sib@${api}\`.`], context);
+});
+
+test('session-start in a task names a ready PR of another repo for the merge gate by its slug and main checkout', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const api = checkout(h, 'api');
+  const own = waitingTask(h, main, 'own', 1, `- parent: epic @ ${api}`);
+  ledgerIn(h, worktree(h, api, path.join(api, '.claude/worktrees/epic')), familyLedger('epic', [], `## Children\n- own @ ${main}\n- sib\n\n## Next step\nA step.\n`));
+  ledgerIn(h, worktree(h, api, path.join(api, '.claude/worktrees/sib')), familyLedger('sib', ['- status: waiting 2026-11-20', `- pr: ${prUrl(2)}`, '- parent: epic']));
+  const { env } = stubPrs(h, { [prUrl(1)]: { json: open([checkRun('', 'QUEUED')]) }, [prUrl(2)]: { json: open([checkRun('SUCCESS')], 'APPROVED') } });
+
+  const context = startedWith(h, own.folder, env);
+
+  assert.deepEqual(needsYou(context), [`- sib: PR checks and review passed; ready to merge. Ask the question from \`ledger task gate merge sib@${api}\`.`], context);
 });
 
 test('session-start never asks gh about a waiting task whose worktree folder is now a plain folder with no .git', (t) => {

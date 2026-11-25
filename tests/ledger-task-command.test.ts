@@ -188,11 +188,18 @@ test('a finished task ends with one multi-select question for retire and the nex
   assert.match(bullet, /A ticked option is the operator's approval to run it\./);
 });
 
+test('a task becomes done on "Merge now" or "Goal met", through ledger task done, before End of task', () => {
+  assert.match(checkpointBullet('**Resume.**'), /A task with no PR asks `ledger task gate goal` instead\./);
+  assert.match(checkpointBullet('**Merge.**'), /ask the question `ledger task gate merge` prints\. Merge only on "Merge now": merge the PR, run `ledger task done <slug>`, then follow End of task\./);
+  assert.match(checkpointBullet('**Goal met.**'), /On "Goal met", run `ledger task done`, then follow End of task\./);
+  assert.match(checkpointBullet('**End of task.**'), /^\*\*End of task\.\*\* When a task becomes done, ask the question `ledger task gate finalize` prints\./);
+});
+
 const askingTheOperator = () => read('rules/20-writing.md').match(/### Asking the operator.*?## /)?.[0] ?? '';
 
 test('the writing rule takes the widget of each gate ledger task gate knows from it', () => {
   const section = askingTheOperator();
-  assert.match(section, /At a gate that `ledger task gate` knows \(`plan`, `pr`, `abandon` and `finalize` today\), show the question it prints as JSON\. Do not write its options yourself\./);
+  assert.match(section, /At a gate that `ledger task gate` knows \(`plan`, `pr`, `merge`, `goal`, `abandon` and `finalize` today\), show the question it prints as JSON\. Do not write its options yourself\./);
   assert.match(section, /Write any other gate yourself, with at most three actions, plus Close\./);
 });
 

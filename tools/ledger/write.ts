@@ -133,6 +133,17 @@ const oneLine = (text: string): string => text.trim().split(/\s+/).join(' ');
 /** `text` as one shell word: unchanged when no character needs quoting, else in single quotes. */
 export const shellWord = (text: string): string => (/^[\w@%+=:,./-]+$/.test(text) ? text : `'${text.replaceAll("'", `'\\''`)}'`);
 
+/**
+ * The command that prints the question of `gate` for `task`, as `<slug>@<main>` when it is not a task of `repo`, the
+ * session's, so it names that repo's task; the slug alone when the store knows no main checkout of its repo. A slug that
+ * starts with `-` follows `--`, or the CLI would read it as an option.
+ */
+export function gateCommand(gate: string, task: Task, repo: string): string {
+  const { slug, main } = task;
+  const ref = task.repoKeys.includes(repo) || main === undefined ? slug : shellWord(`${slug}@${main}`);
+  return `ledger task gate ${gate} ${slug.startsWith('-') ? `-- ${ref}` : ref}`;
+}
+
 const slugRule = (slug: string): string =>
   `"${slug}" cannot name a new task. A new slug starts with a lowercase letter or digit and has only lowercase letters, digits and hyphens.`;
 
@@ -647,6 +658,34 @@ export function markMergedDone(context: Context, task: Task): MergedCheck {
 export function markWaitingDone(context: Context, task: Task): boolean {
   return updateLedger(context, task, (text) => (stateOf(parseLedger(text).location) === 'waiting' ? movedTo(task, text, { value: 'done', date: today() }) : undefined));
 }
+
+export type DoneResult = { slug: string; ledger: string; finalize: string };
+
+/**
+ * Marks a task done: one with no PR link, as the operator answered "Goal met", or one whose PR gh says is merged. The
+ * task `name` gives, or else the task of the worktree the command runs in.
+ */
+export function doneTask(context: Context, name: string | undefined): DoneResult {
+  const task = name === undefined ? (currentTask(context.store, context.cwd) ?? fail('No task in this folder. Give its slug: ledger task done <slug>')) : liveTask(context, name).task;
+  const { slug } = task;
+  if (task.place === 'backlog') fail(`${slug} is in the backlog: it has not started, so it cannot be done. Start it with ledger go ${slug}.`);
+  // Before gh and the write: updateLedger refuses a lost task as one of another machine, which hides why it cannot move.
+  checkTransition(slug, stateOf(task.ledger.location), 'done');
+  const main = mainCheckout(context.cwd);
+  const repo = main === undefined ? '' : repoKey(main);
+  const { pr } = task.ledger.location;
+  if (pr !== undefined && !task.elsewhere) {
+    const state = prState(task.main ?? context.cwd, pr);
+    if (state === 'unknown') fail(`${slug}: gh could not say whether its PR ${pr} is merged, so the task is not done. Try again once gh answers.`);
+    if (state === 'not merged') fail(`${slug}: its PR ${pr} is not merged, so the task is not done. Merge it first, after the question from \`${gateCommand('merge', task, repo)}\`.`);
+  }
+  updateLedger(context, task, (text) =>
+    parseLedger(text).location.pr === pr ? movedTo(task, text, { value: 'done', date: today() }) : fail(`${slug}: its PR link changed while it was being marked done. Run ledger task done again.`),
+  );
+  return { slug, ledger: task.file, finalize: gateCommand('finalize', task, repo) };
+}
+
+export const doneText = ({ slug, finalize }: DoneResult): string => `${slug} is done. Finalize it with the question from \`${finalize}\`.`;
 
 /**
  * Makes a waiting task active again, as its PR needs fixes, at the build stage when its kind has one. Gives the stage

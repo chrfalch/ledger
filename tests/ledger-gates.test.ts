@@ -169,10 +169,10 @@ test('ledger task gate outside a task asks about this task', (t) => {
 
 test('ledger task gate with an unknown name exits 1 and lists the gates', (t) => {
   const h = home(t);
-  const ran = ledger(h, h, 'task', 'gate', 'merge');
+  const ran = ledger(h, h, 'task', 'gate', 'ship');
   assert.equal(ran.status, 1);
   assert.equal(ran.stdout, '');
-  assert.match(ran.stderr, /"merge"/);
+  assert.match(ran.stderr, /"ship"/);
   assert.match(ran.stderr, /plan, pr/);
 });
 
@@ -304,8 +304,8 @@ test('ledger task gate finalize outside a task, with no slug, says to name one',
 
 test('ledger task gate names the finalize gate in its help and when a name is unknown', (t) => {
   const h = home(t);
-  assert.match(ok(ledger(h, h, 'task', 'gate', '--help')), /plan, pr, abandon, finalize/);
-  assert.match(ledger(h, h, 'task', 'gate', 'merge').stderr, /plan, pr, abandon, finalize/);
+  assert.match(ok(ledger(h, h, 'task', 'gate', '--help')), /plan, pr, merge, goal, abandon, finalize/);
+  assert.match(ledger(h, h, 'task', 'gate', 'ship').stderr, /plan, pr, merge, goal, abandon, finalize/);
 });
 
 test('the abandon gate asks to abandon the task, offers Abandon task, Not yet and Close, and closes as the plan gate does', () => {
@@ -327,4 +327,40 @@ test('ledger task gate abandon prints the abandon question for the task of the w
   const question = JSON.parse(ok(ledger(h, worktreeOf(app, 'fix-login'), 'task', 'gate', 'abandon'))) as GateQuestion;
   assert.deepEqual(question, gateQuestion('abandon', 'fix-login'));
   assert.deepEqual(JSON.parse(ok(ledger(h, h, 'task', 'gate', 'abandon', 'fix-login'))), question);
+});
+
+const SINGLE_SELECT_CLOSE = { label: 'Close', description: 'Save where the task stands and stop. Nothing else runs.' };
+
+test('ledger task gate merge asks to merge the PR that passed, with Merge now, Not yet and Close (D4)', (t) => {
+  const h = home(t);
+  assert.deepEqual(JSON.parse(ok(ledger(h, h, 'task', 'gate', 'merge', 'fix-login'))), {
+    question: 'The PR of fix-login passed its checks and review. Merge it now?',
+    header: 'Merge',
+    multiSelect: false,
+    options: [
+      { label: 'Merge now (Recommended)', description: 'Merge the pull request. The task becomes done and the finalize question follows.' },
+      { label: 'Not yet', description: 'Nothing is merged. The PR stays open and the task stays waiting.' },
+      SINGLE_SELECT_CLOSE,
+    ],
+  });
+  assert.equal(gateQuestion('merge').question, 'The PR of this task passed its checks and review. Merge it now?');
+});
+
+test('ledger task gate goal asks whether the goal of a task with no PR is met, with Goal met, Not yet and Close (D15)', (t) => {
+  const h = home(t);
+  assert.deepEqual(JSON.parse(ok(ledger(h, h, 'task', 'gate', 'goal', 'fix-login'))), {
+    question: 'Every stage of fix-login has passed. Is its goal met?',
+    header: 'Goal',
+    multiSelect: false,
+    options: [
+      { label: 'Goal met (Recommended)', description: 'Mark the task done. The finalize question follows.' },
+      { label: 'Not yet', description: 'The task stays active. Say what is left to do.' },
+      SINGLE_SELECT_CLOSE,
+    ],
+  });
+  assert.equal(gateQuestion('goal').question, 'Every stage of this task has passed. Is its goal met?');
+});
+
+test('the gates come in the order of the lifecycle: plan, pr, merge, goal, abandon', () => {
+  assert.deepEqual(GATE_NAMES, ['plan', 'pr', 'merge', 'goal', 'abandon']);
 });
