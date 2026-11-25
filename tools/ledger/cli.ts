@@ -1,21 +1,24 @@
 import { Argument, Command, CommanderError, Option } from 'commander';
 import { spawnSync } from 'node:child_process';
+import { Console } from 'node:console';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claimResultText, claimTask, Held, knownSession, releaseAll, releaseTask, requiredSession, touchAll, touchTask, type AllResult } from './claims.js';
+import { limitCloneGitCalls } from './clone.js';
 import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
 import { finalizeQuestion } from './finalize.js';
 import { parseLedger, planProgress } from './format.js';
 import { ALL_GATE_NAMES, FINALIZE_GATE, gateQuestion } from './gates.js';
-import { mainCheckout } from './git.js';
+import { mainCheckout, resetGitLimits } from './git.js';
 import { logHookFailure, oneLine } from './hook-failures.js';
 import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookContext, type HookEvent } from './hooks.js';
 import { KINDS, STAGES } from './kinds.js';
+import { limitLockWaits } from './lock.js';
 import { ledgerBin, ledgerPaths, realPath } from './paths.js';
-import { repoKey, repoLabel } from './repo-key.js';
+import { forgetRepoKeys, repoKey, repoLabel } from './repo-key.js';
 import { migrateStorage } from './migrate.js';
 import { migrateActive } from './migrate-active.js';
 import { migrateRecords } from './migrate-records.js';
@@ -59,7 +62,8 @@ import { abandonTask, retireTask, retireText } from './retire.js';
 import { readStorage, STORAGES, type Storage } from './settings.js';
 import { ownLedger, shownLedger } from './show.js';
 import { sqliteFile } from './sqlite-store.js';
-import type { LedgerStore } from './store.js';
+import { Collected, inRun, runConsole, runEnv } from './run-io.js';
+import { forgetCreatedCopies, type LedgerStore } from './store.js';
 import { initSync, syncInBackground, syncLedgers } from './sync.js';
 import {
   autoPrune,
@@ -223,13 +227,13 @@ function session(store: LedgerStore, folder: string) {
 
 function deploy(args: string[]): number {
   const script = fileURLToPath(new URL('../../bin/deploy', import.meta.url));
-  const result = spawnSync(process.execPath, [script, ...args], { stdio: 'inherit' });
+  const result = spawnSync(process.execPath, [script, ...args], { stdio: 'inherit', env: runEnv() });
   if (result.error) {
-    console.error(`ledger deploy: ${result.error.message}`);
+    runConsole().error(`ledger deploy: ${result.error.message}`);
     return 1;
   }
   if (result.signal) {
-    console.error(`ledger deploy: bin/deploy terminated by ${result.signal}`);
+    runConsole().error(`ledger deploy: bin/deploy terminated by ${result.signal}`);
     return 1;
   }
   return result.status ?? 1;
@@ -246,11 +250,44 @@ function sessionForAll(slug: string | undefined, session: string | undefined): s
   return requiredSession(session);
 }
 
+export type LedgerIo = { home: string; cwd: string; env: NodeJS.ProcessEnv; store?: LedgerStore; stdin?: string };
+export type LedgerRun = { code: number; stdout: string; stderr: string };
+
+/** A run's inputs, with stdin read only by a command that needs it, and the streams it prints to. */
+type RunInputs = Omit<LedgerIo, 'stdin'> & { stdin: () => string; stdout: NodeJS.WritableStream; stderr: NodeJS.WritableStream };
+
 /** Runs the `ledger` command line `argv`, without the node and script paths, and returns its exit code. */
 export async function main(argv: string[]): Promise<number> {
-  const paths = ledgerPaths(process.env.HOME || homedir());
-  const cwd = process.cwd();
-  let store: LedgerStore | undefined;
+  return run(argv, { home: process.env.HOME || homedir(), cwd: process.cwd(), env: process.env, stdin: () => readFileSync(0, 'utf8'), stdout: process.stdout, stderr: process.stderr });
+}
+
+/** Runs `argv` as main does, inside this process: with the inputs of `io`, and with what it prints collected. A store given in `io` stays open. */
+export async function runLedger(argv: string[], { stdin = '', ...io }: LedgerIo): Promise<LedgerRun> {
+  const stdout = new Collected();
+  const stderr = new Collected();
+  const code = await run(argv, { ...io, stdin: () => stdin, stdout, stderr });
+  return { code, stdout: stdout.text(), stderr: stderr.text() };
+}
+
+/** Each run starts as a fresh process does: without the time limits, cache and notes an earlier run left in the modules. */
+function resetRunState(): void {
+  resetGitLimits();
+  limitCloneGitCalls(Infinity);
+  limitLockWaits(Infinity);
+  forgetRepoKeys();
+  forgetCreatedCopies();
+}
+
+function run(argv: string[], io: RunInputs): Promise<number> {
+  resetRunState();
+  return inRun({ env: io.env, console: new Console({ stdout: io.stdout, stderr: io.stderr }) }, () => commandLine(argv, io));
+}
+
+async function commandLine(argv: string[], { home, cwd, store: given, stdin, stdout, stderr }: RunInputs): Promise<number> {
+  // Shadows the global console, so that each command prints to the streams of this run.
+  const console = runConsole();
+  const paths = ledgerPaths(home);
+  let store = given;
   const context: Context = {
     paths,
     cwd,
@@ -332,16 +369,16 @@ export async function main(argv: string[]): Promise<number> {
           if (slug === undefined && (repo !== undefined || evidence !== undefined)) fail('--repo and --evidence name a task of their own: ledger show <slug>');
           const found = slug === undefined ? ownLedger(context) : shownLedger(context, slug, { repo, archived: evidence !== undefined });
           if (found.notice !== undefined) console.error(found.notice);
-          if (evidence === true) process.stdout.write(context.store.archive.evidenceFiles(found.repo, found.name).map((file) => `${file}\n`).join(''));
+          if (evidence === true) stdout.write(context.store.archive.evidenceFiles(found.repo, found.name).map((file) => `${file}\n`).join(''));
           else if (evidence !== undefined) {
             const bytes = context.store.archive.readEvidence(found.repo, found.name, evidence) ?? fail(`${evidence} is not an evidence file of ${slug}, archived as ${found.name} in the repo ${repoLabel(found.repo)}.`);
-            process.stdout.write(bytes);
+            stdout.write(bytes);
           } else if (json) {
             const { status } = parseLedger(found.text).location;
             printJson({ repo: found.repo, name: found.name, location: found.location, ...(found.host === undefined ? {} : { host: found.host }), ...(status === undefined ? {} : { status }), text: found.text });
           } else {
             if (found.host !== undefined) console.log(`${found.name} is in a worktree on ${found.host}. This is a read-only copy of its ledger:`);
-            process.stdout.write(found.text);
+            stdout.write(found.text);
           }
         } catch (error) {
           if (!(error instanceof Failure)) throw error;
@@ -351,6 +388,7 @@ export async function main(argv: string[]): Promise<number> {
       });
 
   const program = new Command('ledger').description('Read and change the task ledgers on this machine.').enablePositionalOptions().exitOverride();
+  program.configureOutput({ writeOut: (text) => void stdout.write(text), writeErr: (text) => void stderr.write(text) });
   const taskGroup = program.command('task').description('Make, start, claim, park, block, retire, abandon and read tasks, and record their PRs.');
   taskGroup
     .command('new')
@@ -914,7 +952,7 @@ export async function main(argv: string[]): Promise<number> {
         },
       };
       try {
-        process.stdout.write(answerHook(event, readFileSync(0, 'utf8'), hookContext));
+        stdout.write(answerHook(event, stdin(), hookContext));
       } catch (error) {
         // Exit 0 with no output: Claude Code then allows the tool call and injects nothing. Exit 2 would block the tool call.
         const message = oneLine(error instanceof Error ? error.message : String(error));
@@ -948,7 +986,7 @@ export async function main(argv: string[]): Promise<number> {
     printJson({}, error instanceof Error ? error.message : String(error));
     return 1;
   } finally {
-    store?.close?.();
+    if (store !== given) store?.close?.();
   }
   return exitCode;
 }

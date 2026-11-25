@@ -168,6 +168,8 @@ export const noteCreated = (location: string): void => void createdHere.add(loca
  */
 export const wasCreatedHere = (location: string): boolean => createdHere.has(location);
 
+export const forgetCreatedCopies = (): void => createdHere.clear();
+
 /** Copies of retired ledgers; the name is `<YYYY-MM-DD>-<slug>`. */
 export interface Archive extends LedgerCollection {
   /**

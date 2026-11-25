@@ -43,6 +43,7 @@ import { withHint } from './migrate-repo-ids.js';
 import { hasStage, isKind, KINDS, type Kind } from './kinds.js';
 import { parseRecord, storedText } from './record.js';
 import { remoteKey, repoKey } from './repo-key.js';
+import { runConsole } from './run-io.js';
 import { holdsUnmovedLedger } from './unmoved.js';
 import { hostProblem, noteOwnHost } from './settings.js';
 import { checkPrLink, checkTransition, stateOf } from './states.js';
@@ -192,7 +193,7 @@ function excludeEvidence(main: string): void {
   try {
     writeAtomic(exclude, `${current}${current === '' || current.endsWith('\n') ? '' : '\n'}.claude/evidence/\n`);
   } catch {
-    console.error(`warning: .claude/evidence/ was not added to ${exclude}`);
+    runConsole().error(`warning: .claude/evidence/ was not added to ${exclude}`);
   }
 }
 

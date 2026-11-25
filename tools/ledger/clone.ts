@@ -8,6 +8,7 @@ import { folderEntries, isReadableFile, isTaken, readText, writeAtomic } from '.
 import { withLock, type LockOptions } from './lock.js';
 import type { LedgerPaths } from './paths.js';
 import { readRecordJson } from './record.js';
+import { runConsole, runEnv } from './run-io.js';
 import { isSecretLike, prePushHook, RAW_CHANGES_LOG, WITHHELD } from './secret-scan.js';
 import { HOST_LABEL } from './settings.js';
 
@@ -137,7 +138,7 @@ const POINTS_ELSEWHERE = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJ
 
 /** This process's environment without what would point git elsewhere than the clone, for git in it and a ledger it starts. */
 export const cloneEnv = (): NodeJS.ProcessEnv => ({
-  ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !POINTS_ELSEWHERE.includes(name) && !name.startsWith('GIT_CONFIG'))),
+  ...Object.fromEntries(Object.entries(runEnv()).filter(([name]) => !POINTS_ELSEWHERE.includes(name) && !name.startsWith('GIT_CONFIG'))),
   // The git text ledger prints and records stays in English, as the rest of its output is.
   LC_ALL: 'C',
 });
@@ -427,7 +428,7 @@ export type CommitOptions = {
  * Commits the changes of the clone's working tree; true when it made a commit. Unfinished work, or any changed path
  * outside the allowlist, staged or not, stops it with nothing committed. Call it under the clone lock.
  */
-export function commitChanges(clone: string, { message = 'Update ledgers', deadline, host, ownHosts = new Set(), own = new Set(), pending, warn = (text) => console.error(`warning: ${text}`) }: CommitOptions = {}): boolean {
+export function commitChanges(clone: string, { message = 'Update ledgers', deadline, host, ownHosts = new Set(), own = new Set(), pending, warn = (text) => runConsole().error(`warning: ${text}`) }: CommitOptions = {}): boolean {
   let changed = checkedChanges(clone, deadline);
   // unique: a staged removal of a file that is still on disk is two entries.
   const foreign = unique(changed).flatMap((file) => {

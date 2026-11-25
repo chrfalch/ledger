@@ -8,6 +8,7 @@ import { folderEntries } from './files.js';
 import { ledgerBin, type LedgerPaths } from './paths.js';
 import { ownHosts, validHost } from './settings.js';
 import { parseRecord, recordJson } from './record.js';
+import { runConsole, runEnv } from './run-io.js';
 import type { Backlog, LedgerCollection, LedgerStore, WrittenLedger } from './store.js';
 
 export type GitStoreOptions = {
@@ -26,7 +27,7 @@ export function onBackgroundSyncForTests(started: (pid: number) => void): void {
 
 /** Pushes in a process of its own that outlives this command. LEDGER_TEST_NO_BACKGROUND_SYNC lets a test sync when it chooses. */
 function startBackgroundSync(paths: LedgerPaths): void {
-  if (process.env.LEDGER_TEST_NO_BACKGROUND_SYNC) return;
+  if (runEnv().LEDGER_TEST_NO_BACKGROUND_SYNC) return;
   const child = spawn(process.execPath, [ledgerBin, 'store', 'sync', '--quiet'], { cwd: paths.home, detached: true, stdio: 'ignore', env: { ...cloneEnv(), HOME: paths.home } });
   child.on('error', () => {});
   child.unref();
@@ -187,7 +188,7 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
         // The ledgers are written; only the commit is missing, and the next command or sync commits it.
         const problem = error instanceof SyncProblem ? error : new SyncProblem('git', `Could not commit in ${paths.tilde(clone)}: ${(error as Error).message}`);
         recordProblem(paths, problem);
-        console.error(`warning: the change is written but not committed. ${problem.message.split('\n')[0]}`);
+        runConsole().error(`warning: the change is written but not committed. ${problem.message.split('\n')[0]}`);
         return;
       }
       if (backgroundSync && (committed || hasUnpushed(clone))) startBackgroundSync(paths);

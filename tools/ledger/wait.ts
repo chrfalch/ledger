@@ -1,3 +1,5 @@
+import { runEnv } from './run-io.js';
+
 const sleeper = new Int32Array(new SharedArrayBuffer(4));
 
 /** Blocks this process for `ms` milliseconds; the ledger code is synchronous, so it cannot await a timer. */
@@ -12,6 +14,6 @@ const MAX_TEST_DELAY_MS = 10_000;
  * The time is random so that a command that read first can write last.
  */
 export function pauseForTest(): void {
-  const ms = Number(process.env.LEDGER_TEST_DELAY_MS);
+  const ms = Number(runEnv().LEDGER_TEST_DELAY_MS);
   if (Number.isFinite(ms) && ms > 0) sleep(Math.random() * Math.min(ms, MAX_TEST_DELAY_MS));
 }

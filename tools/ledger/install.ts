@@ -4,6 +4,7 @@ import { rmSync } from 'node:fs';
 import path from 'node:path';
 import { fail } from './failure.js';
 import { exists } from './files.js';
+import { runEnv } from './run-io.js';
 
 /** The exit code of `ledger go` when the install fails, after the exit codes of promote and Held. */
 export const INSTALL_FAILED = 5;
@@ -51,6 +52,7 @@ export function installPackages(worktree: string, retry: string): string | undef
     stdio: ['ignore', 'pipe', 'pipe'],
     maxBuffer: 256 * 1024 * 1024,
     timeout: INSTALL_TIMEOUT_MS,
+    env: runEnv(),
   });
   if (result.status === 0) return shown;
   // A partial node_modules would make the next start skip the install. There was none before this install ran.

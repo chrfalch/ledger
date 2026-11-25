@@ -59,6 +59,8 @@ export function remoteKey(url: string, base: string): string | undefined {
 
 const keys = new Map<string, string>();
 
+export const forgetRepoKeys = (): void => keys.clear();
+
 /** The store key of the repo at `main`: the address of origin, else of its only remote, else the path `main`. */
 export function repoKey(main: string): string {
   const known = keys.get(main);
