@@ -57,6 +57,15 @@ export const sqliteFile = (home: string): string => path.join(home, '.claude', '
 const BUSY_TIMEOUT_MS = 5_000;
 const SQLITE_BUSY = 5;
 
+let busyTimeoutMs = BUSY_TIMEOUT_MS;
+
+/** For tests only: how long a write waits for another to end. A module the tests preload calls it. Gives the wait it replaces. */
+export function limitBusyWaitForTests(ms: number): number {
+  const replaced = busyTimeoutMs;
+  busyTimeoutMs = ms;
+  return replaced;
+}
+
 const SQLITE_WARNING = 'SQLite is an experimental feature and might change at any time';
 
 type Place = 'backlog' | 'active' | 'archive';
@@ -107,7 +116,7 @@ function openDatabase(file: string, home: string, readOnly: boolean): DatabaseSy
   if (!readOnly) mkdirSync(path.dirname(file), { recursive: true });
   const db = new sqlite.DatabaseSync(file, { readOnly });
   // Hooks and commands of several sessions may write at once; each waits for the others' short transactions.
-  db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+  db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
   if (!readOnly) db.exec(SCHEMA);
   return db;
 }
@@ -165,7 +174,7 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
 
   const failIfBusy = (error: unknown): void => {
     if ((error as { errcode?: number }).errcode === SQLITE_BUSY) {
-      fail(`Another ledger command has been writing ${file} for more than ${BUSY_TIMEOUT_MS / 1000} seconds, so this one gave up. Try again.`);
+      fail(`Another ledger command has been writing ${file} for more than ${busyTimeoutMs / 1000} seconds, so this one gave up. Try again.`);
     }
   };
 

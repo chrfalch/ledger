@@ -5,10 +5,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { pathToFileURL } from 'node:url';
 import { readRecordJson, renderRecord } from '../tools/ledger/record.js';
 import { REPO } from './helpers.js';
-import { commandEnv, git, home, LEDGER_BIN, ok, type Ran } from './ledger-core-fixtures.js';
+import { commandEnv, git, home, LEDGER_BIN, ok, PRELOAD_OPTIONS, type Ran } from './ledger-core-fixtures.js';
 
 export const URL = 'https://github.com/me/ledgers.git';
 export const SSH_URL = 'git@github.com:me/ledgers.git';
@@ -89,8 +88,6 @@ export function machine(t: TestContext, bare: string): Machine {
   return { h, app, bare, clone: path.join(h, '.claude/ledger-data'), status: path.join(h, '.claude/ledger-data.status.json') };
 }
 
-const TEST_REMOTE = pathToFileURL(path.join(REPO, 'tests/fixtures/git-test-remote.mjs')).href;
-
 /** Where the preloaded module notes the pid of each background sync a ledger command of HOME `h` starts. */
 export const backgroundPids = (h: string): string => path.join(h, 'background-sync-pids');
 
@@ -102,7 +99,7 @@ export const machineEnv = (m: Machine): NodeJS.ProcessEnv => ({
   ...commandEnv(m.h),
   LEDGER_TEST_REMOTE: m.bare,
   LEDGER_TEST_BACKGROUND_PIDS: backgroundPids(m.h),
-  NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import ${TEST_REMOTE}`.trim(),
+  NODE_OPTIONS: PRELOAD_OPTIONS,
 });
 
 export const runs = (pid: number): boolean => {
@@ -183,8 +180,8 @@ export function today(): string {
   return [date.getFullYear(), date.getMonth() + 1, date.getDate()].map((part) => String(part).padStart(2, '0')).join('-');
 }
 
-export const hookContext = (m: Machine, cwd = m.h): string => {
-  const ran = run(m, ['hook', 'session-start'], { cwd, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd }) });
+export const hookContext = (m: Machine, cwd = m.h, env = quietEnv(m)): string => {
+  const ran = run(m, ['hook', 'session-start'], { cwd, env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd }) });
   assert.equal(ran.status, 0, ran.stderr);
   return ran.stdout === '' ? '' : (JSON.parse(ran.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext;
 };

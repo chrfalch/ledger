@@ -46,6 +46,7 @@ import { isFolder, isTaken, writeAtomic } from './files.js';
 import { gh } from './git.js';
 import { withLockIfFree } from './lock.js';
 import { realPath, type LedgerPaths } from './paths.js';
+import { runClock } from './run-io.js';
 import { ADDED_LINES_LOG, CHANGED_PATHS_LOG, MESSAGES_LOG, messageLocations, secretLocations } from './secret-scan.js';
 import { ownHosts, readStorage, validHost } from './settings.js';
 import { plural } from './views.js';
@@ -115,7 +116,7 @@ function checkPrivate(paths: LedgerPaths, clone: string, repo: string, daily: bo
   const { notPrivate: marker } = clonePaths(paths);
   const [at, checked] = cloneGit(clone, ['config', '--get', CHECKED]).stdout.trim().split(' ');
   // The marker also covers an earlier check that git could not remove from the clone config.
-  if (daily && checked === repo && Date.now() - Number(at) < DAY_MS && !isTaken(marker)) return;
+  if (daily && checked === repo && runClock().now().getTime() - Number(at) < DAY_MS && !isTaken(marker)) return;
   // Written before gh is asked, so an answer that it is not private is never lost to a write that fails after it.
   let asking: string;
   try {
@@ -129,7 +130,7 @@ function checkPrivate(paths: LedgerPaths, clone: string, repo: string, daily: bo
   const reason = notPrivate(paths, repo);
   if (reason === undefined) {
     return withCloneLock(clone, () => {
-      must(cloneGit(clone, ['config', CHECKED, `${Date.now()} ${repo}`]));
+      must(cloneGit(clone, ['config', CHECKED, `${runClock().now().getTime()} ${repo}`]));
       // Another text is from a check that started later, whose answer this older one must not undo.
       if (isTaken(marker) && readFileSync(marker, 'utf8') === asking) rmSync(marker, { force: true });
     });
@@ -153,7 +154,7 @@ function checkPrivate(paths: LedgerPaths, clone: string, repo: string, daily: bo
 
 /** Writes the not-private marker with a text no other check writes, and gives that text. */
 function mark(marker: string, repo: string): string {
-  const text = `${JSON.stringify({ repo, at: new Date().toISOString(), check: randomUUID() })}\n`;
+  const text = `${JSON.stringify({ repo, at: runClock().now().toISOString(), check: randomUUID() })}\n`;
   writeAtomic(marker, text);
   return text;
 }
@@ -264,7 +265,7 @@ function initLocked(paths: LedgerPaths, url: string, repo: string, line: Line): 
     if (problem !== undefined) fail(`${STOPPED}: ${where} is a clone of ${shown}, but ${problem}.`);
     withCloneLock(clone, () => {
       installHook(clone);
-      must(cloneGit(clone, ['config', CHECKED, `${Date.now()} ${repo}`]));
+      must(cloneGit(clone, ['config', CHECKED, `${runClock().now().getTime()} ${repo}`]));
       if (empty) commitChanges(clone, { message: 'Set up git storage for ledgers' });
     });
   } catch (error) {

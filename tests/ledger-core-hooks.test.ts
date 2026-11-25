@@ -12,9 +12,12 @@ import { ledgerPaths } from '../tools/ledger/paths.js';
 import { parseRecord, recordJson } from '../tools/ledger/record.js';
 import { repoKey } from '../tools/ledger/repo-key.js';
 import { REPO } from './helpers.js';
-import { git, home, LEDGER_BIN, ledgerText, readLedgerFile, touch } from './ledger-core-fixtures.js';
+import { git, home, LEDGER_BIN, ledgerText, readLedgerFile, shortLimits, touch } from './ledger-core-fixtures.js';
 
 type Ran = { status: number | null; stdout: string; stderr: string };
+
+/** The time limit of a hook in the tests of a git that hangs; ledger in use gives a hook 5 s. */
+const HOOK_MS = 1000;
 
 function environment(h: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
@@ -319,10 +322,10 @@ test('session-start whose git worktree listing does not answer gives no hint and
   writeFileSync(path.join(stubs, 'git'), `#!/bin/sh\nfor arg in "$@"; do [ "$arg" = list ] && exec sleep 30; done\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
   const started = Date.now();
 
-  const ran = runHook(h, 'session-start', JSON.stringify({ cwd: main }), { PATH: `${stubs}${path.delimiter}${process.env.PATH ?? ''}` }, 20_000);
+  const ran = runHook(h, 'session-start', JSON.stringify({ cwd: main }), { PATH: `${stubs}${path.delimiter}${process.env.PATH ?? ''}`, ...shortLimits({ hookMs: HOOK_MS }) }, 20_000);
 
   assert.equal(ran.status, 0, ran.stderr);
-  assert.ok(Date.now() - started < 9_000);
+  assert.ok(Date.now() - started < HOOK_MS + 4_000);
   assert.doesNotMatch(ran.stdout, /still kept in/);
 });
 
@@ -438,7 +441,7 @@ test('session-start names tasks in a repository whose git does not answer as unk
   const { ran, took } = sessionStartWithHangingGit(h, child, slow);
 
   assert.equal(ran.status, 0, ran.stderr);
-  assert.ok(took < 9_000, `took ${took} ms`);
+  assert.ok(took < HOOK_MS + 4_000, `took ${took} ms`);
   assert.equal(
     (JSON.parse(ran.stdout) as SessionStartOutput).hookSpecificOutput.additionalContext,
     relationText(ledger, `Parent task: epic @ ${slow} (unknown).`, ...parts.map((part) => `Child task: ${part} @ ${slow} (unknown).`)),
@@ -456,7 +459,7 @@ test('session-start waits once for a hanging repository, also when tasks name it
   const { ran, took } = sessionStartWithHangingGit(h, child, slow);
 
   assert.equal(ran.status, 0, ran.stderr);
-  assert.ok(took < 9_000, `took ${took} ms`);
+  assert.ok(took < HOOK_MS + 4_000, `took ${took} ms`);
   assert.equal(
     (JSON.parse(ran.stdout) as SessionStartOutput).hookSpecificOutput.additionalContext,
     relationText(ledger, `Parent task: epic @ ${worktreeOf('epic')} (unknown).`, `Child task: part-a @ ${slow} (unknown).`, `Child task: part-b @ ${worktreeOf('part-b')} (unknown).`),
@@ -470,7 +473,7 @@ function sessionStartWithHangingGit(h: string, cwd: string, slow: string): { ran
   const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
   writeFileSync(path.join(stubs, 'git'), `#!/bin/sh\nfor arg in "$@"; do case "$arg" in '${slow}'*) exec sleep 30 ;; esac; done\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
   const started = Date.now();
-  const ran = runHook(h, 'session-start', JSON.stringify({ cwd }), { PATH: `${stubs}${path.delimiter}${process.env.PATH ?? ''}` }, 20_000);
+  const ran = runHook(h, 'session-start', JSON.stringify({ cwd }), { PATH: `${stubs}${path.delimiter}${process.env.PATH ?? ''}`, ...shortLimits({ hookMs: HOOK_MS }) }, 20_000);
   return { ran, took: Date.now() - started };
 }
 
@@ -743,11 +746,11 @@ test('session-start asks gh about every PR at once, and counts a call not done i
   const { env } = stubPrs(h, { [prUrl(1)]: together, [prUrl(2)]: together, [prUrl(3)]: { hang: true } });
   const started = Date.now();
 
-  const context = startedWith(h, main, env);
+  const context = startedWith(h, main, { ...env, ...shortLimits({ prCheckMs: 1500 }) });
 
-  assert.ok(Date.now() - started < 25_000, `took ${Date.now() - started} ms; the hung gh sleeps 30 s`);
+  assert.ok(Date.now() - started < 1500 + 22_000, `took ${Date.now() - started} ms; the hung gh sleeps 30 s`);
   assert.deepEqual(needsYou(context), [
-    '- hangs: could not check the PR (gh did not answer in 3 s).',
+    '- hangs: could not check the PR (gh did not answer in 1.5 s).',
     '- one: PR checks and review passed; ready to merge.',
     '- two: PR checks and review passed; ready to merge.',
   ]);

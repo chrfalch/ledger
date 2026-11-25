@@ -16,7 +16,7 @@ import { sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { allowRemoteForTests, pullForSession } from '../tools/ledger/sync.js';
 import { REPO } from './helpers.js';
-import { commandEnv, git, home, LEDGER_BIN, ledgerText, noSqlite, ok, type Ran } from './ledger-core-fixtures.js';
+import { commandEnv, git, home, LEDGER_BIN, ledgerText, noSqlite, ok, shortLimits, type Ran } from './ledger-core-fixtures.js';
 import {
   answerGh,
   APP,
@@ -90,6 +90,11 @@ function assertOwnHook(m: Machine): void {
   assert.equal(lstatSync(hookFile(m)).mode & 0o777, 0o755);
   assert.equal(gitRan(m.h, m.clone, 'config', '--local', '--get-all', 'core.hooksPath').stdout, `${path.join(m.clone, '.git/hooks')}\n`);
 }
+
+/** The time limit of a hook in the tests of a pull or git that hangs; ledger in use gives a hook 5 s. */
+const HOOK_MS = 2000;
+/** The pull's share of HOOK_MS, as ledger in use keeps 1 s of its 5 s for after the pull. */
+const PULL_MS = HOOK_MS * 0.8;
 
 /** Elapsed milliseconds of `work`. */
 function timed<T>(work: () => T): [T, number] {
@@ -1273,13 +1278,13 @@ test('the session-start pull stops within its time limit and leaves no half reba
   writeFileSync(slow, `#!/bin/sh\nexec >/dev/null 2>&1 </dev/null\ntouch '${rewriting}'\nsleep 30\n`);
   chmodSync(slow, 0o755);
   // A session start with nothing to rebase, so the difference is the time the pull spends on the rebase.
-  const [, baseline] = timed(() => hookContext(a));
+  const [, baseline] = timed(() => hookContext(a, a.h, { ...quietEnv(a), ...shortLimits({ hookMs: HOOK_MS }) }));
 
-  const [, ms] = timed(() => hookContext(b));
+  const [, ms] = timed(() => hookContext(b, b.h, { ...quietEnv(b), ...shortLimits({ hookMs: HOOK_MS }) }));
 
   assert.ok(existsSync(rewriting), 'the session start did not rebase');
-  assert.ok(ms < 15_000, `the session start took ${ms} ms`);
-  assert.ok(ms - baseline < 4250, `the pull took ${ms - baseline} ms of the 5 s the whole session start has`);
+  assert.ok(ms < HOOK_MS + 10_000, `the session start took ${ms} ms`);
+  assert.ok(ms - baseline < PULL_MS + 250, `the pull took ${ms - baseline} ms of the ${HOOK_MS} ms the whole session start has`);
   for (const folder of ['rebase-merge', 'rebase-apply']) assert.equal(existsSync(path.join(b.clone, '.git', folder)), false, `${folder} is left`);
   assert.equal(git(b.h, b.clone, 'rev-parse', 'HEAD'), local);
   assert.equal(git(b.h, b.clone, 'status', '--porcelain'), '');
@@ -1982,7 +1987,7 @@ test('the whole session start in a linked worktree stays within its 5 s, when th
   const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
   // Only the main checkout hangs, so the session finds its own active task first, and then lists every task.
   writeFileSync(path.join(stubs, 'git'), `#!/bin/sh\nfor arg in "$@"; do case "$arg" in '${b.app}') exec sleep 30 ;; esac; done\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
-  const env = { ...quietEnv(b), PATH: `${stubs}${path.delimiter}${quietEnv(b).PATH ?? ''}` };
+  const env = { ...quietEnv(b), PATH: `${stubs}${path.delimiter}${quietEnv(b).PATH ?? ''}`, ...shortLimits({ hookMs: HOOK_MS }) };
   const [, startUp] = timed(() => run(b, ['--help'], { env }));
   const mine = path.join(b.app, '.claude/worktrees/mine');
 
@@ -1991,9 +1996,9 @@ test('the whole session start in a linked worktree stays within its 5 s, when th
   assert.equal(ran.status, 0, ran.stderr);
   assert.match((JSON.parse(ran.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext, /A task ledger exists for mine in the worktree /);
   assert.ok(existsSync(rewriting), 'the session start did not rebase');
-  // The 5 s start when the hook starts its work. The second on top is for the work after the last git call, which reads
-  // files only, and for start-up times that differ between runs; without one deadline the hook takes about 9 s.
-  assert.ok(ms - startUp < 6000, `the session start took ${ms - startUp} ms after start-up`);
+  // The limit starts when the hook starts its work. The second on top is for the work after the last git call, which
+  // reads files only, and for start-up times that differ between runs; without one deadline the hook takes about 9 s.
+  assert.ok(ms - startUp < HOOK_MS + 1000, `the session start took ${ms - startUp} ms after start-up`);
 });
 
 test('a waiting task whose PR gh says is merged after the session start used up its git time is still marked done and committed', (t) => {
@@ -2011,14 +2016,15 @@ test('a waiting task whose PR gh says is merged after the session start used up 
   ledgerOk(b, 'go', 'mine');
   const pr = 'https://github.com/acme/app/pull/7';
   ledgerOk(b, 'task', 'pr', pr, '--task', 'mine');
-  // The pull hangs in its rebase until its share of the 5 s is up, 1 s before the end; gh then answers 1.5 s later.
+  // The pull hangs in its rebase until its share of the hook's time is up; gh then answers after the end of that time.
   const slow = path.join(b.clone, '.git/hooks/post-rewrite');
   writeFileSync(slow, '#!/bin/sh\nexec >/dev/null 2>&1 </dev/null\nsleep 30\n', { mode: 0o755 });
   const stubs = path.join(b.h, 'pr-stubs');
   mkdirSync(stubs);
   const merged = JSON.stringify({ state: 'MERGED', reviewDecision: 'APPROVED', statusCheckRollup: [] });
-  writeFileSync(path.join(stubs, 'gh'), `#!/bin/sh\n[ "$1 $2 $3" = "pr view ${pr}" ] || exec "$HOME/stub-bin/gh" "$@"\nsleep 1.5\nprintf '%s\\n' '${merged}'\n`, { mode: 0o755 });
-  const env = { ...quietEnv(b), PATH: `${stubs}${path.delimiter}${quietEnv(b).PATH ?? ''}` };
+  const ghSeconds = ((HOOK_MS - PULL_MS) * 1.5) / 1000;
+  writeFileSync(path.join(stubs, 'gh'), `#!/bin/sh\n[ "$1 $2 $3" = "pr view ${pr}" ] || exec "$HOME/stub-bin/gh" "$@"\nsleep ${ghSeconds}\nprintf '%s\\n' '${merged}'\n`, { mode: 0o755 });
+  const env = { ...quietEnv(b), PATH: `${stubs}${path.delimiter}${quietEnv(b).PATH ?? ''}`, ...shortLimits({ hookMs: HOOK_MS }) };
   const mine = path.join(b.app, '.claude/worktrees/mine');
 
   const ran = run(b, ['hook', 'session-start'], { cwd: mine, env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd: mine }) });
@@ -2499,13 +2505,13 @@ for (const slow of ['opens', 'closes'] as const) {
     mkdirSync(stubs);
     const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
     writeFileSync(path.join(stubs, 'git'), `#!/bin/sh\ncase " $* " in ${hangs}) exec sleep 10 ;; esac\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
-    const env = { ...quietEnv(a), PATH: `${stubs}${path.delimiter}${quietEnv(a).PATH ?? ''}` };
+    const env = { ...quietEnv(a), PATH: `${stubs}${path.delimiter}${quietEnv(a).PATH ?? ''}`, ...shortLimits({ hookMs: HOOK_MS }) };
     const [, startUp] = timed(() => run(a, ['--help'], { env }));
 
     const [ran, ms] = timed(() => run(a, ['hook', 'session-start'], { cwd: a.app, env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd: a.app }) }));
 
     assert.equal(ran.status, 0, ran.stderr);
-    assert.ok(ms - startUp < 6000, `the session start took ${ms - startUp} ms after start-up`);
+    assert.ok(ms - startUp < HOOK_MS + 1000, `the session start took ${ms - startUp} ms after start-up`);
   });
 }
 

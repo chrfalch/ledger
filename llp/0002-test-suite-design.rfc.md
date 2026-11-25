@@ -187,6 +187,37 @@ The fake clock replaces `LEDGER_NOW`. Code that today reads `LEDGER_NOW` reads
 calls a `…ForTests` setter, so production code reads no such variable. The aim
 is 5 to 10 such tests, not the roughly 60 that wait today.
 
+**As built** (step 2):
+
+- **The clock.** `tools/ledger/clock.ts` has `Clock` and `systemClock`. The
+  clock is a third field of the run values in `run-io.ts`, read with
+  `runClock()`. Outside a run it is the system clock. `runLedger` takes an
+  optional `clock`; `main` passes the system clock.
+- **What reads it.** Claim expiry in `claims.ts`, `today()` in `write.ts`, the
+  stale-lock ages and the `since` stamp in `lock.ts`, and the daily check with
+  its stamps in `sync.ts`. `LEDGER_NOW` is gone.
+- **What still reads real time.** Deadlines, timeouts and polling loops: the
+  lock retry and release loops, the session-start time left, and every
+  `spawnSync` timeout. The fake clock's `sleep` from the table above is not
+  built.
+- **Claims tests.** A fake clock cannot reach a child process, so
+  `ledger-core-claims` runs in the test process now, with `fakeClock()` from
+  the fixtures, instead of waiting for step 4.
+- **Short limits.** Four setters return the value they replace:
+  `limitHookTimeForTests` (`hooks.ts`; the time kept after the pull scales
+  with it), `limitPrCheckTimeForTests` (`pr-check.ts`; the update budget
+  scales with it), `limitLockWaitForTests` (`lock.ts`) and
+  `limitBusyWaitForTests` (`sqlite-store.ts`). The preload maps
+  `LEDGER_TEST_HOOK_TIME_MS`, `LEDGER_TEST_PR_CHECK_TIME_MS`,
+  `LEDGER_TEST_LOCK_WAIT_MS` and `LEDGER_TEST_BUSY_WAIT_MS` to them. Tests
+  that spawn through `commandEnv` opt in with `shortLimits()`; in-process
+  tests call a setter and restore it in `t.after`. `resetRunState()` does not
+  reset them, because in a real process it runs after the preload.
+- **Assertions.** A wall-time bound keeps its slack above the limit; only the
+  limit shrinks. A test whose bound would then pass at the production limit
+  uses a smaller limit (core-hooks uses 1 s). That limit is also each git
+  call's timeout in those tests, so a slow git under load can fail them.
+
 ### 3. A memory store
 
 `memoryStore()` implements `LedgerStore` (`tools/ledger/store.ts:295`) with
@@ -298,7 +329,8 @@ Each step is one PR and one task, under one parent task.
 
 - **The 8 failures on main.** Four `ledger-core-hooks` session-start tests
   failed in the full run (lines 422, 756, 783, 2130). Did load push them past
-  the 5 s limit? Rerun them alone before step 2 changes any limit.
+  the 5 s limit? Resolved in step 2: each passes alone in 0.4 to 1.1 s, so
+  load, not the limit.
 - **The four `ledger-task-command` failures** expect rule text that has since
   changed (lines 179, 193, 219, 232). They are outside this RFC, but they keep
   the full run failing.

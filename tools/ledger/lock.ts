@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, rmSync } from 'node:fs';
 import { fail } from './failure.js';
 import { createFile, moveAside, putBack } from './files.js';
+import { runClock } from './run-io.js';
 import { pauseForTest, sleep } from './wait.js';
 
 const WAIT_MS = 5_000;
@@ -11,6 +12,14 @@ const STALE_MS = 60_000;
 const GUARD_STALE_MS = 10_000;
 
 let limit = Infinity;
+let defaultWaitMs = WAIT_MS;
+
+/** For tests only: how long a lock is waited for by default. A module the tests preload calls it. Gives the wait it replaces. */
+export function limitLockWaitForTests(ms: number): number {
+  const replaced = defaultWaitMs;
+  defaultWaitMs = ms;
+  return replaced;
+}
 
 /** Ends every later lock wait of this process by `until`, a time from Date.now(), the wait to release a lock too: for hooks. */
 export function limitLockWaits(until: number): void {
@@ -46,8 +55,10 @@ function isRunning(pid: number): boolean {
   }
 }
 
+const ageMs = (since: string): number => runClock().now().getTime() - Date.parse(since);
+
 const isLeftOver = ({ pid, since }: Holder, keepWhileRunning: boolean): boolean =>
-  !isRunning(pid) || (!keepWhileRunning && Date.now() - Date.parse(since) > STALE_MS);
+  !isRunning(pid) || (!keepWhileRunning && ageMs(since) > STALE_MS);
 
 /** A lock text no lock was made with counts as left over too. */
 const isLeftOverText = (text: string, keepWhileRunning: boolean): boolean => {
@@ -57,11 +68,11 @@ const isLeftOverText = (text: string, keepWhileRunning: boolean): boolean => {
 
 const isLeftOverGuard = (text: string): boolean => {
   const holder = holderOf(text);
-  return holder === undefined || !isRunning(holder.pid) || Date.now() - Date.parse(holder.since) > GUARD_STALE_MS;
+  return holder === undefined || !isRunning(holder.pid) || ageMs(holder.since) > GUARD_STALE_MS;
 };
 
 /** The nonce makes each text unique, so a text read before a removal stands for one take of a lock or guard only. */
-const holderText = (): string => JSON.stringify({ pid: process.pid, since: new Date().toISOString(), nonce: randomUUID() } satisfies Holder & { nonce: string });
+const holderText = (): string => JSON.stringify({ pid: process.pid, since: runClock().now().toISOString(), nonce: randomUUID() } satisfies Holder & { nonce: string });
 
 export type LockOptions = {
   /** How long to wait for another process to let go; five seconds by default. */
@@ -106,7 +117,7 @@ function removeIfStill(file: string, text: string): boolean {
 }
 
 /** Takes `lock` and gives its text, or gives the process that still held it when the wait ran out. */
-function take(lock: string, { waitMs = WAIT_MS, keepWhileRunning = false }: LockOptions): string | { holder?: Holder } {
+function take(lock: string, { waitMs = defaultWaitMs, keepWhileRunning = false }: LockOptions): string | { holder?: Holder } {
   const deadline = Math.min(Date.now() + waitMs, limit);
   for (;;) {
     // Written whole through a hard link, so a waiting command never reads half a lock.
@@ -128,7 +139,7 @@ function take(lock: string, { waitMs = WAIT_MS, keepWhileRunning = false }: Lock
  * limitLockWaits, the lock stays, and is left over once this process ends.
  */
 function release(lock: string, mine: string): void {
-  const deadline = Math.min(Date.now() + WAIT_MS, limit);
+  const deadline = Math.min(Date.now() + defaultWaitMs, limit);
   while (!removeIfStill(lock, mine) && Date.now() < deadline) sleep(1);
 }
 

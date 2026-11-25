@@ -16,7 +16,7 @@ import { findTasks } from '../tools/ledger/tasks.js';
 import { pauseForTest } from '../tools/ledger/wait.js';
 import { goTask, type Context } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
-import { asCli, commandEnv, git, home, LEDGER_BIN, ledger, ledgerText, noSqlite, ok, readLedgerFile, repoKeyOf, repository, storeFolder, type Ran } from './ledger-core-fixtures.js';
+import { asCli, commandEnv, git, home, LEDGER_BIN, ledger, ledgerText, noSqlite, ok, readLedgerFile, repoKeyOf, repository, shortLimits, storeFolder, type Ran } from './ledger-core-fixtures.js';
 
 type Storage = 'file' | 'sqlite';
 
@@ -46,9 +46,12 @@ function setup(t: TestContext, storage: Storage) {
  * `ledger` as a child process that runs alongside the others the caller starts. Each command pauses between a read and
  * the write that depends on it, so commands started together overlap there on every run, not only on a slow machine.
  */
-function ledgerAsync(h: string, cwd: string, ...args: string[]): Promise<Ran> {
+const ledgerAsync = (h: string, cwd: string, ...args: string[]): Promise<Ran> => ledgerAsyncWith(h, cwd, {}, ...args);
+
+/** ledgerAsync with `env` added to the environment of the command. */
+function ledgerAsyncWith(h: string, cwd: string, env: NodeJS.ProcessEnv, ...args: string[]): Promise<Ran> {
   return new Promise((resolve, reject) => {
-    const child = spawn(LEDGER_BIN, args, { cwd, env: { ...commandEnv(h), LEDGER_TEST_DELAY_MS: '300' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(LEDGER_BIN, args, { cwd, env: { ...commandEnv(h), LEDGER_TEST_DELAY_MS: '300', ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk));
@@ -236,8 +239,11 @@ test('file store: a lock older than its time limit is taken over, even when its 
 test('file store: a command that waits too long for a lock held by a live process exits 1, names the lock and its process, and writes nothing', (t) => {
   const { h, app, file, lock } = lockedBacklogTask(t, { pid: process.pid, since: new Date().toISOString() });
   const before = readFileSync(file, 'utf8');
-  const ran = ledger(h, app, 'task', 'park', 'fix-login', '--reason', 'paused');
+  const started = Date.now();
+  const ran = spawnSync(LEDGER_BIN, ['task', 'park', 'fix-login', '--reason', 'paused'], { cwd: app, env: { ...commandEnv(h), ...shortLimits({ lockWaitMs: 500 }) }, encoding: 'utf8' });
+  const took = Date.now() - started;
   assert.equal(ran.status, 1, ran.stderr);
+  assert.ok(took < 500 + 3_500, `took ${took} ms`);
   assert.ok(ran.stderr.includes(lock), ran.stderr);
   assert.ok(ran.stderr.includes(`process ${process.pid}`), ran.stderr);
   assert.equal(readFileSync(file, 'utf8'), before);
@@ -252,13 +258,16 @@ test('sqlite store: a command that waits too long for the database exits 1, says
   const holder = new DatabaseSync(path.join(h, '.claude/ledgers.db'));
   holder.exec('BEGIN IMMEDIATE');
   let ran: Ran;
+  const started = Date.now();
   try {
-    ran = await ledgerAsync(h, app, 'task', 'park', 'fix-login', '--reason', 'paused');
+    ran = await ledgerAsyncWith(h, app, shortLimits({ busyWaitMs: 500 }), 'task', 'park', 'fix-login', '--reason', 'paused');
   } finally {
     holder.exec('ROLLBACK');
     holder.close();
   }
+  const took = Date.now() - started;
   assert.equal(ran.status, 1, ran.stderr);
+  assert.ok(took < 500 + 3_500, `took ${took} ms`);
   assert.match(ran.stderr, /another ledger command/i);
   assert.ok(ran.stderr.includes('ledgers.db'), ran.stderr);
   assert.equal(inStore((store) => store.backlog.read(key, 'fix-login')?.text), before);
@@ -267,7 +276,8 @@ test('sqlite store: a command that waits too long for the database exits 1, says
 /** Runs `call` on the SQLite store of HOME `h` in a child process, so this one is free while the child waits for the database. */
 function storeCallAsync(h: string, call: string): Promise<Ran> {
   const script = `
-    import { sqliteStore } from './tools/ledger/sqlite-store.ts';
+    import { limitBusyWaitForTests, sqliteStore } from './tools/ledger/sqlite-store.ts';
+    limitBusyWaitForTests(500);
     const store = sqliteStore({ home: ${JSON.stringify(h)} });
     try {
       ${call};
@@ -307,7 +317,7 @@ test('sqlite store: every write that waits too long for the database says anothe
   }
   Object.keys(calls).forEach((name, index) => {
     const { stdout, stderr } = runs[index];
-    assert.match(stdout, /^Another ledger command has been writing .*ledgers\.db for more than 5 seconds/, `${name}: ${stdout}${stderr}`);
+    assert.match(stdout, /^Another ledger command has been writing .*ledgers\.db for more than 0\.5 seconds/, `${name}: ${stdout}${stderr}`);
   });
   inStore((store) => {
     assert.equal(store.backlog.read(key, 'fix-login')?.text, before.ledger);
