@@ -54,6 +54,8 @@ export type TaskRecord = {
   /** A person's `- state:` line from before the status line; one with a status value reads as `status`. */
   state?: string;
   stage?: string;
+  /** How many times the review stage failed (D22); absent is none. */
+  reviewRounds?: number;
   parent?: TaskRef;
   order?: number;
   dependencies?: Dependency[];
@@ -93,6 +95,7 @@ const FIELDS = [
   'kind',
   'state',
   'stage',
+  'reviewRounds',
   'parent',
   'order',
   'dependencies',
@@ -159,7 +162,7 @@ function tidy(lines: readonly string[]): string[] {
   return kept;
 }
 
-type LocationKey = 'main' | 'worktree' | 'host' | 'branch' | 'base' | 'designRefs' | 'parent' | 'title' | 'kind' | 'state' | 'stage' | 'order' | 'dependencies' | 'claim' | 'pr' | 'repo' | 'status' | 'lost';
+type LocationKey = 'main' | 'worktree' | 'host' | 'branch' | 'base' | 'designRefs' | 'parent' | 'title' | 'kind' | 'state' | 'stage' | 'reviewRounds' | 'order' | 'dependencies' | 'claim' | 'pr' | 'repo' | 'status' | 'lost';
 
 /**
  * A `- <name>: <value>` bullet under ## Location. `template` is the value ledger.template.md gives it, which reads as
@@ -190,6 +193,7 @@ function bullet<K extends LocationKey>(
 }
 
 const asText = (value: string): string => value;
+const asCount = (value: string): number | undefined => (/^[1-9]\d*$/.test(value) ? Number(value) : undefined);
 const showRef = ({ slug, main }: TaskRef): string => (main === undefined ? slug : `${slug} @ ${main}`);
 
 /** Each comma-separated item of `value` as `parse` reads it; undefined when any item does not read. */
@@ -248,6 +252,7 @@ const BULLETS: Bullet[] = [
   bullet('kind', 'kind', asText, asText),
   stateBullet,
   bullet('stage', 'stage', asText, asText),
+  bullet('review rounds', 'reviewRounds', asCount, String),
   bullet('order', 'order', parseOrder, String),
   bullet('depends on', 'dependencies', parseDependencies, showDependencies),
   bullet('claim', 'claim', parseClaim, claimText),
@@ -560,6 +565,8 @@ const passes = (test: (value: unknown) => boolean, problem: string): Check => (v
 };
 const isText = passes((value) => typeof value === 'string', 'is not a string');
 const isWhole = passes(Number.isInteger, 'is not a whole number');
+const isNumber = (value: unknown): value is number => typeof value === 'number';
+const isCount = passes((value) => isNumber(value) && Number.isInteger(value) && value >= 1, 'is not a whole number from 1');
 const isTrue = passes((value) => value === true, 'is not true');
 const isSlug = passes((value) => typeof value === 'string' && isReadableSlug(value), 'is not a slug');
 const isKey = passes((value) => typeof value === 'string' && isRepoKeyShape(value), 'is not a repo key such as github.com/owner/repo or the path of a main checkout');
@@ -608,6 +615,7 @@ const isRecord = shape(
     claim: shape({ session: isText, since: isClaimStamp, active: isClaimStamp }),
     parent: isRef,
     order: isWhole,
+    reviewRounds: isCount,
     childNotes: listOfChecks(isText),
     dependencies: listOfChecks(shape({ slug: isSlug }, { repo: isKey })),
     base: shape({ ref: isText }, { commit: isText }),

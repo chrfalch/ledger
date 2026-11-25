@@ -68,6 +68,18 @@ For user-facing, architectural, security-relevant, or astra-implemented work, ad
 the Claude verdict first. Where two reviews disagree, you decide.
 <!-- /needs -->
 
+### Failure gate
+- Record a rejected review with `ledger notes stage review fail --back build`,
+  or `--back investigate` for an investigation task, which has no build stage;
+  the tool counts the rounds. After the second, run the next round at higher
+  effort and tell the operator. The third blocks the task: ask the operator.
+- If a subagent fails, times out or returns an empty report, tell the operator
+  what failed and ask what to do with the question widget; do not retry it.
+- A merge conflict sends the task back to build with `fail --back build`.
+  Resolve it there; then verify and review run again.
+- To drop a task, confirm with `ledger task gate abandon` in the widget. Then run
+  `ledger task abandon --reason "<why>"`: the ledger is archived, nothing merges.
+
 ### Investigation gate
 Wide investigation — tracing across files, non-obvious root cause — belongs in a
 throwaway context that returns a tight report, not in yours. Do it yourself only

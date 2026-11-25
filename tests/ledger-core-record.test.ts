@@ -582,3 +582,21 @@ test('every valid record round-trips whole: the time a task was created is kept 
     (error: Error) => error.message.startsWith('fix.json: ') && /created/.test(error.message),
   );
 });
+
+test('the review rounds read from and render as a "- review rounds: <n>" bullet under ## Location, and round-trip', () => {
+  const counted: TaskRecord = { ...parseRecord(TEMPLATE), slug: 'x', reviewRounds: 2 };
+  const rendered = renderRecord(counted);
+  const location = parseLedger(rendered).sections.find(({ heading }) => heading === 'Location');
+  assert.ok(location, rendered);
+  assert.ok(rendered.split('\n').slice(location.start, location.end).includes('- review rounds: 2'), rendered);
+  assert.deepEqual(parseRecord(rendered), counted);
+  assert.equal(parseRecord(fixture('full.md').replace(/^- stage: .*$/m, '$&\n- review rounds: 3')).reviewRounds, 3);
+  assert.equal(parseRecord(TEMPLATE).reviewRounds, undefined);
+  assert.doesNotMatch(renderRecord(parseRecord(TEMPLATE)), /review rounds/);
+});
+
+test('validateRecord takes the review rounds only as a whole number from 1', () => {
+  const valid = JSON.parse(JSON.stringify(FULL)) as Record<string, unknown>;
+  assert.equal(validateRecord({ ...valid, reviewRounds: 2 }).reviewRounds, 2);
+  for (const rounds of ['2', -1, 1.5]) assert.throws(() => validateRecord({ ...valid, reviewRounds: rounds }), /reviewRounds/, String(rounds));
+});

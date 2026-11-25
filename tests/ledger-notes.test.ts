@@ -560,7 +560,10 @@ test('stage fail keeps the stage, and with --back returns to an earlier one; eac
   const { notes, stage, stageNotes } = withStage(t, { stage: 'review' });
   assert.equal(passed(notes('stage', 'review', 'fail')), 'Stage review of wt failed; it stays at review.');
   assert.equal(stage(), 'review');
-  assert.equal(passed(notes('stage', 'review', 'fail', '--back', 'build')), 'Stage review of wt failed; back to build.');
+  assert.equal(
+    passed(notes('stage', 'review', 'fail', '--back', 'build')),
+    'Stage review of wt failed; back to build. Review rejected 2 times: run the next round at higher effort and tell the operator.',
+  );
   assert.equal(stage(), 'build');
   assert.deepEqual(stageNotes(), [`${TODAY} stage review fail`, `${TODAY} stage review fail, back to build`]);
 });
@@ -652,4 +655,70 @@ test('check lists an unknown kind, and a stage that is not a stage of the kind',
   assert.match(problems, /red/);
   assert.match(problems, /plan, build, review, pr/);
   assert.equal(passed(withStage(t, { stage: 'finished' }).notes('check')), 'ok');
+});
+
+const reviewRounds = (markdown: string): string | undefined => linesOf(markdown, /^## Location$/).find((line) => line.startsWith('- review rounds:'));
+
+/** Runs build and verify again after a task went back to build, then rejects its review, sending it back to build. */
+function rejectReview({ notes }: ReturnType<typeof withStage>): string {
+  passed(notes('stage', 'build', 'pass'));
+  passed(notes('stage', 'verify', 'pass'));
+  return passed(notes('stage', 'review', 'fail', '--back', 'build'));
+}
+
+test('each rejected review adds one to the review rounds under ## Location, and ledger show prints them', (t) => {
+  const task = withStage(t, { stage: 'review' });
+  assert.equal(reviewRounds(task.read()), undefined);
+  passed(task.notes('stage', 'review', 'fail', '--back', 'build'));
+  assert.equal(reviewRounds(task.read()), '- review rounds: 1');
+  rejectReview(task);
+  assert.equal(reviewRounds(task.read()), '- review rounds: 2');
+  assert.match(passed(task.run(task.worktree, 'show')), /^- review rounds: 2$/m);
+});
+
+test('the first rejected review prints what it printed before review rounds were counted', (t) => {
+  const task = withStage(t, { stage: 'review' });
+  assert.equal(passed(task.notes('stage', 'review', 'fail', '--back', 'build')), 'Stage review of wt failed; back to build.');
+});
+
+test('the second rejected review asks for the next round at higher effort and for the operator to be told', (t) => {
+  const task = withStage(t, { stage: 'review' });
+  passed(task.notes('stage', 'review', 'fail', '--back', 'build'));
+  const second = rejectReview(task);
+  assert.ok(second.startsWith('Stage review of wt failed; back to build.'), second);
+  assert.ok(second.includes('Review rejected 2 times: run the next round at higher effort and tell the operator.'), second);
+  assert.doesNotMatch(second, /blocked/);
+  assert.doesNotMatch(task.read(), /^- status: blocked/m);
+});
+
+test('the third rejected review blocks the task on "review rejected three times" and says to ask the operator', (t) => {
+  const task = withStage(t, { stage: 'review' });
+  passed(task.notes('stage', 'review', 'fail', '--back', 'build'));
+  rejectReview(task);
+  const third = rejectReview(task);
+  assert.ok(third.includes('Review rejected 3 times: wt is blocked; ask the operator what to do.'), third);
+  assert.doesNotMatch(third, /higher effort/);
+  assert.match(task.read(), new RegExp(`^- status: blocked ${TODAY} — review rejected three times$`, 'm'));
+  assert.equal(reviewRounds(task.read()), '- review rounds: 3');
+});
+
+test('a passed review keeps the count of rejected rounds', (t) => {
+  const task = withStage(t, { stage: 'review' });
+  passed(task.notes('stage', 'review', 'fail', '--back', 'build'));
+  passed(task.notes('stage', 'build', 'pass'));
+  passed(task.notes('stage', 'verify', 'pass'));
+  passed(task.notes('stage', 'review', 'pass'));
+  assert.equal(task.stage(), 'pr');
+  assert.equal(reviewRounds(task.read()), '- review rounds: 1');
+});
+
+test('a failed stage other than review leaves the review rounds alone', (t) => {
+  const task = withStage(t, { stage: 'verify' });
+  passed(task.notes('stage', 'verify', 'fail', '--back', 'build'));
+  passed(task.notes('stage', 'build', 'pass'));
+  passed(task.notes('stage', 'verify', 'fail'));
+  assert.equal(reviewRounds(task.read()), undefined);
+  passed(task.notes('stage', 'verify', 'pass'));
+  assert.equal(passed(task.notes('stage', 'review', 'fail', '--back', 'build')), 'Stage review of wt failed; back to build.');
+  assert.equal(reviewRounds(task.read()), '- review rounds: 1');
 });

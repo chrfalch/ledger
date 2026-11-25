@@ -55,7 +55,7 @@ import {
   type Tag,
 } from './notes.js';
 import { openStore, openToRead } from './open-store.js';
-import { retireTask, retireText } from './retire.js';
+import { abandonTask, retireTask, retireText } from './retire.js';
 import { readStorage, STORAGES, type Storage } from './settings.js';
 import { ownLedger, shownLedger } from './show.js';
 import { sqliteFile } from './sqlite-store.js';
@@ -351,7 +351,7 @@ export async function main(argv: string[]): Promise<number> {
       });
 
   const program = new Command('ledger').description('Read and change the task ledgers on this machine.').enablePositionalOptions().exitOverride();
-  const taskGroup = program.command('task').description('Make, start, claim, park, block, retire and read tasks, and record their PRs.');
+  const taskGroup = program.command('task').description('Make, start, claim, park, block, retire, abandon and read tasks, and record their PRs.');
   taskGroup
     .command('new')
     .description('Write a backlog ledger for a new task, from ~/.claude/ledger.template.md. /ledger:go <slug> starts it.')
@@ -447,6 +447,20 @@ export async function main(argv: string[]): Promise<number> {
     .action((slug: string | undefined, { dryRun = false, force = false }: { dryRun?: boolean; force?: boolean }) => {
       const silent = { line: () => {}, warn: () => {} };
       show(json ? retireTask(context, slug, { dryRun, force }, silent) : retireTask(context, slug, { dryRun, force }), retireText);
+    });
+  taskGroup
+    .command('abandon')
+    .description(
+      'Retire a task that is no longer needed, with nothing merged: as retire does, but an unmerged branch does not stop it and is kept. The archived ledger ends with the note "<date> abandoned: <reason>". Exits 1, with nothing changed, when a check stops it.',
+    )
+    .argument('[slug]', 'the task in this repo; by default the task of the worktree you are in')
+    .requiredOption('--reason <text>', 'one line: why the task is no longer needed')
+    .option('--dry-run', 'print what would be checked and done; it fetches the default branch from origin, and changes nothing else')
+    .option('--force', 'abandon it anyway with uncommitted changes or active children')
+    .option('--json', JSON_HELP)
+    .action((slug: string | undefined, { reason, dryRun = false, force = false }: { reason: string; dryRun?: boolean; force?: boolean }) => {
+      const silent = { line: () => {}, warn: () => {} };
+      show(json ? abandonTask(context, slug, { reason, dryRun, force }, silent) : abandonTask(context, slug, { reason, dryRun, force }), retireText);
     });
   showCommand(taskGroup.command('show'));
   listCommand(taskGroup.command('list'));

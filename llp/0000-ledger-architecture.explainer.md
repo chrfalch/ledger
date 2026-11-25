@@ -96,6 +96,8 @@ each:
   - `park`, `unpark`: write the status line `parked <date> — <reason>`, or
     remove it when the task is parked.
   - `retire`: archives the ledger (see [Retire and archive](#retire-and-archive)).
+  - `abandon`: archives a task that is no longer needed, with nothing merged
+    (see [Retire and archive](#retire-and-archive)).
   - `show`, `list`, `archive`: print a task's ledger, list the live tasks, or
     list the archived ledgers.
     `list` covers the live tasks of every known repo. `show` prints the
@@ -171,6 +173,13 @@ to an earlier stage. A later stage is refused, as is an earlier one, and the
 message says to use `--skip` or `fail --back`. `--step <n>` also sets the
 status of plan step n: `red` after red, `green` after build, `reviewed` after
 review, `done` after any other stage.
+
+Each fail of the review stage adds one to the record's `reviewRounds`, written
+as `- review rounds: <n>` under `## Location`; a record with none has no line.
+A pass never resets it. The second rejection adds a sentence to the output:
+run the next round at higher effort and tell the operator. From the third on,
+the task is blocked on "review rejected three times", or stays blocked, and the
+output says to ask the operator. The stage still moves as `--back` says.
 
 Each command acts on the task `--task` names, or else on the task of the
 worktree the command runs in. An archived task is refused. A write changes the
@@ -738,6 +747,19 @@ updates the list itself.
 An archive copy is never replaced. `Archive.write` throws when the name is
 taken.
 
+`abandonTask` runs the same retire for `ledger task abandon --reason <text>`,
+with two differences. An unmerged branch does not stop it, and the branch is
+kept. A detached HEAD with unmerged commits still needs `--force`, as no
+branch keeps those commits. And the archive copy ends with the note
+`<date> abandoned: <reason>`. The live ledger never gets the note, so a lost
+task, or one on another machine, is abandoned with `--force` as it is retired.
+Before it removes anything, the check that the live ledger matches the copy
+allows that one note. A rerun after a failure finds the copy by the ledger
+with any abandon note, of any date and reason, and adds no second note and no
+second copy. The reason must be one line; an empty one is refused before
+anything is read. The `--json` output of both commands has a `verb` field,
+`retire` or `abandon`, and the dry run of an abandon is titled `Abandon`.
+
 ### Rules and agents
 
 `rules/*.md` are the orchestrator contract. `agents/*.md` are the subagents.
@@ -763,7 +785,7 @@ name the `ledger` command and the `/ledger:` commands. The code does not read
 the rules. The agent follows them.
 
 At a gate, the agent asks the operator with the question widget. For the gates
-that `ledger task gate <name>` knows, `plan`, `pr` and `finalize` today, the question comes
+that `ledger task gate <name>` knows, `plan`, `pr`, `abandon` and `finalize` today, the question comes
 from that command, not from the rule text. The agent writes any other gate
 itself, by the same rules: one to three actions, the recommended one first, and
 Close last.

@@ -374,5 +374,36 @@ test('rule 10 ends a task with the question ledger task gate finalize prints, an
 });
 
 test('rule 20 names every gate ledger task gate knows', () => {
-  assert.match(ruleSource('20-writing.md'), /\(`plan`, `pr` and `finalize` today\)/);
+  assert.match(ruleSource('20-writing.md').replace(/\s+/g, ' '), /\(`plan`, `pr`, `abandon` and `finalize` today\)/);
+});
+
+/** The Failure gate of rule 10 with each run of whitespace collapsed to one space. */
+const failureGate = (): string => section(ruleSource('10-operating-model.md'), '### Failure gate').replace(/\s+/g, ' ');
+const failureGateSentence = (pattern: RegExp): string | undefined => failureGate().split(/(?<=\.)\s+/).find((sentence) => pattern.test(sentence));
+
+test('the Failure gate of rule 10 sends a rejected review back with ledger notes stage, which counts the rounds (D22)', () => {
+  const sentence = failureGateSentence(/`ledger notes stage review fail --back build`/);
+  assert.ok(sentence, 'no sentence names `ledger notes stage review fail --back build`');
+  assert.match(sentence, /counts?\b[^]*\brounds?\b/i);
+  assert.ok(sentence.includes('`--back investigate`'), sentence);
+  assert.match(sentence, /investigation task/, sentence);
+});
+
+test('the Failure gate of rule 10 tells the operator what failed in a subagent and asks what to do in the widget, with no retry (D23)', () => {
+  const sentence = failureGateSentence(/empty report/);
+  assert.ok(sentence, 'no sentence names an empty report');
+  for (const words of ['tell the operator what failed', 'ask what to do', 'question widget', 'do not retry']) assert.ok(sentence.includes(words), `"${sentence}" lacks "${words}"`);
+});
+
+test('the Failure gate of rule 10 sends a merge conflict back to build, then runs verify and review again (D24)', () => {
+  const sentence = failureGateSentence(/merge conflict/i);
+  assert.ok(sentence, 'no sentence names a merge conflict');
+  assert.ok(sentence.includes('--back build'), sentence);
+  assert.match(failureGate(), /merge conflict[^]*\bverify\b[^]*\breview\b/i);
+});
+
+test('the Failure gate of rule 10 names ledger task gate abandon and ledger task abandon (D25)', () => {
+  const gate = failureGate();
+  assert.ok(gate.includes('`ledger task gate abandon'), gate);
+  assert.ok(gate.includes('`ledger task abandon'), gate);
 });

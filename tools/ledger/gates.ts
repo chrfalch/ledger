@@ -72,6 +72,16 @@ const GATES: readonly GateDefinition[] = [
       { label: 'Not yet', description: 'Nothing is committed or pushed. The session waits for what you say next.' },
     ],
   },
+  {
+    name: 'abandon',
+    header: 'Abandon',
+    question: (task) => `Abandon ${task}? Its ledger is archived and nothing is merged.`,
+    multiSelect: false,
+    actions: [
+      { label: 'Abandon task', description: 'Archive the ledger with the reason and remove the worktree. An unmerged branch is kept.' },
+      { label: 'Not yet', description: 'Nothing is archived or removed. The task stays as it is.' },
+    ],
+  },
 ];
 
 /** The gates whose question is the same for every task, so `gateQuestion` builds it from the name alone. */
