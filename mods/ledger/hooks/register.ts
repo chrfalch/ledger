@@ -444,7 +444,7 @@ function answerOf($: EngineInterface, command: string, args: string | undefined)
 }
 
 // /ledger:next is typed-only too, unless the operator just picked the clear-point option: its own Skill hook decides.
-const TYPED_ONLY = new Set(['ledger:close', 'ledger:park'])
+const TYPED_ONLY = new Set(['ledger:close', 'ledger:park', 'ledger:fleet'])
 
 /** The operator's answers in a question box. An answer the box gave itself after the operator was away is not the operator's. */
 function operatorAnswers(asked: ToolCallResult<'AskUserQuestion'>): string[] {

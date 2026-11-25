@@ -5,7 +5,7 @@
 **Systems:** ledger CLI, ledger plugin, hooks, rules, subagents
 **Author:** Christian Falch / Claude
 **Date:** 2026-11-19
-**Revised:** 2026-11-22
+**Revised:** 2026-11-24
 **Related:** LLP 0000
 
 Some decisions are built. Section 14 lists the decisions; none is open.
@@ -222,6 +222,11 @@ alias of the new one, the dependency names the same task. So `ledger tree
 depends` counts a task named by an old address of its own repo as itself,
 refuses a cycle through such a dependency, and keeps one dependency where an
 old address and the new one name the same task.
+
+Children with no dependency between them may run at the same time. `ledger
+tree ready <parent>` lists every backlog child whose dependencies are retired
+or done, in order, and each child already running. It only reads. It works
+outside T3; `/ledger:fleet` uses it to choose what to start (D50).
 
 ### 5.4 Claims
 
@@ -506,6 +511,12 @@ version is gone: with no worktree copy, nothing can drift.)
   "(Recommended)" (D35).
 - During an operator walkthrough of a document, questions are plain text, one
   point at a time. The widget returns at the next gate (D36).
+- `/ledger:fleet <parent>` runs a parent's children in T3 threads. A question
+  in a child thread that has a recommended option is answered with that
+  option, plan and PR approval included, and the answer is logged in the
+  parent ledger. When any question in a request has no recommended option,
+  the whole request comes to the operator with a short summary. A permission prompt cannot be answered this way and stays with the
+  operator (D50).
 
 ## 12. Enforcement
 
@@ -782,6 +793,23 @@ Decided 2026-11-19:
   `ledger task pr` exists, so most finished tasks are not marked done yet
   (section 7, step 8).
 
+Decided 2026-11-24:
+
+- **D50** `/ledger:fleet <parent>` starts each child that `ledger tree ready`
+  lists in its own T3 thread, up to `fleetParallel` in
+  `~/.claude/ledger-settings.json` at a time (default 2). It holds back a
+  child that may touch the same files as a running one, and tells the
+  operator. It answers child questions as section 11
+  says. Only the operator starts it: it is in the hook's typed-only list, as
+  `/ledger:close` and `/ledger:park` are, so an agent cannot run it through
+  the Skill tool, and nothing changes until a person types it. It runs in the
+  main session, because only the main session can show the operator a widget.
+  It stops when every thread it watches waits for a person (review, merge, a
+  permission prompt), and the operator types it again after a retire. Each
+  thread it starts is a note `fleet started <child> in thread <id>` in the
+  parent ledger, so a later run picks the threads up. Reason: a watch loop
+  that never ends would hold the session while children wait for a merge.
+
 ## 15. From today to this spec
 
 | Area | Today | Work |
@@ -789,6 +817,7 @@ Decided 2026-11-19:
 | States | backlog, active, parked, blocked, waiting, done, lost, retired; the moves of section 5.1 inside active are one table (`checkTransition` in `tools/ledger/states.ts`), which `ledger task park`, `unpark`, `block` and `unblock`, `ledger store repair --to` and `--lost`, and the done mark of a merged PR (`markMergedDone` in `tools/ledger/write.ts`) check before they write; `ledger task block <slug> --on <text>` writes the blocked status line and keeps the claim, and `ledger task unblock` removes it; `ledger store repair` names only `--to` for a blocked, waiting or done task whose folder is gone, as `--lost` refuses it, and `--to` of a lost task removes the lost mark and keeps its status line | set waiting with `ledger task pr` (PR waiting row), and done with *Goal met* for a task with no PR (Merge and goal gates row) |
 | Stages | free text in the plan table | `ledger notes stage`, ordered and checked |
 | Child order (D16) | `ledger tree order` and `ledger tree depends` set the order and dependency fields; a dependency may name a task in another repo as `<slug>@<address>`; `ledger tree next` and `ledger go <parent>` pick the first child in order whose dependencies are retired or done (`firstToStart` in `tools/ledger/write.ts`) | none |
+| Fleet (D50) | `ledger tree ready <parent> [--json]` lists every ready backlog child in order and each running child (`changeParent` and `startable` in `tools/ledger/write.ts`); `/ledger:fleet` in `mods/ledger/commands/fleet.md` starts, watches and answers T3 threads; `ledger:fleet` is in `TYPED_ONLY` in `mods/ledger/hooks/register.ts` | none |
 | Ledger writes (D38) | `ledger notes` writes each item; the PreToolUse hook denies Edit, Write and MultiEdit of a store path and shell commands that write one: a redirect, tee, sed -i, cp, mv, rm, rmdir, touch, truncate, mkdir, ln, sqlite3 without -readonly on the database, git commands in the clone other than reads, and a git clone, a log, show, diff, diff-tree, diff-index or archive --output, or an archive -o into the store; a `--help` or `--version` before the first operand of cp, mv, rm, rmdir, touch, truncate, mkdir, ln or tee, with only options before it, counts as no write, and one after an operand as a file name, as the BSD tools of macOS read it; rm, rmdir and an mv source also count when they name a folder above the store, and a glob counts when it could match a store path; `ledger` itself is allowed unless it redirects into the store (`storeWriteReason` in `tools/ledger/hooks.ts`). The operator resolves a sync conflict in a terminal; the hook's reason and the sync's conflict messages tell an agent to ask them. The hook catches habit, not an adversary, so it misses interpreters, bash -c, eval, dd, rsync, install, chmod, find -delete, xargs from stdin, GIT_DIR=, variables other than HOME, pushd, where `cd -` leads, a command after a `case` pattern's `)`, symlinks through missing folders, git init with an explicit destination, git clone with no destination run inside the clone, `git config --file` on the clone's config, a target that starts with a command substitution (one that ends in `.claude/ledger.md` is still denied), cp -R of a folder's contents (`<src>/.`) over the store's parent, sqlite3 `file:` URIs with `mode=rw`, a `#` inside `$(...)`, which it reads as a comment as bash does, cp with a process substitution `<(...)` as a source, the arguments after a process substitution (`tee < <(printf x) .claude/ledger.md`), `git clone --separate-git-dir` into the store, and sqlite3 dot-commands that name another file (`.backup`, `.save`, `.output`); it counts a `cd` behind `&&` or `||` as run (`false && cd /tmp`), and of the cds in the branches of an `if` it counts the last in the text (`if true; then cd .claude; else cd /tmp; fi`), and it counts a cd inside a function definition as run even when the function is never called (`f() { cd ..; }`); it expands each brace group of a word without a cap on the words that makes, as habit commands hold few; it reads a shortened git apply long option (`--cach`, `--ind`, `--app`) as no option and does not count the file that `git apply --stat --build-fake-ancestor=<file>` writes; it does not unquote a quoted redirect target such as `>> $'ledger.md'`; it does not read `git archive -o<file>`, with the file attached to `-o`, as an output, counts every `-o` of a git archive, so one that names a store path denies even when a later `-o` wins, and counts an `-o` after `--` as an output; it does not check git `--output` targets outside the store root, such as the legacy .claude/ledger.md (`git diff --output=.claude/ledger.md HEAD`); it reads an option value of `--` as the end of options, so it does not see a `--dry-run` after it (`git fetch --server-option -- --dry-run`), and it reads a `--list` or `-l` after `git branch --format` or `--sort` as list mode, though git takes it as that option's value and creates the branch named after it (`git branch --format --list <name>`, `git branch --sort -l <name>`); it denies `git branch -a <name>` and `git branch -r <name>` in the clone, though git rejects both and creates nothing; it resolves a redirect on a `cd` command in the folder the cd leads to, though bash makes it in the folder it starts in (`cd .claude >ledger.md`); it matches a bracket class in a glob as the C locale does, and an unknown class (`[[:foo:]]`) as any one character; it keeps the folder unchanged after a cd to a path that is no folder, or that does not exist when the hook runs, so it denies a write that a failed cd skips (`cd /dev/null && printf x >> ledger.md`) and one into a folder an earlier command makes (`mkdir x && cd x`); it reads a `--help` after touch -d, -r or -t, truncate -s or -r, or mkdir -m as that option's value, so it denies the command though the tool rejects the value, and when it looks for that `--help` it does not skip the value of a long form (`--date`, `--reference`, `--size`, `--mode`); it reads a `{` after a process substitution as opening a group (`echo <(true) {`); it decodes a `$'...'` here-document delimiter one character per escape, so a delimiter of non-ASCII byte escapes (`$'\xC3\xA9'`) does not match the line bash ends on; and it does not join a here-document body that holds a command substitution with a line after it that ends in `&&` | none |
 | Gates and widgets (D3, D33–D37) | `ledger task gate plan` and `pr` print the question as JSON: at most three actions, each with a label and a one-line description, the first ending in "(Recommended)", then Close (`buildGate` in `tools/ledger/gates.ts`); the plan-approval condition is in `rules/10-operating-model.md`, and the multi-select Close rule, the ❓ rule and the walkthrough exception are in `rules/20-writing.md` | none |
 | Awareness (D26–D28) | current ledgers at session start | ordered report under ~20 lines; outside-task prompt; store-only status line |
@@ -812,7 +841,7 @@ Decided 2026-11-19:
 | Failure handling (D22–D25) | none: `ledger notes stage <stage> fail` keeps a task at its stage, or with `--back` returns it to an earlier one (`recordStage` in `tools/ledger/notes.ts`); nothing counts review rounds | review round count and escalation; failed subagent reported, no retry; merge conflict back to build; abandon as a confirmed retire with reason |
 | Command groups (D30) | `task`, `notes`, `tree`, `store`, `worktrees` groups, with `go`, `list` and `show` as short forms (`tools/ledger/cli.ts`); the old names exit as unknown commands | none |
 | Report size (D31) | every `ledger notes` write shortens the report of each reviewed or done step to one line; `ledger notes check` fails over 16,000 characters and names the three largest sections (`tools/ledger/notes.ts`) | none |
-| Deploy permissions (D32) | `settings.policy.json` allows `ledger notes`, `go`, `list`, `show`, `tree show`, `tree next` and every `task` command except `retire`; deploy merges the list into `~/.claude/settings.json` | none |
+| Deploy permissions (D32) | `settings.policy.json` allows `ledger notes`, `go`, `list`, `show`, `tree show`, `tree next`, `tree ready` and every `task` command except `retire`; deploy merges the list into `~/.claude/settings.json` | none |
 | Merge and goal gates (D4, D15) | none: `ledger task gate` has only `plan` and `pr` (`tools/ledger/gates.ts`); the End of task rule in `rules/10-operating-model.md` asks only after a merge or when the operator says the task is finished | *Merge now* gate after checks and review; *Goal met* gate for tasks with no PR |
 | Session name (D43) | renamed to the task slug on every task change: the prompt hook titles each `go <slug>` the session does not already claim; the turn end renames to the worktree's task, else to the task the session claimed | none |
 | Worktree location (D6) | inside the main checkout | unchanged: the session-switch test failed (confirmation on every switch); D42 is the safeguard |

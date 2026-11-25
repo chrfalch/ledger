@@ -607,8 +607,8 @@ so the turn end does the same release and writes the same `handover` itself.
 The queued run then sends its `go <slug>`. That the release comes first is
 not yet checked in T3 [inferred].
 
-Only the operator may type `/ledger:close` and `/ledger:park` (`TYPED_ONLY` in
-`register.ts`). The plugin refuses them when the agent starts them through the
+Only the operator may type `/ledger:close`, `/ledger:park` and
+`/ledger:fleet` (`TYPED_ONLY` in `register.ts`). The plugin refuses them when the agent starts them through the
 `Skill` tool. `isTypedOnly` in `register.ts` refuses three more commands from
 the agent: `/ledger:retire` with `--force`, `/ledger:worktrees prune` or
 `prune-orphans` without `--dry-run`, and `/ledger:parent` with an action other
