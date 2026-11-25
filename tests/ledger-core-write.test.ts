@@ -56,6 +56,7 @@ test('ledger --help lists the writing commands, and each has its own --help', (t
     'task unpark': [/<slug>/],
     'task block': [/<slug>/, /--on/],
     'task unblock': [/<slug>/],
+    'task pr': [/<url>/, /--task/, /--json/],
     tree: [/<slug>/, /\badd\b/, /\bremove\b/, /\bstart\b/, /\bnext\b/, /\border\b/, /\bdepends\b/, /--json/],
     'tree order': [/<slug>/, /<child\.\.\.>/, /--json/],
     'tree depends': [/<child>/, /\[task\.\.\.\]/, /github\.com\/\w+\/\w+/, /--json/],
@@ -519,6 +520,118 @@ test('block and unblock of an unknown slug fail', (t) => {
   const { h, app } = setup(t);
   failed(ledger(h, app, 'task', 'block', 'ghost', '--on', 'x'), /ghost/);
   failed(ledger(h, app, 'task', 'unblock', 'ghost'), /ghost/);
+});
+
+const PR = 'https://github.com/acme/app/pull/42';
+
+test('task pr records the PR link, sets stage pr and makes the task waiting, for the task of the worktree by default', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  const stdout = ok(ledger(h, worktreeOf(app, 'epic'), 'task', 'pr', PR));
+  assert.equal(stdout, `Recorded PR ${PR} on epic; the task is waiting.\n`);
+  const text = read(file);
+  assert.match(text, new RegExp(`^- pr: ${PR}$`, 'm'));
+  assert.match(text, /^- stage: pr$/m);
+  assert.match(text, new RegExp(`^- status: waiting ${today()}$`, 'm'));
+  const listed = (JSON.parse(ok(ledger(h, app, 'list', '--json'))) as { tasks: { slug: string; status: string }[] }).tasks;
+  assert.equal(listed.find(({ slug }) => slug === 'epic')?.status, 'waiting');
+});
+
+test('task pr --task names the task, and --json prints the result', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'epic' });
+  const shown = JSON.parse(ok(ledger(h, app, 'task', 'pr', PR, '--task', 'epic', '--json'))) as { slug: string; pr: string };
+  assert.equal(shown.slug, 'epic');
+  assert.equal(shown.pr, PR);
+});
+
+test('task pr stores the link without a trailing slash, query or fragment', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  for (const given of [`${PR}/`, `${PR}?w=1`, `${PR}#issuecomment-1`, `${PR}/#top`]) {
+    ok(ledger(h, app, 'task', 'pr', given, '--task', 'epic'));
+    assert.match(read(file), new RegExp(`^- pr: ${PR}$`, 'm'), given);
+  }
+});
+
+test('task pr on a waiting task replaces the link, and the task stays waiting', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  ok(ledger(h, app, 'task', 'pr', PR, '--task', 'epic'));
+  const other = 'https://github.com/acme/app/pull/43';
+  ok(ledger(h, app, 'task', 'pr', other, '--task', 'epic'));
+  const text = read(file);
+  assert.match(text, new RegExp(`^- pr: ${other}$`, 'm'));
+  assert.equal(text.match(/^- pr:/gm)?.length, 1);
+  assert.match(text, new RegExp(`^- status: waiting ${today()}$`, 'm'));
+});
+
+test('task pr refuses anything but a GitHub PR link, names the accepted form, and changes nothing', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  const before = read(file);
+  for (const url of [
+    '42',
+    'http://github.com/acme/app/pull/42',
+    'https://gitlab.com/acme/app/pull/42',
+    'https://github.com/acme/app/issues/42',
+    'https://github.com/acme/app/pull/0',
+    'https://github.com/acme/app/pull/abc',
+    'https://github.com/acme/app/pull/42/files',
+    'https://github.com/acme/pull/42',
+  ]) {
+    failed(ledger(h, app, 'task', 'pr', url, '--task', 'epic'), /https:\/\/github\.com\/<owner>\/<repo>\/pull\/<number>/);
+    assert.equal(read(file), before, url);
+  }
+});
+
+test('task pr refuses a parked, blocked, done or lost task with the move check message, and changes nothing', (t) => {
+  const { h, app } = setup(t);
+  const file = worktreeTask(h, app, { slug: 'epic' });
+  const plain = read(file);
+  const lost = `- lost: 2026-11-22 — folder ${worktreeOf(app, 'epic')} not found`;
+  const refusals: [string, RegExp][] = [
+    [withStatus(plain, 'parked 2026-11-20 — later'), /epic is parked, so it cannot become waiting\. A parked task can become active\./],
+    [withStatus(plain, 'blocked 2026-11-20 — the API'), /epic is blocked, so it cannot become waiting\. A blocked task can become active\./],
+    [withStatus(plain, 'done 2026-11-20'), /epic is done, so it cannot become waiting\. Finalize it with the question from `ledger task gate finalize epic`\./],
+    [inserted(plain, '- design refs: none', lost), /epic is lost, so it cannot become waiting\. A lost task can become active\./],
+  ];
+  for (const [text, message] of refusals) {
+    writeLedgerFile(file, text);
+    const before = read(file);
+    failed(ledger(h, app, 'task', 'pr', PR, '--task', 'epic'), message);
+    assert.equal(read(file), before);
+  }
+});
+
+test('task pr refuses a backlog task, a task of another machine and a retired task, and changes nothing', (t) => {
+  const { h, app } = setup(t);
+  const idea = backlogTask(h, app, { slug: 'idea' });
+  const far = putActive(h, app, 'far', ledgerText({ slug: 'far', worktree: path.join(h, 'elsewhere/far') }));
+  archivedTask(h, app, '2026-11-01', { slug: 'gone' });
+  const before = [read(idea), read(far)];
+  failed(ledger(h, app, 'task', 'pr', PR, '--task', 'idea'), /idea is in the backlog/);
+  failed(ledger(h, app, 'task', 'pr', PR, '--task', 'far'), /\bfar\b.*not on this machine/);
+  failed(ledger(h, app, 'task', 'pr', PR, '--task', 'gone'), /gone is retired/);
+  assert.deepEqual([read(idea), read(far)], before);
+});
+
+test('task pr sets stage pr only for a kind that has it: a docs task moves there, an investigation keeps its stage', (t) => {
+  const { h, app } = setup(t);
+  const docs = worktreeTask(h, app, { slug: 'docs' });
+  const study = worktreeTask(h, app, { slug: 'study' });
+  writeLedgerFile(docs, inserted(read(docs), '- design refs: none', '- kind: docs', '- stage: review'));
+  writeLedgerFile(study, inserted(read(study), '- design refs: none', '- kind: investigation', '- stage: report'));
+  ok(ledger(h, app, 'task', 'pr', PR, '--task', 'docs'));
+  ok(ledger(h, app, 'task', 'pr', PR, '--task', 'study'));
+  assert.match(read(docs), /^- stage: pr$/m);
+  assert.match(read(study), /^- stage: report$/m);
+  assert.match(read(study), new RegExp(`^- status: waiting ${today()}$`, 'm'));
+});
+
+test('task pr outside a task worktree without --task says to pass it', (t) => {
+  const { h, app } = setup(t);
+  failed(ledger(h, app, 'task', 'pr', PR), /--task <slug>/);
 });
 
 test('ledger go to a blocked task leaves its status line as it is', (t) => {

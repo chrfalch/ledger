@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Failure } from '../tools/ledger/failure.js';
 import { parseLedger } from '../tools/ledger/format.js';
-import { checkTransition, stateOf, type ActiveState } from '../tools/ledger/states.js';
+import { checkPrLink, checkTransition, stateOf, type ActiveState } from '../tools/ledger/states.js';
 import { ledgerText } from './ledger-core-fixtures.js';
 
 // LLP 0001 section 5.1, the states inside active; done leaves only by retire, which is no move between these.
@@ -46,4 +46,14 @@ test('stateOf reads the status line, a lost mark over it, and active for neither
   assert.equal(stateOf(located()), 'active');
   assert.equal(stateOf(located('- status: blocked 2026-11-20 — the API')), 'blocked');
   assert.equal(stateOf(located('- status: waiting 2026-11-20', '- lost: 2026-11-22 — folder /repos/app/.claude/worktrees/epic not found')), 'lost');
+});
+
+test('checkPrLink refuses a code task without a PR link, names ledger task pr, and lets any other task pass', () => {
+  const message = 'epic is a code task without a PR link, so it cannot become waiting. Record the link first: ledger task pr <url>';
+  for (const record of [{}, { kind: 'code' }]) {
+    assert.throws(() => checkPrLink('epic', record), (error) => error instanceof Failure && error.message === message, JSON.stringify(record));
+  }
+  for (const record of [{ pr: 'https://github.com/acme/app/pull/1' }, { kind: 'code', pr: 'https://github.com/acme/app/pull/1' }, { kind: 'docs' }, { kind: 'investigation' }]) {
+    assert.doesNotThrow(() => checkPrLink('epic', record), JSON.stringify(record));
+  }
 });

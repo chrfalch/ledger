@@ -7,3 +7,9 @@ export const STAGES: Readonly<Record<'code' | 'docs' | 'investigation', readonly
 export type Kind = keyof typeof STAGES;
 export const KINDS = Object.keys(STAGES).join(', ');
 export const isKind = (kind: string): kind is Kind => Object.hasOwn(STAGES, kind);
+
+/** Whether a task of `kind`, code when none, goes through `stage`. */
+export const hasStage = (kind: string | undefined, stage: string): boolean => {
+  const known = kind ?? 'code';
+  return isKind(known) && STAGES[known].includes(stage);
+};

@@ -1996,6 +1996,40 @@ test('the whole session start in a linked worktree stays within its 5 s, when th
   assert.ok(ms - startUp < 6000, `the session start took ${ms - startUp} ms after start-up`);
 });
 
+test('a waiting task whose PR gh says is merged after the session start used up its git time is still marked done and committed', (t) => {
+  const bare = remote(t);
+  const a = machine(t, bare);
+  setUp(a);
+  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
+  ledgerOk(a, 'store', 'sync');
+  const b = machine(t, bare);
+  answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
+  setUp(b);
+  ledgerOk(a, 'task', 'new', 'later', '--goal', 'Comes later.');
+  ledgerOk(a, 'store', 'sync');
+  ledgerOk(b, 'task', 'new', 'mine', '--goal', 'Made on B.');
+  ledgerOk(b, 'go', 'mine');
+  const pr = 'https://github.com/acme/app/pull/7';
+  ledgerOk(b, 'task', 'pr', pr, '--task', 'mine');
+  // The pull hangs in its rebase until its share of the 5 s is up, 1 s before the end; gh then answers 1.5 s later.
+  const slow = path.join(b.clone, '.git/hooks/post-rewrite');
+  writeFileSync(slow, '#!/bin/sh\nexec >/dev/null 2>&1 </dev/null\nsleep 30\n', { mode: 0o755 });
+  const stubs = path.join(b.h, 'pr-stubs');
+  mkdirSync(stubs);
+  const merged = JSON.stringify({ state: 'MERGED', reviewDecision: 'APPROVED', statusCheckRollup: [] });
+  writeFileSync(path.join(stubs, 'gh'), `#!/bin/sh\n[ "$1 $2 $3" = "pr view ${pr}" ] || exec "$HOME/stub-bin/gh" "$@"\nsleep 1.5\nprintf '%s\\n' '${merged}'\n`, { mode: 0o755 });
+  const env = { ...quietEnv(b), PATH: `${stubs}${path.delimiter}${quietEnv(b).PATH ?? ''}` };
+  const mine = path.join(b.app, '.claude/worktrees/mine');
+
+  const ran = run(b, ['hook', 'session-start'], { cwd: mine, env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd: mine }) });
+
+  assert.equal(ran.status, 0, ran.stderr);
+  const context = (JSON.parse(ran.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext;
+  assert.ok(context.startsWith('Needs you:\n- mine: PR merged; the task is done.'), context);
+  assert.match(ledgerOk(b, 'show', 'mine', '--repo', 'app'), new RegExp(`^- status: done ${today()}$`, 'm'));
+  assert.equal(git(b.h, b.clone, 'status', '--porcelain'), '');
+});
+
 test('git in the clone ignores GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and GIT_CONFIG_* of the environment ledger runs in', (t) => {
   const bare = remote(t);
   const a = machine(t, bare);

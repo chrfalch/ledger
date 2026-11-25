@@ -40,12 +40,12 @@ import {
 import { withLock } from './lock.js';
 import { samePath, taskWorktree, type LedgerPaths } from './paths.js';
 import { withHint } from './migrate-repo-ids.js';
-import { isKind, KINDS, type Kind } from './kinds.js';
-import { storedText } from './record.js';
+import { hasStage, isKind, KINDS, type Kind } from './kinds.js';
+import { parseRecord, storedText } from './record.js';
 import { remoteKey, repoKey } from './repo-key.js';
 import { holdsUnmovedLedger } from './unmoved.js';
 import { hostProblem, noteOwnHost } from './settings.js';
-import { checkTransition, stateOf } from './states.js';
+import { checkPrLink, checkTransition, stateOf } from './states.js';
 import { keyAndAliases, type Change, type LedgerStore } from './store.js';
 import { pauseForTest } from './wait.js';
 import {
@@ -555,12 +555,13 @@ function checkMove(task: Task, location: Location, to: StatusValue): void {
 
 function movedTo(task: Task, text: string, status: Status): string {
   checkMove(task, parseLedger(text).location, status.value);
+  if (status.value === 'waiting') checkPrLink(task.slug, parseRecord(text));
   return setStatus(text, status) ?? fail(`${task.file} has no ## Location section.`);
 }
 
 /**
  * `text` without the status `value`, which makes the task active again.
- * The check cannot fail today: only parked and blocked are cleared, and the table lets both go back to active.
+ * The check cannot fail today: only parked, blocked and waiting are cleared, and the table lets each go back to active.
  */
 function movedFrom(task: Task, text: string, value: StatusValue): string {
   checkTransition(task.slug, value, 'active');
@@ -636,13 +637,63 @@ export function markMergedDone(context: Context, task: Task): MergedCheck {
   if (task.status !== 'waiting' || pr === undefined || task.elsewhere) return { marked: false };
   if (prState(task.main ?? context.cwd, pr) !== 'merged') return { marked: false };
   try {
-    const marked = updateLedger(context, task, (text) => (stateOf(parseLedger(text).location) === 'waiting' ? movedTo(task, text, { value: 'done', date: today() }) : undefined));
+    const marked = markWaitingDone(context, task);
     return marked ? { marked, notice: `${task.slug}: PR merged; marked done. Finalize it with the question from \`ledger task gate finalize ${task.slug}\`.` } : { marked };
   } catch (error) {
     if (!(error instanceof Failure)) throw error;
     return { marked: false, notice: `warning: ${task.slug}: its PR is merged, but it was not marked done: ${oneLine(error.message)}` };
   }
 }
+
+/** Marks a waiting task done, as its PR is merged; false when the record, as its lock reads it, is not waiting any more. */
+export function markWaitingDone(context: Context, task: Task): boolean {
+  return updateLedger(context, task, (text) => (stateOf(parseLedger(text).location) === 'waiting' ? movedTo(task, text, { value: 'done', date: today() }) : undefined));
+}
+
+/**
+ * Makes a waiting task active again, as its PR needs fixes, at the build stage when its kind has one. Gives the stage
+ * set, 'active' when none was, and undefined when the record, as its lock reads it, is not waiting any more.
+ */
+export function sendBackToBuild(context: Context, task: Task): 'build' | 'active' | undefined {
+  let moved: 'build' | 'active' | undefined;
+  updateLedger(context, task, (text) => {
+    if (stateOf(parseLedger(text).location) !== 'waiting') return undefined;
+    const active = movedFrom(task, text, 'waiting');
+    moved = hasStage(parseRecord(text).kind, 'build') ? 'build' : 'active';
+    return moved === 'build' ? (setLocationBullet(active, 'stage', 'build') ?? active) : active;
+  });
+  return moved;
+}
+
+const PR_FORM = 'https://github.com/<owner>/<repo>/pull/<number>';
+
+/** `url` as the PR link to record: a GitHub PR address, without a trailing slash, query or fragment. */
+function prLink(url: string): string {
+  const link = /^(https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*)\/?(?:[?#].*)?$/.exec(url.trim())?.[1];
+  return link ?? fail(`${url} is not the address of a GitHub PR. Give it as ${PR_FORM}.`);
+}
+
+export type PrResult = { slug: string; ledger: string; pr: string };
+
+/**
+ * Records the PR link of a task, the one `name` gives or else the task of the worktree the command runs in, and makes
+ * the task waiting at its pr stage, when its kind has one. A waiting task keeps waiting with the new link.
+ */
+export function recordPr(context: Context, name: string | undefined, url: string): PrResult {
+  const pr = prLink(url);
+  const task = name === undefined ? (currentTask(context.store, context.cwd) ?? fail('No task in this folder. Pass --task <slug>.')) : liveTask(context, name).task;
+  if (task.place === 'backlog') fail(`${task.slug} is in the backlog, so it cannot become waiting. Start it first: ledger go ${task.slug}`);
+  // Before the write too: updateLedger refuses a lost task as one of another machine, which hides why it cannot move.
+  checkMove(task, task.ledger.location, 'waiting');
+  updateLedger(context, task, (text) => {
+    const linked = setLocationBullet(text, 'pr', pr) ?? text;
+    const staged = hasStage(parseRecord(linked).kind, 'pr') ? (setLocationBullet(linked, 'stage', 'pr') ?? linked) : linked;
+    return movedTo(task, staged, { value: 'waiting', date: today() });
+  });
+  return { slug: task.slug, ledger: task.file, pr };
+}
+
+export const recordPrText = ({ slug, pr }: PrResult): string => `Recorded PR ${pr} on ${slug}; the task is waiting.`;
 
 export type ParentAction = 'add' | 'remove' | 'start' | 'next';
 
