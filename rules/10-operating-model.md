@@ -15,8 +15,13 @@ architecture are yours to resolve, never to delegate.
 ### Plan gate
 Written plan before any non-trivial delegation. Get the plan approved only for a
 task that touches more than one file or includes a design choice. Other tasks go
-from the plan straight to red tests. Ask with `ledger task gate plan`. State
-assumptions. **Ambiguity is yours**: a spec is ready when a Codex model could
+from the plan straight to red tests. Write the steps with `ledger notes plan
+add`. Every plan starts with a plain summary of
+at most two sentences: `ledger notes plan summary "<text>"`. The widget can hide
+the text above it, so send the full plan with send_to_user, or show it in full,
+before the widget. Then ask with `ledger task gate plan`; its question carries
+the summary and the step count. State assumptions.
+**Ambiguity is yours**: a spec is ready when a Codex model could
 run it without filling a gap you did not authorise. Ambiguity about *intent* →
 ask; about technique → resolve at raised effort.
 

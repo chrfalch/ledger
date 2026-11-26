@@ -1,4 +1,8 @@
 import { fail } from './failure.js';
+import type { TaskRef } from './format.js';
+import { parseRecord } from './record.js';
+import { findTasks, taskRef, theTask, type Task } from './tasks.js';
+import { currentTask, readLedger, type Context } from './write.js';
 
 // @ref LLP 0001#11-questions-to-the-operator — the widget rules, D33–D35.
 
@@ -53,16 +57,6 @@ export function buildGate(gate: GateDefinition, slug?: string): GateQuestion {
 
 const GATES: readonly GateDefinition[] = [
   {
-    name: 'plan',
-    header: 'Plan',
-    question: (task) => `Approve the plan for ${task}?`,
-    multiSelect: false,
-    actions: [
-      { label: 'Approve plan', description: 'Start the work as planned, with the failing tests first.' },
-      { label: 'Change plan', description: 'Nothing starts yet. Say what to change; the new plan comes back for approval.' },
-    ],
-  },
-  {
     name: 'pr',
     header: 'Pull request',
     question: (task) => `Every step of ${task} is done. Open its pull request?`,
@@ -107,11 +101,44 @@ const GATES: readonly GateDefinition[] = [
 /** The gates whose question is the same for every task, so `gateQuestion` builds it from the name alone. */
 export const GATE_NAMES: readonly string[] = GATES.map(({ name }) => name);
 
+/** The gate whose question names the plan's summary and step count, which `planQuestion` reads from the store. */
+export const PLAN_GATE = 'plan';
+
 /** The gate whose actions come from the task's tree and repo, which finalize.ts reads from the store. */
 export const FINALIZE_GATE = 'finalize';
 
 /** Every gate `ledger task gate` asks. */
-export const ALL_GATE_NAMES: readonly string[] = [...GATE_NAMES, FINALIZE_GATE];
+export const ALL_GATE_NAMES: readonly string[] = [PLAN_GATE, ...GATE_NAMES, FINALIZE_GATE];
+
+/** The task the gate `gate` asks about: `slug`, by default the task of the worktree `context.cwd` is in. */
+export function gateTask(context: Context, gate: string, slug?: string): { task: Task; ref: Required<TaskRef>; tasks: Task[] } {
+  const name = slug ?? currentTask(context.store, context.cwd)?.slug ?? fail(`No task has the worktree you are in, so name one: ledger task gate ${gate} <slug>`);
+  const ref = taskRef(context.cwd, name);
+  const tasks = findTasks(context.store);
+  return { task: theTask(tasks, ref), ref, tasks };
+}
+
+/** The plan question for the task `slug`, which states the plan's summary and step count, as the widget hides the text above it. */
+export function planQuestion(context: Context, slug?: string): GateQuestion {
+  const { task } = gateTask(context, PLAN_GATE, slug);
+  const { summary, steps } = parseRecord(readLedger(context, task)).plan;
+  if (steps.length === 0) fail(`The plan of ${task.slug} has no steps. Add them first: ledger notes plan add "<step>" --owner <agent>`);
+  if (summary === undefined) fail(`The plan of ${task.slug} has no summary. Set one first: ledger notes plan summary "<text>"`);
+  const count = steps.length === 1 ? '1 step' : `${steps.length} steps`;
+  return buildGate(
+    {
+      name: PLAN_GATE,
+      header: 'Plan',
+      question: (subject) => `Approve the plan for ${subject}? ${summary} (${count})`,
+      multiSelect: false,
+      actions: [
+        { label: 'Approve plan', description: 'Start the work as planned, with the failing tests first.' },
+        { label: 'Change plan', description: 'Nothing starts yet. Say what to change; the new plan comes back for approval.' },
+      ],
+    },
+    task.slug,
+  );
+}
 
 /** The widget question of the gate `name` for the task `slug`; fails for a name no gate has. */
 export function gateQuestion(name: string, slug?: string): GateQuestion {

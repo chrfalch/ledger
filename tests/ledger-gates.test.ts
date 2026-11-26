@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 
-import { buildGate, GATE_NAMES, gateQuestion, type GateDefinition, type GateQuestion } from '../tools/ledger/gates.js';
+import { ALL_GATE_NAMES, buildGate, GATE_NAMES, gateQuestion, type GateDefinition, type GateQuestion } from '../tools/ledger/gates.js';
 import { archivedTask, backlogTask, home, ledger, ledgerText, ok, putActive, readLedgerFile, repository, worktreeOf, worktreeTask, writeLedgerFile } from './ledger-core-fixtures.js';
 
 const pick: GateDefinition = {
@@ -33,16 +33,8 @@ function assertQuestionShape(question: GateQuestion): void {
 }
 
 test('the registry has the plan and pr gates', () => {
-  assert.ok(GATE_NAMES.includes('plan'));
+  assert.ok(ALL_GATE_NAMES.includes('plan'));
   assert.ok(GATE_NAMES.includes('pr'));
-});
-
-test('the plan gate offers Approve plan, Change plan and Close', () => {
-  const question = gateQuestion('plan', 'fix-login');
-  assertQuestionShape(question);
-  assert.equal(question.multiSelect, false);
-  assert.deepEqual(labels(question), ['Approve plan (Recommended)', 'Change plan', 'Close']);
-  assert.match(question.question, /fix-login/);
 });
 
 test('the pr gate offers Commit, push and open the PR, Not yet and Close', () => {
@@ -59,7 +51,6 @@ test('without a slug, each gate question still names its subject and stands alon
     assert.doesNotMatch(question, /undefined/, name);
     assert.match(question, /this task/, name);
   }
-  assert.match(gateQuestion('plan').question, /plan/);
   assert.match(gateQuestion('pr').question, /pull request/);
 });
 
@@ -137,11 +128,51 @@ test('a header longer than 12 characters is refused', () => {
   assert.throws(() => buildGate({ ...pick, header: 'Thirteen char' }), /12 characters/);
 });
 
-test('ledger task gate plan prints one AskUserQuestion question as JSON', (t) => {
-  const h = home(t);
-  const question = JSON.parse(ok(ledger(h, h, 'task', 'gate', 'plan', 'fix-login'))) as GateQuestion;
+/** A worktree task `fix-login` whose plan has `summary` and the steps whose numbers are in `steps`. */
+function planned(t: TestContext, summary: string | undefined, steps = ['1', '2']) {
+  const { h, app } = tree(t);
+  const file = worktreeTask(h, app, { slug: 'fix-login' });
+  const kept = readLedgerFile(file)
+    .split('\n')
+    .filter((line) => !/^\| \d+ \|/.test(line) || steps.some((n) => line.startsWith(`| ${n} |`)))
+    .join('\n');
+  writeLedgerFile(file, summary === undefined ? kept : kept.replace('## Plan (approved 2026-11-01)\n', `## Plan (approved 2026-11-01)\nSummary: ${summary}\n\n`));
+  return { h, app, worktree: worktreeOf(app, 'fix-login') };
+}
+
+test('ledger task gate plan asks to approve the plan by its summary and step count, with Approve plan, Change plan and Close', (t) => {
+  const { h, app, worktree } = planned(t, 'Edit gates.ts and notes.ts. Then test.');
+  const question = JSON.parse(ok(ledger(h, worktree, 'task', 'gate', 'plan'))) as GateQuestion;
   assertQuestionShape(question);
-  assert.deepEqual(question, gateQuestion('plan', 'fix-login'));
+  assert.equal(question.question, 'Approve the plan for fix-login? Edit gates.ts and notes.ts. Then test. (2 steps)');
+  assert.equal(question.header, 'Plan');
+  assert.equal(question.multiSelect, false);
+  assert.deepEqual(labels(question), ['Approve plan (Recommended)', 'Change plan', 'Close']);
+  assert.equal(question.options.at(-1)?.description, gateQuestion('pr').options.at(-1)?.description);
+  assert.deepEqual(JSON.parse(ok(ledger(h, app, 'task', 'gate', 'plan', 'fix-login'))), question);
+});
+
+test('the plan gate counts one step as "1 step"', (t) => {
+  const { h, worktree } = planned(t, 'Ship it.', ['1']);
+  const { question } = JSON.parse(ok(ledger(h, worktree, 'task', 'gate', 'plan'))) as GateQuestion;
+  assert.equal(question, 'Approve the plan for fix-login? Ship it. (1 step)');
+});
+
+test('ledger task gate plan refuses a plan with no summary, and names the command that sets one', (t) => {
+  const { h, worktree } = planned(t, undefined);
+  const ran = ledger(h, worktree, 'task', 'gate', 'plan');
+  assert.equal(ran.status, 1);
+  assert.equal(ran.stdout, '');
+  assert.match(ran.stderr, /fix-login/);
+  assert.match(ran.stderr, /ledger notes plan summary "<text>"/);
+});
+
+test('ledger task gate plan refuses a plan with no steps', (t) => {
+  const { h, worktree } = planned(t, 'Ship it.', []);
+  const ran = ledger(h, worktree, 'task', 'gate', 'plan');
+  assert.equal(ran.status, 1);
+  assert.equal(ran.stdout, '');
+  assert.match(ran.stderr, /no steps/);
 });
 
 test('ledger task gate takes the slug of the worktree it runs in', (t) => {
@@ -163,8 +194,16 @@ test('ledger task gate in an untitled worktree ledger takes the folder slug', (t
 
 test('ledger task gate outside a task asks about this task', (t) => {
   const h = home(t);
-  const question = JSON.parse(ok(ledger(h, h, 'task', 'gate', 'plan'))) as GateQuestion;
-  assert.deepEqual(question, gateQuestion('plan'));
+  const question = JSON.parse(ok(ledger(h, h, 'task', 'gate', 'pr'))) as GateQuestion;
+  assert.deepEqual(question, gateQuestion('pr'));
+});
+
+test('ledger task gate plan outside a task, with no slug, says to name one', (t) => {
+  const { h } = tree(t);
+  const ran = ledger(h, h, 'task', 'gate', 'plan');
+  assert.equal(ran.status, 1);
+  assert.equal(ran.stdout, '');
+  assert.match(ran.stderr, /ledger task gate plan <slug>/);
 });
 
 test('ledger task gate with an unknown name exits 1 and lists the gates', (t) => {
@@ -308,7 +347,7 @@ test('ledger task gate names the finalize gate in its help and when a name is un
   assert.match(ledger(h, h, 'task', 'gate', 'ship').stderr, /plan, pr, merge, goal, abandon, finalize/);
 });
 
-test('the abandon gate asks to abandon the task, offers Abandon task, Not yet and Close, and closes as the plan gate does', () => {
+test('the abandon gate asks to abandon the task, offers Abandon task, Not yet and Close, and closes as the pr gate does', () => {
   assert.ok(GATE_NAMES.includes('abandon'));
   const question = gateQuestion('abandon', 'fix-login');
   assertQuestionShape(question);
@@ -316,7 +355,7 @@ test('the abandon gate asks to abandon the task, offers Abandon task, Not yet an
   assert.equal(question.header, 'Abandon');
   assert.equal(question.multiSelect, false);
   assert.deepEqual(labels(question), ['Abandon task (Recommended)', 'Not yet', 'Close']);
-  assert.equal(question.options.at(-1)?.description, gateQuestion('plan').options.at(-1)?.description);
+  assert.equal(question.options.at(-1)?.description, gateQuestion('pr').options.at(-1)?.description);
   assert.equal(gateQuestion('abandon').question, 'Abandon this task? Its ledger is archived and nothing is merged.');
 });
 

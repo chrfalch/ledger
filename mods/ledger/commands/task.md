@@ -92,7 +92,9 @@ parent task.
    the new worktree: no session start report covers a worktree entered in
    the middle of a session. Then continue with the operator's request in this session, through
    the normal pipeline. When the task changes more than one file or involves
-   a design choice, get the plan approved with the widget question that
-   `ledger task gate plan` prints. Then write the plan into the ledger with
-   `ledger notes plan add`, one step per command, and
-   `ledger notes plan approve`.
+   a design choice, write the plan into the ledger with
+   `ledger notes plan add`, one step per command, and its summary with
+   `ledger notes plan summary`. Send the full plan with send_to_user, or
+   show it in full, then
+   get it approved with the widget question that `ledger task gate plan`
+   prints. Then run `ledger notes plan approve`.
