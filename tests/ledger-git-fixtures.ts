@@ -1,13 +1,22 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import { limitCloneGitCalls } from '../tools/ledger/clone.js';
+import { onBackgroundSyncForTests } from '../tools/ledger/git-store.js';
+import { resetGitLimits } from '../tools/ledger/git.js';
+import { limitHookTimeForTests } from '../tools/ledger/hooks.js';
+import { limitLockWaitForTests, limitLockWaits } from '../tools/ledger/lock.js';
+import { limitPrCheckTimeForTests } from '../tools/ledger/pr-check.js';
 import { readRecordJson, renderRecord } from '../tools/ledger/record.js';
+import { runEnv } from '../tools/ledger/run-io.js';
+import { limitBusyWaitForTests } from '../tools/ledger/sqlite-store.js';
+import { allowRemoteForTests } from '../tools/ledger/sync.js';
 import { REPO } from './helpers.js';
-import { commandEnv, git, home, LEDGER_BIN, ok, PRELOAD_OPTIONS, type Ran } from './ledger-core-fixtures.js';
+import { commandEnv, git, home, LEDGER_BIN, ok, PRELOAD_OPTIONS, runInProcessWith, type Ran } from './ledger-core-fixtures.js';
 
 export const URL = 'https://github.com/me/ledgers.git';
 export const SSH_URL = 'git@github.com:me/ledgers.git';
@@ -48,7 +57,10 @@ export function remote(t: TestContext): string {
 
 type GhAnswer = { visibility: string; isEmpty: boolean } | 'fail';
 
-/** The stub gh prints the answer the test set in $HOME/gh-answer.json, and notes each call in $HOME/gh-calls. */
+/**
+ * The stub gh prints the answer the test set in $HOME/gh-answer.json, and notes each call in $HOME/gh-calls. A call
+ * made while $HOME/gh-hold exists answers only once $HOME/gh-release exists.
+ */
 export function answerGh(h: string, answer: GhAnswer): void {
   const file = path.join(h, 'gh-answer.json');
   if (answer === 'fail') rmSync(file, { force: true });
@@ -72,7 +84,10 @@ export function machine(t: TestContext, bare: string): Machine {
     [
       '#!/bin/sh',
       '[ "$1 $2" = "repo view" ] || { echo "gh: not logged in" >&2; exit 4; }',
+      // Decided before the call is noted, so a test that sees the call can take gh-hold away for later calls only.
+      'held=; [ ! -f "$HOME/gh-hold" ] || held=1',
       'printf "%s\\n" "$*" >> "$HOME/gh-calls"',
+      `[ -z "$held" ] || { ${holdUntil('$HOME/gh-release')}; }`,
       '[ ! -f "$HOME/gh-delay" ] || sleep "$(cat "$HOME/gh-delay")"',
       '[ -f "$HOME/gh-answer.json" ] || { echo "gh: not logged in" >&2; exit 4; }',
       'cat "$HOME/gh-answer.json"',
@@ -87,6 +102,12 @@ export function machine(t: TestContext, bare: string): Machine {
   writeFileSync(path.join(app, '.git/info/exclude'), '.claude/\n');
   return { h, app, bare, clone: path.join(h, '.claude/ledger-data'), status: path.join(h, '.claude/ledger-data.status.json') };
 }
+
+/**
+ * A shell command that waits until `file` exists, so a hook or stub holds while the test checks what happens meanwhile.
+ * It gives up after 15 s, so a test that fails before it creates `file` does not hang.
+ */
+export const holdUntil = (file: string): string => `i=0; while [ ! -e "${file}" ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i + 1)); done`;
 
 /** Where the preloaded module notes the pid of each background sync a ledger command of HOME `h` starts. */
 export const backgroundPids = (h: string): string => path.join(h, 'background-sync-pids');
@@ -132,13 +153,54 @@ async function stopBackgroundSyncs(h: string): Promise<void> {
 
 export const quietEnv = (m: Machine): NodeJS.ProcessEnv => ({ ...machineEnv(m), LEDGER_TEST_NO_BACKGROUND_SYNC: '1' });
 
-export function run(m: Machine, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string } = {}): Ran {
+export type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv; input?: string };
+
+export function run(m: Machine, args: string[], options: RunOptions = {}): Ran {
   const result = spawnSync(LEDGER_BIN, args, { cwd: options.cwd ?? m.app, env: options.env ?? quietEnv(m), input: options.input, encoding: 'utf8' });
   if (result.error) throw result.error;
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
 export const ledgerOk = (m: Machine, ...args: string[]): string => ok(run(m, args));
+
+/** The setters the preloaded module calls with these variables of a spawned command; each gives the limit it replaces. */
+const LIMITS = {
+  LEDGER_TEST_HOOK_TIME_MS: limitHookTimeForTests,
+  LEDGER_TEST_PR_CHECK_TIME_MS: limitPrCheckTimeForTests,
+  LEDGER_TEST_LOCK_WAIT_MS: limitLockWaitForTests,
+  LEDGER_TEST_BUSY_WAIT_MS: limitBusyWaitForTests,
+};
+
+const noteBackgroundSync = (pid: number): void => {
+  const file = runEnv().LEDGER_TEST_BACKGROUND_PIDS;
+  if (file) appendFileSync(file, `${pid}\n`);
+};
+
+/**
+ * `run` inside this process, with what the preloaded module gives a spawned command: the bare repository of `m` as the
+ * test remote, the limits the environment lowers, and a note of each background sync. Its runs must not overlap.
+ */
+export async function runHere(m: Machine, args: string[], { cwd = m.app, env = quietEnv(m), input }: RunOptions = {}): Promise<Ran> {
+  allowRemoteForTests(m.bare);
+  onBackgroundSyncForTests(noteBackgroundSync);
+  const restores: (() => void)[] = Object.entries(LIMITS).flatMap(([variable, limit]) => {
+    if (!env[variable]) return [];
+    const replaced = limit(Number(env[variable]));
+    return [() => limit(replaced)];
+  });
+  try {
+    return await runInProcessWith(m.h, cwd, { env, input }, ...args);
+  } finally {
+    for (const restore of restores) restore();
+    // A hook run leaves its deadlines set until the next run starts; a test that calls ledger code directly must not inherit them.
+    resetGitLimits();
+    limitCloneGitCalls(Infinity);
+    limitLockWaits(Infinity);
+  }
+}
+
+/** `ledgerOk` inside this process. */
+export const ledgerOkHere = async (m: Machine, ...args: string[]): Promise<string> => ok(await runHere(m, args));
 
 export function failed(ran: Ran): string {
   assert.equal(ran.status, 1, `exit 1 expected; stdout:\n${ran.stdout}\nstderr:\n${ran.stderr}`);
@@ -175,16 +237,28 @@ export function setUp(m: Machine, url = URL): void {
   useGitStorage(m);
 }
 
+/** `setUp` inside this process. */
+export async function setUpHere(m: Machine, url = URL): Promise<void> {
+  ok(await runHere(m, ['store', 'sync', 'init', url]));
+  useGitStorage(m);
+}
+
 export function today(): string {
   const date = new Date();
   return [date.getFullYear(), date.getMonth() + 1, date.getDate()].map((part) => String(part).padStart(2, '0')).join('-');
 }
 
-export const hookContext = (m: Machine, cwd = m.h, env = quietEnv(m)): string => {
-  const ran = run(m, ['hook', 'session-start'], { cwd, env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd }) });
+const sessionContext = (ran: Ran): string => {
   assert.equal(ran.status, 0, ran.stderr);
   return ran.stdout === '' ? '' : (JSON.parse(ran.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext;
 };
+
+const sessionStart = (cwd: string, env: NodeJS.ProcessEnv): RunOptions => ({ cwd, env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd }) });
+
+export const hookContext = (m: Machine, cwd = m.h, env = quietEnv(m)): string => sessionContext(run(m, ['hook', 'session-start'], sessionStart(cwd, env)));
+
+/** `hookContext` inside this process. */
+export const hookContextHere = async (m: Machine, cwd = m.h, env = quietEnv(m)): Promise<string> => sessionContext(await runHere(m, ['hook', 'session-start'], sessionStart(cwd, env)));
 
 export const lineOf = (text: string, needle: string): number => text.split('\n').findIndex((line) => line.includes(needle)) + 1;
 
