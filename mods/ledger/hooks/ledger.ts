@@ -157,6 +157,16 @@ export type GoFields = {
 /** The line that tells go.md and next.md the operator types `go <slug>` after the clear. */
 export const CONTINUE_TYPED = 'continue: typed'
 
+/** The continue line and the instruction under it, so go.md and next.md cannot read the line as an example. */
+export const continueTypedArgs = (slug: string): string =>
+  [
+    CONTINUE_TYPED,
+    `This session runs in T3 and cannot restart by itself, so queue the next session now: call mcp__t3-code__t3_thread_list and take its currentThreadId; then, as the last tool call of this turn, call mcp__t3-code__t3_thread_send with that threadId, message exactly "go ${slug}", mode "queue" and freshContext true. If either tool is missing or a call fails, your last line tells the operator to type: go ${slug}`,
+  ].join('\n')
+
+export const notQueuedMessage = (mode: 'next' | 'go', slug: string): string =>
+  `/ledger:${mode} cleared the session, but no "go ${slug}" was queued in T3. Type: go ${slug}`
+
 // One field per line, because a path can hold spaces. go.md reads this format. `ledger` names the session's own task as
 // `ledger notes --task` takes it.
 export function goArgs(target: string, ledger: string | undefined, { isNew, held, unparked, parent, children = [], promoted, picked, marked, warnings = [], typed }: GoFields): string {
@@ -172,7 +182,7 @@ export function goArgs(target: string, ledger: string | undefined, { isNew, held
     ...(picked ? [`picked: ${picked.join(' > ')}`] : []),
     ...(marked ? [`marked: ${marked}`] : []),
     ...warnings.map(warning => `warning: ${warning}`),
-    ...(typed ? [CONTINUE_TYPED] : []),
+    ...(typed ? [continueTypedArgs(target)] : []),
   ].join('\n')
 }
 

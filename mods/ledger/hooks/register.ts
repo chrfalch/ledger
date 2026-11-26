@@ -4,8 +4,8 @@ import { ledgerBin, ledgerJson, ledgerSucceeded, ledgerText, LONG_TIMEOUT_MS, me
 import {
   claimFailedMessage,
   CLEAR_POINT_OPTION,
-  CONTINUE_TYPED,
   clearPointReminder,
+  continueTypedArgs,
   descriptionMessage,
   formatLedgers,
   GO_FROM_SUBAGENT,
@@ -26,6 +26,7 @@ import {
   noLedgerMessage,
   notCheckedMessage,
   notCreatedMessage,
+  notQueuedMessage,
   oneSwitchPerTurnMessage,
   PARENT_USAGE,
   PARK_USAGE,
@@ -109,7 +110,7 @@ async function typing($: EngineInterface): Promise<{ typed?: true }> {
 }
 
 /** next.md takes no argument of its own, so the continue line replaces whatever was passed. */
-const withNextArgs = <E extends { args?: string }>(e: E, { typed }: NextArm): E => (typed ? { ...e, args: CONTINUE_TYPED } : e)
+const withNextArgs = <E extends { args?: string }>(e: E, { typed, slug }: NextArm): E => (typed ? { ...e, args: continueTypedArgs(slug) } : e)
 
 /** The fields go.md reads from what `ledger go` did, each task named as the operator types it in the repo at `here`. */
 function goFields({ worktree, promoted, chain, parent, children = [], unparked, marked, warnings }: Started, here: string): GoFields {
@@ -723,7 +724,12 @@ export const register: Register = (on, options) => {
     }
     if (value.mode === 'next' || value.mode === 'go') {
       if (value.previous) await showRetireHint($, value.previous, value.mode === 'next')
-      if (value.typed) return next(e)
+      if (value.typed) {
+        try {
+          await $.ui.log(notQueuedMessage(value.mode, value.slug))
+        } catch {}
+        return next(e)
+      }
       try {
         await $.prompt.submit({ text: go })
       } catch (error) {
