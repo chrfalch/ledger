@@ -3,8 +3,9 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { finalizeCommand, statusLineText, sessionReport } from '../tools/ledger/awareness.js';
+import { finalizeAdvice, statusLineText, sessionReport } from '../tools/ledger/awareness.js';
 import { fileStore } from '../tools/ledger/file-store.js';
+import type { GateQuestion } from '../tools/ledger/gates.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { activeTasks, findTasks } from '../tools/ledger/tasks.js';
 import { commandEnv, fakeClock, git, home, LEDGER_BIN, putActive, runInProcessWith, storeFolder, worktreeOf } from './ledger-core-fixtures.js';
@@ -98,6 +99,13 @@ async function sessionStart(h: string, cwd: string, source = 'startup'): Promise
   return { context: additionalContext, ...(sessionTitle === undefined ? {} : { title: sessionTitle }) };
 }
 
+/** What `ledger task gate finalize [<slug>]` offers in `folder`, by label; the report's Then line must agree with it. */
+async function finalizeLabels(h: string, folder: string, slug?: string): Promise<string[]> {
+  const ran = await runInProcessWith(h, folder, { env: hookEnv(h) }, 'task', 'gate', 'finalize', ...(slug === undefined ? [] : [slug]));
+  assert.equal(ran.status, 0, ran.stderr);
+  return (JSON.parse(ran.stdout) as GateQuestion).options.map(({ label }) => label);
+}
+
 function statusline(h: string, folder: string, env: NodeJS.ProcessEnv = hookEnv(h)): string {
   const ran = spawnSync(LEDGER_BIN, ['statusline', folder], { cwd: h, env, encoding: 'utf8' });
   assert.equal(ran.status, 0, ran.stderr);
@@ -144,7 +152,7 @@ test('D26: the session start in a task folder gives the report in its fixed orde
       'Where: epic › feature › **part-b**',
       'Siblings: part-a done, part-c active, part-d blocked',
       'Next: Write the docs page.',
-      'Then: part-c (active)',
+      'Then: part-a (done), part-c (active) and part-d (blocked) must be retired, then the parent finalizes next',
     ].join('\n'),
   );
 });
@@ -268,7 +276,7 @@ test('D26: a parent with no ledger is still on the path, with no Siblings or The
   assert.deepEqual((await sessionStart(h, folder)).context.split('\n').slice(2), ['Where: epic › **part**', 'Next: Next step of part.']);
 });
 
-test('D26: on a large tree the report stays at 20 lines, capping the items for the operator and the siblings', async (t) => {
+test('D26: on a large tree the report stays at 20 lines, capping the items for the operator, the siblings and the siblings to retire', async (t) => {
   const h = home(t);
   const main = checkout(h, 'app');
   const names = Array.from({ length: 41 }, (_, index) => `kid-${String(index).padStart(2, '0')}`);
@@ -289,6 +297,8 @@ test('D26: on a large tree the report stays at 20 lines, capping the items for t
     '- +13 more',
   ]);
   assert.match(lines.find((line) => line.startsWith('Siblings: ')) ?? '', /, \+32 more$/);
+  const firstEight = ['kid-01 (blocked)', 'kid-02 (blocked)', 'kid-03 (blocked)', 'kid-04 (done)', 'kid-05 (done)', 'kid-06 (done)', 'kid-07 (active)', 'kid-08 (active)'];
+  assert.equal(lines.at(-1), `Then: ${firstEight.join(', ')} and 32 more must be retired, then the parent finalizes next`);
 });
 
 test('D26: a question of several lines shows only its first line, so the report stays within 20 lines', async (t) => {
@@ -470,6 +480,262 @@ test('D26: Then names a done sibling and a lost one as to retire before the pare
   assert.equal(lines.at(-1), 'Then: last open child: shipped (done) and gone (lost) must be retired, then the parent finalizes next');
 });
 
+test('D26: a sibling marked retired under Children whose ledger is still live counts as open, as finalize counts it', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  backlog(h, main, 'epic', { children: ['- stale (retired 2026-11-20)', '- part'] });
+  recorded(h, main, 'stale', { location: ['- parent: epic', `- lost: 2026-11-22 — folder ${worktreeOf(main, 'stale')} not found`] });
+  const folder = started(h, main, 'part', { location: ['- parent: epic'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.equal(lines.at(-1), 'Then: last open child: stale (lost) must be retired, then the parent finalizes next');
+});
+
+test('D26: a done grandchild under a backlog child whose record names its main as a relative path gets finalize advice', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  backlog(h, main, 'epic', { children: ['- part', '- later'] });
+  const folder = started(h, main, 'part', { location: ['- parent: epic'] });
+  const later = path.join(storeFolder(h, 'ledger-backlog', main), 'later.md');
+  writeFileSync(later, ledgerMd('later', { location: ['- main: .', '- parent: epic'], children: ['- grand'] }));
+  recorded(h, main, 'grand', { location: ['- parent: later', '- status: done 2026-11-20'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.deepEqual(lines.slice(1, 3), ['Needs you:', '- Done: grand — finalize with the question from `ledger task gate finalize grand`']);
+});
+
+test('D26: a backlog parent whose record names its main as a relative path still shows the siblings and the Then line, as finalize does', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const epic = path.join(storeFolder(h, 'ledger-backlog', main), 'epic.md');
+  mkdirSync(path.dirname(epic), { recursive: true });
+  writeFileSync(epic, ledgerMd('epic', { location: ['- main: .'], children: ['- part', '- later'] }));
+  const folder = started(h, main, 'part', { location: ['- parent: epic'] });
+  backlog(h, main, 'later', { location: ['- parent: epic'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.deepEqual(lines.slice(-4), ['Where: epic › **part**', 'Siblings: later backlog', 'Next: Next step of part.', 'Then: later (backlog)']);
+});
+
+test('D26: the last open child does not name a backlog sibling that waits for a task not done; it names it as to retire, as finalize does', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  backlog(h, main, 'epic', { children: ['- later', '- part'] });
+  backlog(h, main, 'later', { location: ['- parent: epic', '- depends on: nowhere'] });
+  const folder = started(h, main, 'part', { location: ['- parent: epic'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.equal(lines.at(-1), 'Then: last open child: later (backlog) must be retired, then the parent finalizes next');
+});
+
+test('D26: the last open child names the first startable child of a backlog sibling that has children, as tree next starts it', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  backlog(h, main, 'epic', { children: ['- nested', '- part'] });
+  backlog(h, main, 'nested', { location: ['- parent: epic'], children: ['- deep'] });
+  backlog(h, main, 'deep', { location: ['- parent: nested'] });
+  const folder = started(h, main, 'part', { location: ['- parent: epic'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.equal(lines.at(-1), 'Then: deep (backlog)');
+});
+
+test('D26: Then passes over a sibling after the current task that waits for a task not done, and names the next that can start, as finalize does', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  backlog(h, main, 'epic', { children: ['- current', '- wait', '- ready'] });
+  const folder = started(h, main, 'current', { location: ['- parent: epic'] });
+  backlog(h, main, 'wait', { location: ['- parent: epic', '- depends on: nowhere'] });
+  backlog(h, main, 'ready', { location: ['- parent: epic'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.deepEqual(lines.slice(-3), ['Siblings: wait backlog, ready backlog', 'Next: Next step of current.', 'Then: ready (backlog)']);
+  assert.deepEqual(await finalizeLabels(h, folder), ['Retire current (Recommended)', 'Start ready', 'Close']);
+});
+
+test('D26: Then names the first startable child of a backlog sibling after the current task, as finalize does', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  backlog(h, main, 'epic', { children: ['- current', '- nested'] });
+  const folder = started(h, main, 'current', { location: ['- parent: epic'] });
+  backlog(h, main, 'nested', { location: ['- parent: epic'], children: ['- deep'] });
+  backlog(h, main, 'deep', { location: ['- parent: nested'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.equal(lines.at(-1), 'Then: deep (backlog)');
+  assert.deepEqual(await finalizeLabels(h, folder), ['Retire current (Recommended)', 'Start deep', 'Close']);
+});
+
+test('D26: when no sibling after the current task can start, Then names the siblings to retire before the parent finalizes, not calling the task the last open child', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  backlog(h, main, 'epic', { children: ['- current', '- wait'] });
+  const folder = started(h, main, 'current', { location: ['- parent: epic'] });
+  backlog(h, main, 'wait', { location: ['- parent: epic', '- depends on: nowhere'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.equal(lines.at(-1), 'Then: wait (backlog) must be retired, then the parent finalizes next');
+  assert.deepEqual(await finalizeLabels(h, folder), ['Retire current (Recommended)', 'Close']);
+});
+
+test('D26: a current task with a child left gets that child to start next, never the parent to finalize, as finalize does', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  backlog(h, main, 'epic', { children: ['- current'] });
+  const folder = started(h, main, 'current', { location: ['- parent: epic'], children: ['- leaf'] });
+  backlog(h, main, 'leaf', { location: ['- parent: current'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.equal(lines.at(-1), 'Then: leaf (backlog)');
+  assert.deepEqual(await finalizeLabels(h, folder), ['Start leaf (Recommended)', 'Close']);
+});
+
+test('D26: a current task whose children have all started gets no Then line, as finalize has nothing to start or retire', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  backlog(h, main, 'epic', { children: ['- current'] });
+  const folder = started(h, main, 'current', { location: ['- parent: epic'], children: ['- leaf'] });
+  recorded(h, main, 'leaf', { location: ['- parent: current'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.equal(lines.at(-1), 'Next: Next step of current.');
+  const gate = await runInProcessWith(h, folder, { env: hookEnv(h) }, 'task', 'gate', 'finalize');
+  assert.match(gate.stderr, /^current has nothing left to finalize\./m);
+});
+
+test('D26: a sibling line with no ledger counts as not retired, so the parent does not finalize next, as finalize counts it', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  backlog(h, main, 'epic', { children: ['- current', `- gone @ ${main}`] });
+  const folder = started(h, main, 'current', { location: ['- parent: epic'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.deepEqual(lines.slice(-3), ['Where: epic › **current**', 'Next: Next step of current.', 'Then: last open child: gone (missing) must be retired, then the parent finalizes next']);
+  assert.deepEqual(await finalizeLabels(h, folder), ['Retire current (Recommended)', 'Close']);
+});
+
+test('D26: a parent that has only an archive copy gets no Then line, as finalize then has no parent to finalize', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  retired(h, main, 'epic', { children: ['- current'] });
+  const folder = started(h, main, 'current', { location: ['- parent: epic'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.deepEqual(lines.slice(-2), ['Where: epic › **current**', 'Next: Next step of current.']);
+  assert.deepEqual(await finalizeLabels(h, folder), ['Retire current (Recommended)', 'Close']);
+});
+
+test('D26: under a parent that has only an archive copy, a current task with a child left gets that child to start, as finalize offers it', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  retired(h, main, 'epic', { children: ['- current'] });
+  const folder = started(h, main, 'current', { location: ['- parent: epic'], children: ['- leaf'] });
+  backlog(h, main, 'leaf', { location: ['- parent: current'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.equal(lines.at(-1), 'Then: leaf (backlog)');
+  assert.deepEqual(await finalizeLabels(h, folder), ['Start leaf (Recommended)', 'Close']);
+  assert.equal((await sessionStart(h, main)).context, ['Open task trees in this repo:', '- epic retired — 1 open child', ASK_TREES].join('\n'));
+});
+
+test('D26: a sibling line marked started whose task has no ledger anywhere counts as missing, not as prose, as finalize counts it', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  backlog(h, main, 'epic', { children: ['- current', '- gone (started 2026-11-01)'] });
+  const folder = started(h, main, 'current', { location: ['- parent: epic'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.deepEqual(
+    { then: lines.at(-1), gate: await finalizeLabels(h, folder) },
+    { then: 'Then: last open child: gone (missing) must be retired, then the parent finalizes next', gate: ['Retire current (Recommended)', 'Close'] },
+  );
+});
+
+test('D26: a sibling line marked retired whose archive copy is gone does not block the parent, in the report or the gate', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  backlog(h, main, 'epic', { children: ['- current', '- gone (retired 2026-11-01)'] });
+  const folder = started(h, main, 'current', { location: ['- parent: epic'] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+  const gate = await finalizeLabels(h, folder);
+
+  assert.deepEqual(
+    { then: lines.at(-1), finalizesEpic: gate.some((label) => label.includes('epic')) },
+    { then: 'Then: last child: the parent finalizes next', finalizesEpic: true },
+  );
+});
+
+/** Two checkouts of one repo, as they share one origin and so one repo key. The store knows the second by a backlog task there. */
+function twoCheckouts(h: string): { a: string; b: string } {
+  const origin = path.join(h, 'remotes', 'app.git');
+  const [a, b] = ['app', 'app-b'].map((name) => {
+    const main = checkout(h, name);
+    git(h, main, 'remote', 'add', 'origin', origin);
+    return main;
+  });
+  backlog(h, b, 'later');
+  return { a, b };
+}
+
+test('D26: Then reads the children of the current task at the session checkout, as finalize does, not at the checkout its parent line names', async (t) => {
+  const h = home(t);
+  const { a, b } = twoCheckouts(h);
+  backlog(h, a, 'epic', { children: [`- current @ ${b}`] });
+  const folder = started(h, a, 'current', { location: ['- parent: epic'], children: ['- old'] });
+  retired(h, a, 'old', { location: [`- parent: current @ ${a}`] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.equal(lines.at(-1), 'Then: last child: the parent finalizes next');
+  assert.deepEqual(await finalizeLabels(h, folder), ['Retire current (Recommended)', 'Finalize epic', 'Close']);
+});
+
+test('D26: a child whose archive copy names the current task at the other checkout is still left at the session checkout, so there is no Then line, as finalize offers nothing', async (t) => {
+  const h = home(t);
+  const { a, b } = twoCheckouts(h);
+  backlog(h, a, 'epic', { children: [`- current @ ${b}`] });
+  const folder = started(h, a, 'current', { location: ['- parent: epic'], children: ['- old'] });
+  retired(h, a, 'old', { location: [`- parent: current @ ${b}`] });
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.equal(lines.at(-1), 'Next: Next step of current.');
+  const gate = await runInProcessWith(h, folder, { env: hookEnv(h) }, 'task', 'gate', 'finalize');
+  assert.match(gate.stderr, /^current has nothing left to finalize\./m);
+});
+
+test('D26: a done task the tree finds at a checkout of another repo gets finalize advice for that checkout, not for the stale main its record names', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const api = checkout(h, 'api');
+  backlog(h, api, 'later');
+  backlog(h, main, 'epic', { children: ['- current', `- shipped @ ${api}`] });
+  const folder = started(h, main, 'current', { location: ['- parent: epic'] });
+  backlog(h, main, 'shipped', { children: ['- orphan'] });
+  backlog(h, main, 'orphan', { location: ['- parent: shipped'] });
+  putActive(h, api, 'shipped', ledgerMd('shipped', { location: [`- main: ${main}`, `- parent: epic @ ${main}`, '- status: done 2026-11-20'] }));
+
+  const lines = (await sessionStart(h, folder)).context.split('\n');
+
+  assert.deepEqual(lines.slice(1, 3), ['Needs you:', `- Done: shipped — finalize with the question from \`ledger task gate finalize shipped@${api}\``]);
+  assert.deepEqual(await finalizeLabels(h, folder, `shipped@${api}`), ['Retire shipped (Recommended)', 'Close']);
+});
+
 test('D26: finalize advice for a slug that starts with a hyphen runs, as the CLI does not read the slug as an option', async (t) => {
   const h = home(t);
   const main = checkout(h, 'app');
@@ -486,12 +752,13 @@ test('D26: finalize advice for a slug that starts with a hyphen runs, as the CLI
   assert.match(ran.stdout, /"Retire -legacy/);
 });
 
-test('D26: finalize advice for a task of another repo with no known main checkout names the slug alone, never a placeholder', (t) => {
+test('D26: finalize advice for a task of another repo with no known main checkout says to run it from a checkout of that repo, never a placeholder', (t) => {
   const h = home(t);
   recorded(h, checkout(h, 'api'), 'shipped', { location: ['- status: done 2026-11-20'] });
   const [{ main: _main, ...shipped }] = activeTasks(fileStore(ledgerPaths(h)));
 
-  assert.equal(finalizeCommand(shipped, 'github.com/acme/app'), 'ledger task gate finalize shipped');
+  assert.equal(finalizeAdvice(shipped, 'github.com/acme/app'), 'from a checkout of its repo, with the question from `ledger task gate finalize shipped`');
+  assert.equal(finalizeAdvice({ ...shipped, slug: '-legacy' }, 'github.com/acme/app'), 'from a checkout of its repo, with the question from `ledger task gate finalize -- -legacy`');
 });
 
 // B. Outside any task (D27)
@@ -512,6 +779,17 @@ test('D27: a main checkout lists the open trees of its repo and asks what to do'
     (await sessionStart(h, main)).context,
     ['Open task trees in this repo:', '- solo parked', '- epic backlog — 2 open children', '- single backlog — 1 open child', ASK_TREES].join('\n'),
   );
+});
+
+test('D27: a root whose record names its main as a relative path counts its children at the main checkout, and they head no tree of their own', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const epic = path.join(storeFolder(h, 'ledger-backlog', main), 'epic.md');
+  mkdirSync(path.dirname(epic), { recursive: true });
+  writeFileSync(epic, ledgerMd('epic', { location: ['- main: .'], children: ['- part'] }));
+  backlog(h, main, 'part', { location: ['- parent: epic'] });
+
+  assert.equal((await sessionStart(h, main)).context, ['Open task trees in this repo:', '- epic backlog — 1 open child', ASK_TREES].join('\n'));
 });
 
 test('D27: a live task whose parent is in another repo or has no ledger heads a tree here, so it is not hidden', async (t) => {

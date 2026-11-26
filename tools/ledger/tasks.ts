@@ -294,8 +294,16 @@ export function theTask(tasks: Task[], ref: Required<TaskRef>, { live = false } 
   return found[0];
 }
 
-/** Whether `a` and `b` name one task: a slug is one task per repo key, so a slug named from each clone of a repo is one. */
-export const sameTask = (a: Required<TaskRef>, b: Required<TaskRef>): boolean => a.slug === b.slug && (samePath(a.main, b.main) || repoKey(a.main) === repoKey(b.main));
+/**
+ * Whether `a` and `b` name one task: a slug is one task per repo key, so a slug named from each clone of a repo is one.
+ * Two checkouts whose key `repoOf` does not know are not one repo.
+ */
+export function sameTask(a: Required<TaskRef>, b: Required<TaskRef>, repoOf: RepoOf = repoKey): boolean {
+  if (a.slug !== b.slug) return false;
+  if (samePath(a.main, b.main)) return true;
+  const key = repoOf(a.main);
+  return key !== undefined && key === repoOf(b.main);
+}
 
 /** The live ledgers of `ref` (active or backlog), else its newest archive copy. */
 export function findNamed(tasks: Task[], { slug, main }: Required<TaskRef>, repoOf: RepoOf = repoKey): Task[] {
@@ -304,10 +312,16 @@ export function findNamed(tasks: Task[], { slug, main }: Required<TaskRef>, repo
   return live.length > 0 ? live : named.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 1);
 }
 
-/** The ## Children bullets that name a child: `<slug>@<path>`, or a slug some known ledger has. Any other bullet is prose. */
+/**
+ * The ## Children bullets that name a child: `<slug>@<path>`, a slug marked started, as only a child's line gets one, or
+ * a slug some known ledger has. Any other bullet is prose.
+ */
 export function namedChildren(parent: Task, tasks: Task[]): Child[] {
   // Any repo on purpose: a bare bullet may name a child whose ledger is elsewhere; it then shows as missing, not vanishes.
-  return parent.ledger.children.filter((line) => line.main !== undefined || tasks.some(({ slug }) => slug === line.slug));
+  // A retired mark with no ledger left is a child whose archive copy was deleted: done, so it must not block the parent.
+  return parent.ledger.children.filter(
+    (line) => line.main !== undefined || line.mark?.kind === 'started' || tasks.some(({ slug }) => slug === line.slug),
+  );
 }
 
 /** `items` by the order `orderOf` gives each, lowest first, then those without one; each tie keeps its place. */
@@ -337,8 +351,8 @@ export const orderedChildren = (
 ): ListedChild[] => inOrder(listedChildren(parent, parentMain, tasks, repoOf), ({ task }) => task && orderOf(task));
 
 /** The children `parent` lists, each with its status from disk, by order. */
-export function childrenOf(parent: Task, parentMain: string, tasks: Task[]): ChildView[] {
-  return orderedChildren(parent, parentMain, tasks).map(({ ref, task }) => ({
+export function childrenOf(parent: Task, parentMain: string, tasks: Task[], repoOf: RepoOf = repoKey): ChildView[] {
+  return orderedChildren(parent, parentMain, tasks, undefined, repoOf).map(({ ref, task }) => ({
     slug: ref.slug,
     main: ref.main,
     status: task?.status ?? 'missing',

@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { fileStore } from '../tools/ledger/file-store.js';
 import { parseLedger } from '../tools/ledger/format.js';
+import { ledgerPaths } from '../tools/ledger/paths.js';
+import { findTasks, sameTask, storedRepoOf, type RepoOf } from '../tools/ledger/tasks.js';
+import { nextToStart } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
 import { activeFile, archivedTask, backlogTask, git, home, ledger, LEDGER_BIN, ledgerText, ok, putActive, readLedgerFile, repoKeyOf, repository, spawn, storeFolder, THIS_HOST, worktreeOf, worktreeTask, writeLedgerFile } from './ledger-core-fixtures.js';
 
@@ -1113,6 +1117,21 @@ test('tree next finds a done dependency in a repo without remote that only the d
   archivedTask(h, lib, '2026-10-19', { slug: 'old' });
   located(b, `- depends on: shipped @ ${lib}, old @ ${lib}`);
   assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic b\n');
+});
+
+test('nextToStart with a store-only repoOf finds a child by the store alone, and two refs of one slug in repos it does not know are not one task', (t) => {
+  const { h, app } = setup(t);
+  worktreeTask(h, app, { slug: 'epic', children: ['- a'] });
+  backlogTask(h, app, { slug: 'a', parent: 'epic' });
+  const tasks = findTasks(fileStore(ledgerPaths(h)));
+  const epic = tasks.find(({ slug }) => slug === 'epic') ?? assert.fail('no epic');
+  const parent = { task: epic, ref: { slug: 'epic', main: app } };
+  const unknown: RepoOf = () => undefined;
+
+  assert.deepEqual(nextToStart(tasks, parent, undefined, storedRepoOf(tasks)), { slug: 'a', main: app });
+  assert.equal(nextToStart(tasks, parent, undefined, unknown), undefined, 'the store knows no repo, so it finds no child');
+  assert.equal(sameTask({ slug: 'a', main: '/nowhere/one' }, { slug: 'a', main: '/nowhere/two' }, unknown), false);
+  assert.equal(sameTask({ slug: 'a', main: '/nowhere/one' }, { slug: 'a', main: '/nowhere/one' }, unknown), true);
 });
 
 test('tree next with every child waiting prints nothing and says on stderr what each child waits for', (t) => {

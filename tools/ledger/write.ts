@@ -71,6 +71,7 @@ import {
   type ChildStatus,
   type ListedChild,
   type Place,
+  type RepoOf,
   type Task,
 } from './tasks.js';
 
@@ -135,11 +136,12 @@ export const shellWord = (text: string): string => (/^[\w@%+=:,./-]+$/.test(text
 
 /**
  * The command that prints the question of `gate` for `task`, as `<slug>@<main>` when it is not a task of `repo`, the
- * session's, so it names that repo's task; the slug alone when the store knows no main checkout of its repo. A slug that
- * starts with `-` follows `--`, or the CLI would read it as an option.
+ * session's, so it names that repo's task; the slug alone when no main checkout of its repo is known. `main` is by
+ * default the one its record names, which may be stale, so a caller that found the task at a checkout names that one.
+ * A slug that starts with `-` follows `--`, or the CLI would read it as an option.
  */
-export function gateCommand(gate: string, task: Task, repo: string): string {
-  const { slug, main } = task;
+export function gateCommand(gate: string, task: Task, repo: string, main = task.main): string {
+  const { slug } = task;
   const ref = task.repoKeys.includes(repo) || main === undefined ? slug : shellWord(`${slug}@${main}`);
   return `ledger task gate ${gate} ${slug.startsWith('-') ? `-- ${ref}` : ref}`;
 }
@@ -1009,27 +1011,30 @@ type Walk = { blocked: Blocked[]; running: Ref[][] };
  * that is not done. A child with children of its own is not started itself: the walk goes on into its children. A task
  * already on the chain is a cycle and is skipped. Each child passed over is added to `walk`, up to the last chain taken.
  */
-function* startable(tasks: Task[], parent: Linked, walk: Walk, chain: Ref[] = [parent.ref]): Generator<Ref[]> {
-  for (const { ref: child, task: found } of orderedChildren(parent.task, parent.ref.main, tasks)) {
-    if (chain.some((ref) => sameTask(ref, child))) continue;
+function* startable(tasks: Task[], parent: Linked, walk: Walk, chain: Ref[] = [parent.ref], repoOf: RepoOf = repoKey): Generator<Ref[]> {
+  for (const { ref: child, task: found } of orderedChildren(parent.task, parent.ref.main, tasks, undefined, repoOf)) {
+    if (chain.some((ref) => sameTask(ref, child, repoOf))) continue;
     if (found?.place === 'active') walk.running.push([...chain, child]);
     if (found?.place !== 'backlog') continue;
     const waiting = dependenciesOf(found).filter((dependency) => !isDone(dependencyTask(tasks, dependency)));
     if (waiting.length > 0) walk.blocked.push({ child, dependencies: waiting });
     else if (namedChildren(found, tasks).length === 0) yield [...chain, child];
-    else yield* startable(tasks, { task: found, ref: child }, walk, [...chain, child]);
+    else yield* startable(tasks, { task: found, ref: child }, walk, [...chain, child], repoOf);
   }
 }
 
 /** The first chain `startable` gives; each child passed over for what it waits for is added to `blocked`. */
-function firstToStart(tasks: Task[], parent: Linked, blocked: Blocked[], chain: Ref[] = [parent.ref]): Ref[] | undefined {
-  const [first] = startable(tasks, parent, { blocked, running: [] }, chain);
+function firstToStart(tasks: Task[], parent: Linked, blocked: Blocked[], chain: Ref[] = [parent.ref], repoOf: RepoOf = repoKey): Ref[] | undefined {
+  const [first] = startable(tasks, parent, { blocked, running: [] }, chain, repoOf);
   return first;
 }
 
-/** The task `ledger tree next` would start under `parent`, with `skip` passed over; it starts nothing. */
-export const nextToStart = (tasks: Task[], parent: Linked, skip?: Ref): Ref | undefined =>
-  firstToStart(tasks, parent, [], skip === undefined ? [parent.ref] : [parent.ref, skip])?.at(-1);
+/**
+ * The task `ledger tree next` would start under `parent`, with `skip` passed over; it starts nothing. `repoOf` tells the
+ * repo of a checkout, by git unless the caller must read the store alone.
+ */
+export const nextToStart = (tasks: Task[], parent: Linked, skip?: Ref, repoOf: RepoOf = repoKey): Ref | undefined =>
+  firstToStart(tasks, parent, [], skip === undefined ? [parent.ref] : [parent.ref, skip], repoOf)?.at(-1);
 
 /** What `ledger tree order` set: the children of `parent`, first to last. */
 export type OrderResult = { action: 'order'; parent: Ref; children: Ref[] };

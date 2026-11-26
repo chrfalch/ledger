@@ -1,4 +1,5 @@
 // @ref LLP 0001#9-awareness — D26 the report in a task folder, D27 the open trees outside one, D28 the status line.
+import { nextInTree, type NextInTree } from './finalize.js';
 import { isStatusValue, serializeLedger, type Claim } from './format.js';
 import type { SessionLedgers } from './hooks.js';
 import { isKind, STAGES } from './kinds.js';
@@ -6,7 +7,7 @@ import { samePath } from './paths.js';
 import type { CheckedLine } from './pr-check.js';
 import { parseRecord, type TaskRecord } from './record.js';
 import { repoKey } from './repo-key.js';
-import { dependenciesOf, dependencyTask, findNamed, inRepo, isDone, namedChildren, orderedChildren, storedRepoOf, type ListedChild, type RepoOf, type Task } from './tasks.js';
+import { findNamed, inRepo, orderedChildren, storedRepoOf, type ListedChild, type RepoOf, type Task } from './tasks.js';
 import { joined, plural } from './views.js';
 import { gateCommand } from './write.js';
 
@@ -31,83 +32,98 @@ function capped(items: readonly string[], cap: number, more = (count: number): s
   return items.length <= cap ? [...items] : [...items.slice(0, cap), more(items.length - cap)];
 }
 
-/** The child's task, unless it is retired or has no ledger. */
-const openTask = ({ line, task }: ListedChild): Task[] => (task !== undefined && task.place !== 'archive' && line.mark?.kind !== 'retired' ? [task] : []);
-
 const isLive = ({ place, status }: Task): boolean => place !== 'archive' && status !== 'lost';
 
-/** The finalize gate of `task`, named for the session of `repo` as `gateCommand` names it. */
-export const finalizeCommand = (task: Task, repo: string): string => gateCommand('finalize', task, repo);
+/**
+ * How to finalize `task`, found at the main checkout `main`, as words after "finalize": with the question `gateCommand`
+ * names. When another repo's task has no known main, its slug alone would name a task of the session's repo, so the
+ * gate is to be asked from a checkout of its own.
+ */
+export function finalizeAdvice(task: Task, repo: string, main = task.main): string {
+  const gate = `with the question from \`${gateCommand('finalize', task, repo, main)}\``;
+  return main === undefined && !task.repoKeys.includes(repo) ? `from a checkout of its repo, ${gate}` : gate;
+}
 
 /** The tasks the report reads, and how it tells the repo of a checkout from them alone, as it runs no git in another repo. */
 type Known = { tasks: Task[]; repoOf: RepoOf };
 
-/** The children of `parent` that are not retired, by order. */
-const openChildren = (parent: Task, { tasks, repoOf }: Known): Task[] =>
-  parent.main === undefined ? [] : orderedChildren(parent, parent.main, tasks, undefined, repoOf).flatMap(openTask);
+type OpenChild = ListedChild & { task: Task };
+
+/** A child is open while its ledger is: finalize reads the ledger, and the mark on the child's line is only a hint. */
+const isOpen = (child: ListedChild): child is OpenChild => child.task !== undefined && child.task.place !== 'archive';
 
 /**
- * The task `ledger tree next` would start under `parent`, by the rule of `nextToStart` but from the store alone: the
- * first backlog child, by order, that waits for no task not done; one with children of its own yields its first such child.
+ * The open children of `parent` at `main`, by order. Each child's `ref.main` is where its line puts it, which is the main
+ * its own children resolve against, as finalize resolves them: a record may name its main as a relative path.
  */
-function taskToStart(parent: Task, main: string | undefined, known: Known, seen: ReadonlySet<string> = new Set([parent.file])): Task | undefined {
-  if (main === undefined) return undefined;
-  for (const { ref, task } of orderedChildren(parent, main, known.tasks, undefined, known.repoOf)) {
-    if (task?.place !== 'backlog' || seen.has(task.file)) continue;
-    if (dependenciesOf(task).some((dependency) => !isDone(dependencyTask(known.tasks, dependency)))) continue;
-    const next = namedChildren(task, known.tasks).length === 0 ? task : taskToStart(task, ref.main, known, new Set([...seen, task.file]));
-    if (next !== undefined) return next;
+const openChildren = (parent: Task, main: string | undefined, { tasks, repoOf }: Known): OpenChild[] =>
+  main === undefined ? [] : orderedChildren(parent, main, tasks, undefined, repoOf).filter(isOpen);
+
+/** The Then line for `next`, what the finalize question offers next in the tree; `last` is whether no live child follows the task. */
+function thenLine(next: NextInTree | undefined, last: boolean, { tasks, repoOf }: Known): string | undefined {
+  switch (next?.kind) {
+    case 'child':
+    case 'sibling': {
+      if (next.ref === undefined) return undefined;
+      const status = findNamed(tasks, next.ref, repoOf).at(0)?.status ?? 'missing';
+      return `Then: ${next.ref.slug} (${status})`;
+    }
+    case 'wait': {
+      const named = joined(capped(next.siblings.map(({ slug, status }) => `${slug} (${status})`), SIBLING_CAP, (count) => `${count} more`));
+      return `Then: ${last ? 'last open child: ' : ''}${named} must be retired, then the parent finalizes next`;
+    }
+    case 'parent':
+      return 'Then: last child: the parent finalizes next';
+    case undefined:
+      return undefined;
   }
-  return undefined;
 }
 
-/** What follows the last open child `task`, as the finalize question offers it: a task to start, the siblings to retire first, or the parent. */
-function afterLastChild(task: Task, parent: Task, unretired: Task[], known: Known): string {
-  const next = taskToStart(parent, parent.main, known);
-  if (next !== undefined) return `Then: ${next.slug} (${next.status})`;
-  const open = unretired.filter(({ file }) => file !== task.file).map(({ slug, status }) => `${slug} (${status})`);
-  return open.length === 0 ? 'Then: last child: the parent finalizes next' : `Then: last open child: ${joined(open)} must be retired, then the parent finalizes next`;
-}
+/**
+ * A task and the main checkout it was found at, undefined when none is known. Its children resolve against that main, and
+ * its finalize advice names it: the main its record names may be relative or stale.
+ */
+type Placed = { task: Task; main?: string };
 
 /** A task on the path up from the session's task; `found` is undefined for a parent no ledger has. */
-type Ancestor = { slug: string; found?: Task };
+type Ancestor = { slug: string; found?: Placed };
 
-/** The parent `task` names, an active task first. */
-function parentOf(task: Task, { tasks, repoOf }: Known): Ancestor | undefined {
+/** The parent `task` names, an active task first, at the main its parent line gives, else at `main`, where `task` was found. */
+function parentOf(task: Task, main: string | undefined, { tasks, repoOf }: Known): Ancestor | undefined {
   const parent = task.ledger.location.parent;
   if (parent === undefined) return undefined;
-  const main = parent.main ?? task.main;
-  const named = main === undefined ? [] : findNamed(tasks, { slug: parent.slug, main }, repoOf);
+  const at = parent.main ?? main;
+  const named = at === undefined ? [] : findNamed(tasks, { slug: parent.slug, main: at }, repoOf);
   const found = named.find(({ place }) => place === 'active') ?? named[0];
-  return found === undefined ? { slug: parent.slug } : { slug: parent.slug, found };
+  return found === undefined || at === undefined ? { slug: parent.slug } : { slug: parent.slug, found: { task: found, main: at } };
 }
 
 /** The parents of `task`, nearest first, up to the root or to a task already on the path. */
 function ancestorsOf(task: Task, known: Known): Ancestor[] {
   const seen = new Set([task.file]);
   const path: Ancestor[] = [];
-  for (let parent = parentOf(task, known); parent !== undefined; parent = parent.found && parentOf(parent.found, known)) {
-    if (parent.found !== undefined && seen.has(parent.found.file)) break;
+  for (let parent = parentOf(task, task.main, known); parent !== undefined; parent = parent.found && parentOf(parent.found.task, parent.found.main, known)) {
+    if (parent.found !== undefined && seen.has(parent.found.task.file)) break;
     path.push(parent);
-    if (parent.found !== undefined) seen.add(parent.found.file);
+    if (parent.found !== undefined) seen.add(parent.found.task.file);
   }
   return path;
 }
 
-/** `root` and every task below it, each once. */
-function treeOf(root: Task, known: Known): Task[] {
-  const seen = new Map<string, Task>();
-  const visit = (task: Task): void => {
+/** `root`, found at `main`, and every task below it, each once, each at the main its line gives. */
+function treeOf(root: Task, main: string | undefined, known: Known): Placed[] {
+  const seen = new Map<string, Placed>();
+  const visit = (task: Task, at: string | undefined): void => {
     if (seen.has(task.file)) return;
-    seen.set(task.file, task);
-    for (const child of openChildren(task, known)) visit(child);
+    seen.set(task.file, { task, main: at });
+    for (const child of openChildren(task, at, known)) visit(child.task, child.ref.main);
   };
-  visit(root);
+  visit(root, main);
   return [...seen.values()];
 }
 
-/** Each task once, where it first comes. */
-const uniqueTasks = (tasks: Task[]): Task[] => [...new Map(tasks.map((task) => [task.file, task])).values()];
+/** Each task once, at the main where it first comes. */
+const uniqueTasks = (placed: Placed[]): Placed[] => placed.filter(({ task }, index) => placed.findIndex((each) => each.task.file === task.file) === index);
 
 /** A text of several lines would break the report's line cap, so an item shows only its first line. */
 const firstLine = (text: string): string => text.split('\n', 1)[0];
@@ -134,13 +150,14 @@ function taskReport(task: Task, tasks: Task[], heldElsewhere: HeldElsewhere, che
   const known: Known = { tasks, repoOf: storedRepoOf(tasks, task.main === undefined ? undefined : { main: task.main, key: repo }) };
   const ancestors = ancestorsOf(task, known);
   const parent = ancestors[0]?.found;
-  const unretired = parent === undefined ? [] : openChildren(parent, known);
-  const children = unretired.filter(isLive);
+  const listed = parent === undefined ? [] : openChildren(parent.task, parent.main, known);
+  const children = listed.map((child) => child.task).filter(isLive);
   const at = children.findIndex(({ file }) => file === task.file);
   const siblings = children.filter(({ file }) => file !== task.file);
-  const parents = ancestors.flatMap(({ found }) => found ?? []);
-  const root = parents.at(-1) ?? task;
-  const related = uniqueTasks([task, ...parents, ...treeOf(root, known), ...treeOf(task, known)]);
+  const placedParents = ancestors.flatMap(({ found }) => found ?? []);
+  const parents = placedParents.map((each) => each.task);
+  const root = placedParents.at(-1);
+  const related = uniqueTasks([{ task, main: task.main }, ...placedParents, ...(root === undefined ? [] : treeOf(root.task, root.main, known)), ...treeOf(task, task.main, known)]);
 
   const questions = record.questions
     .filter(({ resolved }) => !resolved)
@@ -151,9 +168,9 @@ function taskReport(task: Task, tasks: Task[], heldElsewhere: HeldElsewhere, che
   });
   const advised = new Set(checked.flatMap(({ done }) => done ?? []));
   const done = related
-    .filter(({ status, file }) => status === 'done' && !advised.has(file))
-    .map((each) => `- ${each.ledger.location.pr === undefined ? 'Done' : 'PR merged'}: ${each.slug} — finalize with the question from \`${finalizeCommand(each, repo)}\``);
-  const held = related.flatMap((each) => {
+    .filter(({ task: { status, file } }) => status === 'done' && !advised.has(file))
+    .map(({ task: each, main }) => `- ${each.ledger.location.pr === undefined ? 'Done' : 'PR merged'}: ${each.slug} — finalize ${finalizeAdvice(each, repo, main)}`);
+  const held = related.flatMap(({ task: each }) => {
     const claim = heldElsewhere(each);
     return claim === undefined ? [] : [`- Held by another session: ${each.slug} (${claim.session} since ${claim.since})`];
   });
@@ -165,14 +182,15 @@ function taskReport(task: Task, tasks: Task[], heldElsewhere: HeldElsewhere, che
     SIBLING_CAP,
     (count) => `+${count} more`,
   );
-  const following = at === -1 ? undefined : children[at + 1];
+  const next = at === -1 || task.main === undefined ? undefined : nextInTree(tasks, { task, ref: { slug: task.slug, main: task.main } }, known.repoOf);
+  const then = thenLine(next, at === children.length - 1, known);
   return [
     header(task, record),
     ...(needs.length === 0 ? ['Needs you: nothing.'] : needsSection(needs, ITEM_CAP)),
     ancestors.length === 0 ? `Where: ${path} (no parent)` : `Where: ${path}`,
     ...(siblings.length === 0 ? [] : [`Siblings: ${siblingStates.join(', ')}`]),
     nextLine(task),
-    ...(at === -1 || parent === undefined ? [] : [following === undefined ? afterLastChild(task, parent, unretired, known) : `Then: ${following.slug} (${following.status})`]),
+    ...(then === undefined ? [] : [then]),
   ];
 }
 
@@ -208,9 +226,10 @@ const TREES_NEEDS_CAP = REPORT_LINES - 6;
 export function openTreesReport(tasks: Task[], main: string, checked: readonly CheckedLine[] = []): string {
   const known: Known = { tasks, repoOf: storedRepoOf(tasks, { main, key: repoKey(main) }) };
   const here = tasks.filter((task) => inRepo(task, main, known.repoOf) && !(task.place === 'active' && task.worktree !== undefined && samePath(task.worktree, main)));
+  // Every task of `here` is of the repo at `main`, so each walk below starts at `main`, never at a main a record names, which may be relative.
   const listedByParent = (task: Task): boolean => {
-    const parent = parentOf(task, known)?.found;
-    return parent !== undefined && inRepo(parent, main, known.repoOf) && openChildren(parent, known).some(({ file }) => file === task.file);
+    const parent = parentOf(task, main, known)?.found;
+    return parent !== undefined && inRepo(parent.task, main, known.repoOf) && openChildren(parent.task, parent.main, known).some((child) => child.task.file === task.file);
   };
   const roots = new Map<string, Task>();
   for (const task of here) {
@@ -218,13 +237,13 @@ export function openTreesReport(tasks: Task[], main: string, checked: readonly C
     const kept = roots.get(task.slug);
     if (kept === undefined || rank(task) < rank(kept) || (rank(task) === rank(kept) && task.mtimeMs > kept.mtimeMs)) roots.set(task.slug, task);
   }
-  const heads = [...roots.values()].filter((root) => treeOf(root, known).some(isLive));
-  const shown = new Set(heads.flatMap((head) => treeOf(head, known)).map(({ file }) => file));
+  const heads = [...roots.values()].filter((root) => treeOf(root, main, known).some(({ task }) => isLive(task)));
+  const shown = new Set(heads.flatMap((head) => treeOf(head, main, known)).map(({ task }) => task.file));
   // Parents that list each other in a loop leave no root; their live tasks still head a tree.
   for (const task of here) {
     if (!isLive(task) || shown.has(task.file)) continue;
     heads.push(task);
-    for (const { file } of treeOf(task, known)) shown.add(file);
+    for (const { task: { file } } of treeOf(task, main, known)) shown.add(file);
   }
   const needs = needsSection(checked.map(checkedItem), TREES_NEEDS_CAP);
   if (heads.length === 0) {
@@ -233,7 +252,7 @@ export function openTreesReport(tasks: Task[], main: string, checked: readonly C
   const lines = heads
     .sort((a, b) => rank(a) - rank(b) || a.slug.localeCompare(b.slug))
     .map((head) => {
-      const children = openChildren(head, known).filter(isLive).length;
+      const children = openChildren(head, main, known).filter((child) => isLive(child.task)).length;
       return `- ${head.slug} ${head.status}${children === 0 ? '' : ` — ${plural(children, 'open child', 'open children')}`}`;
     });
   return [

@@ -338,11 +338,11 @@ test('session-start in a child task lists its open siblings in order with their 
 
   assert.equal(
     sessionStart(h, childA).additionalContext,
-    childReport(ledger, 'Where: epic › **child-a**', 'Siblings: child-b parked', 'Next: A step.', 'Then: child-b (parked)'),
+    childReport(ledger, 'Where: epic › **child-a**', 'Siblings: child-b parked', 'Next: A step.', 'Then: child-b (parked) must be retired, then the parent finalizes next'),
   );
 });
 
-test('session-start skips a sibling marked retired, not counting a live task with the same slug', (t) => {
+test('session-start lists a sibling marked retired as open while its ledger is live, as finalize counts it', (t) => {
   const h = home(t);
   const main = checkout(h, 'main');
   ledgerIn(h, worktree(h, main, path.join(h, 'epic')), familyLedger('epic', [], '## Children\n- reused (retired 2026-10-01)\n- current\n\n## Next step\nA step.\n'));
@@ -350,7 +350,10 @@ test('session-start skips a sibling marked retired, not counting a live task wit
   const current = worktree(h, main, path.join(h, 'current'));
   const ledger = ledgerIn(h, current, familyLedger('current', ['- parent: epic']));
 
-  assert.equal(sessionStart(h, current).additionalContext, childReport(ledger, 'Where: epic › **current**', 'Next: A step.', 'Then: last child: the parent finalizes next'));
+  assert.equal(
+    sessionStart(h, current).additionalContext,
+    childReport(ledger, 'Where: epic › **current**', 'Siblings: reused active', 'Next: A step.', 'Then: last open child: reused (active) must be retired, then the parent finalizes next'),
+  );
 });
 
 test('session-start lists a sibling marked started, with or without a note, with its status', (t) => {
