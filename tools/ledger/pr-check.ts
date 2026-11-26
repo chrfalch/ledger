@@ -1,5 +1,5 @@
 // @ref LLP 0001#7-the-lifecycle — step 7: what the session start does with the PR of each waiting task (D20).
-import { finalizeCommand } from './awareness.js';
+import { finalizeAdvice } from './awareness.js';
 import { limitCloneGitCalls } from './clone.js';
 import { prViews, type PrView } from './git.js';
 import { limitLockWaits } from './lock.js';
@@ -98,7 +98,7 @@ function outcomeLine(context: Context, task: Task, outcome: PrOutcome, repo: str
   switch (outcome.kind) {
     case 'merged':
       return markWaitingDone(context, task)
-        ? { text: `${slug}: PR merged; the task is done. Finalize it with the question from \`${finalizeCommand(task, repo)}\`.`, done: task.file }
+        ? { text: `${slug}: PR merged; the task is done. Finalize it ${finalizeAdvice(task, repo)}.`, done: task.file }
         : undefined;
     case 'fix': {
       const why = outcome.checksFailed ? `PR checks failed${outcome.changesRequested ? ' and review asked for changes' : ''}` : 'PR review asked for changes';
