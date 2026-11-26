@@ -400,6 +400,33 @@ Each step is one PR and one task, under one parent task.
        seeds or reads file-store files.
      - Times, file alone, 681 tests [observed]: before 247 s at load
        2.3–6.1; after 48 s at load 4.7–3.9 (-80%).
+   - **As built, `ledger-store-repair`:**
+     - Every `ledger` command runs in the test process: `runInProcess` for
+       the file and SQLite stores, and `runHere` and `setUpHere` for the
+       git-store machines. Git stays real. The local `Run` and the helpers
+       built on it, such as `start`, `listed`, `taskIn` and `shown`, are
+       async.
+     - The memory store does not fit. `store repair` opens its own store
+       from `home` (the known gap of step 1), and the tests check what
+       repair leaves on disk: hard links, hidden Markdown, evidence folders,
+       folder modes and git commits.
+     - The fake clock does not fit either. The tests that check a date
+       compare it with `today()`, and the run reads the same system clock.
+     - No spawned `bin/ledger` is left. No test checks the script's exit
+       code, its bytes or a lock between processes; the lock tests already
+       ran `repairStore` in the test process.
+     - `repairWith` calls `repairStore` directly, so it now clears the
+       repo-key cache first, as a CLI run does. An earlier in-process run
+       had cached the key of a repo whose origin the test then renamed.
+     - Times, file alone, under load from other work on the machine
+       [observed]:
+       - before: 234 s at load 2.3–5.8;
+       - old and new run one after the other, twice: 225 s → 145 s and
+         304 s → 190 s, at load 3.4–5.6 (-36%).
+     - The hang reported in the backlog task `store-test-hangs` did not
+       come back alone, on this base or on 9226cea where it was seen
+       (447 s, all passing) [observed]. It came from work running beside
+       it [inferred].
 5. **Quick and full runs.**
    - Changes: the `*.e2e.test.ts` names, `npm test` and `npm run test:full`.
    - Also: the verify step in LLP 0001 and the rules name `test:full`. Record
