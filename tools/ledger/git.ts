@@ -26,6 +26,20 @@ export function resetGitLimits(): void {
   unanswered.clear();
 }
 
+/** Runs `calls` under limitGitCalls(ms, until), then puts back the limits and the folders that did not answer as they were. */
+export function withGitLimits<T>(ms: number, until: number, calls: () => T): T {
+  const before = { timeoutMs, deadline, unanswered: [...unanswered] };
+  limitGitCalls(ms, until);
+  try {
+    return calls();
+  } finally {
+    timeoutMs = before.timeoutMs;
+    deadline = before.deadline;
+    unanswered.clear();
+    for (const folder of before.unanswered) unanswered.add(folder);
+  }
+}
+
 /** Whether a git call in `folder` or a folder that holds it was stopped by the limit of limitGitCalls. */
 export function gitTimedOut(folder: string): boolean {
   for (let current = path.resolve(folder); ; current = path.dirname(current)) {
@@ -34,7 +48,10 @@ export function gitTimedOut(folder: string): boolean {
   }
 }
 
-function run(folder: string, args: string[]): { ok: boolean; stdout: string; stderr: string } {
+// spawnSync stops a child at 1 MiB of output by default, which git status passes in a checkout with a few thousand untracked files.
+const MAX_OUTPUT = 256 * 1024 * 1024;
+
+function run(folder: string, args: string[], env = runEnv()): { ok: boolean; stdout: string; stderr: string } {
   const unanswering = { ok: false, stdout: '', stderr: `git did not answer in ${folder}` };
   const markUnanswered = (): void => {
     const stopped = path.resolve(folder);
@@ -46,7 +63,7 @@ function run(folder: string, args: string[]): { ok: boolean; stdout: string; std
     markUnanswered();
     return unanswering;
   }
-  const result = spawnSync('git', ['-C', folder, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout, env: runEnv() });
+  const result = spawnSync('git', ['-C', folder, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout, env, maxBuffer: MAX_OUTPUT });
   if (result.error !== undefined && 'code' in result.error && result.error.code === 'ETIMEDOUT') markUnanswered();
   return { ok: result.status === 0, stdout: result.stdout ?? '', stderr: (result.stderr ?? '').trim() };
 }
@@ -82,9 +99,22 @@ export const checkoutRoot = (folder: string): string | undefined => line(folder,
 /** Undefined on a detached HEAD. */
 export const currentBranch = (folder: string): string | undefined => line(folder, 'branch', '--show-current');
 
+/** As currentBranch, but with git's error text when git fails, which currentBranch cannot tell from a detached HEAD. */
+export function checkedOutBranch(folder: string): { branch?: string } | { error: string } {
+  const result = run(folder, ['branch', '--show-current']);
+  if (!result.ok) return { error: result.stderr || 'git branch --show-current failed' };
+  const branch = result.stdout.trim();
+  return branch === '' ? {} : { branch };
+}
+
+/** Whether `commit` has `file`, a path from the top of the repo. */
+export const hasFile = (folder: string, commit: string, file: string): boolean => run(folder, ['cat-file', '-e', `${commit}:${file}`]).ok;
+
 export const commitOf = (folder: string, ref: string): string | undefined => line(folder, 'rev-parse', '--quiet', '--verify', `${ref}^{commit}`);
 
 export const shortCommit = (folder: string, commit: string): string | undefined => line(folder, 'rev-parse', '--short', commit);
+
+export const commitSubject = (folder: string, commit: string): string | undefined => line(folder, 'log', '-1', '--format=%s', commit);
 
 /** The fetch address of each remote by name; undefined when git cannot list them. */
 export function remoteUrls(folder: string): Map<string, string> | undefined {
@@ -134,10 +164,21 @@ export function worktrees(main: string): Worktree[] {
     });
 }
 
-/** `git fetch <remote> <branch>`, which also moves <remote>/<branch>; git's error text when it fails. FETCH_HEAD is not written, so a fetch that brings nothing changes no file. */
-export function fetchBranch(main: string, remote: string, branch: string): string | undefined {
-  const result = run(main, ['fetch', '--quiet', '--no-write-fetch-head', remote, branch]);
+/**
+ * Fetches <branch> of <remote> into <remote>/<branch>, whichever branches the fetch refspecs of the remote name; git's
+ * error text when it fails. FETCH_HEAD is not written, so a fetch that brings nothing changes no file. With `prompt`
+ * false, git fails rather than ask for credentials on the terminal.
+ */
+export function fetchBranch(main: string, remote: string, branch: string, { prompt = true }: { prompt?: boolean } = {}): string | undefined {
+  const env = prompt ? runEnv() : { ...runEnv(), GIT_TERMINAL_PROMPT: '0' };
+  const result = run(main, ['fetch', '--quiet', '--no-write-fetch-head', remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`], env);
   return result.ok ? undefined : result.stderr || 'git fetch failed';
+}
+
+/** `git merge --ff-only <ref>` in the checkout of `folder`; git's error text when it fails. */
+export function fastForward(folder: string, ref: string): string | undefined {
+  const result = run(folder, ['merge', '--quiet', '--ff-only', ref]);
+  return result.ok ? undefined : result.stderr || 'git merge --ff-only failed';
 }
 
 /** The commits `head` has that `base` has not; undefined when git cannot count them. */

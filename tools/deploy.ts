@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildRules } from './build-rules.js';
 import { isMain } from './cli.js';
+import { modsLines } from './deploy-mods-lines.js';
 
 // bin/deploy passes the path it was called through; import.meta.url is the realpath, and
 // link targets and the CLAUDE.md retirement check must use the caller's path.
@@ -169,16 +170,16 @@ function deployMods(opts: DeployOptions): void {
     return;
   }
   if (!command('sh', ['-c', 'command -v claude'], true)) {
-    console.log('mods     skipped (no claude CLI on PATH)');
+    console.log(modsLines.noClaude());
     return;
   }
-  const change = (verb: keyof typeof PAST, args: string[], what: string): void => {
+  const change = (verb: keyof typeof PAST, args: string[], what: string, done = `mods     ${PAST[verb]} ${what}`): void => {
     if (opts.dry) {
       console.log(`mods     would ${verb} ${what}`);
       return;
     }
     runClaude([...args, '--scope', 'user']);
-    console.log(`mods     ${PAST[verb]} ${what}`);
+    console.log(done);
   };
   const marketplaces = claudeList<{ name: string; path?: string; installLocation?: string }>(['plugin', 'marketplace']);
   const located = (name: string) => {
@@ -188,8 +189,8 @@ function deployMods(opts: DeployOptions): void {
   };
   const marketplace = located(MARKETPLACE);
   if (marketplace && !marketplace.fromRepo) {
-    console.log(`mods     marketplace ${MARKETPLACE} points at ${marketplace.location ?? 'an unknown source'}, not this repo; to fix: claude plugin marketplace remove ${MARKETPLACE}, then run deploy again`);
-    console.log(`mods     skipped install of ${MODS.map((name) => modId(name)).join(', ')} until the marketplace points at this repo`);
+    console.log(modsLines.marketplaceElsewhere(MARKETPLACE, marketplace.location ?? 'an unknown source'));
+    console.log(modsLines.skippedInstall(MODS.map((name) => modId(name))));
     return;
   }
   let plugins: { id: string; scope?: string; installPath?: string }[] | undefined;
@@ -201,7 +202,7 @@ function deployMods(opts: DeployOptions): void {
   for (const name of MODS) {
     const mod = modId(name);
     const installed = installedByDeploy(mod);
-    if (!installed) change('install', ['plugin', 'install', mod], `${mod} (/${name})`);
+    if (!installed) change('install', ['plugin', 'install', mod], `${mod} (/${name})`, modsLines.installed(mod, name));
     else if (installed.installPath && sameTree(installed.installPath, path.join(REPO, 'mods', name))) console.log(`mods     ${mod} already installed`);
     else if (opts.dry) console.log(`mods     would reinstall ${mod} (installed copy differs from mods/${name})`);
     else reinstall(mod, name);
@@ -218,7 +219,7 @@ function reinstall(mod: string, name: string): void {
     if (!(error instanceof DeployError)) throw error;
     throw new DeployError(`${error.message}\ndeploy: ${mod} is now uninstalled; run deploy again to install it`, error.status);
   }
-  console.log(`mods     reinstalled ${mod} (installed copy differed from mods/${name})`);
+  console.log(modsLines.reinstalled(mod, name));
 }
 
 // Run as a command, never imported: deploy runs on Node 20.12, and the ledger's SQLite storage needs 22.13.
