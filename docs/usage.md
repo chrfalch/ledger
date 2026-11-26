@@ -168,11 +168,12 @@ If the session cannot be cleared, the orchestrator says so; then type `/clear`,
 then `go`.
 
 When every plan step of the task is done, `/ledger:next` first shows one line
-in the fresh session on how to retire the task:
+in the fresh session on how to finish the task with the finalize question:
 
-- The branch is merged: ``Task <name> is finished and merged. Retire it with `/ledger:retire <name>`.``
-- The branch has an open PR: ``Task <name> is finished. After PR #<n> merges, run `/ledger:retire <name>`.``
-- Anything else, or git or gh could not tell: ``Task <name> is finished. Run `/ledger:retire <name> --dry-run` to see what blocks retiring it.``
+- The branch is merged: ``Task <name> is finished and merged. Ask the question `ledger task gate finalize <name>` prints.``
+- The branch is merged, but something blocks retiring it: ``Task <name> is finished and merged, but it cannot be retired yet: <what blocks it>. Run `/ledger:retire <name> --dry-run` to see the details; once that is cleared, ask the question `ledger task gate finalize <name>` prints.``
+- The branch has an open PR: ``Task <name> is finished, and its PR #<n> is still open. After it merges, ask the question `ledger task gate finalize <name>` prints.``
+- Anything else, or git or gh could not tell: ``Task <name> is finished. Ask the question `ledger task gate finalize <name>` prints.``
 
 A branch is merged when it has no commits ahead of the default branch on
 origin, or when a PR from it was merged. This is the rule `/ledger:retire` uses.

@@ -213,11 +213,12 @@ export function startedElsewhereMessage({ slug, main, worktree, promoted, chain,
 export type BranchFacts = { merged: boolean; openPr?: number; blockedBy: string[] } | undefined
 
 export function retireHint(slug: string, branch: BranchFacts): string {
+  const finalize = `the question \`ledger task gate finalize ${slug}\` prints.`
   if (branch?.merged && branch.blockedBy.length > 0)
-    return `Task ${slug} is finished and merged, but it cannot be retired yet: ${branch.blockedBy.join('; ')}. Run \`/ledger:retire ${slug} --dry-run\` to see the details.`
-  if (branch?.merged) return `Task ${slug} is finished and merged. Retire it with \`/ledger:retire ${slug}\`.`
-  if (branch?.openPr !== undefined) return `Task ${slug} is finished, and its PR #${branch.openPr} is still open. After it merges, run \`/ledger:retire ${slug}\`.`
-  return `Task ${slug} is finished. Run \`/ledger:retire ${slug} --dry-run\` to see whether it can be retired, then \`/ledger:retire ${slug}\`.`
+    return `Task ${slug} is finished and merged, but it cannot be retired yet: ${branch.blockedBy.join('; ')}. Run \`/ledger:retire ${slug} --dry-run\` to see the details; once that is cleared, ask ${finalize}`
+  if (branch?.merged) return `Task ${slug} is finished and merged. Ask ${finalize}`
+  if (branch?.openPr !== undefined) return `Task ${slug} is finished, and its PR #${branch.openPr} is still open. After it merges, ask ${finalize}`
+  return `Task ${slug} is finished. Ask ${finalize}`
 }
 
 /** `parent` and `child` as the operator types them; `child` is undefined when none is left to start. */
