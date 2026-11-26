@@ -312,10 +312,8 @@ function isPlainOrGone(file: string): boolean {
 /** The pre-tool-use hook denies git commands in the clone that write, so the steps of a conflict are the operator's. */
 export const ASK_THE_OPERATOR = 'An agent does not run these git steps: it asks the operator to run them in a terminal.';
 
-/** Git's marks of work a person started in the clone and has not finished. */
+/** Git's marks of work a person started in the clone and has not finished; a rebase is clearLeftoverRebase's. */
 const UNFINISHED: [mark: string, work: string][] = [
-  ['rebase-merge', 'A rebase'],
-  ['rebase-apply', 'A rebase'],
   ['MERGE_HEAD', 'A merge'],
   ['CHERRY_PICK_HEAD', 'A cherry-pick'],
   ['REVERT_HEAD', 'A revert'],
@@ -323,8 +321,86 @@ const UNFINISHED: [mark: string, work: string][] = [
 
 export const conflictedFiles = (clone: string, deadline?: number): string[] => nulSeparated(must(cloneGit(clone, ['diff', '--name-only', '-z', '--diff-filter=U'], { deadline })));
 
-/** Stops when a person left work in the clone halfway, such as a conflict after git stash pop: `git add` would mark it resolved. */
+/** Why a rebase holds work that `git rebase --quit` would lose; `partway` when it rebased or stopped at a commit, which git rebase --continue finishes. */
+type KeptRebase = { why: string; branch: string | undefined; partway: boolean };
+
+/**
+ * Why a rebase left in `state`, the clone's .git/rebase-merge, holds work that `git rebase --quit` would lose, and the
+ * branch it rebases; undefined when it holds none. A git stopped while it wrote that folder leaves any part of it, so
+ * each file is read only when it is there. Commits not pushed yet are not at stake: `--quit` leaves the branch on
+ * them, and the sync pushes them.
+ */
+function keptRebase(clone: string, state: string, deadline?: number): KeptRebase | undefined {
+  const read = (name: string): string | undefined => {
+    const file = path.join(state, name);
+    return isReadableFile(file) ? readText(file).trim() : undefined;
+  };
+  const headName = read('head-name');
+  const symbolic = cloneGit(clone, ['symbolic-ref', '--quiet', 'HEAD'], { deadline });
+  // Exit 1 is git's answer for a detached HEAD; a git that ran out of time says nothing about HEAD.
+  if (symbolic.status !== 1) must(symbolic);
+  const checkedOut = symbolic.stdout.trim();
+  const short = (ref: string): string => ref.replace(/^refs\/heads\//, '');
+  const rebased = headName ?? checkedOut;
+  const branch = rebased.startsWith('refs/heads/') ? short(rebased) : undefined;
+  const name = branch ?? 'the branch';
+  const kept = (why: string, partway = false): KeptRebase => ({ why, branch, partway });
+  if (checkedOut === '') return kept(`It got partway: HEAD is detached, on the commits it rebased so far, which ${name} does not hold.`, true);
+  if (headName !== undefined && headName !== checkedOut) return kept(`It rebases ${branch === undefined ? 'a detached HEAD' : name}, but ${short(checkedOut)} is checked out.`);
+  const stopped = read('stopped-sha');
+  if (stopped !== undefined) return kept(`It stopped at commit ${stopped.slice(0, 12)} of ${name} for a person to change it, and clearing it would lose that change.`, true);
+  if ((read('done') ?? '').split('\n').some((line) => line.trim() !== '' && !line.trimStart().startsWith('#'))) {
+    return kept(`It got partway: it rebased commits that ${name} does not hold yet.`, true);
+  }
+  const origHead = read('orig-head');
+  if (origHead !== undefined && origHead !== must(cloneGit(clone, ['rev-parse', '--verify', 'HEAD'], { deadline })).trim()) {
+    return kept(`The tip of ${name} moved since the rebase started from ${origHead.slice(0, 12)}.`);
+  }
+  const conflicted = conflictedFiles(clone, deadline);
+  if (conflicted.length > 0) return kept(`It stopped at a conflict in ${shownPaths(conflicted)}, which nobody resolved.`);
+  return undefined;
+}
+
+/**
+ * Clears a rebase left in the clone, as one that git was stopped in while it wrote its state, when that loses nothing:
+ * HEAD is on the branch it rebases, at the commit it started from, with no commit rebased, none stopped at and no
+ * conflict. `git rebase --abort` fails on such a rebase; `git rebase --quit` leaves HEAD, the index and the files as
+ * they are, ledger changes and commits not pushed yet too. Any other rebase stays, as does what git am or a rebase that
+ * applies patches left in .git/rebase-apply, and this throws what a person would lose. Call it under the clone lock.
+ */
+export function clearLeftoverRebase(clone: string, deadline?: number): void {
+  if (isTaken(path.join(clone, '.git', 'rebase-apply'))) {
+    throw new SyncProblem(
+      'conflict',
+      `A git am or a rebase that applies patches is in progress in ${clone}, so nothing was committed or pushed.\nLook at it with git status there, then finish it or stop it, and run ledger store sync.\n${ASK_THE_OPERATOR}`,
+    );
+  }
+  const state = path.join(clone, '.git', 'rebase-merge');
+  if (!isTaken(state)) return;
+  const kept = keptRebase(clone, state, deadline);
+  if (kept === undefined) {
+    must(cloneGit(clone, ['rebase', '--quit'], { deadline }));
+    return;
+  }
+  const branch = kept.branch ?? '<branch>';
+  const restore = `To keep ${branch} as it was before the rebase, with every commit on it, stop it with git rebase --quit, then git switch ${branch}.`;
+  throw new SyncProblem(
+    'conflict',
+    [
+      `A rebase was left unfinished in ${clone}, so nothing was committed or pushed.`,
+      kept.why,
+      `Look at it with git status in ${clone}.${kept.partway ? ' To keep what it rebased, finish it with git rebase --continue.' : ''} ${restore} Then run ledger store sync.`,
+      ASK_THE_OPERATOR,
+    ].join('\n'),
+  );
+}
+
+/**
+ * Stops when a person left work in the clone halfway, such as a conflict after git stash pop: `git add` would mark it
+ * resolved. A rebase that holds no work is cleared first.
+ */
 export function checkFinished(clone: string, deadline?: number): void {
+  clearLeftoverRebase(clone, deadline);
   const unfinished = UNFINISHED.find(([mark]) => isTaken(path.join(clone, '.git', mark)));
   if (unfinished !== undefined) {
     throw new SyncProblem('conflict', `${unfinished[1]} is in progress in ${clone}, so nothing was committed or pushed.\nFinish it or abort it there, then run ledger store sync.\n${ASK_THE_OPERATOR}`);

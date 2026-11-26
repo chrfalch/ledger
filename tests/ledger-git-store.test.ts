@@ -1663,7 +1663,7 @@ test('migrate withholds a secret-like name when it names a name the target alrea
 
 // ------------------------------------------------------------------------------------------------- session-start budget
 
-test('when the session-start pull cannot undo a rebase that stopped, it records that and says to run git rebase --abort', async (t) => {
+test('when the session-start pull cannot undo a rebase that stopped, it records that the rebase got partway, without saying to run git rebase --abort', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   await setUpHere(a);
@@ -1684,7 +1684,8 @@ test('when the session-start pull cannot undo a rebase that stopped, it records 
 
   const status = JSON.parse(readFileSync(b.status, 'utf8')) as { problem: string; message: string };
   assert.equal(status.problem, 'conflict');
-  assert.match(status.message, /git rebase --abort/);
+  assert.match(status.message, /got partway/);
+  assert.doesNotMatch(status.message, /git rebase --abort/);
   assert.match(status.message, ASKS_THE_OPERATOR);
 });
 
