@@ -40,6 +40,7 @@ export type Location = {
   branch?: string;
   base?: { ref: string; commit?: string };
   main?: string;
+  designRefs?: string[] | 'none';
   /** The line of `- main:`, also when its value names no main. */
   mainLine?: number;
   parent?: TaskRef & { line: number };
@@ -159,6 +160,13 @@ export function parseDependencies(text: string): Dependency[] | undefined {
     dependencies.push(repo === undefined ? { slug } : { slug, repo });
   }
   return dependencies;
+}
+
+/** The value of a `- design refs:` bullet: 'none', or each comma-separated ref as written; undefined when a ref is empty. */
+export function parseDesignRefs(text: string): string[] | 'none' | undefined {
+  if (text === 'none') return 'none';
+  const refs = text.split(',').map((ref) => ref.trim());
+  return refs.includes('') ? undefined : refs;
 }
 
 export const showDependencies = (dependencies: readonly Dependency[]): string => dependencies.map(({ slug, repo }) => (repo === undefined ? slug : `${slug} @ ${repo}`)).join(', ');
@@ -320,6 +328,9 @@ function parseLocation(plain: string[], range: number[]): { location: Location; 
     else if (name === 'order' && location.order === undefined) {
       const order = parseOrder(value);
       if (order !== undefined) location.order = order;
+    } else if (name === 'design refs' && location.designRefs === undefined) {
+      const designRefs = parseDesignRefs(value);
+      if (designRefs !== undefined) location.designRefs = designRefs;
     } else if (name === 'depends on' && location.dependencies === undefined) {
       const dependencies = parseDependencies(value);
       if (dependencies !== undefined) location.dependencies = dependencies;

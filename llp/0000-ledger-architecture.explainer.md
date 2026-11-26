@@ -521,6 +521,13 @@ The task list is a query over the task records, as D29 in LLP 0001 says.
 task from the store each time. Nothing caches the result, so no write has to
 keep a list in line with the records.
 
+Each row of `ledger list --json`, with or without `--archived`, has
+`designRefs` from the ledger's `- design refs:` line, which `parseDesignRefs`
+in `tools/ledger/format.ts` reads for the task list and the task record alike.
+`- design refs: 3, 12` gives `["3", "12"]`, each ref as written.
+`- design refs: none` gives `"none"`. A ledger with no such line, or with the
+template's placeholder, has no `designRefs` key.
+
 Older versions kept a cache of it, the registry: `~/.claude/ledgers.json`, the
 `registry` table of `~/.claude/ledgers.db`, or `~/.claude/ledgers-git.json`.
 Nothing writes it now. The one-time moves read it, through `oldTaskList` and

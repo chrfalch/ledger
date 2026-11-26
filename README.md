@@ -104,7 +104,7 @@ ledgers; each edit changes only the lines it names.
 
 | You type | What happens |
 |---|---|
-| `ledger task list [--json]` | Lists the tasks that are not retired, in every repo it knows: active, parked and backlog. It reads the status from the ledgers on disk. |
+| `ledger task list [--json]` | Lists the tasks that are not retired, in every repo it knows: active, parked and backlog. It reads the status from the ledgers on disk. With `--json`, each row has `designRefs` from the ledger's `- design refs:` line: the refs as written, such as `["3", "12"]`, or `"none"`. A ledger with no such line, or only the template's placeholder, has no `designRefs`. |
 | `ledger task archive [term] [--all]` | Lists this repo's archived ledgers, newest first. A term keeps only the ledgers that contain it, in any case. `--all` lists the archive of every repo. |
 | `ledger task show <slug> [--repo <repo>] [--json]` | Prints the task's worktree ledger in this clone, else its backlog ledger in this repo, else its newest archive copy, `<date>-<slug>`. A full archive name, such as `2026-11-01-fix-login-2`, prints that one copy. `--repo <repo>` reads another repo's ledgers; outside a repo it is required. It takes the repo's key, such as `github.com/me/app`, an old folder name kept as an alias, or the short label, such as `me/app`, when one repo has it. |
 | `ledger task show <slug> --evidence [<file>]` | Lists the evidence files of the task's newest archive copy, one path per line. With a file, it prints that file's bytes. |
