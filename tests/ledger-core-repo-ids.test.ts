@@ -1079,7 +1079,7 @@ test('an archive copy whose main line is . or a path with a note is read by the 
   store.archive.write('netinfo', '2026-01-03-noted', ledgerText({ slug: 'noted', main: `${gone} (lib fork clone; moved here, operator option 1)` }));
   const accepted = plannedMoves(store).filter((move) => move.accepted);
   assert.deepEqual(accepted.map(({ from, reason }) => [from, reason]), [
-    ['archive jev/2026-01-02-dot', 'its ledger does not say which repo folder it came from'],
+    ['archive jev/2026-01-02-dot', 'its saved main checkout "." is a relative path, so its repo folder cannot be recovered'],
     ['archive netinfo/2026-01-03-noted', `its repo folder ${gone} is gone`],
   ]);
   const out = ok(convert(h));
@@ -1763,6 +1763,48 @@ test('evidence under the folder name of an archive copy whose worktree path is r
   assert.deepEqual(evidence, { kind: 'repo-ids', from: 'evidence expo/2026-01-01-old', to: 'repo address', auto: false, reason: 'notes of a finished task whose ledger is not in the store', accepted: true });
   assert.equal(sessionStart(h, app), 'No open task trees in this repo.\nAsk the operator in one question widget: make a new task, or quick work (a small change with no task).');
   assert.doesNotMatch(ok(ledger(h, app, 'store', 'migrate', '--repo-ids')), new RegExp(key.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+// --- A main line saved relative, under ~, or with a stray backtick ---
+
+const relativeReason = (main: string): RegExp => new RegExp(`: its saved main checkout "${main.replaceAll('.', '\\.')}" is a relative path, so its repo folder cannot be recovered$`);
+
+test('a ledger whose main line is ., run from the main checkout of another repo, stays under its folder name and says its main is relative', (t) => {
+  const { h, app, key, store } = appWorld(t);
+  store.backlog.write('app', 'dot', ledgerText({ slug: 'dot', main: '.' }));
+  const out = failedWith(ledger(h, app, 'store', 'migrate', '--repo-ids'));
+  assert.match(lineWith(out, 'backlog app/dot'), relativeReason('.'));
+  assert.equal(store.backlog.has('app', 'dot'), true);
+  assert.equal(store.backlog.has(key, 'dot'), false);
+  assert.deepEqual([...store.aliases.read()], []);
+});
+
+test('a ledger whose old task list entry names the main . or a path relative to where it runs is not filed under the repo there', (t) => {
+  const { h, app, key, store } = appWorld(t);
+  store.backlog.write('app', 'dot', ledgerText({ slug: 'dot' }));
+  store.backlog.write('app', 'near', ledgerText({ slug: 'near' }));
+  writeOldTaskList(h, [backlogEntry(store, 'app', 'dot', '.'), backlogEntry(store, 'app', 'near', 'app')]);
+  const out = failedWith(ledger(h, path.dirname(app), 'store', 'migrate', '--repo-ids'));
+  assert.match(lineWith(out, 'backlog app/dot'), relativeReason('.'));
+  assert.match(lineWith(out, 'backlog app/near'), relativeReason('app'));
+  assert.deepEqual(store.backlog.list(key), []);
+  assert.deepEqual([...store.aliases.read()], []);
+});
+
+test('a ledger whose main line has one stray backtick is filed under the key of that checkout', (t) => {
+  const { h, app, key, store } = appWorld(t);
+  store.backlog.write('app', 'quoted', ledgerText({ slug: 'quoted', main: `\`${app}` }));
+  ok(convert(h));
+  assert.equal(store.backlog.has(key, 'quoted'), true);
+  assert.equal(store.backlog.has('app', 'quoted'), false);
+});
+
+test('a ledger whose main line is under ~ is filed under the key of that checkout in the home the run has', (t) => {
+  const { h, app, key, store } = appWorld(t);
+  store.backlog.write('app', 'tilde', ledgerText({ slug: 'tilde', main: `~/${path.relative(h, app)}` }));
+  ok(convert(h));
+  assert.equal(store.backlog.has(key, 'tilde'), true);
+  assert.equal(store.backlog.has('app', 'tilde'), false);
 });
 
 test('rollback preserves a replaced target record', (t) => {

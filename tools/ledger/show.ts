@@ -29,9 +29,10 @@ const isPlainName = (name: string): boolean => name !== '' && !/\.\.|[/\\]/.test
 /**
  * The repo `named` means, the key it is an alias of or the key itself, else the one key with that label, of the store,
  * its active tasks of other machines included, or of the clone `main`; with its old keys, so a ledger the conversion left
- * under one is found too.
+ * under one is found too. The key comes first.
  */
-function namedRepos(store: LedgerStore, named: string, main: string | undefined): string[] {
+export function namedRepos(store: LedgerStore, named: string, main: string | undefined): string[] {
+  if (!isRepoKey(named)) fail(`--repo "${named}" cannot name a repo. A repo is not empty, holds no \\, and has no . or .. between slashes.`);
   const aliases = store.aliases.read();
   const keys = [...new Set([...store.backlog.repos(), ...store.active.repos(), ...store.archive.repos(), ...aliases.values(), ...(main === undefined ? [] : [repoKey(main)])])];
   const labelled = (): string => {
@@ -77,7 +78,6 @@ export function shownLedger(context: Context, slug: string, { repo: named, archi
     return entry && shownActive(context, entry);
   };
   if (!isPlainName(slug)) fail(`"${slug}" cannot name a ledger. A name is not empty and holds no .., / or \\.`);
-  if (named !== undefined && !isRepoKey(named)) fail(`--repo "${named}" cannot name a repo. A repo is not empty, holds no \\, and has no . or .. between slashes.`);
   const main = mainCheckout(cwd);
   const repos =
     named === undefined

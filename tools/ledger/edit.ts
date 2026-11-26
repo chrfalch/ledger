@@ -1,3 +1,5 @@
+import path from 'node:path';
+import { fail } from './failure.js';
 import {
   claimText,
   findSection,
@@ -66,8 +68,12 @@ export type Filled = {
 const PLACEHOLDER_TITLE = /^# Task ledger[ \t]*[—-][ \t]*<.*>$/;
 const LOCATION_BULLET = /^- (main|worktree|branch|base|design refs):/;
 
-/** Fills the template, or a backlog ledger on its way into a worktree. A given field replaces its bullet's value. */
+/**
+ * Fills the template, or a backlog ledger on its way into a worktree. A given field replaces its bullet's value. A main
+ * that is no absolute path fails, as it would name the folder of whoever reads the ledger.
+ */
 export function fillLedger(text: string, fields: Filled): string {
+  if (fields.main !== undefined && !path.isAbsolute(fields.main)) fail(`The main checkout "${fields.main}" is no absolute path, so no ledger of ${fields.slug} was written.`);
   const ledger = parseLedger(text);
   const goal = findSection(ledger.sections, 'Goal');
   const location = findSection(ledger.sections, 'Location');

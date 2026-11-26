@@ -29,7 +29,7 @@ export function pendingMoves(store: LedgerStore | undefined, { cwd, home }: { cw
   const moves: Move[] = [];
   const add = (move: Move): void => void moves.push(move);
   const quiet = (): void => {};
-  migrateRepoIds(store, { dryRun: true }, quiet, add);
+  migrateRepoIds(store, { dryRun: true, home }, quiet, add);
   migrateActive(store, { dryRun: true, cwd, home }, quiet, add);
   migrateRecords(store, { dryRun: true }, quiet, add);
   return moves;

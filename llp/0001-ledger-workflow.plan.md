@@ -146,7 +146,10 @@ known for sure, a task whose name the address already has, and a task on
 another disk stay where they are. The command lists each such conflict and
 exits 1, and a person fixes it by hand. `ledger store repair` detects a renamed
 remote (D9). `ledger store repair --remote <old-key>` moves its tasks the same
-way and keeps the old address as an alias.
+way and keeps the old address as an alias. Neither command resolves a saved
+main checkout against the folder it runs in: a relative one, such as `.`,
+names no checkout, and the task stays with a reason that says so. A saved main
+under `~` is read against the home the command runs with.
 
 **Decision D1 (2026-11-19):** the store is a technical setting, outside this
 spec. The tool supports Markdown files and SQLite, and GitHub support is in
@@ -169,6 +172,13 @@ progress. Every rule in this spec must work the same with each store.
 
 A parent task's state follows its children: active while any child is not
 retired; done when all children are retired.
+
+**A backlog task of a repo that is gone.** `ledger task retire <slug> --repo
+<repo>` retires a backlog task of the repo `--repo` names, by its key, an alias
+or its label, from any folder. It needs no checkout of that repo and runs no git
+or gh. It archives the ledger under the repo's key and marks it retired in its
+parent, both found by repo key. It refuses an active task; one whose worktree
+is gone is marked lost first (D9).
 
 **How the state is stored (D7).** The location of the ledger still decides the
 three basic states: backlog (in the store's backlog), active (in a worktree)
@@ -587,6 +597,10 @@ Decided 2026-11-19:
   `.claude/worktrees/.build` folder, and a named folder inside one, by the rules of a folder found in the
   search, and by the name the folder has on disk, so another case of it is
   skipped too on a disk that ignores case.
+  Result (2026-11-25): a backlog task whose repo folder is gone is retired
+  with `ledger task retire <slug> --repo <repo>`, from the store alone
+  (section 5.1). A saved main checkout that is a relative path names no folder
+  to repair (D10).
 - **D10** Repos are identified by remote address, with the main checkout's
   path as fallback; `ledger store migrate --repo-ids` converts existing tasks
   once and keeps each folder name in an alias map; renamed remotes come with
@@ -657,6 +671,15 @@ Decided 2026-11-19:
   JavaScript lower-casing as the case test, a symbolic link used as a store
   folder inside the clone, and a destination staged in one case spelling and
   on disk in another.
+  Result (2026-11-25): a saved main checkout is read as a person may have
+  damaged it. A lone backtick at either end is dropped, and `~` is the home the
+  command runs with. A relative one, such as `.`, is never resolved against the
+  folder the command runs in: `migrate --repo-ids` and `repair --remote` leave
+  the task with the reason "its saved main checkout "." is a relative path, so
+  its repo folder cannot be recovered", in the old task list too, unless an
+  alias or another ledger of its folder name places it. A finished task left
+  so counts as accepted, as one whose folder is gone does. A new ledger refuses
+  a main checkout that is not an absolute path.
 - **D11** (revised) Hooks still let actions through when they fail; a hook
   failure log reports them at session start (section 10).
 - **D12** LLP 0000 stays current: a PR that changes how the system works

@@ -1,4 +1,6 @@
 import { statSync } from 'node:fs';
+import path from 'node:path';
+import { absoluteMain } from './paths.js';
 
 // Not starting with a dot, so a slug never names ., .. or a hidden folder when it becomes a worktree folder.
 const READABLE_SLUG = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
@@ -41,6 +43,8 @@ export type Location = {
   base?: { ref: string; commit?: string };
   main?: string;
   designRefs?: string[] | 'none';
+  /** A `- main:` value that is a relative path, such as `.`: it names no main, as it would resolve against the cwd. */
+  relativeMain?: string;
   /** The line of `- main:`, also when its value names no main. */
   mainLine?: number;
   parent?: TaskRef & { line: number };
@@ -182,7 +186,8 @@ const isNamed = (heading: string, name: string): boolean => heading === name || 
 
 export const findSection = (sections: readonly Section[], name: string): Section | undefined => sections.find(({ heading }) => isNamed(heading, name));
 
-export function parseLedger(text: string): Ledger {
+/** `home` reads a `- main:` value under ~; without it, such a value names no main. */
+export function parseLedger(text: string, { home }: { home?: string } = {}): Ledger {
   const lines = text.split('\n');
   const plain = lines.map(plainLine);
   const sections = findSections(plain);
@@ -196,7 +201,7 @@ export function parseLedger(text: string): Ledger {
       .map((index) => plain[index].trim())
       .filter((line) => line !== '' && !isPlaceholder(line));
   const titled = plain.map((line) => TITLE.exec(line)?.[1].trim()).find((slug) => slug !== undefined);
-  const { location, status: bullet } = parseLocation(plain, range('Location'));
+  const { location, status: bullet } = parseLocation(plain, range('Location'), home);
   const status = bullet ?? parseParked(plain, range('Next step'));
   if (status !== undefined) location.status = status.status;
   return {
@@ -285,20 +290,23 @@ function unquoted(value: string): string {
 
 /**
  * A `- main:` value, without the note in parentheses people add at its end: all from its first ` (`, notes in notes too.
- * The whole value stays when it is a folder on disk, as `engine (legacy)` can be. A path that is not absolute, such as
- * `.`, names no main. Backticks around the path are dropped first.
+ * The whole value stays when it is a folder on disk, as `engine (legacy)` can be. Backticks around the path are dropped
+ * first, and a lone one at either end or before the note, as a code span cut short leaves; ~ is `home`. A relative
+ * path, such as `.`, names no main.
  */
-function mainPath(raw: string): string | undefined {
-  const value = unquoted(raw);
-  const bare = value.replace(/\s+\(.*\)$/, '');
+function mainPath(raw: string, home: string | undefined): Pick<Location, 'main' | 'relativeMain'> {
+  const saved = unquoted(raw).replace(/^`|`$/g, '');
+  const value = absoluteMain(saved, home) ?? saved;
+  const bare = value.replace(/\s+\(.*\)$/, '').replace(/`$/, '');
   const main = bare === value || !isMissing(value) ? value : bare;
-  return main.startsWith('/') ? main : undefined;
+  if (path.isAbsolute(main)) return { main };
+  return /^~(\/|$)/.test(main) ? {} : { relativeMain: main };
 }
 
 type StatusAt = { status: Status; line: number };
 
 /** The status is its `- status:` bullet, else a legacy `- state:` bullet with a status value, wherever each stands. */
-function parseLocation(plain: string[], range: number[]): { location: Location; status?: StatusAt } {
+function parseLocation(plain: string[], range: number[], home: string | undefined): { location: Location; status?: StatusAt } {
   const location: Location = {};
   const lost: string[] = [];
   let bullet: StatusAt | undefined;
@@ -309,8 +317,7 @@ function parseLocation(plain: string[], range: number[]): { location: Location; 
     if (name === undefined || !value || value.startsWith('<')) continue;
     if (name === 'main' && location.mainLine === undefined) {
       location.mainLine = index;
-      const main = mainPath(value);
-      if (main !== undefined) location.main = main;
+      Object.assign(location, mainPath(value, home));
     }
     else if (name === 'worktree') location.worktree ??= unquoted(value);
     else if (name === 'host' || name === 'branch' || name === 'pr') location[name] ??= value;

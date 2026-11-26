@@ -22,10 +22,11 @@ import {
 } from './git.js';
 import { ledgerBin, realPath, samePath } from './paths.js';
 import { parseRecord, renderRecord, storedText, type TaskRecord } from './record.js';
-import { repoKey } from './repo-key.js';
+import { repoKey, repoLabel } from './repo-key.js';
 import { runConsole } from './run-io.js';
 import type { Archive } from './store.js';
-import { findNamed, findTasks, inRepo, locateChild, namedChildren, sameTask, type Task } from './tasks.js';
+import { namedRepos } from './show.js';
+import { findNamed, findTasks, inRepo, locateChild, mainNamedByParent, namedChildren, sameTask, storedRepoOf, storedTasks, type RepoOf, type Task } from './tasks.js';
 import { plural } from './views.js';
 import { below, deleteInBackground, linkAboveBuildFolders, removedWorktreeXcodeFolder, xcodeFolderOf } from './worktrees.js';
 import { readLedger, shellWord, today, updateLedger, type Context } from './write.js';
@@ -68,6 +69,8 @@ export type RetireFacts = {
   tasks: Task[];
   /** The repo key the copy is archived under: the repo's key now, also for a backlog ledger still filed under an alias. */
   archiveRepo: string;
+  /** The repo key of a main checkout, by which the parent and children are found. */
+  repoOf: RepoOf;
   /** Whether a copy or an evidence folder already uses the archive name. */
   archiveNameTaken: (name: string) => boolean;
   /**
@@ -84,8 +87,11 @@ export type RetireFacts = {
   command: RetireCommand;
 };
 
-/** What runs: a retire, or an abandon (D25) with its reason. Messages name it, so what they say to run again repeats it. */
-export type RetireCommand = { verb: 'retire' } | { verb: 'abandon'; reason: string };
+/**
+ * What runs: a retire, of a backlog task of the repo `repo` when it names one, or an abandon (D25) with its reason.
+ * Messages name it, so what they say to run again repeats it.
+ */
+export type RetireCommand = { verb: 'retire'; repo?: string } | { verb: 'abandon'; reason: string };
 
 const RETIRE: RetireCommand = { verb: 'retire' };
 const SLUG_PLACEHOLDER = '<slug>';
@@ -97,16 +103,17 @@ const WORDS: Record<Verb, { capital: string; past: string; gerund: string }> = {
   abandon: { capital: 'Abandon', past: 'abandoned', gerund: 'Abandoning' },
 };
 
-/** `command` as a command line: bare, or for `slug`, which may be the placeholder <slug>. An abandon repeats its reason. */
+/** `command` as a command line: bare, or for `slug`, which may be the placeholder <slug>. It repeats a reason or a repo. */
 function commandLine(command: RetireCommand, slug?: string): string {
   const bare = `${ledgerCommand} task ${command.verb}`;
   if (slug === undefined) return bare;
   const word = slug === SLUG_PLACEHOLDER ? slug : shellWord(slug);
-  return command.verb === 'retire' ? `${bare} ${word}` : `${bare} ${word} --reason ${shellWord(command.reason)}`;
+  if (command.verb === 'abandon') return `${bare} ${word} --reason ${shellWord(command.reason)}`;
+  return command.repo === undefined ? `${bare} ${word}` : `${bare} ${word} --repo ${shellWord(command.repo)}`;
 }
 
-/** What to run once more: a retire finds its task again by itself; an abandon names its task and its reason. */
-const rerunLine = (command: RetireCommand, slug: string): string => commandLine(command, command.verb === 'retire' ? undefined : slug);
+/** What to run once more: a retire in the repo finds its task again by itself; one by --repo and an abandon name it. */
+const rerunLine = (command: RetireCommand, slug: string): string => commandLine(command, command.verb === 'retire' && command.repo === undefined ? undefined : slug);
 
 /** What to run in the repo of the task: an abandon needs its reason, and so a slug before it. */
 const outsideLine = (command: RetireCommand, slug: string | undefined): string => commandLine(command, command.verb === 'retire' ? undefined : (slug ?? SLUG_PLACEHOLDER));
@@ -175,14 +182,15 @@ export type RetirePlan = {
   warnings: string[];
   actions: RetireAction[];
   command: RetireCommand;
+  repoOf: RepoOf;
 };
 
 /** A child line names a task in the parent's repo unless it names another. */
 const lineRef = (line: Child, parentMain: string): Ref => ({ slug: line.slug, main: line.main ?? parentMain });
 
 /** By disk alone: a child with no ledger anywhere is missing, whatever its line's mark says. */
-function childStatus(tasks: Task[], line: Child, parent: Ref): 'retired' | 'missing' | 'live' {
-  const found = locateChild(tasks, lineRef(line, parent.main), parent);
+function childStatus(tasks: Task[], line: Child, parent: Ref, repoOf: RepoOf): 'retired' | 'missing' | 'live' {
+  const found = locateChild(tasks, lineRef(line, parent.main), parent, repoOf);
   return found === undefined ? 'missing' : found.status === 'retired' ? 'retired' : 'live';
 }
 
@@ -205,12 +213,12 @@ function archiveName(facts: RetireFacts): string {
 }
 
 /** The parent's ## Children line, report copy and hint; warnings for what cannot be done. */
-function parentActions({ task, ref, tasks }: RetireFacts, warnings: string[]): RetireAction[] {
+function parentActions({ task, ref, tasks, repoOf }: RetireFacts, warnings: string[]): RetireAction[] {
   const named = task.ledger.location.parent;
   if (named === undefined) return [];
   const parentRef = { slug: named.slug, main: named.main ?? ref.main };
   const shown = linkFrom(ref.main, parentRef);
-  const live = findNamed(tasks, parentRef).filter(({ place }) => place !== 'archive');
+  const live = findNamed(tasks, parentRef, repoOf).filter(({ place }) => place !== 'archive');
   if (live.length !== 1) {
     const found = live.length === 0 ? 'no live ledger' : `${live.length} ledgers (${live.map(({ file }) => file).join(', ')})`;
     warnings.push(`the parent ${shown} has ${found}, so no ## Children line is marked and the report is not copied.`);
@@ -223,13 +231,13 @@ function parentActions({ task, ref, tasks }: RetireFacts, warnings: string[]): R
   }
   const childName = linkFrom(parentRef.main, ref);
   const actions: RetireAction[] = [];
-  const line = parent.ledger.children.find((child) => sameTask(lineRef(child, parentRef.main), ref));
+  const line = parent.ledger.children.find((child) => sameTask(lineRef(child, parentRef.main), ref, repoOf));
   if (line === undefined) warnings.push(`${childName} is not listed under ## Children of ${parentRef.slug} in ${parent.file}, so no line is marked retired.`);
   else if (line.mark?.kind !== 'retired') actions.push({ kind: 'mark-parent', parent, parentRef, child: ref, childName });
   const { report } = task.ledger;
   if (report.length === 0) warnings.push(`${task.file} has no report under ## Report, so none is copied to ${shown}.`);
   else actions.push({ kind: 'copy-report', parent, parentRef, heading: samePath(parentRef.main, ref.main) ? ref.slug : `${ref.slug}@${ref.main}`, report, childName });
-  const siblingsActive = namedChildren(parent, tasks).some((child) => !sameTask(lineRef(child, parentRef.main), ref) && childStatus(tasks, child, parentRef) !== 'retired');
+  const siblingsActive = namedChildren(parent, tasks).some((child) => !sameTask(lineRef(child, parentRef.main), ref, repoOf) && childStatus(tasks, child, parentRef, repoOf) !== 'retired');
   if (line !== undefined && !siblingsActive) {
     const text = samePath(parentRef.main, ref.main)
       ? `Parent ${parentRef.slug} has no active children left. Finalize it with the question from \`ledger task gate finalize ${parentRef.slug}\`.`
@@ -245,12 +253,12 @@ function parentActions({ task, ref, tasks }: RetireFacts, warnings: string[]): R
  * Its first step adds its note to the live ledger, which is archived with it.
  */
 export function planRetire(facts: RetireFacts, { force }: { force: boolean }): RetirePlan {
-  const { task, ref, text, worktree, tasks } = facts;
+  const { task, ref, text, worktree, tasks, repoOf } = facts;
   const warnings = [...facts.warnings];
   const blockers: Blocker[] = [];
   const named = (status: ReturnType<typeof childStatus>): string[] =>
     namedChildren(task, tasks)
-      .filter((line) => childStatus(tasks, line, ref) === status)
+      .filter((line) => childStatus(tasks, line, ref, repoOf) === status)
       .map((line) => linkFrom(ref.main, lineRef(line, ref.main)));
   const active = named('live');
   if (active.length > 0) blockers.push({ kind: 'children', names: active });
@@ -327,7 +335,7 @@ export function planRetire(facts: RetireFacts, { force }: { force: boolean }): R
   actions.push(...hint);
 
   const blocked = blockers.some((blocker) => !isForceable(blocker) || !force);
-  return { task, ...(worktree === undefined ? {} : { worktree }), blockers, blocked, warnings, actions, command: facts.command };
+  return { task, ...(worktree === undefined ? {} : { worktree }), blockers, blocked, warnings, actions, command: facts.command, repoOf };
 }
 
 /** The local origin/HEAD first, then what gh says; main, with a warning, when neither knows. */
@@ -496,6 +504,7 @@ function removedWorktreeOf({ store }: Context, task: Task, main: string, warning
  * check one ledger and archive another.
  */
 export function readRetire(context: Context, slug: string | undefined, command: RetireCommand = RETIRE): RetireFacts {
+  if (command.verb === 'retire' && command.repo !== undefined) return readRetireIn(context, command.repo, slug, command);
   const { cwd, store } = context;
   const main = mainCheckout(cwd) ?? fail(`${cwd} is not inside a git repository. Run ${outsideLine(command, slug)} in the repo of the task.`);
   const tasks = findTasks(store);
@@ -523,24 +532,73 @@ export function readRetire(context: Context, slug: string | undefined, command: 
     };
   }
   const text = withoutClaim(serializeLedger(task.ledger));
-  const archiveRepo = repoKey(main);
-  const identical = store.archive.list(archiveRepo).find((copy) => holds(copy.text, text));
-  const removedWorktree = identical === undefined ? undefined : removedWorktreeOf(context, task, main, warnings, command.verb);
+  const archive = archiveFacts(store.archive, repoKey(main), text, evidence);
+  const removedWorktree = archive.alreadyArchived === undefined ? undefined : removedWorktreeOf(context, task, main, warnings, command.verb);
   return {
     task,
     ref: { slug: task.slug, main },
     text,
     ...(worktree === undefined ? {} : { worktree }),
     tasks,
-    archiveRepo,
-    archiveNameTaken: (name) => store.archive.nameTaken(archiveRepo, name),
+    repoOf: repoKey,
+    ...archive,
     ...(removedWorktree === undefined ? {} : { removedWorktree }),
-    ...(identical === undefined ? {} : { alreadyArchived: { name: identical.name, location: identical.location, losesEvidence: losesEvidence(store.archive, archiveRepo, identical.name, evidence) } }),
-    archiveLocation: (name) => store.archive.location(archiveRepo, name),
-    archiveEvidenceLocation: (name) => store.archive.evidenceLocation(archiveRepo, name),
     today: today(),
     warnings,
     command,
+  };
+}
+
+/**
+ * The facts for retiring the backlog task `slug` of the repo `named`, from the store alone: no checkout of the repo needs
+ * to be there, and neither git nor gh runs. Its parent and children are found by the repo keys their ledgers are under.
+ */
+function readRetireIn({ store }: Context, named: string, slug: string | undefined, command: RetireCommand): RetireFacts {
+  const nothing = 'Nothing was retired.';
+  if (slug === undefined) fail(`--repo names the repo of the task to retire, so name the task too: ${commandLine(command, SLUG_PLACEHOLDER)}`);
+  const repos = namedRepos(store, named, undefined);
+  const label = repoLabel(repos[0]);
+  const tasks = storedTasks(store);
+  const ofRepo = tasks.filter(({ repo }) => repos.includes(repo));
+  if (ofRepo.length === 0) fail(`The store has no task of the repo ${named}. ${nothing}`);
+  const found = ofRepo.filter((task) => task.slug === slug);
+  const live = found.filter(({ place }) => place !== 'archive');
+  if (live.some(({ place }) => place === 'active')) {
+    fail(`${slug} is an active task of ${label}, and --repo retires only a backlog task. ${nothing} If its worktree is gone, mark it lost from a checkout of its repo with ledger store repair ${shellWord(slug)} --lost.`);
+  }
+  if (live.length > 1) fail(`Several task ledgers are named "${slug}": ${live.map(({ file }) => file).join(', ')}. ${nothing} Give each task its own slug in its ledger's title.`);
+  const [task] = live;
+  if (task === undefined) {
+    if (found.length > 0) fail(`${slug} is retired already: ${found[0].file}`);
+    const known = ofRepo.filter(({ place }) => place !== 'archive').map((each) => each.slug);
+    fail(`No task ledger is named "${slug}" in the repo ${label}. ${nothing} Task ledgers: ${known.join(', ') || 'none'}.`);
+  }
+  const archiveRepo = task.currentRepo ?? task.repo;
+  // A ledger that names no main has no folder to name it by, so its key stands in, which only its own repo has.
+  const main = task.main ?? mainNamedByParent(tasks, task) ?? archiveRepo;
+  const text = withoutClaim(serializeLedger(task.ledger));
+  return {
+    task,
+    ref: { slug: task.slug, main },
+    text,
+    tasks,
+    repoOf: storedRepoOf(tasks, { main, key: archiveRepo }),
+    ...archiveFacts(store.archive, archiveRepo, text, undefined),
+    today: today(),
+    warnings: [],
+    command,
+  };
+}
+
+/** Where `text` is archived under `repo`, and the copy there that holds it already, if one does. */
+function archiveFacts(archive: Archive, repo: string, text: string, evidence: string | undefined): Pick<RetireFacts, 'archiveRepo' | 'archiveNameTaken' | 'alreadyArchived' | 'archiveLocation' | 'archiveEvidenceLocation'> {
+  const identical = archive.list(repo).find((copy) => holds(copy.text, text));
+  return {
+    archiveRepo: repo,
+    archiveNameTaken: (name) => archive.nameTaken(repo, name),
+    ...(identical === undefined ? {} : { alreadyArchived: { name: identical.name, location: identical.location, losesEvidence: losesEvidence(archive, repo, identical.name, evidence) } }),
+    archiveLocation: (name) => archive.location(repo, name),
+    archiveEvidenceLocation: (name) => archive.evidenceLocation(repo, name),
   };
 }
 
@@ -844,7 +902,7 @@ export function executeRetire(context: Context, plan: RetirePlan, out: Output = 
       case 'mark-parent':
         try {
           const marked = updateLedger(context, action.parent, (text) => {
-            const line = parseLedger(text).children.find((child) => sameTask(lineRef(child, action.parentRef.main), action.child));
+            const line = parseLedger(text).children.find((child) => sameTask(lineRef(child, action.parentRef.main), action.child, plan.repoOf));
             return line === undefined || line.mark?.kind === 'retired' ? undefined : markRetired(text, line, today());
           });
           if (marked) out.line(`retired ${action.childName} in ${action.parent.file}`);
@@ -933,12 +991,13 @@ function installedLinksWarning({ paths }: Context, { main, folder }: { main: str
 }
 
 /**
- * `ledger task retire [<slug>] [--dry-run] [--force]`. Exit 0 when retired or planned; exit 1, with nothing changed, when a
- * blocker stops it or the task cannot be found; exit 1 after the archive copy when the worktree cannot be removed.
+ * `ledger task retire [<slug>] [--repo <repo>] [--dry-run] [--force]`. Exit 0 when retired or planned; exit 1, with
+ * nothing changed, when a blocker stops it or the task cannot be found; exit 1 after the archive copy when the worktree
+ * cannot be removed. With `repo`, it retires a backlog task of that repo from any folder, by the store alone.
  * Lines and warnings go to `out` as they happen, and are also in the result.
  */
-export function retireTask(context: Context, slug: string | undefined, options: RetireOptions, out: Output = consoleOutput): RetireResult {
-  return settle(context, slug, options, RETIRE, out);
+export function retireTask(context: Context, slug: string | undefined, { repo, ...options }: RetireOptions & { repo?: string }, out: Output = consoleOutput): RetireResult {
+  return settle(context, slug, options, repo === undefined ? RETIRE : { verb: 'retire', repo }, out);
 }
 
 /**

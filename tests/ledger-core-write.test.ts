@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { fillLedger } from '../tools/ledger/edit.js';
+import { Failure } from '../tools/ledger/failure.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { parseLedger } from '../tools/ledger/format.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
@@ -86,6 +88,13 @@ test('ledger task writes a backlog ledger from ~/.claude/ledger.template.md and 
   const file = backlogFile(h, app, 'fix-login');
   assert.equal(stdout, `ledger:  ${file}\nstatus:  backlog\nstart:   /ledger:go fix-login\n`);
   assert.equal(read(file), backlogText('fix-login', 'Users cannot log in. Done when they can.', app));
+});
+
+test('a ledger is filled only with an absolute main checkout, as a relative one would name the folder of whoever reads it', () => {
+  for (const main of ['.', './app', 'repos/app', '~/repos/app']) {
+    assert.throws(() => fillLedger(TEMPLATE, { slug: 'fix-login', main }), (error: unknown) => error instanceof Failure && error.message.includes(`"${main}"`), main);
+  }
+  assert.match(fillLedger(TEMPLATE, { slug: 'fix-login', main: '/repos/app' }), /^- main: \/repos\/app$/m);
 });
 
 test('ledger task in a repo with llp/ writes "design refs: none"; without --goal the goal stays a placeholder', (t) => {

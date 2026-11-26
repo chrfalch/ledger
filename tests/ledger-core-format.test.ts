@@ -126,6 +126,37 @@ test('a main line that is no absolute path, such as . or repos/app, names no mai
   }
 });
 
+test('a main line with one backtick at its start or end, as a code span cut short, is read without it', () => {
+  const main = (value: string): string | undefined => parseLedger(ledgerText({ slug: 'idea', main: value })).location.main;
+  assert.equal(main('`/Users/x/repos/expo/expo'), '/Users/x/repos/expo/expo');
+  assert.equal(main('/Users/x/repos/expo/expo`'), '/Users/x/repos/expo/expo');
+  assert.equal(main('`/Users/x/repos/expo/expo (moved here 2026-10-27)'), '/Users/x/repos/expo/expo');
+});
+
+test('a main line with one backtick at its end, then a note, is read without the backtick', () => {
+  const main = (value: string): string | undefined => parseLedger(ledgerText({ slug: 'idea', main: value }), { home: '/Users/me' }).location.main;
+  assert.equal(main('/Users/x/repos/expo/expo` (moved here 2026-10-27)'), '/Users/x/repos/expo/expo');
+  assert.equal(main('~/repos/expo` (the old clone)'), '/Users/me/repos/expo');
+});
+
+test('a main line under ~ is read against the home it is parsed with, and names no main without one', () => {
+  const location = (value: string, home?: string) => parseLedger(ledgerText({ slug: 'idea', main: value }), { home }).location;
+  assert.equal(location('~/repos/expo', '/Users/me').main, '/Users/me/repos/expo');
+  assert.equal(location('`~/repos/expo`', '/Users/me').main, '/Users/me/repos/expo');
+  assert.equal(location('~', '/Users/me').main, '/Users/me');
+  assert.equal(location('~/repos/expo').main, undefined);
+  assert.equal(location('~/repos/expo').relativeMain, undefined);
+});
+
+test('a relative main line is kept as such, so a reader can say why it names no main', () => {
+  const location = (value: string) => parseLedger(ledgerText({ slug: 'idea', main: value }), { home: '/Users/me' }).location;
+  assert.equal(location('.').main, undefined);
+  assert.equal(location('.').relativeMain, '.');
+  assert.equal(location('`./x`').relativeMain, './x');
+  assert.equal(location('x/y (the old clone)').relativeMain, 'x/y');
+  assert.equal(location('/repos/app').relativeMain, undefined);
+});
+
 test('a parent line outside ## Location is not the parent', () => {
   const text = '# Task ledger — x\n\n## Location\n- parent: <slug>\n\n## Notes\n- parent: epic\n';
   assert.equal(parseLedger(text).location.parent, undefined);
