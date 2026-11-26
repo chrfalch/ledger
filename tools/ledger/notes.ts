@@ -153,6 +153,22 @@ export const approvePlan = (context: Context, name: string | undefined) =>
 
 export const approvePlanText = ({ slug, approved }: ReturnType<typeof approvePlan>): string => `Approved the plan of ${slug} on ${approved}.`;
 
+/** A text with no sentence end, such as a bare phrase, is one sentence. */
+const sentences = (text: string): number => Math.max(1, text.match(/[.!?](?=\s|$)/g)?.length ?? 0);
+
+/** Sets the summary the plan gate asks about, in place of any earlier one: one line of at most two sentences. */
+export function setPlanSummary(context: Context, name: string | undefined, text: string) {
+  const summary = given(text, 'The summary');
+  if (/[\r\n]/.test(summary)) fail('The summary must be one line.');
+  if (sentences(summary) > 2) fail('The summary has more than two sentences. Shorten it to at most two.');
+  return write(context, name, ({ plan }) => {
+    plan.summary = summary;
+    return { summary };
+  });
+}
+
+export const setPlanSummaryText = ({ slug }: ReturnType<typeof setPlanSummary>): string => `Set the plan summary of ${slug}.`;
+
 export function addDecision(context: Context, name: string | undefined, text: string, because: string, tag: Tag) {
   const decision: Decision = { text: given(text, 'The decision'), reason: given(because, '--because'), tag, date: today() };
   return write(context, name, ({ decisions }) => ({ number: decisions.push(decision), decision }));

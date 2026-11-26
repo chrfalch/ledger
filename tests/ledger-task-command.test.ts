@@ -21,7 +21,7 @@ test('/ledger:task continues in this session when there is no current ledger', (
 test('/ledger:task without a current ledger reads the new ledger and follows the plan gate', () => {
   const step8 = read('mods/ledger/commands/task.md').match(/ 8\. If there is no current ledger.*/)?.[0] ?? '';
   assert.match(step8, /EnterWorktree.*Read its ledger with `ledger show` in the new worktree/);
-  assert.match(step8, /When the task changes more than one file or involves a design choice, get the plan approved with the widget question that `ledger task gate plan` prints\. Then write the plan into the ledger with `ledger notes plan add`/);
+  assert.match(step8, /When the task changes more than one file or involves a design choice, write the plan into the ledger with `ledger notes plan add`, one step per command, and its summary with `ledger notes plan summary`\. Send the full plan with send_to_user, or show it in full, then get it approved with the widget question that `ledger task gate plan` prints\./);
 });
 
 test('/ledger:task without a current ledger starts the backlog task with ledger go, then enters the worktree it printed', () => {
@@ -172,7 +172,9 @@ test('the Plan gate asks for approval only for a task with more than one file or
   const gate = planGate();
   assert.match(gate, /Get the plan approved only for a task that touches more than one file or includes a design choice\./);
   assert.match(gate, /Other tasks go from the plan straight to red tests\./);
-  assert.match(gate, /Ask with `ledger task gate plan`\./);
+  assert.match(gate, /Then ask with `ledger task gate plan`; its question carries\s+the summary and the step count\./);
+  assert.match(gate, /Every plan starts with a plain summary of\s+at most two sentences: `ledger notes plan summary "<text>"`\./);
+  assert.match(gate, /send the full plan with send_to_user, or show it in full,\s+before the widget\./);
   assert.doesNotMatch(gate, /approval before multi-file or architectural work/);
 });
 

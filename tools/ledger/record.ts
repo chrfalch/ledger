@@ -73,8 +73,11 @@ export type TaskRecord = {
   status?: Status;
   lost?: Lost;
   goal: string;
-  /** `exampleRow` is false for a plan without steps that lacks the template's example row too, which the plugin reads as a step. */
-  plan: { approved?: string; steps: Step[]; exampleRow?: false };
+  /**
+   * `summary` is at most two sentences on one line, for the plan gate's question. `exampleRow` is false for a plan without
+   * steps that lacks the template's example row too, which the plugin reads as a step.
+   */
+  plan: { approved?: string; summary?: string; steps: Step[]; exampleRow?: false };
   decisions: Decision[];
   constraints: Constraint[];
   questions: Question[];
@@ -144,6 +147,8 @@ const EXAMPLE_QUESTION = '- <question> — blocks step <#>?';
 
 const FIELD = /^- ([a-z][a-z ]*):[ \t]*(.*)$/;
 const PLAN_HEADING = /^Plan(?: \(approved (.+)\))?$/;
+const PLAN_SUMMARY = /^Summary: (.+)$/;
+const SUMMARY = '<at most two sentences>';
 // An item may span lines, so these match across them: [\s\S] is any character, and $ is the end of the item.
 const DATED = /^(\d{4}-\d\d-\d\d): ([\s\S]+)$/;
 const TAGGED = /^([\s\S]+?)[ \t]+\[((?:observed|confirmed|inferred)\b[^[\]\n]*)\]$/;
@@ -416,13 +421,15 @@ const READERS: Record<Exclude<Known, 'Notes'>, Reader> = {
   },
   Plan: (record, lines, { heading }) => {
     const [, approved] = PLAN_HEADING.exec(heading) ?? [];
-    const { items, left } = readItems(lines, (line) => {
+    const [, summary] = PLAN_SUMMARY.exec(lines[0] ?? '') ?? [];
+    const rest = summary === undefined ? lines : lines.slice(lines[1] === '' ? 2 : 1);
+    const { items, left } = readItems(rest, (line) => {
       const row = readRow(line);
       return row === 'skip' ? undefined : row;
     }, (line) => readRow(line) === 'skip');
     const steps = items.map(({ head, more }) => ({ ...head, note: [head.note, ...more].join('\n') }));
-    const exampleRow = steps.length > 0 || lines.some((line) => line.trim() === EXAMPLE_STEP) ? undefined : false;
-    record.plan = defined({ approved: approved === '<date>' ? undefined : approved, steps, exampleRow });
+    const exampleRow = steps.length > 0 || rest.some((line) => line.trim() === EXAMPLE_STEP) ? undefined : false;
+    record.plan = defined({ approved: approved === '<date>' ? undefined : approved, summary: summary === SUMMARY ? undefined : summary, steps, exampleRow });
     return left;
   },
   Decisions: bulletReader('decisions', EXAMPLE_DECISION, readDecision),
@@ -528,6 +535,7 @@ export function renderRecord(record: TaskRecord): string {
       ? ['## Children', ...record.children.map(writeChild), ...(record.childNotes === undefined ? [] : ['', ...record.childNotes]), '']
       : []),
     `## Plan (approved ${plan.approved ?? '<date>'})`,
+    ...(plan.summary === undefined ? [] : [`Summary: ${plan.summary}`, '']),
     ...TABLE,
     ...planRows,
     '',
@@ -599,7 +607,7 @@ const isRecord = shape(
     version: isOne(1),
     slug: isText,
     goal: isText,
-    plan: shape({ steps: listOfChecks(shape({ n: isText, step: isText, status: isText, owner: isText, note: isText })) }, { approved: isText, exampleRow: isOne(false) }),
+    plan: shape({ steps: listOfChecks(shape({ n: isText, step: isText, status: isText, owner: isText, note: isText })) }, { approved: isText, summary: isText, exampleRow: isOne(false) }),
     decisions: listOfChecks(shape({ text: isText }, { reason: isText, tag: isText, date: isText })),
     constraints: listOfChecks(shape({ text: isText }, { source: isText, tag: isText })),
     questions: listOfChecks(shape({ id: isWhole, text: isText }, { blocks: isWhole, resolved: isTrue })),

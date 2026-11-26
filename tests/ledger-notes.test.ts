@@ -96,6 +96,25 @@ test('plan approve sets the approval date to today, in place of an earlier one',
   assert.doesNotMatch(read(), /2026-11-01/);
 });
 
+test('plan summary sets the line under the plan heading, in place of an earlier one, and prints what it did', (t) => {
+  const { notes, read } = withWorktree(t);
+  assert.equal(passed(notes('plan', 'summary', 'Add the summary.')), 'Set the plan summary of wt.');
+  assert.deepEqual(linesOf(read(), /^## Plan/).slice(0, 2), ['Summary: Add the summary.', '| # | step | status | owner | note |']);
+  const result = JSON.parse(passed(notes('plan', 'summary', '  Edit gates.ts and notes.ts. Then test.  ', '--json')));
+  assert.equal(result.summary, 'Edit gates.ts and notes.ts. Then test.');
+  assert.deepEqual(linesOf(read(), /^## Plan/).slice(0, 2), ['Summary: Edit gates.ts and notes.ts. Then test.', '| # | step | status | owner | note |']);
+  assert.equal(read().match(/^Summary:/gm)?.length, 1);
+});
+
+test('plan summary refuses an empty text, more than one line and more than two sentences, and writes nothing', (t) => {
+  const { notes, read } = withWorktree(t);
+  const before = read();
+  assert.match(refused(notes('plan', 'summary', '   ')), /empty/);
+  assert.match(refused(notes('plan', 'summary', 'One line.\nTwo lines.')), /one line/);
+  assert.match(refused(notes('plan', 'summary', 'One. Two! Three?')), /two sentences/);
+  assert.equal(read(), before);
+});
+
 test('step sets the status of a step, replaces its note, or both, and prints the step', (t) => {
   const { notes, read } = withWorktree(t);
   assert.equal(passed(notes('step', '2', '--status', 'in review')), 'Updated step 2 of wt.');

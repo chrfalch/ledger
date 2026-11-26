@@ -1,6 +1,6 @@
 import { fail } from './failure.js';
-import { buildGate, FINALIZE_GATE, type GateAction, type GateQuestion } from './gates.js';
-import { childrenOf, findNamed, findTasks, inRepo, sameTask, taskRef, theTask, type Task } from './tasks.js';
+import { buildGate, FINALIZE_GATE, gateTask, type GateAction, type GateQuestion } from './gates.js';
+import { childrenOf, findNamed, inRepo, sameTask, type Task } from './tasks.js';
 import { currentTask, nextToStart, type Context } from './write.js';
 
 // @ref LLP 0001#7-the-lifecycle — step 8, Finalize, and step 9, Up the tree (D21, D49).
@@ -52,11 +52,8 @@ function upTheTree(tasks: Task[], linked: Linked, waitsForChildren: boolean, par
  * the other done tasks of its repo, and start or finalize what comes next in its tree. It runs no dry run itself.
  */
 export function finalizeQuestion(context: Context, slug?: string): GateQuestion {
-  const name = slug ?? currentTask(context.store, context.cwd)?.slug ?? fail('No task has the worktree you are in, so name one: ledger task gate finalize <slug>');
-  const ref = taskRef(context.cwd, name);
-  const tasks = findTasks(context.store);
-  const linked = { task: theTask(tasks, ref), ref };
-  const { task } = linked;
+  const { task, ref, tasks } = gateTask(context, FINALIZE_GATE, slug);
+  const linked = { task, ref };
   const named = task.ledger.location.parent;
   const parentRef = named && { slug: named.slug, main: named.main ?? ref.main };
   const parentTask = parentRef && findNamed(tasks, parentRef).find(({ place }) => place !== 'archive');

@@ -13,7 +13,7 @@ import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
 import { finalizeQuestion } from './finalize.js';
 import { parseLedger, planProgress } from './format.js';
-import { ALL_GATE_NAMES, FINALIZE_GATE, gateQuestion } from './gates.js';
+import { ALL_GATE_NAMES, FINALIZE_GATE, gateQuestion, PLAN_GATE, planQuestion } from './gates.js';
 import { limitGitCalls, mainCheckout, resetGitLimits } from './git.js';
 import { logHookFailure, oneLine } from './hook-failures.js';
 import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookContext, type HookEvent } from './hooks.js';
@@ -54,6 +54,8 @@ import {
   resolveQuestionText,
   setNext,
   setNextText,
+  setPlanSummary,
+  setPlanSummaryText,
   setStep,
   setStepText,
   TAGS,
@@ -552,7 +554,8 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
     .argument('<name>', `the gate: ${ALL_GATE_NAMES.join(', ')}`)
     .argument('[slug]', 'the task the question names; by default the task of the worktree you are in')
     .action((name: string, slug: string | undefined) => {
-      const question = name === FINALIZE_GATE ? finalizeQuestion(context, slug) : gateQuestion(name, slug ?? currentTask(context.store, cwd)?.slug);
+      const question =
+        name === FINALIZE_GATE ? finalizeQuestion(context, slug) : name === PLAN_GATE ? planQuestion(context, slug) : gateQuestion(name, slug ?? currentTask(context.store, cwd)?.slug);
       print(JSON.stringify(question, null, 2));
     });
 
@@ -588,12 +591,15 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
   };
   type TaskOption = { task?: string };
 
-  const planGroup = notesGroup.command('plan').description('Add a step to the plan, or approve the plan.');
+  const planGroup = notesGroup.command('plan').description('Add a step to the plan, set its summary, or approve the plan.');
   notesCommand(planGroup, 'add', 'Add a step to the end of the plan, numbered after the highest step, with status todo.')
     .argument('<step>', 'what the step does')
     .requiredOption('--owner <agent>', 'the agent that does the step')
     .option('--note <text>', 'one line for the note column')
     .action((step: string, { owner, note, task }: TaskOption & { owner: string; note?: string }) => written(addStep(context, task, step, owner, note), addStepText));
+  notesCommand(planGroup, 'summary', 'Set the summary the plan gate asks about, in place of any earlier one: one line of at most two sentences.')
+    .argument('<text>', 'what the plan does, in at most two sentences')
+    .action((text: string, { task }: TaskOption) => written(setPlanSummary(context, task, text), setPlanSummaryText));
   notesCommand(planGroup, 'approve', 'Mark the plan approved today, in place of any earlier date.').action(({ task }: TaskOption) => written(approvePlan(context, task), approvePlanText));
   notesCommand(notesGroup, 'step', 'Set the status of a plan step, or replace its note, or both.')
     .argument('<n>', 'the number of the step')

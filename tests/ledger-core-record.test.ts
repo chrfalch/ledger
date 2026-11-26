@@ -207,6 +207,34 @@ test('the template renders back without its design refs placeholder: unset desig
   assert.equal(renderRecord(parseRecord(TEMPLATE)), TEMPLATE.replace(/^- design refs: .*\n/m, ''));
 });
 
+const withSummary = (markdown: string, line: string): string => markdown.replace(/^(## Plan \(approved .*\))\n/m, `$1\n${line}\n\n`);
+
+test('a plan summary is the line under the plan heading, and renders back byte for byte', () => {
+  const markdown = withSummary(ledgerText({ slug: 'fix-login', main: '/repos/app' }), 'Summary: Edit gates.ts and notes.ts. Then test.');
+  const record = parseRecord(markdown);
+  assert.equal(record.plan.summary, 'Edit gates.ts and notes.ts. Then test.');
+  assert.equal(record.plan.steps.length, 2);
+  assert.deepEqual(record.notes, []);
+  assert.equal(renderRecord(record), markdown);
+  assert.deepEqual(planProgress(parseLedger(markdown)), planProgress(parseLedger(ledgerText({ slug: 'fix-login', main: '/repos/app' }))));
+});
+
+test('a plan without a summary line reads back with no summary', () => {
+  assert.equal(Object.hasOwn(parseRecord(ledgerText({ slug: 'fix-login', main: '/repos/app' })).plan, 'summary'), false);
+});
+
+test('the summary placeholder reads as no summary', () => {
+  const record = parseRecord(withSummary(ledgerText({ slug: 'fix-login', main: '/repos/app' }), 'Summary: <at most two sentences>'));
+  assert.equal(Object.hasOwn(record.plan, 'summary'), false);
+  assert.deepEqual(record.notes, []);
+});
+
+test('a record with a plan summary passes the shape check, and one whose summary is no string fails it', () => {
+  const record = parseRecord(withSummary(ledgerText({ slug: 'fix-login', main: '/repos/app' }), 'Summary: Ship it.'));
+  validateRecord(record);
+  assert.throws(() => validateRecord({ ...record, plan: { ...record.plan, summary: 3 } }), /plan\.summary/);
+});
+
 test('the template parses to an empty record: placeholders, example rows and the preamble are dropped', () => {
   assert.deepEqual(parseRecord(TEMPLATE), {
     version: 1,
