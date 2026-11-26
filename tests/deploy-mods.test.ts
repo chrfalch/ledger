@@ -5,6 +5,7 @@ import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 
 import { parseDeployArguments } from '../tools/deploy.js';
+import { readModsLines } from '../tools/deploy-mods-lines.js';
 import { claudeCalls, claudeConfig, claudeInstallPath, claudeLists, failClaude, freshHome, REPO, run, runWithoutClaude } from './helpers.js';
 
 const DEPLOY = [path.join(REPO, 'bin/deploy')] as const;
@@ -292,3 +293,32 @@ test('a failing install after the uninstall tells the operator to run deploy aga
   assert.ok(claudeCalls(home).includes(UNINSTALL_LEDGER));
   assert.match(result.stderr, /run deploy again/);
 });
+
+// ledger deploy --latest reads these lines to say what changed; a wording change the reader misses would report nothing.
+const readsBack: [string, (t: TestContext) => { stdout: string }, ReturnType<typeof readModsLines>][] = [
+  ['an install', (t) => run(freshHome(t), DEPLOY), { installed: ['ledger@ledger'], reinstalled: [], warnings: [] }],
+  ['a reinstall', (t) => run(deployWithStaleCopy(t), DEPLOY), { installed: [], reinstalled: ['ledger@ledger'], warnings: [] }],
+  [
+    'a marketplace at another path',
+    (t) => {
+      const home = freshHome(t);
+      claudeLists(home, { marketplaces: registeredAt('/elsewhere/ledger') });
+      return run(home, DEPLOY);
+    },
+    {
+      installed: [],
+      reinstalled: [],
+      warnings: [
+        'marketplace ledger points at /elsewhere/ledger, not this repo; to fix: claude plugin marketplace remove ledger, then run deploy again',
+        'skipped install of ledger@ledger until the marketplace points at this repo',
+      ],
+    },
+  ],
+  ['no claude CLI', (t) => runWithoutClaude(freshHome(t), DEPLOY), { installed: [], reinstalled: [], warnings: ['skipped (no claude CLI on PATH)'] }],
+];
+
+for (const [change, deployed, expected] of readsBack) {
+  test(`what deploy prints about ${change} reads back as the same change`, (t) => {
+    assert.deepEqual(readModsLines(deployed(t).stdout), expected);
+  });
+}

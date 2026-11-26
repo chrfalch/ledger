@@ -9,6 +9,7 @@ import { statusLineText } from './awareness.js';
 import { claimResultText, claimTask, Held, knownSession, releaseAll, releaseTask, requiredSession, touchAll, touchTask, type AllResult } from './claims.js';
 import { limitCloneGitCalls } from './clone.js';
 import { systemClock, type Clock } from './clock.js';
+import { deployLatest } from './deploy-latest.js';
 import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
 import { finalizeQuestion } from './finalize.js';
@@ -253,8 +254,11 @@ function statusLine(paths: LedgerPaths, folder: string): string {
   }
 }
 
+/** The checkout that holds this bin/ledger, whose bin/deploy `ledger deploy` runs. */
+const LEDGER_REPO = fileURLToPath(new URL('../..', import.meta.url));
+
 function deploy(args: string[]): number {
-  const script = fileURLToPath(new URL('../../bin/deploy', import.meta.url));
+  const script = path.join(LEDGER_REPO, 'bin/deploy');
   const result = spawnSync(process.execPath, [script, ...args], { stdio: 'inherit', env: runEnv() });
   if (result.error) {
     runConsole().error(`ledger deploy: ${result.error.message}`);
@@ -1007,12 +1011,24 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
     });
   program
     .command('deploy')
-    .description('Run bin/deploy from this repo; options pass through.')
+    .description(
+      'Run bin/deploy from this repo; options pass through. With --latest, and optionally --json, fast-forward the main checkout to the default branch of origin first, then deploy it without asking anything.',
+    )
     .helpOption(false)
     .allowUnknownOption()
     .allowExcessArguments()
-    .action(() => {
-      exitCode = deploy(argv.slice(argv.indexOf('deploy') + 1));
+    .action(async () => {
+      const args = argv.slice(argv.indexOf('deploy') + 1);
+      if (!args.includes('--latest')) {
+        exitCode = deploy(args);
+        return;
+      }
+      const extra = args.filter((arg) => arg !== '--latest' && arg !== '--json');
+      if (extra.length > 0) fail(`ledger deploy --latest takes only --json, not ${extra.join(' ')}.`, 2);
+      const run = await deployLatest({ repo: LEDGER_REPO, json });
+      stdout.write(run.stdout);
+      stderr.write(run.stderr);
+      exitCode = run.code;
     });
 
   try {

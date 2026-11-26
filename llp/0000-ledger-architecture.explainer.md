@@ -136,7 +136,9 @@ each:
   their build folders.
 - `go`, `list`, `show`: short forms of the `task` commands of the same names.
 - `deploy`: runs `bin/deploy`, which installs the files and offers the
-  one-time moves that `ledger store migrate --pending` lists.
+  one-time moves that `ledger store migrate --pending` lists. With
+  `--latest`, it first fast-forwards the main checkout and runs `bin/deploy`
+  with no terminal (see [Deploy](#deploy)).
 
 Two commands are for Claude Code and stay out of the help. `session` prints
 the ledgers a session in a folder works on. `hook` answers a Claude Code hook
@@ -928,6 +930,60 @@ line that names Claude or anthropic.com, a line with
 `Generated with [Claude Code]` and a `Claude-Session:` line. Then it runs the
 repo's own hook of the same name, from the git common folder, so the hooks of
 a worktree are the main repository's.
+
+**Deploy the latest main.** `ledger deploy --latest` (`deployLatest` in
+`tools/ledger/deploy-latest.ts`) deploys the main checkout of the repo that
+holds the running `bin/ledger`, also when that is a linked worktree. It
+stops, with nothing deployed, when a tracked file has an uncommitted change,
+staged or not. Untracked files do not stop it. It also stops when the main
+checkout is not on the branch `origin/HEAD` names, when the fetch of that
+branch fails, when the local branch has commits the remote one lacks, and
+when the remote one has no `tools/deploy-mods-lines.ts` to read the report
+of `bin/deploy` with.
+It checks the tracked files and the branch again after the fetch, since the
+checkout can change while the fetch runs. Otherwise it runs
+`git merge --ff-only` and then `bin/deploy` with no arguments, stdin closed
+and `DEPLOY_PULL_CHECK` unset, so nothing asks a question and nothing passes
+`--force`. The fetch runs with `GIT_TERMINAL_PROMPT=0`, so it fails rather
+than wait for credentials. It names its own refspec, so it moves
+`origin/<branch>` whatever fetch refspecs origin has. git and `bin/deploy`
+run without the variables that `git rev-parse --local-env-vars` lists, such
+as `GIT_DIR`, so a caller in a git hook cannot point them at its own
+repository.
+
+From the `mods` lines of `tools/deploy.ts` it reports the reinstalled and
+installed mods, and three kinds of warning: the `ledger` marketplace points
+at another folder, the install was skipped for that reason, or no `claude`
+CLI was on PATH. `tools/deploy-mods-lines.ts` holds both the wording of these
+lines and the reading of them, so the two cannot drift apart. ledger reads
+them with the main checkout's copy, imported anew after the fast-forward, so
+the reading comes from the same commit as the wording, also when the running
+ledger is older. `needsReload` is true when a mod was installed or
+reinstalled. `--json` prints the commit, its subject, `from` and `to`, those
+lists and `needsReload`.
+
+A stop before the fast-forward is `ok: false` with only the `error`. A stop
+after it also carries the commit, `from`, `to` and the mods report read from
+what `bin/deploy` printed, if it ran. That stop comes when `bin/deploy`
+fails, when the time is up before it can start, or when the main checkout's
+`tools/deploy-mods-lines.ts` does not load. Without `--json`, those lines
+follow the error.
+
+The whole run has one time limit of 9 minutes, under the 10-minute Bash
+limit of the agent that runs it. Each git call gets what is left of it, and
+`bin/deploy` gets what the git calls left; when nothing is left, it does not
+start. A step that runs out of time is named in the error. `bin/deploy` runs
+in a process group of its own. At the time limit the whole group gets
+SIGTERM, and SIGKILL a tenth of the limit later, at most 5 seconds later. A
+SIGINT, SIGTERM or SIGHUP that ledger gets goes to the whole group too. So a
+plugin install that `bin/deploy` waits for stops with it.
+
+`/ledger:deploy` is a model turn, not answered by a hook. It runs
+`ledger deploy --latest --json` and reports in plain words. When
+`needsReload` is true, it lists the open T3 threads that need
+`/reload-plugins`. `--machine <name>` deploys nothing here: it starts
+`/ledger:deploy` in a new thread on the T3 environment of that name, where
+the operator approves it.
 
 ### Checks
 
