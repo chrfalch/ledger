@@ -340,6 +340,50 @@ Each step is one PR and one task, under one parent task.
      `repo-ids`.
    - Coordination: a file that another task is editing waits until that task
      merges.
+   - **As built, `ledger-git-store`:**
+     - Where its time went [inferred, from a sample of 24 tests]: about
+       550 `bin/ledger` starts at about 135 ms each, about 70 s of fixed
+       waits, and real git for the rest.
+     - The memory store and the fake clock do not fit, because every test
+       checks the git store. The `ledger` command runs in the test process,
+       and git stays real. Real git is what "the git store keeps
+       real-process tests" means here.
+     - `runHere` and `ledgerOkHere` in `tests/ledger-git-fixtures.ts` do in
+       the test process what the preload does for a spawned command:
+       - `allowRemoteForTests`;
+       - the `LEDGER_TEST_*_MS` limits, restored after the run;
+       - a note of each background-sync pid, so that teardown still kills
+         it.
+
+       After each run they also clear the deadlines that a hook run leaves
+       set.
+     - Tests that check a real process keep one for the checked call:
+       - locks held across processes;
+       - calls next to a running `started()` process;
+       - hang and wall-time tests, whose baseline is a spawned run;
+       - the detached background sync;
+       - byte-exact stdout of the script;
+       - the URL-rewrite test, because `allowRemoteForTests` cannot be
+         unset in a process.
+
+       The setup calls of those tests moved in-process.
+     - Fixed waits changed:
+       - The pre-receive and gh sleeps now hold until a release file. The
+         test creates the file after its checks, and the hold gives up
+         after 15 s.
+       - The lock-contention start waits on a ready barrier, not on now
+         + 3 s.
+       - Three clone-lock tests wait 500 ms for the lock, not 5 s.
+       - `HOOK_MS` is unchanged.
+     - Times, file alone, under load from other work on the machine
+       [observed]:
+       - before: 337 s at load 2.4–3.8;
+       - old and new run one after the other: 1294 s → 968 s, at load 2.5–4.5
+         (-25%);
+       - run at the same time as each other: 2294 s → 1514 s (-34%).
+
+       A time on a quiet machine is still missing. Under load, git's disk
+       writes dominate, not process starts [inferred].
 5. **Quick and full runs.**
    - Changes: the `*.e2e.test.ts` names, `npm test` and `npm run test:full`.
    - Also: the verify step in LLP 0001 and the rules name `test:full`. Record

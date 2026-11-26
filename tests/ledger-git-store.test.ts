@@ -28,8 +28,11 @@ import {
   gitRan,
   GITHUB_TOKEN,
   hookContext,
+  hookContextHere,
+  holdUntil,
   hookFile,
   ledgerOk,
+  ledgerOkHere,
   lineOf,
   machine,
   machineEnv,
@@ -43,8 +46,9 @@ import {
   remoteLedger,
   remoteText,
   run,
+  runHere,
   runs,
-  setUp,
+  setUpHere,
   SSH_URL,
   today,
   token,
@@ -96,6 +100,9 @@ const HOOK_MS = 2000;
 /** The pull's share of HOOK_MS, as ledger in use keeps 1 s of its 5 s for after the pull. */
 const PULL_MS = HOOK_MS * 0.8;
 
+/** The environment of a command in the tests of a busy lock, which gives up its wait for a lock sooner than the 5 s of ledger in use. */
+const shortLockWait = (m: Machine): NodeJS.ProcessEnv => ({ ...quietEnv(m), ...shortLimits({ lockWaitMs: 500 }) });
+
 /** Elapsed milliseconds of `work`. */
 function timed<T>(work: () => T): [T, number] {
   const start = Date.now();
@@ -124,11 +131,11 @@ function remoteHook(bare: string, name: string, lines: string[]): void {
 
 // ---------------------------------------------------------------------------------------------------------------- init
 
-test('sync init on a private, empty repository clones it, writes the marker and layout, pushes them, and leaves the storage setting alone', (t) => {
+test('sync init on a private, empty repository clones it, writes the marker and layout, pushes them, and leaves the storage setting alone', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
 
-  const stdout = ok(run(a, ['store', 'sync', 'init', URL]));
+  const stdout = ok(await runHere(a, ['store', 'sync', 'init', URL]));
 
   assert.match(stdout, /github\.com\/me\/ledgers/);
   assert.deepEqual(readFileSync(path.join(a.h, 'gh-calls'), 'utf8').trim().split(' '), ['repo', 'view', 'github.com/me/ledgers', '--json', 'visibility,isEmpty']);
@@ -141,20 +148,20 @@ test('sync init on a private, empty repository clones it, writes the marker and 
   assert.equal(existsSync(path.join(a.h, '.claude/ledger-settings.json')), false);
 });
 
-test('sync init accepts the ssh form of a GitHub URL', (t) => {
+test('sync init accepts the ssh form of a GitHub URL', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  ok(run(a, ['store', 'sync', 'init', SSH_URL]));
+  ok(await runHere(a, ['store', 'sync', 'init', SSH_URL]));
   assert.ok(remoteFiles(bare).includes('.ledger-data'));
   assert.match(readFileSync(path.join(a.h, 'gh-calls'), 'utf8'), /repo view github\.com\/me\/ledgers /);
 });
 
-test('sync init refuses a public repository: exit 1, no clone, nothing pushed', (t) => {
+test('sync init refuses a public repository: exit 1, no clone, nothing pushed', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   answerGh(a.h, { visibility: 'PUBLIC', isEmpty: true });
 
-  const output = failed(run(a, ['store', 'sync', 'init', URL]));
+  const output = failed(await runHere(a, ['store', 'sync', 'init', URL]));
 
   assert.match(output, /private/i);
   assert.match(output, /PUBLIC/);
@@ -162,11 +169,11 @@ test('sync init refuses a public repository: exit 1, no clone, nothing pushed', 
   assert.equal(remoteHead(bare), '');
 });
 
-test('sync init exits 1 with the reason when gh fails, and when gh is not installed', (t) => {
+test('sync init exits 1 with the reason when gh fails, and when gh is not installed', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   answerGh(a.h, 'fail');
-  assert.match(failed(run(a, ['store', 'sync', 'init', URL])), /gh/);
+  assert.match(failed(await runHere(a, ['store', 'sync', 'init', URL])), /gh/);
   assert.equal(existsSync(a.clone), false);
 
   const tools = path.join(a.h, 'tools-bin');
@@ -174,22 +181,22 @@ test('sync init exits 1 with the reason when gh fails, and when gh is not instal
   symlinkSync(process.execPath, path.join(tools, 'node'));
   const noGh = { ...quietEnv(a), PATH: [tools, '/usr/bin', '/bin'].join(path.delimiter) };
   assert.equal(spawnSync('sh', ['-c', 'command -v gh'], { env: noGh }).status, 1, 'gh must not be on this PATH');
-  const output = failed(run(a, ['store', 'sync', 'init', URL], { env: noGh }));
+  const output = failed(await runHere(a, ['store', 'sync', 'init', URL], { env: noGh }));
   assert.match(output, /gh/);
   assert.equal(existsSync(a.clone), false);
   assert.equal(remoteHead(bare), '');
 });
 
-test('sync init refuses a URL whose host is not github.com, as it cannot check that it is private', (t) => {
+test('sync init refuses a URL whose host is not github.com, as it cannot check that it is private', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  const output = failed(run(a, ['store', 'sync', 'init', bare]));
+  const output = failed(await runHere(a, ['store', 'sync', 'init', bare]));
   assert.match(output, /github\.com/);
   assert.equal(existsSync(a.clone), false);
   assert.equal(existsSync(path.join(a.h, 'gh-calls')), false);
 });
 
-test('sync init refuses a repository with commits but no .ledger-data marker: exit 1, the clone is removed, the remote is unchanged', (t) => {
+test('sync init refuses a repository with commits but no .ledger-data marker: exit 1, the clone is removed, the remote is unchanged', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   const other = path.join(a.h, 'other');
@@ -201,7 +208,7 @@ test('sync init refuses a repository with commits but no .ledger-data marker: ex
   const before = remoteHead(bare);
   answerGh(a.h, { visibility: 'PRIVATE', isEmpty: false });
 
-  const output = failed(run(a, ['store', 'sync', 'init', URL]));
+  const output = failed(await runHere(a, ['store', 'sync', 'init', URL]));
 
   assert.match(output, /\.ledger-data/);
   assert.equal(existsSync(a.clone), false);
@@ -209,7 +216,7 @@ test('sync init refuses a repository with commits but no .ledger-data marker: ex
   assert.deepEqual(remoteFiles(bare), ['README.md']);
 });
 
-test('sync init refuses a marker with an unknown format and removes its clone', (t) => {
+test('sync init refuses a marker with an unknown format and removes its clone', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   const other = path.join(a.h, 'other');
@@ -220,47 +227,47 @@ test('sync init refuses a marker with an unknown format and removes its clone', 
   git(a.h, other, 'push', '--quiet', 'origin', 'HEAD:main');
   answerGh(a.h, { visibility: 'PRIVATE', isEmpty: false });
 
-  assert.match(failed(run(a, ['store', 'sync', 'init', URL])), /format/);
+  assert.match(failed(await runHere(a, ['store', 'sync', 'init', URL])), /format/);
   assert.equal(existsSync(a.clone), false);
 });
 
-test('sync init on a second machine accepts a repository with the marker and installs the pre-push hook', (t) => {
+test('sync init on a second machine accepts a repository with the marker and installs the pre-push hook', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  ok(run(a, ['store', 'sync', 'init', URL]));
+  ok(await runHere(a, ['store', 'sync', 'init', URL]));
   const before = remoteHead(bare);
   const b = machine(t, bare);
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
 
-  ok(run(b, ['store', 'sync', 'init', URL]));
+  ok(await runHere(b, ['store', 'sync', 'init', URL]));
 
   assert.equal(remoteHead(bare), before);
   assert.equal(git(b.h, b.clone, 'rev-parse', 'HEAD'), before);
   assertOwnHook(b);
 });
 
-test('sync init again on the same clone changes nothing; another URL or a folder that is no clone is refused', (t) => {
+test('sync init again on the same clone changes nothing; another URL or a folder that is no clone is refused', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  ok(run(a, ['store', 'sync', 'init', URL]));
+  ok(await runHere(a, ['store', 'sync', 'init', URL]));
   const head = git(a.h, a.clone, 'rev-parse', 'HEAD');
 
-  const again = ok(run(a, ['store', 'sync', 'init', URL]));
+  const again = ok(await runHere(a, ['store', 'sync', 'init', URL]));
   assert.match(again, /already/);
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), head);
   assert.equal(remoteHead(bare), head);
 
-  assert.match(failed(run(a, ['store', 'sync', 'init', 'https://github.com/me/other.git'])), /ledger-data/);
+  assert.match(failed(await runHere(a, ['store', 'sync', 'init', 'https://github.com/me/other.git'])), /ledger-data/);
   assert.equal(git(a.h, a.clone, 'config', 'remote.origin.url'), URL);
 
   const b = machine(t, bare);
   mkdirSync(b.clone);
   writeFileSync(path.join(b.clone, 'mine.txt'), 'keep\n');
-  assert.match(failed(run(b, ['store', 'sync', 'init', URL])), /ledger-data/);
+  assert.match(failed(await runHere(b, ['store', 'sync', 'init', URL])), /ledger-data/);
   assert.deepEqual(readdirSync(b.clone), ['mine.txt']);
 });
 
-test('sync init refuses a repository with a symbolic link, an executable file or a path outside the allowlist, before any of it is checked out', (t) => {
+test('sync init refuses a repository with a symbolic link, an executable file or a path outside the allowlist, before any of it is checked out', async (t) => {
   const cases: [string, (other: string) => void][] = [
     ['backlog/app/link.md', (other) => symlinkSync('/etc/hosts', path.join(other, 'backlog/app/link.md'))],
     ['backlog/app/run.md', (other) => (writeFileSync(path.join(other, 'backlog/app/run.md'), '# run\n'), chmodSync(path.join(other, 'backlog/app/run.md'), 0o755))],
@@ -269,7 +276,7 @@ test('sync init refuses a repository with a symbolic link, an executable file or
   for (const [file, add] of cases) {
     const bare = remote(t);
     const a = machine(t, bare);
-    ok(run(a, ['store', 'sync', 'init', URL]));
+    ok(await runHere(a, ['store', 'sync', 'init', URL]));
     const other = plainClone(a);
     mkdirSync(path.join(other, 'backlog/app'), { recursive: true });
     add(other);
@@ -278,64 +285,64 @@ test('sync init refuses a repository with a symbolic link, an executable file or
     const b = machine(t, bare);
     answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
 
-    assert.ok(failed(run(b, ['store', 'sync', 'init', URL])).includes(file), file);
+    assert.ok(failed(await runHere(b, ['store', 'sync', 'init', URL])).includes(file), file);
     assert.equal(existsSync(b.clone), false, file);
   }
 });
 
-test('sync never prints the user name or password of a URL, also when it fails', (t) => {
+test('sync never prints the user name or password of a URL, also when it fails', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  const init = ok(run(a, ['store', 'sync', 'init', URL_WITH_USERINFO]));
+  const init = ok(await runHere(a, ['store', 'sync', 'init', URL_WITH_USERINFO]));
   assert.match(init, /https:\/\/github\.com\/me\/ledgers\.git/);
   assert.doesNotMatch(init, new RegExp(PASSWORD));
   assert.doesNotMatch(init, /me:/);
   assert.match(readFileSync(path.join(a.h, 'gh-calls'), 'utf8'), /repo view github\.com\/me\/ledgers /);
   useGitStorage(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   renameSync(bare, `${bare}.away`);
 
-  const output = failed(run(a, ['store', 'sync']));
+  const output = failed(await runHere(a, ['store', 'sync']));
 
   assert.doesNotMatch(output, new RegExp(PASSWORD));
   assert.doesNotMatch(output, /me:/);
-  const answer = failed(run(a, ['store', 'sync', 'init', 'https://me:other-secret@github.com/me/other.git']));
+  const answer = failed(await runHere(a, ['store', 'sync', 'init', 'https://me:other-secret@github.com/me/other.git']));
   assert.doesNotMatch(answer, /other-secret/);
 });
 
 // ---------------------------------------------------------------------------------------------------- commands and sync
 
-test('ledger commands under git storage need a set-up clone and say to run ledger store sync init; a hook still exits 0', (t) => {
+test('ledger commands under git storage need a set-up clone and say to run ledger store sync init; a hook still exits 0', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   useGitStorage(a);
 
-  assert.match(failed(run(a, ['list'])), /ledger store sync init/);
-  assert.match(failed(run(a, ['store', 'sync'])), /ledger store sync init/);
-  assert.equal(hookContext(a), '');
+  assert.match(failed(await runHere(a, ['list'])), /ledger store sync init/);
+  assert.match(failed(await runHere(a, ['store', 'sync'])), /ledger store sync init/);
+  assert.equal(await hookContextHere(a), '');
 });
 
-test('task, park, parent add and retire under git storage each commit in the clone, and ledger store sync pushes them', (t) => {
+test('task, park, parent add and retire under git storage each commit in the clone, and ledger store sync pushes them', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const commits = (): number => Number(git(a.h, a.clone, 'rev-list', '--count', 'HEAD'));
   const start = commits();
 
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   assert.equal(commits(), start + 1);
   assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
   assert.ok(!remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`), 'no push without a sync');
 
-  ledgerOk(a, 'task', 'park', 'fix-login', '--reason', 'waits for design');
-  ledgerOk(a, 'task', 'new', 'epic', '--goal', 'All of it.');
-  ledgerOk(a, 'tree', 'add', 'epic', 'fix-login');
-  ledgerOk(a, 'task', 'new', 'idea', '--goal', 'An idea.');
-  ledgerOk(a, 'task', 'retire', 'idea');
+  await ledgerOkHere(a, 'task', 'park', 'fix-login', '--reason', 'waits for design');
+  await ledgerOkHere(a, 'task', 'new', 'epic', '--goal', 'All of it.');
+  await ledgerOkHere(a, 'tree', 'add', 'epic', 'fix-login');
+  await ledgerOkHere(a, 'task', 'new', 'idea', '--goal', 'An idea.');
+  await ledgerOkHere(a, 'task', 'retire', 'idea');
   assert.equal(commits(), start + 6);
   assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
 
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
 
   assert.equal(remoteHead(bare), git(a.h, a.clone, 'rev-parse', 'HEAD'));
   const files = remoteFiles(bare);
@@ -347,52 +354,53 @@ test('task, park, parent add and retire under git storage each commit in the clo
   assert.equal(existsSync(a.status), false);
 });
 
-test('a retire under git storage that cannot delete the backlog ledger keeps its archive copy, says so, and a retry finishes', { skip: process.getuid?.() === 0 }, (t) => {
+test('a retire under git storage that cannot delete the backlog ledger keeps its archive copy, says so, and a retry finishes', { skip: process.getuid?.() === 0 }, async (t) => {
   const a = machine(t, remote(t));
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'idea', '--goal', 'An idea.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'idea', '--goal', 'An idea.');
   const backlog = path.join(a.clone, 'backlog', APP);
   const archived = path.join(a.clone, 'archive', APP, `${today()}-idea.json`);
   chmodSync(backlog, 0o555);
   // A retire that goes through removes the folder with its last ledger.
   t.after(() => existsSync(backlog) && chmodSync(backlog, 0o755));
 
-  const retire = run(a, ['task', 'retire', 'idea']);
+  const retire = await runHere(a, ['task', 'retire', 'idea']);
   chmodSync(backlog, 0o755);
 
   assert.match(failed(retire), /Could not delete the backlog ledger .* Its archive copy is written\./);
   assert.ok(existsSync(archived), 'the failed retire removed its archive copy');
   assert.ok(existsSync(path.join(backlog, 'idea.json')), 'the backlog ledger is gone');
-  ledgerOk(a, 'task', 'retire', 'idea');
+  await ledgerOkHere(a, 'task', 'retire', 'idea');
   assert.equal(existsSync(path.join(backlog, 'idea.json')), false, 'the retry left the backlog ledger');
   assert.ok(existsSync(archived), 'the retry left no archive copy');
 });
 
-test('a second machine sees the ledgers after ledger store sync, and again after its session-start hook pulls', (t) => {
+test('a second machine sees the ledgers after ledger store sync, and again after its session-start hook pulls', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'store', 'sync');
   const b = machine(t, bare);
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
-  setUp(b);
+  await setUpHere(b);
 
-  assert.match(ledgerOk(b, 'show', 'fix-login', '--repo', 'app'), /Users cannot log in\./);
+  assert.match(await ledgerOkHere(b, 'show', 'fix-login', '--repo', 'app'), /Users cannot log in\./);
 
-  ledgerOk(a, 'task', 'new', 'later', '--goal', 'Comes later.');
-  ledgerOk(a, 'store', 'sync');
-  assert.notEqual(run(b, ['show', 'later', '--repo', 'app']).status, 0, 'B has not pulled yet');
-  hookContext(b);
-  assert.match(ledgerOk(b, 'show', 'later', '--repo', 'app'), /Comes later\./);
+  await ledgerOkHere(a, 'task', 'new', 'later', '--goal', 'Comes later.');
+  await ledgerOkHere(a, 'store', 'sync');
+  assert.notEqual((await runHere(b, ['show', 'later', '--repo', 'app'])).status, 0, 'B has not pulled yet');
+  await hookContextHere(b);
+  assert.match(await ledgerOkHere(b, 'show', 'later', '--repo', 'app'), /Comes later\./);
 });
 
 test('without the test switch a command returns first, prints only its own output, and pushes in the background', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const quiet = run(a, ['task', 'new', 'quiet-twin', '--goal', 'Users cannot log in.']);
-  remoteHook(bare, 'pre-receive', ['sleep 3']);
+  const release = path.join(a.h, 'release-push');
+  remoteHook(bare, 'pre-receive', [holdUntil(release)]);
 
   const [ran, ms] = timed(() => run(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.'], { env: machineEnv(a) }));
 
@@ -401,6 +409,7 @@ test('without the test switch a command returns first, prints only its own outpu
   assert.equal(ran.stdout, quiet.stdout.replaceAll('quiet-twin', 'fix-login'));
   assert.ok(ms < 2500, `the command waited ${ms} ms for the push`);
   assert.ok(!remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`), 'the push was not done yet when the command returned');
+  writeFileSync(release, '');
   const head = git(a.h, a.clone, 'rev-parse', 'HEAD');
   await until(() => remoteHead(bare) === head && git(a.h, a.clone, 'rev-parse', 'refs/remotes/origin/main') === head && backgroundSyncDone(a), 'the background push');
   assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
@@ -408,22 +417,22 @@ test('without the test switch a command returns first, prints only its own outpu
 
 // ------------------------------------------------------------------------------------------------------------ allowlist
 
-test('only allowlisted paths reach the remote: no evidence, lock or temporary file', (t) => {
+test('only allowlisted paths reach the remote: no evidence, lock or temporary file', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'old', '--goal', 'Old work.');
-  ledgerOk(a, 'go', 'old');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'old', '--goal', 'Old work.');
+  await ledgerOkHere(a, 'go', 'old');
   const evidence = path.join(a.app, '.claude/worktrees/old/.claude/evidence');
   mkdirSync(evidence, { recursive: true });
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
-  ledgerOk(a, 'task', 'retire', 'old', '--force');
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'task', 'retire', 'old', '--force');
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   writeFileSync(path.join(a.clone, `backlog/${APP}/fix-login.json.lock`), '{}');
   writeFileSync(path.join(a.clone, `backlog/${APP}/fix-login.json.tmp-123`), 'half');
   writeFileSync(path.join(a.clone, 'notes.txt'), 'private\n');
 
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
 
   const name = `${today()}-old`;
   assert.equal(readFileSync(path.join(a.h, `.claude/ledger-evidence/${APP}`, name, 'red.txt'), 'utf8'), 'failing\n');
@@ -433,16 +442,16 @@ test('only allowlisted paths reach the remote: no evidence, lock or temporary fi
   for (const file of files) assert.match(file, ALLOWED);
 });
 
-test('a file a nested .gitignore un-ignores is refused: the sync exits 1, names it, and pushes nothing', (t) => {
+test('a file a nested .gitignore un-ignores is refused: the sync exits 1, names it, and pushes nothing', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   writeFileSync(path.join(a.clone, `backlog/${APP}/.gitignore`), '!*\n');
   writeFileSync(path.join(a.clone, `backlog/${APP}/evil.txt`), 'un-ignored\n');
   const before = remoteHead(bare);
 
-  const output = failed(run(a, ['store', 'sync']));
+  const output = failed(await runHere(a, ['store', 'sync']));
 
   assert.match(output, new RegExp(String.raw`backlog\/${APP_PATTERN}\/evil\.txt`));
   assert.equal(remoteHead(bare), before);
@@ -450,35 +459,35 @@ test('a file a nested .gitignore un-ignores is refused: the sync exits 1, names 
   assert.ok(!remoteFiles(bare).includes(`backlog/${APP}/evil.txt`));
 });
 
-test('a non-allowlisted file committed or staged in the clone blocks the push and is named', (t) => {
+test('a non-allowlisted file committed or staged in the clone blocks the push and is named', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   writeFileSync(path.join(a.clone, 'notes.txt'), 'private\n');
   git(a.h, a.clone, 'add', '-f', 'notes.txt');
   const before = remoteHead(bare);
 
-  assert.match(failed(run(a, ['store', 'sync'])), /notes\.txt/);
+  assert.match(failed(await runHere(a, ['store', 'sync'])), /notes\.txt/);
   assert.equal(remoteHead(bare), before);
 
   git(a.h, a.clone, 'commit', '--quiet', '-m', 'by hand');
-  assert.match(failed(run(a, ['store', 'sync'])), /notes\.txt/);
+  assert.match(failed(await runHere(a, ['store', 'sync'])), /notes\.txt/);
   assert.equal(remoteHead(bare), before);
   assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'allowlist');
 });
 
 // ---------------------------------------------------------------------------------------------------------- secret scan
 
-test('a token in a backlog ledger blocks the push: file:line is named, the token is not printed, the commit stays local', (t) => {
+test('a token in a backlog ledger blocks the push: file:line is named, the token is not printed, the commit stays local', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const before = remoteHead(bare);
-  ledgerOk(a, 'task', 'new', 'leak', '--goal', `Use ${GITHUB_TOKEN} to log in.`);
+  await ledgerOkHere(a, 'task', 'new', 'leak', '--goal', `Use ${GITHUB_TOKEN} to log in.`);
   const line = lineOf(readFileSync(path.join(a.clone, `backlog/${APP}/leak.json`), 'utf8'), GITHUB_TOKEN);
 
-  const output = failed(run(a, ['store', 'sync']));
+  const output = failed(await runHere(a, ['store', 'sync']));
 
   assert.ok(output.includes(`backlog/${APP}/leak.json:${line}`), output);
   assert.ok(!output.includes(GITHUB_TOKEN), 'the token is printed');
@@ -489,10 +498,10 @@ test('a token in a backlog ledger blocks the push: file:line is named, the token
   assert.ok(!status.includes(GITHUB_TOKEN));
 });
 
-test('ledger store sync and the pre-push hook of a manual git push find the same secrets, in binary text and file names too', (t) => {
+test('ledger store sync and the pre-push hook of a manual git push find the same secrets, in binary text and file names too', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const before = remoteHead(bare);
   const lines = ['# samples', ...SAMPLES, ...NEAR_MISSES, `bin\0ary\0 ${GITHUB_TOKEN}`, ''];
   mkdirSync(path.join(a.clone, `backlog/${APP}`), { recursive: true });
@@ -505,7 +514,7 @@ test('ledger store sync and the pre-push hook of a manual git push find the same
   const missed = NEAR_MISSES.map((_, index) => `backlog/${APP}/samples.md:${SAMPLES.length + index + 2}`);
 
   const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
-  const synced = run(a, ['store', 'sync']);
+  const synced = await runHere(a, ['store', 'sync']);
 
   for (const [who, ran] of [['git push', pushed], ['ledger store sync', synced]] as const) {
     assert.notEqual(ran.status, 0, `${who} was not blocked`);
@@ -518,12 +527,12 @@ test('ledger store sync and the pre-push hook of a manual git push find the same
   assert.equal(remoteHead(bare), before);
 });
 
-test('a token added in a merge resolution is caught by ledger store sync and by the pre-push hook', (t) => {
+test('a token added in a merge resolution is caught by ledger store sync and by the pre-push hook', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'store', 'sync');
   const before = remoteHead(bare);
   const file = path.join(a.clone, `backlog/${APP}/fix-login.json`);
   const original = readFileSync(file, 'utf8');
@@ -542,16 +551,16 @@ test('a token added in a merge resolution is caught by ledger store sync and by 
   const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
   assert.notEqual(pushed.status, 0);
   assert.ok(pushed.stderr.includes(hit), pushed.stderr);
-  const synced = failed(run(a, ['store', 'sync']));
+  const synced = failed(await runHere(a, ['store', 'sync']));
   assert.ok(synced.includes(hit), synced);
   assert.ok(!`${pushed.stderr}${synced}`.includes(GITHUB_TOKEN));
   assert.equal(remoteHead(bare), before);
 });
 
-test('ledger store sync and the pre-push hook read a record as its text: a key after an escaped line break, tab or control character is found', (t) => {
+test('ledger store sync and the pre-push hook read a record as its text: a key after an escaped line break, tab or control character is found', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const before = remoteHead(bare);
   const key = token(['s', 'k-'].join(''), 'aB3dE5gH7j', 48);
   const markdown = [
@@ -581,7 +590,7 @@ test('ledger store sync and the pre-push hook read a record as its text: a key a
   const miss = `${file}:${lineOf(json, 'A literal')}`;
 
   const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
-  const synced = run(a, ['store', 'sync']);
+  const synced = await runHere(a, ['store', 'sync']);
 
   for (const [who, ran] of [['git push', pushed], ['ledger store sync', synced]] as const) {
     assert.notEqual(ran.status, 0, `${who} was not blocked`);
@@ -594,10 +603,10 @@ test('ledger store sync and the pre-push hook read a record as its text: a key a
   assert.equal(remoteHead(bare), before);
 });
 
-test('ledger store sync and the pre-push hook read a record whose path holds a space or a double quote as a record, and name it as git shows it', (t) => {
+test('ledger store sync and the pre-push hook read a record whose path holds a space or a double quote as a record, and name it as git shows it', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const before = remoteHead(bare);
   const key = token(['s', 'k-'].join(''), 'aB3dE5gH7j', 48);
   const json = recordJson(parseRecord(['# Task ledger — leak', '', '## Goal', 'Log in with the key below.', key, ''].join('\n')));
@@ -615,7 +624,7 @@ test('ledger store sync and the pre-push hook read a record whose path holds a s
   const hits = files.map(([, shown]) => `${shown}:${lineOf(json, '"goal"')}`);
 
   const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
-  const synced = run(a, ['store', 'sync']);
+  const synced = await runHere(a, ['store', 'sync']);
 
   for (const [who, ran] of [['git push', pushed], ['ledger store sync', synced]] as const) {
     assert.notEqual(ran.status, 0, `${who} was not blocked`);
@@ -627,10 +636,10 @@ test('ledger store sync and the pre-push hook read a record whose path holds a s
   assert.equal(remoteHead(bare), before);
 });
 
-test('the pre-push hook fails closed: when its scan cannot run, the push is blocked', (t) => {
+test('the pre-push hook fails closed: when its scan cannot run, the push is blocked', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const before = remoteHead(bare);
   mkdirSync(path.join(a.clone, `backlog/${APP}`), { recursive: true });
   writeFileSync(path.join(a.clone, `backlog/${APP}/clean.md`), '# clean\n');
@@ -652,22 +661,22 @@ test('the pre-push hook fails closed: when its scan cannot run, the push is bloc
 
 // ------------------------------------------------------------------------------------------------------------- conflict
 
-test('when two machines change the same ledger, the second sync exits 1, names the file, keeps its commit, and the next session start says so', (t) => {
+test('when two machines change the same ledger, the second sync exits 1, names the file, keeps its commit, and the next session start says so', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'store', 'sync');
   const b = machine(t, bare);
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
-  setUp(b);
-  ledgerOk(a, 'task', 'park', 'fix-login', '--reason', 'parked on A');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(b);
+  await ledgerOkHere(a, 'task', 'park', 'fix-login', '--reason', 'parked on A');
+  await ledgerOkHere(a, 'store', 'sync');
   // A ledger names its repo by absolute path, so B works in a checkout at the same path, as on a machine with the same layout.
-  ok(run(b, ['task', 'park', 'fix-login', '--reason', 'parked on B'], { cwd: a.app }));
+  ok(await runHere(b, ['task', 'park', 'fix-login', '--reason', 'parked on B'], { cwd: a.app }));
   const local = git(b.h, b.clone, 'rev-parse', 'HEAD');
 
-  const output = failed(run(b, ['store', 'sync']));
+  const output = failed(await runHere(b, ['store', 'sync']));
 
   assert.match(output, new RegExp(String.raw`backlog\/${APP_PATTERN}\/fix-login\.json`));
   assert.match(output, ASKS_THE_OPERATOR);
@@ -678,30 +687,30 @@ test('when two machines change the same ledger, the second sync exits 1, names t
   assert.doesNotMatch(remoteText(bare, `backlog/${APP}/fix-login.json`), /parked on B/);
   assert.equal(JSON.parse(readFileSync(b.status, 'utf8')).problem, 'conflict');
 
-  const context = hookContext(b);
+  const context = await hookContextHere(b);
   assert.match(context, /conflict/i);
   assert.match(context, /ledger store sync/);
 });
 
-test('a pull whose rebase fails without a conflict exits 1, pushes nothing and tells an agent to ask the operator', (t) => {
+test('a pull whose rebase fails without a conflict exits 1, pushes nothing and tells an agent to ask the operator', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'store', 'sync');
   const b = machine(t, bare);
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
-  setUp(b);
-  ledgerOk(a, 'task', 'park', 'fix-login', '--reason', 'parked on A');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(b);
+  await ledgerOkHere(a, 'task', 'park', 'fix-login', '--reason', 'parked on A');
+  await ledgerOkHere(a, 'store', 'sync');
   const hook = path.join(b.clone, '.git/hooks/pre-rebase');
   writeFileSync(hook, '#!/bin/sh\necho "pre-rebase refuses" >&2\nexit 1\n');
   chmodSync(hook, 0o755);
-  ok(run(b, ['task', 'new', 'fix-signup', '--goal', 'Sign-up fails.']));
+  ok(await runHere(b, ['task', 'new', 'fix-signup', '--goal', 'Sign-up fails.']));
   const local = git(b.h, b.clone, 'rev-parse', 'HEAD');
   const remoteBefore = remoteHead(bare);
 
-  const output = failed(run(b, ['store', 'sync']));
+  const output = failed(await runHere(b, ['store', 'sync']));
 
   assert.match(output, /failed, so nothing was pushed/);
   assert.match(output, /pre-rebase refuses/);
@@ -713,52 +722,52 @@ test('a pull whose rebase fails without a conflict exits 1, pushes nothing and t
 
 // -------------------------------------------------------------------------------------------------------------- offline
 
-test('offline, commands still work locally, a quiet sync prints nothing and records it, and the next good sync clears it', (t) => {
+test('offline, commands still work locally, a quiet sync prints nothing and records it, and the next good sync clears it', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   renameSync(bare, `${bare}.away`);
 
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/fix-login.json`);
 
-  const quiet = run(a, ['store', 'sync', '--quiet']);
+  const quiet = await runHere(a, ['store', 'sync', '--quiet']);
   assert.equal(quiet.stdout, '');
   assert.equal(quiet.stderr, '');
   assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'network');
-  const manual = failed(run(a, ['store', 'sync']));
+  const manual = failed(await runHere(a, ['store', 'sync']));
   assert.ok(manual.trim().split('\n').length <= 3, `a short reason:\n${manual}`);
-  assert.match(hookContext(a), /ledger store sync/);
+  assert.match(await hookContextHere(a), /ledger store sync/);
 
   renameSync(`${bare}.away`, bare);
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
   assert.equal(existsSync(a.status), false);
   assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
-  assert.doesNotMatch(hookContext(a), /ledger store sync/);
+  assert.doesNotMatch(await hookContextHere(a), /ledger store sync/);
 });
 
 // -------------------------------------------------------------------------------------------------------------- migrate
 
 /** A file-storage HOME with a backlog ledger and an archive copy with evidence. */
-function withFileLedgers(m: Machine): string {
-  ledgerOk(m, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ledgerOk(m, 'task', 'new', 'old', '--goal', 'Old work.');
-  ledgerOk(m, 'go', 'old');
+async function withFileLedgers(m: Machine): Promise<string> {
+  await ledgerOkHere(m, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(m, 'task', 'new', 'old', '--goal', 'Old work.');
+  await ledgerOkHere(m, 'go', 'old');
   const evidence = path.join(m.app, '.claude/worktrees/old/.claude/evidence');
   mkdirSync(evidence, { recursive: true });
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
-  ledgerOk(m, 'task', 'retire', 'old', '--force');
+  await ledgerOkHere(m, 'task', 'retire', 'old', '--force');
   return `${today()}-old`;
 }
 
-test('migrate file → git → file moves the ledgers and evidence both ways; --from defaults to the setting', (t) => {
+test('migrate file → git → file moves the ledgers and evidence both ways; --from defaults to the setting', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  const name = withFileLedgers(a);
-  ok(run(a, ['store', 'sync', 'init', URL]));
+  const name = await withFileLedgers(a);
+  ok(await runHere(a, ['store', 'sync', 'init', URL]));
   const backlog = readFileSync(path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.json`), 'utf8');
 
-  ledgerOk(a, 'store', 'migrate', '--to', 'git', '--remove-source');
+  await ledgerOkHere(a, 'store', 'migrate', '--to', 'git', '--remove-source');
 
   assert.equal(JSON.parse(readFileSync(path.join(a.h, '.claude/ledger-settings.json'), 'utf8')).storage, 'git');
   assert.equal(readFileSync(path.join(a.clone, `backlog/${APP}/fix-login.json`), 'utf8'), backlog);
@@ -767,9 +776,9 @@ test('migrate file → git → file moves the ledgers and evidence both ways; --
   assert.ok(remoteFiles(bare).includes(`archive/${APP}/${name}.json`), 'migrate pushed');
   assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
   assert.equal(existsSync(path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.json`)), false);
-  assert.equal(ledgerOk(a, 'show', name, '--evidence'), 'red.txt\n');
+  assert.equal(await ledgerOkHere(a, 'show', name, '--evidence'), 'red.txt\n');
 
-  ledgerOk(a, 'store', 'migrate', '--to', 'file');
+  await ledgerOkHere(a, 'store', 'migrate', '--to', 'file');
 
   assert.equal(JSON.parse(readFileSync(path.join(a.h, '.claude/ledger-settings.json'), 'utf8')).storage, 'file');
   assert.equal(readFileSync(path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.json`), 'utf8'), backlog);
@@ -777,46 +786,46 @@ test('migrate file → git → file moves the ledgers and evidence both ways; --
   assert.ok(existsSync(path.join(a.clone, `backlog/${APP}/fix-login.json`)), 'the git storage keeps its copy');
 });
 
-test('migrate sqlite → git copies into the clone', { skip: noSqlite }, (t) => {
+test('migrate sqlite → git copies into the clone', { skip: noSqlite }, async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   writeFileSync(path.join(a.h, '.claude/ledger-settings.json'), JSON.stringify({ storage: 'sqlite' }));
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ok(run(a, ['store', 'sync', 'init', URL]));
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  ok(await runHere(a, ['store', 'sync', 'init', URL]));
 
-  ledgerOk(a, 'store', 'migrate', '--to', 'git');
+  await ledgerOkHere(a, 'store', 'migrate', '--to', 'git');
 
   assert.match(readFileSync(path.join(a.clone, `backlog/${APP}/fix-login.json`), 'utf8'), /Users cannot log in\./);
   assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
 });
 
-test('migrate --to git reports a failed push but still switches, as the copies are in the clone', (t) => {
+test('migrate --to git reports a failed push but still switches, as the copies are in the clone', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ok(run(a, ['store', 'sync', 'init', URL]));
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  ok(await runHere(a, ['store', 'sync', 'init', URL]));
   renameSync(bare, `${bare}.away`);
 
-  const stdout = ledgerOk(a, 'store', 'migrate', '--to', 'git');
+  const stdout = await ledgerOkHere(a, 'store', 'migrate', '--to', 'git');
 
   assert.match(stdout, /ledger store sync/);
   assert.equal(JSON.parse(readFileSync(path.join(a.h, '.claude/ledger-settings.json'), 'utf8')).storage, 'git');
   git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/fix-login.json`);
 });
 
-test('migrate refuses --from equal to --to, and --to git while the setting already is git without --from', (t) => {
+test('migrate refuses --from equal to --to, and --to git while the setting already is git without --from', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  assert.match(failed(run(a, ['store', 'migrate', '--from', 'file', '--to', 'file'])), /--from/);
-  assert.match(failed(run(a, ['store', 'migrate', '--to', 'git'])), /--from/);
-  ledgerOk(a, 'store', 'migrate', '--from', 'file', '--to', 'git', '--dry-run');
+  await setUpHere(a);
+  assert.match(failed(await runHere(a, ['store', 'migrate', '--from', 'file', '--to', 'file'])), /--from/);
+  assert.match(failed(await runHere(a, ['store', 'migrate', '--to', 'git'])), /--from/);
+  await ledgerOkHere(a, 'store', 'migrate', '--from', 'file', '--to', 'git', '--dry-run');
 });
 
-test('migrate --records --dry-run in git storage changes nothing: the changed hook stays, nothing is committed, no push starts', (t) => {
+test('migrate --records --dry-run in git storage changes nothing: the changed hook stays, nothing is committed, no push starts', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   mkdirSync(path.join(a.clone, `backlog/${APP}`), { recursive: true });
   writeFileSync(path.join(a.clone, `backlog/${APP}/legacy.md`), '# Task ledger — legacy\n\n## Goal\nFrom before records.\n');
   git(a.h, a.clone, 'add', '-A');
@@ -827,7 +836,7 @@ test('migrate --records --dry-run in git storage changes nothing: the changed ho
   const head = git(a.h, a.clone, 'rev-parse', 'HEAD');
   const pushed = remoteHead(bare);
 
-  const out = ok(run(a, ['store', 'migrate', '--records', '--dry-run'], { env: machineEnv(a) }));
+  const out = ok(await runHere(a, ['store', 'migrate', '--records', '--dry-run'], { env: machineEnv(a) }));
 
   assert.match(out, /^would convert backlog .+ legacy: /m);
   assert.equal(readFileSync(hookFile(a), 'utf8'), hook);
@@ -837,44 +846,44 @@ test('migrate --records --dry-run in git storage changes nothing: the changed ho
   assert.equal(remoteHead(bare), pushed);
 });
 
-test('migrate --to git without a set-up clone says to run ledger store sync init and changes nothing', (t) => {
+test('migrate --to git without a set-up clone says to run ledger store sync init and changes nothing', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  assert.match(failed(run(a, ['store', 'migrate', '--to', 'git'])), /ledger store sync init/);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  assert.match(failed(await runHere(a, ['store', 'migrate', '--to', 'git'])), /ledger store sync init/);
   assert.equal(existsSync(path.join(a.h, '.claude/ledger-settings.json')), false);
 });
 
 // ----------------------------------------------------------------------------------------------------------------- help
 
-test('ledger store --help lists sync, sync and migrate have their own help, and the old names fail', (t) => {
+test('ledger store --help lists sync, sync and migrate have their own help, and the old names fail', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  assert.match(ledgerOk(a, 'store', '--help'), /^\s+sync\b/m);
+  assert.match(await ledgerOkHere(a, 'store', '--help'), /^\s+sync\b/m);
   for (const argv of [['sync'], ['sync', '--quiet'], ['sync', 'init', URL]]) {
-    const ran = run(a, argv);
+    const ran = await runHere(a, argv);
     assert.notEqual(ran.status, 0, `ledger ${argv.join(' ')}`);
     assert.match(ran.stderr, /unknown command/, `ledger ${argv.join(' ')}`);
   }
-  const sync = ledgerOk(a, 'store', 'sync', '--help');
+  const sync = await ledgerOkHere(a, 'store', 'sync', '--help');
   assert.match(sync, /^Usage: ledger store sync\b/m);
   assert.match(sync, /--quiet/);
   assert.match(sync, /\binit\b/);
-  assert.match(ledgerOk(a, 'store', 'sync', 'init', '--help'), /<url>/);
-  assert.match(ledgerOk(a, 'store', 'migrate', '--help'), /--from <storage>/);
+  assert.match(await ledgerOkHere(a, 'store', 'sync', 'init', '--help'), /<url>/);
+  assert.match(await ledgerOkHere(a, 'store', 'migrate', '--help'), /--from <storage>/);
 });
 
 // ------------------------------------------------------------------------------------------------ remote code and hooks
 
-test('ledger store sync puts back a pre-push hook that was changed, and replaces a core.hooksPath an older setup left', (t) => {
+test('ledger store sync puts back a pre-push hook that was changed, and replaces a core.hooksPath an older setup left', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const own = readFileSync(hookFile(a), 'utf8');
   writeFileSync(hookFile(a), '#!/bin/sh\nexit 0\n');
   git(a.h, a.clone, 'config', 'core.hooksPath', '.githooks');
 
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
 
   assert.equal(readFileSync(hookFile(a), 'utf8'), own);
   assertOwnHook(a);
@@ -887,25 +896,25 @@ const BAD_ENTRIES: [string, (other: string) => void][] = [
 ];
 
 for (const [file, add] of BAD_ENTRIES) {
-  test(`a pull refuses an incoming ${file}: ledger store sync and the session start leave the clone as it was, and the problem is recorded`, (t) => {
+  test(`a pull refuses an incoming ${file}: ledger store sync and the session start leave the clone as it was, and the problem is recorded`, async (t) => {
     const bare = remote(t);
     const a = machine(t, bare);
-    setUp(a);
-    ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-    ledgerOk(a, 'store', 'sync');
+    await setUpHere(a);
+    await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+    await ledgerOkHere(a, 'store', 'sync');
     const other = plainClone(a);
     mkdirSync(path.join(other, 'backlog/app'), { recursive: true });
     add(other);
     git(a.h, other, 'add', '-f', '-A');
     pushFrom(a, other, `add ${file}`);
     const remoteNow = remoteHead(bare);
-    ledgerOk(a, 'task', 'new', 'mine', '--goal', 'Made here.');
+    await ledgerOkHere(a, 'task', 'new', 'mine', '--goal', 'Made here.');
     const local = git(a.h, a.clone, 'rev-parse', 'HEAD');
 
-    assert.ok(failed(run(a, ['store', 'sync'])).includes(file));
+    assert.ok(failed(await runHere(a, ['store', 'sync'])).includes(file));
     // Removed, so the session start must find the problem itself rather than show the one ledger store sync recorded.
     rmSync(a.status);
-    assert.match(hookContext(a), /ledger store sync/);
+    assert.match(await hookContextHere(a), /ledger store sync/);
 
     assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), local);
     assert.equal(lstatSync(path.join(a.clone, file), { throwIfNoEntry: false }), undefined, `${file} is checked out`);
@@ -917,7 +926,7 @@ for (const [file, add] of BAD_ENTRIES) {
 
 // ---------------------------------------------------------------------------------------------------- privacy and URLs
 
-test('sync init accepts only a plain github.com URL: no query, fragment, port, path past the repository or other user', (t) => {
+test('sync init accepts only a plain github.com URL: no query, fragment, port, path past the repository or other user', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   const secret = 'query-secret-not-for-print';
@@ -934,7 +943,7 @@ test('sync init accepts only a plain github.com URL: no query, fragment, port, p
     'https://github.com.example.com/me/ledgers.git',
     'https://example.com/github.com/me/ledgers.git',
   ]) {
-    const output = failed(run(a, ['store', 'sync', 'init', url]));
+    const output = failed(await runHere(a, ['store', 'sync', 'init', url]));
     assert.match(output, /github\.com/, url);
     assert.ok(!output.includes(secret), `${url} printed its query or fragment`);
   }
@@ -949,58 +958,58 @@ function elsewhere(m: Machine): string {
   return evil;
 }
 
-test('ledger store sync pushes to the URL it checked: a pushurl on origin is not used', (t) => {
+test('ledger store sync pushes to the URL it checked: a pushurl on origin is not used', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const evil = elsewhere(a);
   git(a.h, a.clone, 'config', 'remote.origin.pushurl', evil);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
 
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
 
   assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
   assert.equal(remoteHead(evil), '');
 });
 
-test('ledger store sync refuses when git config would send the push of the checked URL somewhere else', (t) => {
+test('ledger store sync refuses when git config would send the push of the checked URL somewhere else', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const evil = elsewhere(a);
   const gitconfig = path.join(a.h, '.gitconfig');
   writeFileSync(gitconfig, `${readFileSync(gitconfig, 'utf8')}[url "${evil}"]\n\tpushInsteadOf = ${URL}\n`);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   const before = remoteHead(bare);
 
-  assert.match(failed(run(a, ['store', 'sync'])), /insteadOf/);
+  assert.match(failed(await runHere(a, ['store', 'sync'])), /insteadOf/);
 
   assert.equal(remoteHead(evil), '');
   assert.equal(remoteHead(bare), before);
   assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'private');
 });
 
-test('ledger store sync asks gh whether the repository is still private each time, a background sync at most once a day, and a public one gets nothing', (t) => {
+test('ledger store sync asks gh whether the repository is still private each time, a background sync at most once a day, and a public one gets nothing', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const calls = (): number => readFileSync(path.join(a.h, 'gh-calls'), 'utf8').trim().split('\n').length;
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
   const atInit = calls();
 
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
   assert.equal(calls(), atInit + 1, 'a manual sync asks gh');
-  ledgerOk(a, 'task', 'new', 'second', '--goal', 'Second.');
-  ok(run(a, ['store', 'sync', '--quiet']));
+  await ledgerOkHere(a, 'task', 'new', 'second', '--goal', 'Second.');
+  ok(await runHere(a, ['store', 'sync', '--quiet']));
   assert.equal(calls(), atInit + 1, 'a background sync on the same day does not ask again');
   assert.ok(remoteFiles(bare).includes(`backlog/${APP}/second.json`));
 
   answerGh(a.h, { visibility: 'PUBLIC', isEmpty: false });
-  ledgerOk(a, 'task', 'new', 'third', '--goal', 'Third.');
+  await ledgerOkHere(a, 'task', 'new', 'third', '--goal', 'Third.');
   const before = remoteHead(bare);
-  assert.match(failed(run(a, ['store', 'sync'])), /PUBLIC/);
+  assert.match(failed(await runHere(a, ['store', 'sync'])), /PUBLIC/);
   assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'private');
-  const quiet = run(a, ['store', 'sync', '--quiet']);
+  const quiet = await runHere(a, ['store', 'sync', '--quiet']);
   assert.equal(quiet.status, 1);
   assert.equal(calls(), atInit + 3, 'after a public answer, a background sync asks again');
   assert.equal(remoteHead(bare), before);
@@ -1008,85 +1017,85 @@ test('ledger store sync asks gh whether the repository is still private each tim
 
 // ------------------------------------------------------------------------------------------------------------- paths
 
-test('git storage refuses to write through a repo folder that is a symbolic link, in backlog/ and in archive/', (t) => {
+test('git storage refuses to write through a repo folder that is a symbolic link, in backlog/ and in archive/', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const outside = path.join(a.h, 'outside');
   mkdirSync(outside);
   symlinkSync(outside, path.join(a.clone, `backlog/${APP}`));
 
-  const ran = run(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.']);
+  const ran = await runHere(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.']);
 
   assert.equal(ran.status, 1, ran.stdout);
   assert.match(ran.stderr, new RegExp(String.raw`backlog\/${APP_PATTERN}.*symbolic link`));
   assert.deepEqual(readdirSync(outside), []);
 
   rmSync(path.join(a.clone, `backlog/${APP}`));
-  ledgerOk(a, 'task', 'new', 'idea', '--goal', 'An idea.');
+  await ledgerOkHere(a, 'task', 'new', 'idea', '--goal', 'An idea.');
   const outsideArchive = path.join(a.h, 'outside-archive');
   mkdirSync(outsideArchive);
   symlinkSync(outsideArchive, path.join(a.clone, `archive/${APP}`));
 
-  assert.equal(run(a, ['task', 'retire', 'idea']).status, 1);
+  assert.equal((await runHere(a, ['task', 'retire', 'idea'])).status, 1);
   assert.deepEqual(readdirSync(outsideArchive), []);
   assert.ok(existsSync(path.join(a.clone, `backlog/${APP}/idea.json`)));
 });
 
-test('a staged path whose name ends in a line break is checked as it is, and refused', (t) => {
+test('a staged path whose name ends in a line break is checked as it is, and refused', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const name = `backlog/${APP}/odd.md\n`;
   mkdirSync(path.join(a.clone, `backlog/${APP}`), { recursive: true });
   writeFileSync(path.join(a.clone, name), 'odd\n');
   git(a.h, a.clone, 'add', '-f', '--', name);
   const before = remoteHead(bare);
 
-  failed(run(a, ['store', 'sync']));
+  failed(await runHere(a, ['store', 'sync']));
 
   assert.equal(remoteHead(bare), before);
   assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'allowlist');
 });
 
-test('a path with a secret-like name is withheld in the output, the status file and the session context', (t) => {
+test('a path with a secret-like name is withheld in the output, the status file and the session context', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const name = `notes-${GITHUB_TOKEN}.txt`;
   writeFileSync(path.join(a.clone, name), 'notes\n');
   git(a.h, a.clone, 'add', '-f', '--', name);
 
-  const output = failed(run(a, ['store', 'sync']));
+  const output = failed(await runHere(a, ['store', 'sync']));
 
   assert.match(output, /<file name withheld>/);
-  for (const [where, text] of [['output', output], ['status file', readFileSync(a.status, 'utf8')], ['session context', hookContext(a)]]) {
+  for (const [where, text] of [['output', output], ['status file', readFileSync(a.status, 'utf8')], ['session context', await hookContextHere(a)]]) {
     assert.ok(!text.includes(GITHUB_TOKEN), `the ${where} names the file`);
   }
 });
 
 // --------------------------------------------------------------------------------------------------------- scan range
 
-test('ledger store sync and the pre-push hook scan from the remote branch, so a commit another remote-tracking ref holds is scanned too', (t) => {
+test('ledger store sync and the pre-push hook scan from the remote branch, so a commit another remote-tracking ref holds is scanned too', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const before = remoteHead(bare);
-  ledgerOk(a, 'task', 'new', 'leak', '--goal', `Use ${GITHUB_TOKEN} to log in.`);
+  await ledgerOkHere(a, 'task', 'new', 'leak', '--goal', `Use ${GITHUB_TOKEN} to log in.`);
   git(a.h, a.clone, 'update-ref', 'refs/remotes/origin/side', 'HEAD');
 
   const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
   assert.notEqual(pushed.status, 0, 'the pre-push hook let it through');
   assert.match(pushed.stderr, new RegExp(String.raw`backlog\/${APP_PATTERN}\/leak\.json:\d+`));
   git(a.h, a.clone, 'update-ref', 'refs/remotes/origin/side', 'HEAD');
-  assert.match(failed(run(a, ['store', 'sync'])), new RegExp(String.raw`backlog\/${APP_PATTERN}\/leak\.json:\d+`));
+  assert.match(failed(await runHere(a, ['store', 'sync'])), new RegExp(String.raw`backlog\/${APP_PATTERN}\/leak\.json:\d+`));
   assert.equal(remoteHead(bare), before);
 });
 
-test('a secret in a commit message blocks ledger store sync and the pre-push hook, which name the commit and not the secret', (t) => {
+test('a secret in a commit message blocks ledger store sync and the pre-push hook, which name the commit and not the secret', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const before = remoteHead(bare);
   mkdirSync(path.join(a.clone, `backlog/${APP}`), { recursive: true });
   writeFileSync(path.join(a.clone, `backlog/${APP}/clean.md`), '# clean\n');
@@ -1095,7 +1104,7 @@ test('a secret in a commit message blocks ledger store sync and the pre-push hoo
   const where = `message of commit ${git(a.h, a.clone, 'rev-parse', 'HEAD').slice(0, 12)}, line 3`;
 
   const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
-  const synced = run(a, ['store', 'sync']);
+  const synced = await runHere(a, ['store', 'sync']);
 
   for (const [who, ran] of [['git push', pushed], ['ledger store sync', synced]] as const) {
     assert.notEqual(ran.status, 0, `${who} was not blocked`);
@@ -1107,7 +1116,7 @@ test('a secret in a commit message blocks ledger store sync and the pre-push hoo
 
 // -------------------------------------------------------------------------------------------------------------- init
 
-test('sync init counts a repository with only a branch other than the default as not empty, and refuses it', (t) => {
+test('sync init counts a repository with only a branch other than the default as not empty, and refuses it', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   const other = plainClone(a);
@@ -1117,7 +1126,7 @@ test('sync init counts a repository with only a branch other than the default as
   git(a.h, other, 'push', '--quiet', 'origin', 'HEAD:refs/heads/other');
   answerGh(a.h, { visibility: 'PRIVATE', isEmpty: false });
 
-  assert.match(failed(run(a, ['store', 'sync', 'init', URL])), /\.ledger-data/);
+  assert.match(failed(await runHere(a, ['store', 'sync', 'init', URL])), /\.ledger-data/);
 
   assert.equal(remoteHead(bare), '', 'init pushed a main branch');
   assert.equal(existsSync(a.clone), false);
@@ -1126,7 +1135,7 @@ test('sync init counts a repository with only a branch other than the default as
 test('two sync inits at once: the second refuses at once and asks gh nothing, and the clone of the first stays', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  writeFileSync(path.join(a.h, 'gh-delay'), '2');
+  writeFileSync(path.join(a.h, 'gh-hold'), '');
   const first = started(a, ['store', 'sync', 'init', URL]);
   await until(() => existsSync(path.join(a.h, 'gh-calls')), 'the first gh call');
 
@@ -1136,6 +1145,7 @@ test('two sync inits at once: the second refuses at once and asks gh nothing, an
   assert.match(second.stderr, /another ledger store sync init/);
   assert.ok(ms < 1500, `the second init waited ${ms} ms`);
   assert.equal(readFileSync(path.join(a.h, 'gh-calls'), 'utf8').trim().split('\n').length, 1);
+  writeFileSync(path.join(a.h, 'gh-release'), '');
   const done = await first;
   assert.equal(done.status, 0, done.stderr);
   assert.deepEqual(JSON.parse(readFileSync(path.join(a.clone, '.ledger-data'), 'utf8')), { format: FORMAT });
@@ -1144,11 +1154,11 @@ test('two sync inits at once: the second refuses at once and asks gh nothing, an
 
 // -------------------------------------------------------------------------------------------------------- clone state
 
-test('a stash that left a conflict stops the commit of every command and of ledger store sync, and is recorded', (t) => {
+test('a stash that left a conflict stops the commit of every command and of ledger store sync, and is recorded', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   const file = path.join(a.clone, `backlog/${APP}/fix-login.json`);
   const original = readFileSync(file, 'utf8');
   writeFileSync(file, original.replace('Users cannot log in.', 'Stashed goal.'));
@@ -1159,35 +1169,35 @@ test('a stash that left a conflict stops the commit of every command and of ledg
   assert.equal(existsSync(path.join(a.clone, '.git/MERGE_HEAD')), false);
   const head = git(a.h, a.clone, 'rev-parse', 'HEAD');
 
-  const ran = run(a, ['task', 'new', 'second', '--goal', 'More.']);
+  const ran = await runHere(a, ['task', 'new', 'second', '--goal', 'More.']);
 
   assert.equal(ran.status, 0, ran.stderr);
   assert.match(ran.stderr, /not committed/);
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), head);
   assert.notEqual(git(a.h, a.clone, 'ls-files', '-u'), '', 'the conflict was marked as resolved');
   assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'conflict');
-  const output = failed(run(a, ['store', 'sync']));
+  const output = failed(await runHere(a, ['store', 'sync']));
   assert.match(output, new RegExp(String.raw`backlog\/${APP_PATTERN}\/fix-login\.json`));
   assert.match(output, ASKS_THE_OPERATOR);
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), head);
 });
 
-test('during a rebase a person has not finished, ledger store sync refuses, pushes nothing and leaves the rebase as it is', (t) => {
+test('during a rebase a person has not finished, ledger store sync refuses, pushes nothing and leaves the rebase as it is', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'store', 'sync');
   const b = machine(t, bare);
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
-  setUp(b);
-  ledgerOk(a, 'task', 'park', 'fix-login', '--reason', 'parked on A');
-  ledgerOk(a, 'store', 'sync');
-  ok(run(b, ['task', 'park', 'fix-login', '--reason', 'parked on B'], { cwd: a.app }));
+  await setUpHere(b);
+  await ledgerOkHere(a, 'task', 'park', 'fix-login', '--reason', 'parked on A');
+  await ledgerOkHere(a, 'store', 'sync');
+  ok(await runHere(b, ['task', 'park', 'fix-login', '--reason', 'parked on B'], { cwd: a.app }));
   git(b.h, b.clone, 'fetch', '--quiet', 'origin');
   assert.notEqual(gitRan(b.h, b.clone, 'rebase', 'origin/main').status, 0, 'the rebase stops');
 
-  const output = failed(run(b, ['store', 'sync']));
+  const output = failed(await runHere(b, ['store', 'sync']));
   assert.match(output, /rebase/);
   assert.match(output, ASKS_THE_OPERATOR);
 
@@ -1197,28 +1207,28 @@ test('during a rebase a person has not finished, ledger store sync refuses, push
 
 // --------------------------------------------------------------------------------------------------------------- locks
 
-test('the clone lock of a process that still runs is kept, also after a minute', (t) => {
+test('the clone lock of a process that still runs is kept, also after a minute', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const lock = path.join(a.h, '.claude/ledger-data.lock');
   writeFileSync(lock, JSON.stringify({ pid: process.pid, since: new Date(Date.now() - 2 * 60_000).toISOString() }));
 
-  const ran = run(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.']);
+  const ran = await runHere(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.'], { env: shortLockWait(a) });
 
   assert.equal(ran.status, 1, ran.stdout);
   assert.ok(ran.stderr.includes(lock), ran.stderr);
   assert.equal(existsSync(path.join(a.clone, `backlog/${APP}/fix-login.json`)), false);
 });
 
-test('a background sync that gives up waiting for the clone lock prints nothing and records why', (t) => {
+test('a background sync that gives up waiting for the clone lock prints nothing and records why', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   writeFileSync(path.join(a.h, '.claude/ledger-data.lock'), JSON.stringify({ pid: process.pid, since: new Date().toISOString() }));
 
-  const quiet = run(a, ['store', 'sync', '--quiet']);
+  const quiet = await runHere(a, ['store', 'sync', '--quiet'], { env: shortLockWait(a) });
 
   assert.equal(quiet.status, 1);
   assert.equal(`${quiet.stdout}${quiet.stderr}`, '');
@@ -1228,18 +1238,20 @@ test('a background sync that gives up waiting for the clone lock prints nothing 
 test('a background sync that starts while another runs exits at once, and the running one pushes the newer commit too', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  remoteHook(bare, 'pre-receive', ['touch receiving', 'sleep 2']);
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  const release = path.join(a.h, 'release-push');
+  remoteHook(bare, 'pre-receive', ['touch receiving', holdUntil(release)]);
   const first = started(a, ['store', 'sync', '--quiet']);
   await until(() => existsSync(path.join(bare, 'receiving')), 'the first push');
-  ledgerOk(a, 'task', 'new', 'second', '--goal', 'Second.');
+  await ledgerOkHere(a, 'task', 'new', 'second', '--goal', 'Second.');
 
   const [second, ms] = timed(() => run(a, ['store', 'sync', '--quiet']));
 
   assert.equal(second.status, 0, second.stderr);
   assert.equal(`${second.stdout}${second.stderr}`, '');
   assert.ok(ms < 1500, `the second sync took ${ms} ms`);
+  writeFileSync(release, '');
   const done = await first;
   assert.equal(done.status, 0, done.stderr);
   for (const file of [`backlog/${APP}/first.json`, `backlog/${APP}/second.json`]) assert.ok(remoteFiles(bare).includes(file), file);
@@ -1258,18 +1270,18 @@ test('a sync that started earlier neither clears nor replaces the problem a late
 
 // ------------------------------------------------------------------------------------------------------ session start
 
-test('the session-start pull stops within its time limit and leaves no half rebase', (t) => {
+test('the session-start pull stops within its time limit and leaves no half rebase', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  await ledgerOkHere(a, 'store', 'sync');
   const b = machine(t, bare);
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
-  setUp(b);
-  ledgerOk(a, 'task', 'new', 'later', '--goal', 'Comes later.');
-  ledgerOk(a, 'store', 'sync');
-  ledgerOk(b, 'task', 'new', 'mine', '--goal', 'Made on B.');
+  await setUpHere(b);
+  await ledgerOkHere(a, 'task', 'new', 'later', '--goal', 'Comes later.');
+  await ledgerOkHere(a, 'store', 'sync');
+  await ledgerOkHere(b, 'task', 'new', 'mine', '--goal', 'Made on B.');
   const local = git(b.h, b.clone, 'rev-parse', 'HEAD');
   // git rebase runs post-rewrite before it removes its state, so a rebase stopped here is half done.
   const slow = path.resolve(b.clone, git(b.h, b.clone, 'rev-parse', '--git-path', 'hooks/post-rewrite'));
@@ -1295,9 +1307,10 @@ test('the session-start pull stops within its time limit and leaves no half reba
 test('a ledger command that runs while a sync pushes is not held up, and the next sync pushes it', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  remoteHook(bare, 'pre-receive', ['touch receiving', 'sleep 2']);
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  const release = path.join(a.h, 'release-push');
+  remoteHook(bare, 'pre-receive', ['touch receiving', holdUntil(release)]);
   const syncing = started(a, ['store', 'sync']);
   await until(() => existsSync(path.join(bare, 'receiving')), 'the push');
 
@@ -1305,6 +1318,7 @@ test('a ledger command that runs while a sync pushes is not held up, and the nex
 
   assert.equal(ran.status, 0, ran.stderr);
   assert.ok(ms < 1500, `the command waited ${ms} ms`);
+  writeFileSync(release, '');
   const synced = await syncing;
   assert.equal(synced.status, 0, synced.stderr);
   ledgerOk(a, 'store', 'sync');
@@ -1312,12 +1326,12 @@ test('a ledger command that runs while a sync pushes is not held up, and the nex
   assert.equal(git(a.h, a.clone, 'status', '--porcelain'), '');
 });
 
-test('when the remote moves between the fetch and the push, ledger store sync pulls again and pushes', (t) => {
+test('when the remote moves between the fetch and the push, ledger store sync pulls again and pushes', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  await ledgerOkHere(a, 'store', 'sync');
   const other = plainClone(a);
   writeFileSync(path.join(other, `backlog/${APP}/other.md`), '# other\n');
   git(a.h, other, 'add', '-f', `backlog/${APP}/other.md`);
@@ -1329,9 +1343,9 @@ test('when the remote moves between the fetch and the push, ledger store sync pu
     '  exit 1',
     'fi',
   ]);
-  ledgerOk(a, 'task', 'new', 'mine', '--goal', 'Made here.');
+  await ledgerOkHere(a, 'task', 'new', 'mine', '--goal', 'Made here.');
 
-  assert.match(ledgerOk(a, 'store', 'sync'), /Pushed/);
+  assert.match(await ledgerOkHere(a, 'store', 'sync'), /Pushed/);
 
   for (const file of [`backlog/${APP}/other.md`, `backlog/${APP}/mine.json`]) assert.ok(remoteFiles(bare).includes(file), file);
   assert.equal(remoteHead(bare), git(a.h, a.clone, 'rev-parse', 'HEAD'));
@@ -1339,15 +1353,15 @@ test('when the remote moves between the fetch and the push, ledger store sync pu
 
 // --------------------------------------------------------------------------------------------------- migrate and git
 
-test('migrate --to git --remove-source stops before it removes or switches anything when git storage cannot commit', (t) => {
+test('migrate --to git --remove-source stops before it removes or switches anything when git storage cannot commit', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ok(run(a, ['store', 'sync', 'init', URL]));
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  ok(await runHere(a, ['store', 'sync', 'init', URL]));
   writeFileSync(path.join(a.clone, 'notes.txt'), 'private\n');
   git(a.h, a.clone, 'add', '-f', 'notes.txt');
 
-  assert.match(failed(run(a, ['store', 'migrate', '--to', 'git', '--remove-source'])), /notes\.txt/);
+  assert.match(failed(await runHere(a, ['store', 'migrate', '--to', 'git', '--remove-source'])), /notes\.txt/);
 
   assert.ok(existsSync(path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.json`)), 'the source was removed');
   assert.equal(existsSync(path.join(a.h, '.claude/ledger-settings.json')), false);
@@ -1356,10 +1370,10 @@ test('migrate --to git --remove-source stops before it removes or switches anyth
 
 // -------------------------------------------------------------------------------------------------------- names as paths
 
-test('a ledger or repo named . or .. is outside the allowlist: a staged archive/app/...md stops the sync', (t) => {
+test('a ledger or repo named . or .. is outside the allowlist: a staged archive/app/...md stops the sync', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const before = remoteHead(bare);
   for (const file of ['archive/app/...md', 'backlog/app/..md']) {
     mkdirSync(path.dirname(path.join(a.clone, file)), { recursive: true });
@@ -1367,23 +1381,23 @@ test('a ledger or repo named . or .. is outside the allowlist: a staged archive/
   }
   git(a.h, a.clone, 'add', '-f', '--', 'archive/app/...md', 'backlog/app/..md');
 
-  const output = failed(run(a, ['store', 'sync']));
+  const output = failed(await runHere(a, ['store', 'sync']));
 
   assert.ok(output.includes('archive/app/...md'), output);
   assert.equal(remoteHead(bare), before);
   assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'allowlist');
 });
 
-test('migrate --remove-source removes no more than one copy and its evidence: a file named ...md in the archive is no ledger', (t) => {
+test('migrate --remove-source removes no more than one copy and its evidence: a file named ...md in the archive is no ledger', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   const archive = path.join(a.h, '.claude/ledger-archive');
   mkdirSync(path.join(archive, 'app'), { recursive: true });
   writeFileSync(path.join(archive, 'app/...md'), '# dots\n');
   writeFileSync(path.join(archive, 'keep.txt'), 'not a ledger\n');
-  ok(run(a, ['store', 'sync', 'init', URL]));
+  ok(await runHere(a, ['store', 'sync', 'init', URL]));
 
-  run(a, ['store', 'migrate', '--to', 'git', '--remove-source']);
+  await runHere(a, ['store', 'migrate', '--to', 'git', '--remove-source']);
 
   assert.equal(readFileSync(path.join(archive, 'keep.txt'), 'utf8'), 'not a ledger\n');
   assert.ok(existsSync(path.join(archive, 'app/...md')));
@@ -1392,27 +1406,27 @@ test('migrate --remove-source removes no more than one copy and its evidence: a 
 
 // ------------------------------------------------------------------------------------------------------ ignored ledgers
 
-test('a .gitignore from the remote that ignores ledgers keeps none out of the commit or the push', (t) => {
+test('a .gitignore from the remote that ignores ledgers keeps none out of the commit or the push', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const other = plainClone(a);
   appendFileSync(path.join(other, '.gitignore'), '/backlog/*/*.md\n/backlog/*/*.json\n');
   pushFrom(a, other, 'ignore the ledgers');
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
 
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
 
   git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/fix-login.json`);
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
   assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
 });
 
-test('migrate --to git --remove-source commits every copy before it removes anything, also one an exclude file ignores', (t) => {
+test('migrate --to git --remove-source commits every copy before it removes anything, also one an exclude file ignores', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ok(run(a, ['store', 'sync', 'init', URL]));
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  ok(await runHere(a, ['store', 'sync', 'init', URL]));
   writeFileSync(path.join(a.clone, '.git/info/exclude'), 'backlog/\n');
   const source = path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.json`);
   const commits = path.join(a.h, 'commits');
@@ -1421,7 +1435,7 @@ test('migrate --to git --remove-source commits every copy before it removes anyt
   writeFileSync(hook, `#!/bin/sh\nif [ -f '${source}' ]; then echo source; else echo removed; fi >> '${commits}'\n`);
   chmodSync(hook, 0o755);
 
-  ledgerOk(a, 'store', 'migrate', '--to', 'git', '--remove-source');
+  await ledgerOkHere(a, 'store', 'migrate', '--to', 'git', '--remove-source');
 
   assert.equal(readFileSync(commits, 'utf8').split('\n')[0], 'source', 'the first commit came after the source was removed');
   assert.equal(existsSync(source), false);
@@ -1431,35 +1445,35 @@ test('migrate --to git --remove-source commits every copy before it removes anyt
 
 // ------------------------------------------------------------------------------------------------------ incoming commits
 
-test('ledger store sync pushes against the commit it fetched, even when the remote-tracking branch moves while it rebases', (t) => {
+test('ledger store sync pushes against the commit it fetched, even when the remote-tracking branch moves while it rebases', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  await ledgerOkHere(a, 'store', 'sync');
   const b = machine(t, bare);
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
-  setUp(b);
-  ledgerOk(a, 'task', 'new', 'later', '--goal', 'Comes later.');
-  ledgerOk(a, 'store', 'sync');
-  ledgerOk(b, 'task', 'new', 'mine', '--goal', 'Made on B.');
+  await setUpHere(b);
+  await ledgerOkHere(a, 'task', 'new', 'later', '--goal', 'Comes later.');
+  await ledgerOkHere(a, 'store', 'sync');
+  await ledgerOkHere(b, 'task', 'new', 'mine', '--goal', 'Made on B.');
   // Stands in for another process that fetches while this sync rebases.
   const hook = path.join(b.clone, '.git/hooks/post-rewrite');
   writeFileSync(hook, '#!/bin/sh\ngit update-ref refs/remotes/origin/main HEAD\n');
   chmodSync(hook, 0o755);
 
-  ledgerOk(b, 'store', 'sync');
+  await ledgerOkHere(b, 'store', 'sync');
 
   assert.ok(remoteFiles(bare).includes(`backlog/${APP}/mine.json`));
   assert.equal(remoteHead(bare), git(b.h, b.clone, 'rev-parse', 'HEAD'));
 });
 
-test('a pull refuses incoming history that held a path ledger never checks out, also when a later commit removed it', (t) => {
+test('a pull refuses incoming history that held a path ledger never checks out, also when a later commit removed it', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'store', 'sync');
   const other = plainClone(a);
   writeFileSync(path.join(other, 'notes.txt'), 'not a ledger\n');
   git(a.h, other, 'add', '-f', 'notes.txt');
@@ -1467,24 +1481,24 @@ test('a pull refuses incoming history that held a path ledger never checks out, 
   git(a.h, other, 'rm', '--quiet', 'notes.txt');
   pushFrom(a, other, 'remove notes');
   const remoteNow = remoteHead(bare);
-  ledgerOk(a, 'task', 'new', 'mine', '--goal', 'Made here.');
+  await ledgerOkHere(a, 'task', 'new', 'mine', '--goal', 'Made here.');
   const local = git(a.h, a.clone, 'rev-parse', 'HEAD');
 
-  assert.match(failed(run(a, ['store', 'sync'])), /notes\.txt/);
+  assert.match(failed(await runHere(a, ['store', 'sync'])), /notes\.txt/);
 
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), local);
   assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'incoming');
   assert.equal(remoteHead(bare), remoteNow);
   rmSync(a.status);
-  hookContext(a);
+  await hookContextHere(a);
   assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'incoming');
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), local);
 });
 
-test('sync init refuses a repository whose history held a symbolic link, though its last commit holds none', (t) => {
+test('sync init refuses a repository whose history held a symbolic link, though its last commit holds none', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const other = plainClone(a);
   mkdirSync(path.join(other, `backlog/${APP}`), { recursive: true });
   symlinkSync('/etc/hosts', path.join(other, `backlog/${APP}/link.md`));
@@ -1495,18 +1509,18 @@ test('sync init refuses a repository whose history held a symbolic link, though 
   const b = machine(t, bare);
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
 
-  assert.match(failed(run(b, ['store', 'sync', 'init', URL])), new RegExp(String.raw`backlog\/${APP_PATTERN}\/link\.md`));
+  assert.match(failed(await runHere(b, ['store', 'sync', 'init', URL])), new RegExp(String.raw`backlog\/${APP_PATTERN}\/link\.md`));
 
   assert.equal(existsSync(b.clone), false);
 });
 
 // -------------------------------------------------------------------------------------------------------- test remote
 
-test('no environment variable lets a URL rewrite send the checked URL to a local repository', (t) => {
+test('no environment variable lets a URL rewrite send the checked URL to a local repository', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   const before = remoteHead(bare);
   const env = { ...commandEnv(a.h), LEDGER_TEST_REMOTE: a.bare, LEDGER_TEST_NO_BACKGROUND_SYNC: '1' };
 
@@ -1517,15 +1531,15 @@ test('no environment variable lets a URL rewrite send the checked URL to a local
 
 // --------------------------------------------------------------------------------------------------------- manual push
 
-test('a manual git push in the clone runs the pre-push hook of ledger, also when the global git config sets core.hooksPath', (t) => {
+test('a manual git push in the clone runs the pre-push hook of ledger, also when the global git config sets core.hooksPath', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   const globalHooks = path.join(a.h, 'global-hooks');
   mkdirSync(globalHooks);
   appendFileSync(path.join(a.h, '.gitconfig'), `[core]\n\thooksPath = ${globalHooks}\n`);
-  setUp(a);
+  await setUpHere(a);
   const before = remoteHead(bare);
-  ledgerOk(a, 'task', 'new', 'leak', '--goal', `Use ${GITHUB_TOKEN} to log in.`);
+  await ledgerOkHere(a, 'task', 'new', 'leak', '--goal', `Use ${GITHUB_TOKEN} to log in.`);
 
   const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
 
@@ -1537,11 +1551,11 @@ test('a manual git push in the clone runs the pre-push hook of ledger, also when
 
 // -------------------------------------------------------------------------------------------------------- scan options
 
-test('a secret in a root commit is found by ledger store sync and the pre-push hook, also when git config hides root commits from git log', (t) => {
+test('a secret in a root commit is found by ledger store sync and the pre-push hook, also when git config hides root commits from git log', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   appendFileSync(path.join(a.h, '.gitconfig'), '[log]\n\tshowRoot = false\n');
-  setUp(a);
+  await setUpHere(a);
   const before = remoteHead(bare);
   git(a.h, a.clone, 'checkout', '--quiet', '--orphan', 'side');
   git(a.h, a.clone, 'rm', '-r', '-f', '--quiet', '.');
@@ -1555,7 +1569,7 @@ test('a secret in a root commit is found by ledger store sync and the pre-push h
   git(a.h, a.clone, 'merge', '--quiet', '--allow-unrelated-histories', '--no-edit', 'side');
 
   const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
-  const synced = run(a, ['store', 'sync']);
+  const synced = await runHere(a, ['store', 'sync']);
 
   for (const [who, ran] of [['git push', pushed], ['ledger store sync', synced]] as const) {
     assert.notEqual(ran.status, 0, `${who} was not blocked`);
@@ -1565,16 +1579,16 @@ test('a secret in a root commit is found by ledger store sync and the pre-push h
   assert.equal(remoteHead(bare), before);
 });
 
-test('no tag is pushed: ledger store sync leaves tags out under push.followTags, and the pre-push hook blocks a push of one', (t) => {
+test('no tag is pushed: ledger store sync leaves tags out under push.followTags, and the pre-push hook blocks a push of one', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   appendFileSync(path.join(a.h, '.gitconfig'), '[push]\n\tfollowTags = true\n');
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   git(a.h, a.clone, 'tag', '-a', 'v1', '-m', `token ${GITHUB_TOKEN}`);
   const tags = (): string => gitRan(path.dirname(bare), bare, 'tag', '--list').stdout;
 
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
   assert.equal(tags(), '');
 
   const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'refs/tags/v1');
@@ -1586,17 +1600,17 @@ test('no tag is pushed: ledger store sync leaves tags out under push.followTags,
 
 // ------------------------------------------------------------------------------------------------------- modes and types
 
-test('a symbolic link or an executable file at a ledger path is never committed or pushed', (t) => {
+test('a symbolic link or an executable file at a ledger path is never committed or pushed', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'store', 'sync');
   const before = remoteHead(bare);
   const link = path.join(a.clone, `backlog/${APP}/link.md`);
   symlinkSync('/etc/hosts', link);
 
-  assert.match(failed(run(a, ['store', 'sync'])), new RegExp(String.raw`backlog\/${APP_PATTERN}\/link\.md`));
+  assert.match(failed(await runHere(a, ['store', 'sync'])), new RegExp(String.raw`backlog\/${APP_PATTERN}\/link\.md`));
   assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'allowlist');
   assert.equal(remoteHead(bare), before);
 
@@ -1607,21 +1621,21 @@ test('a symbolic link or an executable file at a ledger path is never committed 
   git(a.h, a.clone, 'add', `backlog/${APP}/run.md`);
   git(a.h, a.clone, 'commit', '--quiet', '-m', 'by hand');
 
-  assert.match(failed(run(a, ['store', 'sync'])), new RegExp(String.raw`backlog\/${APP_PATTERN}\/run\.md`));
+  assert.match(failed(await runHere(a, ['store', 'sync'])), new RegExp(String.raw`backlog\/${APP_PATTERN}\/run\.md`));
   assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'allowlist');
   assert.equal(remoteHead(bare), before);
 });
 
 // ------------------------------------------------------------------------------------------------------------ redaction
 
-test('git error text is printed and recorded without secret-like words or credentials', (t) => {
+test('git error text is printed and recorded without secret-like words or credentials', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   remoteHook(bare, 'pre-receive', [`echo "refused backlog/${APP}/${GITHUB_TOKEN}.md from https://me:${PASSWORD}@example.com/x" >&2`, 'exit 1']);
 
-  const output = failed(run(a, ['store', 'sync']));
+  const output = failed(await runHere(a, ['store', 'sync']));
 
   assert.match(output, /refused/);
   for (const [where, text] of [['output', output], ['status file', readFileSync(a.status, 'utf8')]]) {
@@ -1630,17 +1644,17 @@ test('git error text is printed and recorded without secret-like words or creden
   }
 });
 
-test('migrate withholds a secret-like name when it names a name the target already has', (t) => {
+test('migrate withholds a secret-like name when it names a name the target already has', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   const file = `backlog/${APP}/notes-${GITHUB_TOKEN}.md`;
   mkdirSync(path.join(a.h, `.claude/ledger-backlog/${APP}`), { recursive: true });
   writeFileSync(path.join(a.h, `.claude/ledger-${file}`), '# notes\n');
-  ok(run(a, ['store', 'sync', 'init', URL]));
+  ok(await runHere(a, ['store', 'sync', 'init', URL]));
   mkdirSync(path.join(a.clone, `backlog/${APP}`), { recursive: true });
   writeFileSync(path.join(a.clone, file), '# notes\n');
 
-  const output = failed(run(a, ['store', 'migrate', '--to', 'git']));
+  const output = failed(await runHere(a, ['store', 'migrate', '--to', 'git']));
 
   assert.ok(!output.includes(GITHUB_TOKEN), 'migrate printed the secret-like name');
   assert.match(output, /already has 1 name/);
@@ -1649,24 +1663,24 @@ test('migrate withholds a secret-like name when it names a name the target alrea
 
 // ------------------------------------------------------------------------------------------------- session-start budget
 
-test('when the session-start pull cannot undo a rebase that stopped, it records that and says to run git rebase --abort', (t) => {
+test('when the session-start pull cannot undo a rebase that stopped, it records that and says to run git rebase --abort', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  await ledgerOkHere(a, 'store', 'sync');
   const b = machine(t, bare);
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
-  setUp(b);
-  ledgerOk(a, 'task', 'new', 'later', '--goal', 'Comes later.');
-  ledgerOk(a, 'store', 'sync');
-  ledgerOk(b, 'task', 'new', 'mine', '--goal', 'Made on B.');
+  await setUpHere(b);
+  await ledgerOkHere(a, 'task', 'new', 'later', '--goal', 'Comes later.');
+  await ledgerOkHere(a, 'store', 'sync');
+  await ledgerOkHere(b, 'task', 'new', 'mine', '--goal', 'Made on B.');
   // The lock stops the rebase after its first checkout, and then stops git rebase --abort too.
   const hook = path.join(b.clone, '.git/hooks/post-checkout');
   writeFileSync(hook, '#!/bin/sh\ntouch "$(git rev-parse --git-dir)/index.lock"\n');
   chmodSync(hook, 0o755);
 
-  assert.match(hookContext(b), /ledger store sync/);
+  assert.match(await hookContextHere(b), /ledger store sync/);
 
   const status = JSON.parse(readFileSync(b.status, 'utf8')) as { problem: string; message: string };
   assert.equal(status.problem, 'conflict');
@@ -1677,16 +1691,27 @@ test('when the session-start pull cannot undo a rebase that stopped, it records 
 // ------------------------------------------------------------------------------------------------------- locks and status
 
 /**
- * A process that takes the lock of `<target>-<round>` once per round, each round at the same moment as the others. It
- * prints how often it found another process inside the lock with it, or its lock moved or taken while it held it.
+ * A process that takes the lock of `<target>-<round>` once per round, each round at the same moment as the others. Once
+ * started, it adds a byte to `<target>.ready`, and its first round starts at the time `<target>.start` names. It prints
+ * how often it found another process inside the lock with it, or its lock moved or taken while it held it.
  */
 const LOCK_CONTENDER = `
 import { register } from 'tsx/esm/api';
 register();
-const { mkdirSync, readFileSync, rmdirSync } = await import('node:fs');
+const { appendFileSync, mkdirSync, readFileSync, rmdirSync } = await import('node:fs');
 const { withLock } = await import(process.env.LOCK_MODULE);
 const { sleep } = await import(process.env.WAIT_MODULE);
-const [target, rounds, start, roundMs] = [process.env.TARGET, Number(process.env.ROUNDS), Number(process.env.START), Number(process.env.ROUND_MS)];
+const [target, rounds, roundMs] = [process.env.TARGET, Number(process.env.ROUNDS), Number(process.env.ROUND_MS)];
+appendFileSync(target + '.ready', '.');
+const startTime = () => {
+  try {
+    return Number(readFileSync(target + '.start', 'utf8'));
+  } catch {
+    return undefined;
+  }
+};
+let start;
+for (const giveUp = Date.now() + 90000; (start = startTime()) === undefined; sleep(5)) if (Date.now() > giveUp) throw new Error('no start time');
 const holder = (lock) => {
   try {
     return JSON.parse(readFileSync(lock, 'utf8')).pid;
@@ -1715,6 +1740,14 @@ for (let round = 0; round < rounds; round++) {
 process.stdout.write(String(wrong));
 `;
 
+/** Once each of the `count` contenders on `target` is ready, starts their first round a moment later, all at once. */
+async function startContenders(target: string, count: number): Promise<void> {
+  await until(() => existsSync(`${target}.ready`) && readFileSync(`${target}.ready`, 'utf8').length === count, 'every contender is ready', 60_000);
+  // Renamed into place, so no contender reads half a time.
+  writeFileSync(`${target}.start-next`, String(Date.now() + 200));
+  renameSync(`${target}.start-next`, `${target}.start`);
+}
+
 test('a left-over lock is taken over by one process at a time: of four processes that find it at once, none holds it with another or loses it while it works', async (t) => {
   const target = path.join(home(t), 'target');
   const rounds = 25;
@@ -1726,7 +1759,6 @@ test('a left-over lock is taken over by one process at a time: of four processes
     WAIT_MODULE: pathToFileURL(path.join(REPO, 'tools/ledger/wait.ts')).href,
     TARGET: target,
     ROUNDS: String(rounds),
-    START: String(Date.now() + 3000),
     ROUND_MS: '300',
     // Widens each moment between a read of the lock and the step that depends on it.
     LEDGER_TEST_DELAY_MS: '20',
@@ -1741,7 +1773,9 @@ test('a left-over lock is taken over by one process at a time: of four processes
       child.on('close', (status) => resolve({ status, stdout, stderr }));
     });
 
-  const ran = await Promise.all(Array.from({ length: 4 }, contender));
+  const running = Array.from({ length: 4 }, contender);
+  await startContenders(target, 4);
+  const ran = await Promise.all(running);
 
   for (const { status, stderr } of ran) assert.equal(status, 0, stderr);
   assert.deepEqual(
@@ -1762,13 +1796,15 @@ test('a sync that started earlier does not record its problem over the success o
 test('a background sync whose sync fails syncs once more for a command that left a note meanwhile', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  remoteHook(bare, 'pre-receive', ['if [ ! -f refused ]; then', '  touch refused receiving', '  sleep 2', '  exit 1', 'fi']);
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  const release = path.join(a.h, 'release-push');
+  remoteHook(bare, 'pre-receive', ['if [ ! -f refused ]; then', '  touch refused receiving', `  ${holdUntil(release)}`, '  exit 1', 'fi']);
   const first = started(a, ['store', 'sync', '--quiet']);
   await until(() => existsSync(path.join(bare, 'receiving')), 'the first push');
-  ledgerOk(a, 'task', 'new', 'second', '--goal', 'Second.');
+  await ledgerOkHere(a, 'task', 'new', 'second', '--goal', 'Second.');
   assert.equal(run(a, ['store', 'sync', '--quiet']).status, 0);
+  writeFileSync(release, '');
 
   const done = await first;
 
@@ -1779,7 +1815,7 @@ test('a background sync whose sync fails syncs once more for a command that left
 
 // ---------------------------------------------------------------------------------------------------------- init config
 
-test('sync init reaches the URL as git config outside any repository sends it: a repository at ~/.claude does not rewrite it', (t) => {
+test('sync init reaches the URL as git config outside any repository sends it: a repository at ~/.claude does not rewrite it', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   // A shorter prefix than the one in ~/.claude, so that one would win wherever git reads it.
@@ -1795,7 +1831,7 @@ test('sync init reaches the URL as git config outside any repository sends it: a
   git(a.h, a.h, 'init', '--quiet', claude);
   git(a.h, claude, 'config', `url.${evil}.insteadOf`, URL);
 
-  ok(run(a, ['store', 'sync', 'init', URL]));
+  ok(await runHere(a, ['store', 'sync', 'init', URL]));
 
   assert.equal(git(a.h, a.clone, 'rev-parse', 'HEAD'), remoteHead(bare));
   assert.equal(remoteText(bare, '.ledger-data').trim(), JSON.stringify({ format: FORMAT }));
@@ -1803,11 +1839,11 @@ test('sync init reaches the URL as git config outside any repository sends it: a
 
 // ------------------------------------------------------------------------------------------------- what reaches git
 
-test('migrate --to git --remove-source keeps the source when git storage commits other text than the source it read', (t) => {
+test('migrate --to git --remove-source keeps the source when git storage commits other text than the source it read', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ok(run(a, ['store', 'sync', 'init', URL]));
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  ok(await runHere(a, ['store', 'sync', 'init', URL]));
   const source = path.join(a.h, `.claude/ledger-backlog/${APP}/fix-login.json`);
   const text = readFileSync(source, 'utf8');
   // Stands in for another command that changes the copy once the check is done: the commit then holds its text, on disk too.
@@ -1818,7 +1854,7 @@ test('migrate --to git --remove-source keeps the source when git storage commits
   );
   chmodSync(hook, 0o755);
 
-  const output = failed(run(a, ['store', 'migrate', '--to', 'git', '--remove-source']));
+  const output = failed(await runHere(a, ['store', 'migrate', '--to', 'git', '--remove-source']));
 
   assert.ok(existsSync(path.join(a.h, 'changed')), 'the hook did not run');
   assert.match(output, /ledger store migrate stopped/);
@@ -1827,12 +1863,12 @@ test('migrate --to git --remove-source keeps the source when git storage commits
 });
 
 for (const hide of ['a replace object', 'a graft'] as const) {
-  test(`ledger store sync and the pre-push hook scan the commits git pushes, also when ${hide} hides one`, (t) => {
+  test(`ledger store sync and the pre-push hook scan the commits git pushes, also when ${hide} hides one`, async (t) => {
     const bare = remote(t);
     const a = machine(t, bare);
-    setUp(a);
+    await setUpHere(a);
     const before = remoteHead(bare);
-    ledgerOk(a, 'task', 'new', 'leak', '--goal', `Use ${GITHUB_TOKEN} to log in.`);
+    await ledgerOkHere(a, 'task', 'new', 'leak', '--goal', `Use ${GITHUB_TOKEN} to log in.`);
     const leak = git(a.h, a.clone, 'rev-parse', 'HEAD');
     // A later commit takes the token out again, so the last tree holds none; only the commit that added it does.
     writeFileSync(path.join(a.clone, `backlog/${APP}/leak.json`), '# leak\n');
@@ -1843,7 +1879,7 @@ for (const hide of ['a replace object', 'a graft'] as const) {
       writeFileSync(path.join(a.clone, '.git/info/grafts'), `${git(a.h, a.clone, 'rev-parse', 'HEAD')} ${before}\n`);
     }
 
-    const synced = run(a, ['store', 'sync']);
+    const synced = await runHere(a, ['store', 'sync']);
     const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
 
     for (const [who, ran] of [['ledger store sync', synced], ['git push', pushed]] as const) {
@@ -1856,7 +1892,7 @@ for (const hide of ['a replace object', 'a graft'] as const) {
   });
 }
 
-test('ledger store sync and the pre-push hook of a manual git push both refuse a path outside the allowlist, a backslash, a symbolic link and an executable file', (t) => {
+test('ledger store sync and the pre-push hook of a manual git push both refuse a path outside the allowlist, a backslash, a symbolic link and an executable file', async (t) => {
   const cases: [string, (clone: string) => void][] = [
     ['notes.txt', (clone) => writeFileSync(path.join(clone, 'notes.txt'), 'private\n')],
     [`backlog/${APP}/a\\b.md`, (clone) => writeFileSync(path.join(clone, `backlog/${APP}/a\\b.md`), '# a\n')],
@@ -1866,7 +1902,7 @@ test('ledger store sync and the pre-push hook of a manual git push both refuse a
   for (const [file, add] of cases) {
     const bare = remote(t);
     const a = machine(t, bare);
-    setUp(a);
+    await setUpHere(a);
     const before = remoteHead(bare);
     mkdirSync(path.join(a.clone, `backlog/${APP}`), { recursive: true });
     add(a.clone);
@@ -1874,7 +1910,7 @@ test('ledger store sync and the pre-push hook of a manual git push both refuse a
     git(a.h, a.clone, 'commit', '--quiet', '-m', 'by hand');
 
     const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
-    const synced = run(a, ['store', 'sync']);
+    const synced = await runHere(a, ['store', 'sync']);
 
     for (const [who, ran] of [['git push', pushed], ['ledger store sync', synced]] as const) {
       assert.notEqual(ran.status, 0, `${who} was not blocked for ${file}`);
@@ -1884,15 +1920,15 @@ test('ledger store sync and the pre-push hook of a manual git push both refuse a
   }
 });
 
-test('ledger store sync and the pre-push hook name the exact line of a secret, also when git config merges nearby hunks', (t) => {
+test('ledger store sync and the pre-push hook name the exact line of a secret, also when git config merges nearby hunks', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const file = path.join(a.clone, `backlog/${APP}/notes.md`);
   const lines = Array.from({ length: 8 }, (_, index) => `line ${index + 1}`);
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, `${lines.join('\n')}\n`);
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
   const before = remoteHead(bare);
   lines[1] = `line 2 ${GITHUB_TOKEN}`;
   lines[5] = `line 6 ${GITHUB_TOKEN}`;
@@ -1901,7 +1937,7 @@ test('ledger store sync and the pre-push hook name the exact line of a secret, a
   git(a.h, a.clone, 'config', 'diff.interHunkContext', '10');
 
   const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
-  const synced = run(a, ['store', 'sync']);
+  const synced = await runHere(a, ['store', 'sync']);
 
   for (const [who, ran] of [['git push', pushed], ['ledger store sync', synced]] as const) {
     const output = `${ran.stdout}${ran.stderr}`;
@@ -1912,10 +1948,10 @@ test('ledger store sync and the pre-push hook name the exact line of a secret, a
   assert.equal(remoteHead(bare), before);
 });
 
-test('ledger store sync and the session start fetch and move the remote-tracking branch only while they hold the clone lock', (t) => {
+test('ledger store sync and the session start fetch and move the remote-tracking branch only while they hold the clone lock', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const updates = path.join(a.h, 'remote-ref-updates');
   const hook = path.join(a.clone, '.git/hooks/reference-transaction');
   writeFileSync(
@@ -1932,13 +1968,13 @@ test('ledger store sync and the session start fetch and move the remote-tracking
     ].join('\n'),
   );
   chmodSync(hook, 0o755);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'store', 'sync');
   const other = plainClone(a);
   writeFileSync(path.join(other, `backlog/${APP}/other.md`), '# other\n');
   pushFrom(a, other, 'from elsewhere');
 
-  hookContext(a);
+  await hookContextHere(a);
 
   const seen = readFileSync(updates, 'utf8').trim().split('\n');
   assert.ok(seen.length >= 2, seen.join(', '));
@@ -1949,15 +1985,15 @@ test('ledger store sync and the session start fetch and move the remote-tracking
   );
 });
 
-test('gh error text is printed and recorded without secret-like words', (t) => {
+test('gh error text is printed and recorded without secret-like words', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const b = machine(t, bare);
   for (const h of [a.h, b.h]) writeFileSync(path.join(h, 'stub-bin/gh'), `#!/bin/sh\necho "gh: the token ${GITHUB_TOKEN} is not valid" >&2\nexit 4\n`);
 
-  const synced = failed(run(a, ['store', 'sync']));
-  const init = failed(run(b, ['store', 'sync', 'init', URL]));
+  const synced = failed(await runHere(a, ['store', 'sync']));
+  const init = failed(await runHere(b, ['store', 'sync', 'init', URL]));
 
   for (const [where, text] of [['sync', synced], ['status file', readFileSync(a.status, 'utf8')], ['init', init]]) {
     assert.match(text, /not valid/, where);
@@ -1965,19 +2001,19 @@ test('gh error text is printed and recorded without secret-like words', (t) => {
   }
 });
 
-test('the whole session start in a linked worktree stays within its 5 s, when the pull uses its share and git then hangs in the main checkout', (t) => {
+test('the whole session start in a linked worktree stays within its 5 s, when the pull uses its share and git then hangs in the main checkout', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  await ledgerOkHere(a, 'store', 'sync');
   const b = machine(t, bare);
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
-  setUp(b);
-  ledgerOk(a, 'task', 'new', 'later', '--goal', 'Comes later.');
-  ledgerOk(a, 'store', 'sync');
-  ledgerOk(b, 'task', 'new', 'mine', '--goal', 'Made on B.');
-  ledgerOk(b, 'go', 'mine');
+  await setUpHere(b);
+  await ledgerOkHere(a, 'task', 'new', 'later', '--goal', 'Comes later.');
+  await ledgerOkHere(a, 'store', 'sync');
+  await ledgerOkHere(b, 'task', 'new', 'mine', '--goal', 'Made on B.');
+  await ledgerOkHere(b, 'go', 'mine');
   const rewriting = path.join(b.h, 'rewriting');
   const slow = path.join(b.clone, '.git/hooks/post-rewrite');
   writeFileSync(slow, `#!/bin/sh\nexec >/dev/null 2>&1 </dev/null\ntouch '${rewriting}'\nsleep 30\n`);
@@ -2001,21 +2037,21 @@ test('the whole session start in a linked worktree stays within its 5 s, when th
   assert.ok(ms - startUp < HOOK_MS + 1000, `the session start took ${ms - startUp} ms after start-up`);
 });
 
-test('a waiting task whose PR gh says is merged after the session start used up its git time is still marked done and committed', (t) => {
+test('a waiting task whose PR gh says is merged after the session start used up its git time is still marked done and committed', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  await ledgerOkHere(a, 'store', 'sync');
   const b = machine(t, bare);
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
-  setUp(b);
-  ledgerOk(a, 'task', 'new', 'later', '--goal', 'Comes later.');
-  ledgerOk(a, 'store', 'sync');
-  ledgerOk(b, 'task', 'new', 'mine', '--goal', 'Made on B.');
-  ledgerOk(b, 'go', 'mine');
+  await setUpHere(b);
+  await ledgerOkHere(a, 'task', 'new', 'later', '--goal', 'Comes later.');
+  await ledgerOkHere(a, 'store', 'sync');
+  await ledgerOkHere(b, 'task', 'new', 'mine', '--goal', 'Made on B.');
+  await ledgerOkHere(b, 'go', 'mine');
   const pr = 'https://github.com/acme/app/pull/7';
-  ledgerOk(b, 'task', 'pr', pr, '--task', 'mine');
+  await ledgerOkHere(b, 'task', 'pr', pr, '--task', 'mine');
   // The pull hangs in its rebase until its share of the hook's time is up; gh then answers after the end of that time.
   const slow = path.join(b.clone, '.git/hooks/post-rewrite');
   writeFileSync(slow, '#!/bin/sh\nexec >/dev/null 2>&1 </dev/null\nsleep 30\n', { mode: 0o755 });
@@ -2036,10 +2072,10 @@ test('a waiting task whose PR gh says is merged after the session start used up 
   assert.equal(git(b.h, b.clone, 'status', '--porcelain'), '');
 });
 
-test('git in the clone ignores GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and GIT_CONFIG_* of the environment ledger runs in', (t) => {
+test('git in the clone ignores GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and GIT_CONFIG_* of the environment ledger runs in', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const appHead = git(a.h, a.app, 'rev-parse', 'HEAD');
   const env = {
     ...quietEnv(a),
@@ -2051,20 +2087,20 @@ test('git in the clone ignores GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and GIT_CO
     GIT_CONFIG_VALUE_0: elsewhere(a),
   };
 
-  ok(run(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.'], { env }));
-  ok(run(a, ['store', 'sync'], { env }));
+  ok(await runHere(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.'], { env }));
+  ok(await runHere(a, ['store', 'sync'], { env }));
 
   git(a.h, a.clone, 'cat-file', '-e', `HEAD:backlog/${APP}/fix-login.json`);
   assert.equal(git(a.h, a.app, 'rev-parse', 'HEAD'), appHead);
   assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
 });
 
-test('sync init asks gh for the visibility and whether the repository is empty, and refuses when gh and git disagree on empty', (t) => {
+test('sync init asks gh for the visibility and whether the repository is empty, and refuses when gh and git disagree on empty', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   answerGh(a.h, { visibility: 'PRIVATE', isEmpty: false });
 
-  assert.match(failed(run(a, ['store', 'sync', 'init', URL])), /empty/);
+  assert.match(failed(await runHere(a, ['store', 'sync', 'init', URL])), /empty/);
 
   assert.match(readFileSync(path.join(a.h, 'gh-calls'), 'utf8'), /--json visibility,isEmpty/);
   assert.equal(existsSync(a.clone), false);
@@ -2072,14 +2108,14 @@ test('sync init asks gh for the visibility and whether the repository is empty, 
 });
 
 for (const flag of ['--assume-unchanged', '--skip-worktree']) {
-  test(`a ledger the clone's index marks ${flag.slice(2)} is not committed: the command warns and records it`, (t) => {
+  test(`a ledger the clone's index marks ${flag.slice(2)} is not committed: the command warns and records it`, async (t) => {
     const bare = remote(t);
     const a = machine(t, bare);
-    setUp(a);
-    ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+    await setUpHere(a);
+    await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
     git(a.h, a.clone, 'update-index', flag, `backlog/${APP}/fix-login.json`);
 
-    const ran = run(a, ['task', 'park', 'fix-login', '--reason', 'waits for design']);
+    const ran = await runHere(a, ['task', 'park', 'fix-login', '--reason', 'waits for design']);
 
     assert.match(ran.stderr, /not committed/);
     assert.equal(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'git');
@@ -2087,18 +2123,18 @@ for (const flag of ['--assume-unchanged', '--skip-worktree']) {
   });
 }
 
-test('migrate git → sqlite --remove-source moves the ledgers, removes them from git storage and pushes that', { skip: noSqlite }, (t) => {
+test('migrate git → sqlite --remove-source moves the ledgers, removes them from git storage and pushes that', { skip: noSqlite }, async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ledgerOk(a, 'task', 'new', 'old', '--goal', 'Old work.');
-  ledgerOk(a, 'task', 'retire', 'old');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'task', 'new', 'old', '--goal', 'Old work.');
+  await ledgerOkHere(a, 'task', 'retire', 'old');
+  await ledgerOkHere(a, 'store', 'sync');
   const archived = `archive/${APP}/${today()}-old.json`;
   assert.ok(remoteFiles(bare).includes(archived));
 
-  ledgerOk(a, 'store', 'migrate', '--to', 'sqlite', '--remove-source');
+  await ledgerOkHere(a, 'store', 'migrate', '--to', 'sqlite', '--remove-source');
 
   const store = sqliteStore({ home: a.h });
   t.after(() => store.close?.());
@@ -2138,7 +2174,7 @@ test('a reclaim guard older than its time limit is taken over, also while a proc
   assert.equal(existsSync(`${target}.lock.reclaim`), false);
 });
 
-test('a lock wait that runs out names the lock and its reclaim guard', (t) => {
+test('a lock wait that runs out names the lock and its reclaim guard', async (t) => {
   const target = path.join(home(t), 'target');
   writeFileSync(`${target}.lock`, holderOf(process.pid, 0));
 
@@ -2156,7 +2192,6 @@ async function contendFor(target: string, rounds: number, count: number): Promis
     WAIT_MODULE: pathToFileURL(path.join(REPO, 'tools/ledger/wait.ts')).href,
     TARGET: target,
     ROUNDS: String(rounds),
-    START: String(Date.now() + 3000),
     ROUND_MS: '300',
     LEDGER_TEST_DELAY_MS: '20',
   };
@@ -2169,7 +2204,9 @@ async function contendFor(target: string, rounds: number, count: number): Promis
       child.on('error', reject);
       child.on('close', (status) => resolve({ status, stdout, stderr }));
     });
-  const ran = await Promise.all(Array.from({ length: count }, contender));
+  const running = Array.from({ length: count }, contender);
+  await startContenders(target, count);
+  const ran = await Promise.all(running);
   for (const { status, stderr } of ran) assert.equal(status, 0, stderr);
   return ran.map(({ stdout }) => Number(stdout));
 }
@@ -2190,53 +2227,53 @@ test('a left-over lock behind a left-over reclaim guard is taken over by one pro
   }
 });
 
-test('a clone whose .git is a symbolic link is no git storage: a command exits 1 and says why', (t) => {
+test('a clone whose .git is a symbolic link is no git storage: a command exits 1 and says why', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const moved = path.join(a.h, 'moved.git');
   renameSync(path.join(a.clone, '.git'), moved);
   symlinkSync(moved, path.join(a.clone, '.git'));
 
-  assert.match(failed(run(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.'])), /\.git is not a folder/);
+  assert.match(failed(await runHere(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.'])), /\.git is not a folder/);
   assert.equal(existsSync(path.join(a.clone, `backlog/${APP}/fix-login.json`)), false);
 });
 
-test('a clone whose git names another top folder is no git storage: a command exits 1 and says why', (t) => {
+test('a clone whose git names another top folder is no git storage: a command exits 1 and says why', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const other = path.join(a.h, 'other-tree');
   mkdirSync(other);
   git(a.h, a.clone, 'config', 'core.worktree', other);
 
-  assert.match(failed(run(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.'])), /top folder/);
+  assert.match(failed(await runHere(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.'])), /top folder/);
   assert.equal(existsSync(path.join(a.clone, `backlog/${APP}/fix-login.json`)), false);
   assert.deepEqual(readdirSync(other), []);
 });
 
-test('a clone whose .git/hooks is a symbolic link is no git storage: ledger store sync exits 1 and writes no hook through it', (t) => {
+test('a clone whose .git/hooks is a symbolic link is no git storage: ledger store sync exits 1 and writes no hook through it', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const outside = path.join(a.h, 'outside-hooks');
   renameSync(path.join(a.clone, '.git/hooks'), outside);
   rmSync(path.join(outside, 'pre-push'));
   symlinkSync(outside, path.join(a.clone, '.git/hooks'));
 
-  assert.match(failed(run(a, ['store', 'sync'])), /hooks is a symbolic link/);
+  assert.match(failed(await runHere(a, ['store', 'sync'])), /hooks is a symbolic link/);
   assert.equal(existsSync(path.join(outside, 'pre-push')), false);
 });
 
-test('ledger store sync refuses to rebase a merge commit made in the clone, which a rebase would drop: exit 1, the merge stays, nothing is pushed', (t) => {
+test('ledger store sync refuses to rebase a merge commit made in the clone, which a rebase would drop: exit 1, the merge stays, nothing is pushed', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  await ledgerOkHere(a, 'store', 'sync');
   const b = machine(t, bare);
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
-  setUp(b);
+  await setUpHere(b);
   git(b.h, b.clone, 'checkout', '--quiet', '-b', 'side');
   writeFileSync(path.join(b.clone, `backlog/${APP}/side.md`), '# side\n');
   git(b.h, b.clone, 'add', '-A');
@@ -2247,11 +2284,11 @@ test('ledger store sync refuses to rebase a merge commit made in the clone, whic
   git(b.h, b.clone, 'commit', '--quiet', '-m', 'main');
   git(b.h, b.clone, 'merge', '--quiet', '--no-ff', '-m', 'merge side', 'side');
   const merge = git(b.h, b.clone, 'rev-parse', 'HEAD');
-  ledgerOk(a, 'task', 'new', 'later', '--goal', 'Comes later.');
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'task', 'new', 'later', '--goal', 'Comes later.');
+  await ledgerOkHere(a, 'store', 'sync');
   const before = remoteHead(bare);
 
-  const output = failed(run(b, ['store', 'sync']));
+  const output = failed(await runHere(b, ['store', 'sync']));
   assert.match(output, /merge commit/);
   assert.match(output, ASKS_THE_OPERATOR);
 
@@ -2273,24 +2310,24 @@ function pullHere(m: Machine): void {
 }
 
 for (const when of ['a ledger command', 'the session-start pull'] as const) {
-  test(`${when} puts back a pre-push hook that was changed, and the core.hooksPath that names it`, (t) => {
+  test(`${when} puts back a pre-push hook that was changed, and the core.hooksPath that names it`, async (t) => {
     const bare = remote(t);
     const a = machine(t, bare);
-    setUp(a);
+    await setUpHere(a);
     writeFileSync(hookFile(a), '#!/bin/sh\nexit 0\n');
     git(a.h, a.clone, 'config', 'core.hooksPath', path.join(a.h, 'elsewhere'));
 
-    if (when === 'a ledger command') ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+    if (when === 'a ledger command') await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
     else pullHere(a);
 
     assertOwnHook(a);
   });
 }
 
-test('a path whose name holds a line break is outside the allowlist of ledger store sync and of the pre-push hook', (t) => {
+test('a path whose name holds a line break is outside the allowlist of ledger store sync and of the pre-push hook', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const before = remoteHead(bare);
   mkdirSync(path.join(a.clone, `backlog/${APP}`), { recursive: true });
   writeFileSync(path.join(a.clone, `backlog/${APP}/a\nb.md`), '# a\n');
@@ -2298,7 +2335,7 @@ test('a path whose name holds a line break is outside the allowlist of ledger st
   git(a.h, a.clone, 'commit', '--quiet', '-m', 'line break');
 
   const pushed = gitRan(a.h, a.clone, 'push', 'origin', 'HEAD:main');
-  const synced = run(a, ['store', 'sync']);
+  const synced = await runHere(a, ['store', 'sync']);
 
   assert.notEqual(pushed.status, 0, 'git push was not blocked');
   assert.match(pushed.stderr, /ledger pre-push: the push is blocked/);
@@ -2309,24 +2346,24 @@ test('a path whose name holds a line break is outside the allowlist of ledger st
 });
 
 for (const where of ['origin', 'a URL rewrite'] as const) {
-  test(`a refused remote URL is printed and recorded without secret-like words: ${where}`, (t) => {
+  test(`a refused remote URL is printed and recorded without secret-like words: ${where}`, async (t) => {
     const bare = remote(t);
     const a = machine(t, bare);
-    setUp(a);
+    await setUpHere(a);
     if (where === 'origin') git(a.h, a.clone, 'config', 'remote.origin.url', `https://example.com/${GITHUB_TOKEN}.git`);
     else git(a.h, a.clone, 'config', `url.https://example.com/${GITHUB_TOKEN}/.pushInsteadOf`, 'https://github.com/me/');
 
-    const output = failed(run(a, ['store', 'sync']));
+    const output = failed(await runHere(a, ['store', 'sync']));
 
     assert.match(output, /nothing was pulled or pushed/);
     for (const [what, text] of [['output', output], ['status file', readFileSync(a.status, 'utf8')]]) assert.ok(!text.includes(GITHUB_TOKEN), `the ${what} holds the secret-like word`);
   });
 }
 
-test('ledger store sync and the session start write the privacy check and the hook setting only while they hold the clone lock', (t) => {
+test('ledger store sync and the session start write the privacy check and the hook setting only while they hold the clone lock', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const writes = path.join(a.h, 'config-writes');
   const stubs = path.join(a.h, 'logging-git');
   mkdirSync(stubs);
@@ -2347,9 +2384,9 @@ test('ledger store sync and the session start write the privacy check and the ho
   const env = { ...quietEnv(a), PATH: `${stubs}${path.delimiter}${quietEnv(a).PATH ?? ''}` };
   git(a.h, a.clone, 'config', 'core.hooksPath', path.join(a.h, 'elsewhere'));
 
-  ok(run(a, ['store', 'sync'], { env }));
+  ok(await runHere(a, ['store', 'sync'], { env }));
   git(a.h, a.clone, 'config', 'core.hooksPath', path.join(a.h, 'elsewhere'));
-  assert.equal(run(a, ['hook', 'session-start'], { env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd: a.h }) }).status, 0);
+  assert.equal((await runHere(a, ['hook', 'session-start'], { env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd: a.h }) })).status, 0);
 
   const seen = readFileSync(writes, 'utf8').trim().split('\n');
   assert.ok(seen.length >= 3, seen.join(', '));
@@ -2360,11 +2397,11 @@ test('ledger store sync and the session start write the privacy check and the ho
   );
 });
 
-test('after a push, ledger store sync never moves the remote-tracking branch back from a newer commit a fetch found meanwhile', (t) => {
+test('after a push, ledger store sync never moves the remote-tracking branch back from a newer commit a fetch found meanwhile', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   remoteHook(bare, 'post-receive', [
     '[ ! -f "$HOME/moved" ] || exit 0',
     'touch "$HOME/moved"',
@@ -2374,7 +2411,7 @@ test('after a push, ledger store sync never moves the remote-tracking branch bac
     `git -C '${a.clone}' fetch --quiet '${bare}' +refs/heads/main:refs/remotes/origin/main`,
   ]);
 
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
 
   assert.ok(existsSync(path.join(a.h, 'moved')), 'the remote hook did not run');
   assert.equal(git(a.h, a.clone, 'rev-parse', 'refs/remotes/origin/main'), remoteHead(bare));
@@ -2383,8 +2420,8 @@ test('after a push, ledger store sync never moves the remote-tracking branch bac
 test('a command that commits nothing still starts the push while the clone has commits the remote lacks', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   assert.ok(!remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
 
   ok(run(a, ['list'], { env: machineEnv(a) }));
@@ -2395,8 +2432,8 @@ test('a command that commits nothing still starts the push while the clone has c
 test('a command starts the push when git cannot count the commits the remote lacks', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   const stubs = path.join(a.h, 'failing-git');
   mkdirSync(stubs);
   const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
@@ -2408,11 +2445,11 @@ test('a command starts the push when git cannot count the commits the remote lac
   await until(() => remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`) && backgroundSyncDone(a), 'the background push', 10_000);
 });
 
-test('ledger store sync and sync init stop waiting for a gh that does not answer, exit 1 and say so, and push nothing', (t) => {
+test('ledger store sync and sync init stop waiting for a gh that does not answer, exit 1 and say so, and push nothing', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   const b = machine(t, bare);
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
   const before = remoteHead(bare);
@@ -2430,22 +2467,22 @@ test('ledger store sync and sync init stop waiting for a gh that does not answer
   assert.equal(existsSync(b.clone), false);
 });
 
-test('sync init of a repository with the marker makes the backlog and archive folders, which git does not keep while empty', (t) => {
+test('sync init of a repository with the marker makes the backlog and archive folders, which git does not keep while empty', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const b = machine(t, bare);
   answerGh(b.h, { visibility: 'PRIVATE', isEmpty: false });
 
-  ok(run(b, ['store', 'sync', 'init', URL]));
+  ok(await runHere(b, ['store', 'sync', 'init', URL]));
 
   for (const folder of ['backlog', 'archive']) assert.ok(lstatSync(path.join(b.clone, folder), { throwIfNoEntry: false })?.isDirectory(), `${folder} is no folder`);
 });
 
-test('a manual git push of a path whose whole name is a line break is blocked by the pre-push hook', (t) => {
+test('a manual git push of a path whose whole name is a line break is blocked by the pre-push hook', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const before = remoteHead(bare);
   writeFileSync(path.join(a.clone, '\n'), '# a\n');
   git(a.h, a.clone, 'add', '-f', '--', '\n');
@@ -2458,33 +2495,33 @@ test('a manual git push of a path whose whole name is a line break is blocked by
   assert.equal(remoteHead(bare), before);
 });
 
-test('sync init again on a set-up clone makes no backlog or archive folder', (t) => {
+test('sync init again on a set-up clone makes no backlog or archive folder', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   for (const folder of ['backlog', 'archive']) rmSync(path.join(a.clone, folder), { recursive: true, force: true });
 
-  assert.match(ok(run(a, ['store', 'sync', 'init', URL])), /already set up/);
+  assert.match(ok(await runHere(a, ['store', 'sync', 'init', URL])), /already set up/);
 
   for (const folder of ['backlog', 'archive']) assert.equal(existsSync(path.join(a.clone, folder)), false, `${folder} was made`);
 });
 
-test('sync init never prints a secret-like part of a URL, of the repository gh checks, of its answer or of an existing clone', (t) => {
+test('sync init never prints a secret-like part of a URL, of the repository gh checks, of its answer or of an existing clone', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   const tokenUrl = `https://example.com/${GITHUB_TOKEN}.git`;
   const tokenRepoUrl = `https://github.com/me/${GITHUB_TOKEN}.git`;
   const outputs: [string, string][] = [];
-  outputs.push(['a URL that is not GitHub', failed(run(a, ['store', 'sync', 'init', tokenUrl]))]);
+  outputs.push(['a URL that is not GitHub', failed(await runHere(a, ['store', 'sync', 'init', tokenUrl]))]);
   answerGh(a.h, { visibility: 'PUBLIC', isEmpty: true });
-  outputs.push(['a GitHub repository name', failed(run(a, ['store', 'sync', 'init', tokenRepoUrl]))]);
+  outputs.push(['a GitHub repository name', failed(await runHere(a, ['store', 'sync', 'init', tokenRepoUrl]))]);
   answerGh(a.h, { visibility: GITHUB_TOKEN, isEmpty: true });
-  outputs.push(['the visibility gh names', failed(run(a, ['store', 'sync', 'init', URL]))]);
+  outputs.push(['the visibility gh names', failed(await runHere(a, ['store', 'sync', 'init', URL]))]);
   answerGh(a.h, { visibility: 'PRIVATE', isEmpty: true });
-  outputs.push(['a repository git cannot reach', failed(run(a, ['store', 'sync', 'init', tokenRepoUrl]))]);
-  setUp(a);
+  outputs.push(['a repository git cannot reach', failed(await runHere(a, ['store', 'sync', 'init', tokenRepoUrl]))]);
+  await setUpHere(a);
   git(a.h, a.clone, 'config', 'remote.origin.url', tokenUrl);
-  outputs.push(['the origin of the clone', failed(run(a, ['store', 'sync', 'init', URL]))]);
+  outputs.push(['the origin of the clone', failed(await runHere(a, ['store', 'sync', 'init', URL]))]);
 
   for (const [what, output] of outputs) {
     assert.match(output, /ledger store sync init stopped/, what);
@@ -2493,12 +2530,12 @@ test('sync init never prints a secret-like part of a URL, of the repository gh c
 });
 
 for (const slow of ['opens', 'closes'] as const) {
-  test(`the whole session start stays within its 5 s when git hangs while git storage ${slow}`, (t) => {
+  test(`the whole session start stays within its 5 s when git hangs while git storage ${slow}`, async (t) => {
     const bare = remote(t);
     const a = machine(t, bare);
-    setUp(a);
-    ledgerOk(a, 'task', 'new', 'mine', '--goal', 'Made here.');
-    ledgerOk(a, 'go', 'mine');
+    await setUpHere(a);
+    await ledgerOkHere(a, 'task', 'new', 'mine', '--goal', 'Made here.');
+    await ledgerOkHere(a, 'go', 'mine');
     // Opening reads core.hooksPath to check the pre-push hook; closing counts the commits not pushed yet.
     const hangs = slow === 'opens' ? '*" --get-all core.hooksPath "*' : '*" rev-list --count "*';
     const stubs = path.join(a.h, 'hanging-git');
@@ -2518,8 +2555,8 @@ for (const slow of ['opens', 'closes'] as const) {
 test('a command starts the push while origin lacks a commit on the branch the clone pushes to, also when another branch of origin has it', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   git(a.h, a.clone, 'push', '--quiet', 'origin', 'HEAD:refs/heads/side');
   assert.ok(!remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
 
@@ -2528,7 +2565,7 @@ test('a command starts the push while origin lacks a commit on the branch the cl
   await until(() => remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`) && backgroundSyncDone(a), 'the background push', 10_000);
 });
 
-test('sync init stops before it writes the pre-push hook through a hooks folder that a git template made a symbolic link', (t) => {
+test('sync init stops before it writes the pre-push hook through a hooks folder that a git template made a symbolic link', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   const template = path.join(a.h, 'git-template');
@@ -2538,48 +2575,48 @@ test('sync init stops before it writes the pre-push hook through a hooks folder 
   symlinkSync(outside, path.join(template, 'hooks'));
   appendFileSync(path.join(a.h, '.gitconfig'), `[init]\n\ttemplateDir = ${template}\n`);
 
-  assert.match(failed(run(a, ['store', 'sync', 'init', URL])), /hooks is a symbolic link/);
+  assert.match(failed(await runHere(a, ['store', 'sync', 'init', URL])), /hooks is a symbolic link/);
 
   assert.deepEqual(readdirSync(outside), []);
   assert.equal(existsSync(a.clone), false);
   assert.equal(remoteHead(bare), '');
 });
 
-test('when gh says the repository is no longer private but the clone lock is busy, no later sync trusts the earlier check', (t) => {
+test('when gh says the repository is no longer private but the clone lock is busy, no later sync trusts the earlier check', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   const before = remoteHead(bare);
   answerGh(a.h, { visibility: 'PUBLIC', isEmpty: false });
   const lock = path.join(a.h, '.claude/ledger-data.lock');
   writeFileSync(lock, JSON.stringify({ pid: process.pid, since: new Date().toISOString() }));
-  failed(run(a, ['store', 'sync']));
+  failed(await runHere(a, ['store', 'sync'], { env: shortLockWait(a) }));
   rmSync(lock);
 
   // A background sync asks gh at most once a day.
-  run(a, ['store', 'sync', '--quiet']);
+  await runHere(a, ['store', 'sync', '--quiet']);
 
   assert.equal(remoteHead(bare), before);
   assert.match(readFileSync(a.status, 'utf8'), /PUBLIC/);
 });
 
-test('a fetch never moves the remote-tracking branch back after the remote lost commits: ledger store sync and the session start refuse and say why', (t) => {
+test('a fetch never moves the remote-tracking branch back after the remote lost commits: ledger store sync and the session start refuse and say why', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  await ledgerOkHere(a, 'store', 'sync');
   const older = remoteHead(bare);
-  ledgerOk(a, 'task', 'new', 'second', '--goal', 'Second.');
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'task', 'new', 'second', '--goal', 'Second.');
+  await ledgerOkHere(a, 'store', 'sync');
   const fetched = remoteHead(bare);
   git(path.dirname(bare), bare, 'update-ref', 'refs/heads/main', older);
 
-  const output = failed(run(a, ['store', 'sync']));
+  const output = failed(await runHere(a, ['store', 'sync']));
   // So the warning can only come from the session start's own pull.
   rmSync(a.status);
-  const context = hookContext(a);
+  const context = await hookContextHere(a);
 
   assert.match(output, /lost commits/);
   assert.match(context, /^Ledger sync needs attention: \S+ lost commits that this clone fetched before/);
@@ -2591,23 +2628,23 @@ for (const [what, prepare] of [
   ['the clone sets fetch.showForcedUpdates=false', (a: Machine) => (git(a.h, a.clone, 'config', 'fetch.showForcedUpdates', 'false'), quietEnv(a))],
   ['git speaks German', (a: Machine) => ({ ...quietEnv(a), LANG: 'de_DE.UTF-8', LC_ALL: 'de_DE.UTF-8', LANGUAGE: 'de' })],
 ] as const) {
-  test(`a remote that lost commits is refused by their ancestry, not by what git says: ${what}`, (t) => {
+  test(`a remote that lost commits is refused by their ancestry, not by what git says: ${what}`, async (t) => {
     const bare = remote(t);
     const a = machine(t, bare);
-    setUp(a);
-    ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-    ledgerOk(a, 'store', 'sync');
+    await setUpHere(a);
+    await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+    await ledgerOkHere(a, 'store', 'sync');
     const older = remoteHead(bare);
-    ledgerOk(a, 'task', 'new', 'second', '--goal', 'Second.');
-    ledgerOk(a, 'store', 'sync');
+    await ledgerOkHere(a, 'task', 'new', 'second', '--goal', 'Second.');
+    await ledgerOkHere(a, 'store', 'sync');
     const fetched = remoteHead(bare);
     git(path.dirname(bare), bare, 'update-ref', 'refs/heads/main', older);
     const env = prepare(a);
 
-    const output = failed(run(a, ['store', 'sync'], { env }));
+    const output = failed(await runHere(a, ['store', 'sync'], { env }));
     rmSync(a.status);
-    const hook = run(a, ['hook', 'session-start'], { cwd: a.h, env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd: a.h }) });
-    failed(run(a, ['store', 'sync'], { env }));
+    const hook = await runHere(a, ['hook', 'session-start'], { cwd: a.h, env, input: JSON.stringify({ hook_event_name: 'SessionStart', cwd: a.h }) });
+    failed(await runHere(a, ['store', 'sync'], { env }));
 
     assert.equal(hook.status, 0, hook.stderr);
     const context = (JSON.parse(hook.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext;
@@ -2618,48 +2655,48 @@ for (const [what, prepare] of [
   });
 }
 
-test('after the remote lost commits, git fetch --force origin in the clone and then ledger store sync push the commits made here again', (t) => {
+test('after the remote lost commits, git fetch --force origin in the clone and then ledger store sync push the commits made here again', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  await ledgerOkHere(a, 'store', 'sync');
   const older = remoteHead(bare);
-  ledgerOk(a, 'task', 'new', 'second', '--goal', 'Second.');
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'task', 'new', 'second', '--goal', 'Second.');
+  await ledgerOkHere(a, 'store', 'sync');
   const fetched = remoteHead(bare);
   git(path.dirname(bare), bare, 'update-ref', 'refs/heads/main', older);
-  failed(run(a, ['store', 'sync']));
+  failed(await runHere(a, ['store', 'sync']));
 
   git(a.h, a.clone, 'fetch', '--quiet', '--force', 'origin');
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
 
   assert.equal(remoteHead(bare), fetched);
 });
 
-test('when gh says the repository is no longer private but git cannot change the clone config, no later sync trusts the earlier check', (t) => {
+test('when gh says the repository is no longer private but git cannot change the clone config, no later sync trusts the earlier check', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   const before = remoteHead(bare);
   answerGh(a.h, { visibility: 'PUBLIC', isEmpty: false });
   const configLock = path.join(a.clone, '.git/config.lock');
   writeFileSync(configLock, '');
-  assert.match(failed(run(a, ['store', 'sync'])), /PUBLIC/);
+  assert.match(failed(await runHere(a, ['store', 'sync'])), /PUBLIC/);
   rmSync(configLock);
 
   // A background sync asks gh at most once a day.
-  run(a, ['store', 'sync', '--quiet']);
+  await runHere(a, ['store', 'sync', '--quiet']);
 
   assert.equal(remoteHead(bare), before);
   assert.match(readFileSync(a.status, 'utf8'), /PUBLIC/);
 });
 
-test('the pre-push hook names a path with a line break and a path with a ? in its place as two paths', (t) => {
+test('the pre-push hook names a path with a line break and a path with a ? in its place as two paths', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const before = remoteHead(bare);
   for (const file of ['a\nb', 'a?b']) writeFileSync(path.join(a.clone, file), 'x\n');
   git(a.h, a.clone, '--literal-pathspecs', 'add', '-f', '--', 'a\nb', 'a?b');
@@ -2715,10 +2752,10 @@ for (const [what, text] of [
   ['', 'x\n'],
   [', also when the file adds a secret', `${GITHUB_TOKEN}\n`],
 ] as const) {
-  test(`the pre-push hook withholds a path whose secret-like part follows a line break, and never prints the secret${what}`, (t) => {
+  test(`the pre-push hook withholds a path whose secret-like part follows a line break, and never prints the secret${what}`, async (t) => {
     const bare = remote(t);
     const a = machine(t, bare);
-    setUp(a);
+    await setUpHere(a);
     const before = remoteHead(bare);
     const name = `x\n${ANTHROPIC_KEY}`;
     writeFileSync(path.join(a.clone, name), text);
@@ -2737,11 +2774,11 @@ for (const [what, text] of [
 
 // ------------------------------------------------------------------------------------------------ not private, sticky
 
-test('after gh says the repository is not private, no sync trusts the earlier check, also when git cannot forget it and a later problem of another kind replaces the recorded one, until gh says PRIVATE again', (t) => {
+test('after gh says the repository is not private, no sync trusts the earlier check, also when git cannot forget it and a later problem of another kind replaces the recorded one, until gh says PRIVATE again', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   const before = remoteHead(bare);
   const calls = (): number => readFileSync(path.join(a.h, 'gh-calls'), 'utf8').trim().split('\n').length;
   const checked = (): boolean => gitRan(a.h, a.clone, 'config', '--get', 'ledger.checkedPrivate').status === 0;
@@ -2749,36 +2786,36 @@ test('after gh says the repository is not private, no sync trusts the earlier ch
   const configLock = path.join(a.clone, '.git/config.lock');
   writeFileSync(configLock, '');
 
-  assert.match(failed(run(a, ['store', 'sync'])), /PUBLIC/);
+  assert.match(failed(await runHere(a, ['store', 'sync'])), /PUBLIC/);
   assert.ok(checked(), 'git forgot the earlier check, so this test forces nothing');
-  failed(run(a, ['store', 'sync', '--quiet']));
+  failed(await runHere(a, ['store', 'sync', '--quiet']));
   assert.equal(remoteHead(bare), before, 'a background sync pushed after the forget failed');
 
   recordProblem(ledgerPaths(a.h), new SyncProblem('git', 'Could not commit in ~/.claude/ledger-data.'));
   const asked = calls();
-  failed(run(a, ['store', 'sync', '--quiet']));
+  failed(await runHere(a, ['store', 'sync', '--quiet']));
   assert.equal(remoteHead(bare), before, 'a background sync pushed after another problem replaced the recorded one');
   assert.equal(calls(), asked + 1, 'the background sync did not ask gh again');
 
   rmSync(configLock);
   answerGh(a.h, { visibility: 'PRIVATE', isEmpty: false });
-  ok(run(a, ['store', 'sync', '--quiet']));
+  ok(await runHere(a, ['store', 'sync', '--quiet']));
   assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`), 'a PRIVATE answer did not allow the push');
   assert.equal(existsSync(path.join(a.h, '.claude/ledger-data.not-private')), false);
 
   answerGh(a.h, 'fail');
-  ledgerOk(a, 'task', 'new', 'second', '--goal', 'Second.');
-  ok(run(a, ['store', 'sync', '--quiet']));
+  await ledgerOkHere(a, 'task', 'new', 'second', '--goal', 'Second.');
+  ok(await runHere(a, ['store', 'sync', '--quiet']));
   assert.ok(remoteFiles(bare).includes(`backlog/${APP}/second.json`), 'after a PRIVATE answer, a background sync trusts it for a day again');
 });
 
 const ghCalls = (m: Machine): number => readFileSync(path.join(m.h, 'gh-calls'), 'utf8').trim().split('\n').length;
 
-test('when gh says the repository is not private and neither the marker nor the clone config can be written, no later sync trusts the earlier check', (t) => {
+test('when gh says the repository is not private and neither the marker nor the clone config can be written, no later sync trusts the earlier check', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   const before = remoteHead(bare);
   const [claude, gh, lockAfterAnswer] = [path.join(a.h, '.claude'), path.join(a.h, 'stub-bin/gh'), path.join(a.h, 'lock-claude-after-answer')];
   renameSync(gh, `${gh}-answer`);
@@ -2790,7 +2827,7 @@ test('when gh says the repository is not private and neither the marker nor the 
 
   let ran: Ran;
   try {
-    ran = run(a, ['store', 'sync']);
+    ran = await runHere(a, ['store', 'sync']);
   } finally {
     chmodSync(claude, 0o755);
   }
@@ -2800,20 +2837,20 @@ test('when gh says the repository is not private and neither the marker nor the 
   assert.equal(gitRan(a.h, a.clone, 'config', '--get', 'ledger.checkedPrivate').status, 0, 'git forgot the earlier check, so this test forces nothing');
   assert.match(failed(ran), /PUBLIC/);
   // A background sync asks gh at most once a day.
-  failed(run(a, ['store', 'sync', '--quiet']));
+  failed(await runHere(a, ['store', 'sync', '--quiet']));
   assert.equal(remoteHead(bare), before);
 });
 
-test('a sync that cannot write the not-private marker stops before it asks gh, so no answer that the repository is not private goes unrecorded', (t) => {
+test('a sync that cannot write the not-private marker stops before it asks gh, so no answer that the repository is not private goes unrecorded', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
   const before = remoteHead(bare);
   mkdirSync(path.join(a.h, '.claude/ledger-data.not-private/occupied'), { recursive: true });
   const asked = ghCalls(a);
 
-  const ran = run(a, ['store', 'sync']);
+  const ran = await runHere(a, ['store', 'sync']);
 
   assert.equal(ghCalls(a), asked, 'gh was asked though the marker cannot be written');
   assert.match(failed(ran), /could not write \S*ledger-data\.not-private/);
@@ -2823,18 +2860,19 @@ test('a sync that cannot write the not-private marker stops before it asks gh, s
 test('a PRIVATE answer to a check that started before another check found the repository not private leaves the marker of that later check', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  const [marker, delay] = [path.join(a.h, '.claude/ledger-data.not-private'), path.join(a.h, 'gh-delay')];
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  const [marker, hold] = [path.join(a.h, '.claude/ledger-data.not-private'), path.join(a.h, 'gh-hold')];
   const asked = ghCalls(a);
-  writeFileSync(delay, '4');
+  writeFileSync(hold, '');
   const earlier = started(a, ['store', 'sync']);
   await until(() => ghCalls(a) > asked, 'the gh call of the earlier sync');
-  rmSync(delay);
+  rmSync(hold);
   answerGh(a.h, { visibility: 'PUBLIC', isEmpty: false });
 
   assert.match(failed(run(a, ['store', 'sync'])), /PUBLIC/);
   answerGh(a.h, { visibility: 'PRIVATE', isEmpty: false });
+  writeFileSync(path.join(a.h, 'gh-release'), '');
   ok(await earlier);
 
   assert.ok(existsSync(marker), 'the PRIVATE answer of the earlier check cleared the marker of the later one');
@@ -2853,7 +2891,7 @@ test('a background sync that still runs when its test ends, after the wait for i
     const bare = remote(st);
     const a = machine(st, bare);
     h = a.h;
-    setUp(a);
+    await setUpHere(a);
     remoteHook(bare, 'pre-receive', ['sleep 30']);
     ok(run(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.'], { env: machineEnv(a) }));
     pids = readFileSync(backgroundPids(a.h), 'utf8').split('\n').filter(Boolean).map(Number);
@@ -2868,46 +2906,46 @@ test('a background sync that still runs when its test ends, after the wait for i
 
 // ------------------------------------------------------------------------------------------------------------ rewinds
 
-test('after the remote lost commits on purpose, the refusal says how to accept that, and doing so pushes none of the lost commits back', (t) => {
+test('after the remote lost commits on purpose, the refusal says how to accept that, and doing so pushes none of the lost commits back', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  await ledgerOkHere(a, 'store', 'sync');
   const older = remoteHead(bare);
-  ledgerOk(a, 'task', 'new', 'second', '--goal', 'Second.');
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'task', 'new', 'second', '--goal', 'Second.');
+  await ledgerOkHere(a, 'store', 'sync');
   git(path.dirname(bare), bare, 'update-ref', 'refs/heads/main', older);
-  ledgerOk(a, 'task', 'new', 'third', '--goal', 'Third.');
+  await ledgerOkHere(a, 'task', 'new', 'third', '--goal', 'Third.');
 
-  const output = failed(run(a, ['store', 'sync']));
+  const output = failed(await runHere(a, ['store', 'sync']));
 
   assert.match(output, /To push the lost commits back: run git fetch --force origin in \S+, then ledger store sync\./);
   assert.match(output, /git fetch --force origin, then git reset --hard origin\/main/);
   git(a.h, a.clone, 'fetch', '--quiet', '--force', 'origin');
   git(a.h, a.clone, 'reset', '--quiet', '--hard', 'origin/main');
-  assert.match(ledgerOk(a, 'store', 'sync'), /Nothing to push/);
+  assert.match(await ledgerOkHere(a, 'store', 'sync'), /Nothing to push/);
   assert.equal(remoteHead(bare), older);
   assert.deepEqual(remoteFiles(bare).filter((file) => file.startsWith('backlog/')), [`backlog/${APP}/first.json`]);
   assert.equal(existsSync(path.join(a.clone, `backlog/${APP}/third.json`)), false, 'the reset keeps a change that was not pushed');
 });
 
-test('when git cannot check whether the remote lost commits, ledger store sync says so and does not report lost commits', (t) => {
+test('when git cannot check whether the remote lost commits, ledger store sync says so and does not report lost commits', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  await ledgerOkHere(a, 'store', 'sync');
   const older = remoteHead(bare);
-  ledgerOk(a, 'task', 'new', 'second', '--goal', 'Second.');
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'task', 'new', 'second', '--goal', 'Second.');
+  await ledgerOkHere(a, 'store', 'sync');
   git(path.dirname(bare), bare, 'update-ref', 'refs/heads/main', older);
   const stubs = path.join(a.h, 'failing-git');
   mkdirSync(stubs);
   const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
   writeFileSync(path.join(stubs, 'git'), `#!/bin/sh\ncase " $* " in *" merge-base --is-ancestor "*) echo "fatal: stub" >&2; exit 128 ;; esac\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
 
-  const output = failed(run(a, ['store', 'sync'], { env: { ...quietEnv(a), PATH: `${stubs}${path.delimiter}${quietEnv(a).PATH ?? ''}` } }));
+  const output = failed(await runHere(a, ['store', 'sync'], { env: { ...quietEnv(a), PATH: `${stubs}${path.delimiter}${quietEnv(a).PATH ?? ''}` } }));
 
   assert.doesNotMatch(output, /lost commits that/);
   assert.match(output, /Could not check whether \S+ lost commits/);
@@ -2915,49 +2953,49 @@ test('when git cannot check whether the remote lost commits, ledger store sync s
   assert.equal(remoteHead(bare), older);
 });
 
-test('a branch other than the one the clone pushes to, which the remote moved back, does not stop ledger store sync', (t) => {
+test('a branch other than the one the clone pushes to, which the remote moved back, does not stop ledger store sync', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  await ledgerOkHere(a, 'store', 'sync');
   const older = remoteHead(bare);
-  ledgerOk(a, 'task', 'new', 'second', '--goal', 'Second.');
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'task', 'new', 'second', '--goal', 'Second.');
+  await ledgerOkHere(a, 'store', 'sync');
   git(path.dirname(bare), bare, 'update-ref', 'refs/heads/side', remoteHead(bare));
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
   assert.equal(git(a.h, a.clone, 'rev-parse', 'refs/remotes/origin/side'), remoteHead(bare), 'the clone did not fetch side');
   git(path.dirname(bare), bare, 'update-ref', 'refs/heads/side', older);
-  ledgerOk(a, 'task', 'new', 'third', '--goal', 'Third.');
+  await ledgerOkHere(a, 'task', 'new', 'third', '--goal', 'Third.');
 
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
 
   assert.ok(remoteFiles(bare).includes(`backlog/${APP}/third.json`));
   assert.equal(git(a.h, a.clone, 'rev-parse', 'refs/remotes/origin/main'), remoteHead(bare));
 });
 
-test('when the remote lacks the branch the clone pushes to and another branch lost commits, ledger store sync says the branch is missing, and its advice pushes the branch again', (t) => {
+test('when the remote lacks the branch the clone pushes to and another branch lost commits, ledger store sync says the branch is missing, and its advice pushes the branch again', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
-  ledgerOk(a, 'task', 'new', 'first', '--goal', 'First.');
-  ledgerOk(a, 'store', 'sync');
+  await setUpHere(a);
+  await ledgerOkHere(a, 'task', 'new', 'first', '--goal', 'First.');
+  await ledgerOkHere(a, 'store', 'sync');
   const older = remoteHead(bare);
-  ledgerOk(a, 'task', 'new', 'second', '--goal', 'Second.');
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'task', 'new', 'second', '--goal', 'Second.');
+  await ledgerOkHere(a, 'store', 'sync');
   git(path.dirname(bare), bare, 'update-ref', 'refs/heads/side', remoteHead(bare));
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
   git(path.dirname(bare), bare, 'update-ref', 'refs/heads/side', older);
   git(path.dirname(bare), bare, 'update-ref', '-d', 'refs/heads/main');
 
-  const output = failed(run(a, ['store', 'sync']));
+  const output = failed(await runHere(a, ['store', 'sync']));
 
   assert.doesNotMatch(output, /Could not reach/);
   assert.match(output, /has no branch main, which this clone pushes to/);
   assert.match(output, /run git fetch --force origin in \S+, then ledger store sync/);
   assert.notEqual(JSON.parse(readFileSync(a.status, 'utf8')).problem, 'network');
   git(a.h, a.clone, 'fetch', '--quiet', '--force', 'origin');
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
   assert.equal(remoteHead(bare), git(a.h, a.clone, 'rev-parse', 'HEAD'));
 });
 
@@ -2967,10 +3005,10 @@ const gitAliases = (m: Machine): string => path.join(m.h, '.claude/ledger-aliase
 
 const openGit = (m: Machine): LedgerStore => gitStore(ledgerPaths(m.h), { backgroundSync: false });
 
-test('git storage keeps repo aliases in ~/.claude/ledger-aliases-git.json, apart from those of file storage, and pushes none', (t) => {
+test('git storage keeps repo aliases in ~/.claude/ledger-aliases-git.json, apart from those of file storage, and pushes none', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const store = openGit(a);
   store.aliases.add('app', APP_KEY);
   store.close?.();
@@ -2980,7 +3018,7 @@ test('git storage keeps repo aliases in ~/.claude/ledger-aliases-git.json, apart
   assert.deepEqual([...reopened.aliases.read()], [['app', APP_KEY]]);
   assert.deepEqual(JSON.parse(readFileSync(gitAliases(a), 'utf8')), { app: APP_KEY });
   assert.equal(fileStore(ledgerPaths(a.h)).aliases.read().size, 0);
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
   assert.deepEqual(remoteFiles(bare).filter((file) => file.includes('alias')), []);
 
   reopened.aliases.remove('app', APP_KEY);
@@ -2989,37 +3027,37 @@ test('git storage keeps repo aliases in ~/.claude/ledger-aliases-git.json, apart
   assert.match(reopened.aliases.problem() ?? '', /ledger-aliases-git\.json is not a JSON object of repo aliases/);
 });
 
-test('git storage files a task under its repo key, URI-encoded as one folder, and pushes it there', (t) => {
+test('git storage files a task under its repo key, URI-encoded as one folder, and pushes it there', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
 
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  await ledgerOkHere(a, 'store', 'sync');
 
   assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`), remoteFiles(bare).join('\n'));
 });
 
-test('git storage refuses to write through the folder of a repo key that is a symbolic link', (t) => {
+test('git storage refuses to write through the folder of a repo key that is a symbolic link', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const outside = path.join(a.h, 'outside');
   mkdirSync(outside);
   mkdirSync(path.join(a.clone, 'backlog'), { recursive: true });
   symlinkSync(outside, path.join(a.clone, 'backlog', APP));
 
-  const ran = run(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.']);
+  const ran = await runHere(a, ['task', 'new', 'fix-login', '--goal', 'Users cannot log in.']);
 
   assert.equal(ran.status, 1, ran.stdout);
   assert.match(ran.stderr, /symbolic link/);
   assert.deepEqual(readdirSync(outside), []);
 });
 
-test('git storage lists evidence in ~/.claude/ledger-evidence that has no archive copy as orphan evidence', (t) => {
+test('git storage lists evidence in ~/.claude/ledger-evidence that has no archive copy as orphan evidence', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const left = path.join(a.h, '.claude/ledger-evidence/app/2026-01-02-gone');
   mkdirSync(left, { recursive: true });
   writeFileSync(path.join(left, 'red.txt'), 'failing\n');
@@ -3030,10 +3068,10 @@ test('git storage lists evidence in ~/.claude/ledger-evidence that has no archiv
   assert.deepEqual(store.archive.orphanEvidence(), [{ repo: 'app', name: '2026-01-02-gone' }]);
 });
 
-test('ledger store migrate --repo-ids with git storage moves clone ledgers and their evidence to the repo key, commits and pushes the move, and keeps the alias out of the clone', (t) => {
+test('ledger store migrate --repo-ids with git storage moves clone ledgers and their evidence to the repo key, commits and pushes the move, and keeps the alias out of the clone', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
-  setUp(a);
+  await setUpHere(a);
   const evidence = path.join(a.h, 'evidence');
   mkdirSync(evidence);
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
@@ -3041,11 +3079,11 @@ test('ledger store migrate --repo-ids with git storage moves clone ledgers and t
   store.backlog.write('app', 'idea', ledgerText({ slug: 'idea', main: a.app }));
   store.archive.write('app', '2026-01-01-old', ledgerText({ slug: 'old', main: a.app }), evidence);
   store.close?.();
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'sync');
   assert.ok(remoteFiles(bare).includes('backlog/app/idea.json'));
 
-  ledgerOk(a, 'store', 'migrate', '--repo-ids');
-  ledgerOk(a, 'store', 'sync');
+  await ledgerOkHere(a, 'store', 'migrate', '--repo-ids');
+  await ledgerOkHere(a, 'store', 'sync');
 
   const ledgers = remoteFiles(bare).filter((file) => /^(backlog|archive)\//.test(file));
   assert.deepEqual(ledgers, [`archive/${APP}/2026-01-01-old.json`, `backlog/${APP}/idea.json`]);
@@ -3055,19 +3093,19 @@ test('ledger store migrate --repo-ids with git storage moves clone ledgers and t
   assert.deepEqual(JSON.parse(readFileSync(gitAliases(a), 'utf8')), { app: APP_KEY });
 });
 
-test('migrate file → git copies the repo aliases into git storage, and a git storage alias that cannot be read stops it with nothing changed', (t) => {
+test('migrate file → git copies the repo aliases into git storage, and a git storage alias that cannot be read stops it with nothing changed', async (t) => {
   const bare = remote(t);
   const a = machine(t, bare);
   fileStore(ledgerPaths(a.h)).aliases.add('app', APP_KEY);
-  ledgerOk(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
-  ok(run(a, ['store', 'sync', 'init', URL]));
+  await ledgerOkHere(a, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.');
+  ok(await runHere(a, ['store', 'sync', 'init', URL]));
   writeFileSync(gitAliases(a), '[]\n');
 
-  assert.match(failed(run(a, ['store', 'migrate', '--to', 'git'])), /stopped, and nothing changed/);
+  assert.match(failed(await runHere(a, ['store', 'migrate', '--to', 'git'])), /stopped, and nothing changed/);
   assert.equal(existsSync(path.join(a.clone, 'backlog', APP)), false);
 
   rmSync(gitAliases(a));
-  ledgerOk(a, 'store', 'migrate', '--to', 'git');
+  await ledgerOkHere(a, 'store', 'migrate', '--to', 'git');
 
   assert.deepEqual(JSON.parse(readFileSync(gitAliases(a), 'utf8')), { app: APP_KEY });
   assert.ok(remoteFiles(bare).includes(`backlog/${APP}/fix-login.json`));
