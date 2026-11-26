@@ -384,6 +384,22 @@ Each step is one PR and one task, under one parent task.
 
        A time on a quiet machine is still missing. Under load, git's disk
        writes dominate, not process starts [inferred].
+   - **As built, `ledger-core-hooks`:**
+     - `runHook` in the test file runs `ledger hook <event>` through
+       `runInProcessWith`, from HOME, with the environment the spawned run
+       had. Afterwards it clears the deadlines a hook leaves set, as
+       `runHere` does. Every hook helper became async; no assertion changed.
+     - These tests keep a spawned run through `spawnHook`, because only a
+       real process shows a hung call being killed [observed]:
+       - the hung `git worktree list` test and the four tests that use
+         `sessionStartWithHangingGit`, under `HOOK_MS` (1 s);
+       - the gh test with a short PR-check limit and a wall-time bound;
+       - the three missing-dependency tests, which test `bin/ledger` itself.
+     - The fake clock replaced `localToday()` in the merged-PR test, which
+       removes a race at midnight. The memory store does not fit: every test
+       seeds or reads file-store files.
+     - Times, file alone, 681 tests [observed]: before 247 s at load
+       2.3–6.1; after 48 s at load 4.7–3.9 (-80%).
 5. **Quick and full runs.**
    - Changes: the `*.e2e.test.ts` names, `npm test` and `npm run test:full`.
    - Also: the verify step in LLP 0001 and the rules name `test:full`. Record

@@ -44,8 +44,8 @@ const ASSERTS_ABSENCE: Record<string, readonly string[]> = {
     'assert.doesNotMatch(read(`mods/ledger/commands/${file}`), /cc-task-new|cc-ledger-parent|cc-ledgers|cc-worktree-retire|cc-ledger-dashboard/, file);',
   ],
   'tests/ledger-core-hooks.test.ts': [
-    "test('a removal that names the deleted cc-worktree-retire script is denied', (t) => {",
-    'assert.equal(assertDenied(gate(main, \'Bash\', { command: `bin/cc-worktree-retire ${task}; rm -rf ${task}` }, h)), removalReason(main, task));',
+    "test('a removal that names the deleted cc-worktree-retire script is denied', async (t) => {",
+    'assert.equal(assertDenied(await gate(main, \'Bash\', { command: `bin/cc-worktree-retire ${task}; rm -rf ${task}` }, h)), removalReason(main, task));',
   ],
 };
 
