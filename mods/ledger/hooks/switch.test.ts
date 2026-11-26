@@ -89,7 +89,7 @@ test('/ledger:next clears at the turn end, then continues the same task with go 
   ])
 })
 
-test('/ledger:next of a finished child task shows the prune, how to retire it, and the next child of its parent', async ($, on) => {
+test('/ledger:next of a finished child task shows the prune, how to finalize it, and the next child of its parent', async ($, on) => {
   const parent = { slug: 'umbrella', main: MAIN }
   const w = world(
     on,
@@ -106,8 +106,7 @@ test('/ledger:next of a finished child task shows the prune, how to retire it, a
 
   const [clear, pruned, retire, child, submit] = w.events
   expect([clear, pruned, submit]).toEqual(['clear', 'log: Pruned the build folders of epic, because its task is finished: 1.2 GB freed in 1 folder.', 'submit: go epic'])
-  expect(retire).toContain('Task epic is finished')
-  expect(retire).toContain('/ledger:retire epic')
+  expect(retire).toBe('log: Task epic is finished. Ask the question `ledger task gate finalize epic` prints.')
   expect(child).toContain('part')
   expect(child).toContain('/ledger:go umbrella')
   expect(w.events.length).toBe(5)
@@ -1167,7 +1166,7 @@ const retirePlan = (worktree: object, fields: object = {}) =>
     ...fields,
   })
 
-test('/ledger:go from a finished task shows how to retire it, and looks up no next child: go already picked it', async ($, on) => {
+test('/ledger:go from a finished task shows how to finalize it, and looks up no next child: go already picked it', async ($, on) => {
   const w = world(
     on,
     { [SESSION]: ownEpic({ finished: true, parent: { slug: 'umbrella', main: MAIN } }), 'go kid --session session-1 --json': started('kid'), [autoPrune(CWD)]: finishedPrune },
@@ -1178,18 +1177,18 @@ test('/ledger:go from a finished task shows how to retire it, and looks up no ne
   await $.turn.complete(turnEnd)
 
   expect(w.events[0]).toBe('clear')
-  expect(w.events.some(event => event.includes('Task epic is finished'))).toBe(true)
+  expect(w.events).toContain('log: Task epic is finished. Ask the question `ledger task gate finalize epic` prints.')
   expect(w.events.at(-1)).toBe('submit: go kid')
   expect(w.argvs().some(([command]) => command === 'tree')).toBe(false)
 })
 
-test('a finished task whose branch is merged gets the line to retire it', async ($, on) => {
+test('a finished task whose branch is merged gets the line to finalize it', async ($, on) => {
   const w = world(on, { [SESSION]: ownEpic({ finished: true }), [autoPrune(CWD)]: finishedPrune, [RETIRE_PLAN]: retirePlan({ ahead: 0, mergedPr: 'at-head', merged: true }) }, { cwd: CWD })
 
   await $.command.run({ command: 'ledger:next', args: '' })
   await $.turn.complete(turnEnd)
 
-  expect(w.events).toContain('log: Task epic is finished and merged. Retire it with `/ledger:retire epic`.')
+  expect(w.events).toContain('log: Task epic is finished and merged. Ask the question `ledger task gate finalize epic` prints.')
 })
 
 test('a finished, merged task whose retire is blocked says what blocks it, not that retire will work', async ($, on) => {
@@ -1204,12 +1203,12 @@ test('a finished, merged task whose retire is blocked says what blocks it, not t
   await $.turn.complete(turnEnd)
 
   expect(w.events).toContain(
-    'log: Task epic is finished and merged, but it cannot be retired yet: it has 2 uncommitted changes; it has active children: part. Run `/ledger:retire epic --dry-run` to see the details.',
+    'log: Task epic is finished and merged, but it cannot be retired yet: it has 2 uncommitted changes; it has active children: part. Run `/ledger:retire epic --dry-run` to see the details; once that is cleared, ask the question `ledger task gate finalize epic` prints.',
   )
-  expect(w.events.some(event => event.includes('Retire it with'))).toBe(false)
+  expect(w.events.some(event => event.includes('finished and merged. Ask'))).toBe(false)
 })
 
-test('a finished task whose PR is still open says so, and to retire it once the PR merges', async ($, on) => {
+test('a finished task whose PR is still open says so, and to finalize it once the PR merges', async ($, on) => {
   const w = world(
     on,
     { [SESSION]: ownEpic({ finished: true }), [autoPrune(CWD)]: finishedPrune, [RETIRE_PLAN]: retirePlan({ ahead: 3, mergedPr: 'none', merged: false, openPr: 12 }) },
@@ -1219,7 +1218,7 @@ test('a finished task whose PR is still open says so, and to retire it once the 
   await $.command.run({ command: 'ledger:next', args: '' })
   await $.turn.complete(turnEnd)
 
-  expect(w.events).toContain('log: Task epic is finished, and its PR #12 is still open. After it merges, run `/ledger:retire epic`.')
+  expect(w.events).toContain('log: Task epic is finished, and its PR #12 is still open. After it merges, ask the question `ledger task gate finalize epic` prints.')
 })
 
 test('a finished child task whose parent has no child left says so', async ($, on) => {
