@@ -32,9 +32,9 @@ $ARGUMENTS
   task started under `## Children`.
 - Each `warning:` line says what the hook could not do.
 - `continue: typed`, when present, means the new session cannot start by
-  itself. Where the `mcp__t3-code__t3_thread_send` tool is available, you
-  queue it as ledger step 4 says; otherwise the operator types `go <task>`
-  after the clear.
+  itself. The line under it is the hook's instruction for queuing the new
+  session. Follow it as ledger step 4 below says: the step that ends your
+  reply.
 
 If there is a `held:` line, change no files and skip the rest of this command.
 Ask the operator with AskUserQuestion what to do. Name the task, the session
@@ -126,23 +126,27 @@ task with these ledger steps. `<task>` in them is the `ledger:` value:
 3. Roll each finished step into one line:
    `ledger notes step <n> --note "<one line>"`. Keep the ledger under about 4k
    tokens.
-4. End your reply with one line saying whether the ledger is updated (or that there is none), that the
-   session clears automatically after this turn, and that the new session
-   then continues by itself in the task that the `task:` value names, so the
-   operator types nothing. Do not show `go <task>` or any other command for
-   the operator to type. Do not ask the operator to run `/clear`. If there is
-   a `continue: typed` line and the `mcp__t3-code__t3_thread_send` tool is
-   available, queue the new session instead. Call
-   `mcp__t3-code__t3_thread_list` and take its `currentThreadId`. As the last
-   tool call of this turn, call `mcp__t3-code__t3_thread_send` with that
-   `threadId`, `message` exactly `go ` followed by the `task:` value, `mode`
-   `queue` and `freshContext` `true`. The last line then says the task
-   continues in a fresh session of this thread by itself, so the operator
-   types nothing. If the tool is not available, or either call fails, the
-   last line instead says the session clears after this turn, and that the
-   operator then types `go <task>`, with the `task:` value, to continue. If
+4. If the argument block holds a `continue: typed` line, follow its
+   instruction: queue the new session. Call `mcp__t3-code__t3_thread_list`
+   and take its `currentThreadId`. As the last tool call of this turn, call
+   `mcp__t3-code__t3_thread_send` with that `threadId`, `message` exactly
+   `go ` followed by the `task:` value, `mode` `queue` and `freshContext`
+   `true`. Then end your reply with one line saying whether the ledger is
+   updated (or that there is none), and that the task continues in a fresh
+   session of this thread by itself, so the operator types nothing. If
+   either tool is missing, or either call fails, the last line instead says
+   the session clears after this turn, and that the operator then types `go`
+   followed by the `task:` value, to continue.
+
+   Otherwise, end your reply with one line saying whether the ledger is
+   updated (or that there is none), that the session clears automatically
+   after this turn, and that the new session then continues by itself in the
+   task that the `task:` value names, so the operator types nothing. Do not
+   show `go <task>` or any other command for the operator to type.
+
+   In both cases, do not ask the operator to run `/clear`. If
    there is a `new:` line, add one line
-   before it: the task was made, and its worktree is at the path on the
+   before that last line: the task was made, and its worktree is at the path on the
    `worktree` line that `ledger go` printed. If `ledger go` failed with any
    exit but 5, say instead that the task is in the backlog. If there is a `parked:` line, add
    one line before it: the task was parked on that date, the reason, and that it is no

@@ -547,9 +547,10 @@ from the ledger's next step with no typing. After `/ledger:go`, it continues in
 the other task. After `/ledger:close`, nothing starts. In a session with no
 person at the prompt, such as one an Agent SDK host like T3 Code drives, the
 plugin clears but does not send `go <slug>`: such a host cuts that turn off
-at once. The agent's last line asks the operator to type `go <slug>` instead.
-In T3 Code, the agent first queues the new session itself. As its last tool
-call, it sends `go <slug>` to its own thread with `t3_thread_send`, in mode
+at once. The hook passes the command a `continue: typed` line and, under it,
+an instruction line that names the slug and the steps to queue the new
+session. In T3 Code, the agent follows it and queues the new session itself.
+As its last tool call, it sends `go <slug>` to its own thread with `t3_thread_send`, in mode
 `queue` and with `freshContext`. T3 starts that message in a fresh session
 once the turn ends. A `tool.call` handler in `register.ts` marks the armed
 clear `queued` when that call goes through and matches the armed slug. The
@@ -558,7 +559,10 @@ end of a queued turn, the plugin releases the claims and writes the
 `handover` (see Claims), then shows the retire hint. That this finishes
 before T3 starts the queued run is not yet checked in T3 [inferred]. It
 neither clears nor sends `go <slug>`. When the tool is missing or
-the call fails, the agent falls back to asking the operator.
+the call fails, the agent's last line asks the operator to type `go <slug>`.
+When the turn ends with nothing queued, the plugin clears the session and
+logs a line that tells the operator to type `go <slug>`. Whether T3 shows
+that log line is not yet checked [inferred].
 
 For `/ledger:go`, `startGo` in `register.ts` runs
 `ledger go <slug> --session <id>` before the prompt expands. It arms the clear

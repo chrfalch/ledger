@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { done, ledgerOf, MAIN, refused, removedSession, session, task, turnEnd, world, worktreeOf } from './fake-ledger.test-helper'
-import { GO_FROM_SUBAGENT, NEXT_FROM_SUBAGENT, nextAfterSwitchMessage, noLedgerMessage, oneSwitchPerTurnMessage, removedFolderMessage, typedOnlyMessage } from './ledger'
+import { continueTypedArgs, GO_FROM_SUBAGENT, NEXT_FROM_SUBAGENT, nextAfterSwitchMessage, noLedgerMessage, notQueuedMessage, oneSwitchPerTurnMessage, removedFolderMessage, typedOnlyMessage } from './ledger'
 
 const CWD = worktreeOf('epic')
 const SESSION = `session ${CWD} --json`
@@ -1286,16 +1286,16 @@ test('a /rename that fails is tried again at the next turn end', async ($, on) =
 
 const sdkStart = { cwd: CWD, surface: null, isInteractive: false } as const
 
-test('/ledger:go in a session with no person at the prompt tells go.md the operator types go <slug>, and the turn end clears without sending it', async ($, on) => {
+test('/ledger:go in a session with no person at the prompt tells go.md to queue go <slug> in T3, and the turn end with nothing queued clears and tells the operator to type it', async ($, on) => {
   const w = world(on, { [SESSION]: ownEpic(), 'go kid --session session-1 --json': started('kid'), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
 
   await $.session.start(sdkStart)
   await $.command.run({ command: 'ledger:go', args: 'kid' })
   await $.turn.complete(turnEnd)
 
-  expect(w.markdown()).toEqual({ command: 'ledger:go', args: 'task: kid\nledger: epic\ncontinue: typed' })
+  expect(w.markdown()).toEqual({ command: 'ledger:go', args: `task: kid\nledger: epic\n${continueTypedArgs('kid')}` })
   expect(w.armed).toEqual([{ mode: 'go', slug: 'kid', sessionId: 'session-1', previous: { slug: 'epic', worktree: CWD, main: MAIN }, typed: true }])
-  expect(w.events).toEqual(['clear'])
+  expect(w.events).toEqual(['clear', `log: ${notQueuedMessage('go', 'kid')}`])
 })
 
 test('/ledger:go through the Skill tool with no person at the prompt hands go.md the same continue line', async ($, on) => {
@@ -1305,20 +1305,20 @@ test('/ledger:go through the Skill tool with no person at the prompt hands go.md
   await $.tool.call({ tool: 'Skill', skill: 'ledger:go', args: 'kid' })
   await $.turn.complete(turnEnd)
 
-  expect(w.skills).toEqual([{ skill: 'ledger:go', args: 'task: kid\nledger: epic\ncontinue: typed' }])
-  expect(w.events).toEqual(['clear'])
+  expect(w.skills).toEqual([{ skill: 'ledger:go', args: `task: kid\nledger: epic\n${continueTypedArgs('kid')}` }])
+  expect(w.events).toEqual(['clear', `log: ${notQueuedMessage('go', 'kid')}`])
 })
 
-test('/ledger:next with no person at the prompt tells next.md the operator types go <slug>, and the turn end clears without sending it', async ($, on) => {
+test('/ledger:next with no person at the prompt tells next.md to queue go <slug> in T3, and the turn end with nothing queued clears and tells the operator to type it', async ($, on) => {
   const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
 
   await $.session.start(sdkStart)
   await $.command.run({ command: 'ledger:next', args: '' })
   await $.turn.complete(turnEnd)
 
-  expect(w.markdown()).toEqual({ command: 'ledger:next', args: 'continue: typed' })
+  expect(w.markdown()).toEqual({ command: 'ledger:next', args: continueTypedArgs('epic') })
   expect(w.armed).toEqual([{ ...NEXT_ARM, typed: true }])
-  expect(w.events).toEqual(['clear'])
+  expect(w.events).toEqual(['clear', `log: ${notQueuedMessage('next', 'epic')}`])
 })
 
 test('/ledger:next through the Skill tool with no person at the prompt hands next.md the continue line', async ($, on) => {
@@ -1330,8 +1330,8 @@ test('/ledger:next through the Skill tool with no person at the prompt hands nex
   await $.tool.call({ tool: 'Skill', skill: 'ledger:next' })
   await $.turn.complete(turnEnd)
 
-  expect(w.skills).toEqual([{ skill: 'ledger:next', args: 'continue: typed' }])
-  expect(w.events).toEqual(['clear'])
+  expect(w.skills).toEqual([{ skill: 'ledger:next', args: continueTypedArgs('epic') }])
+  expect(w.events).toEqual(['clear', `log: ${notQueuedMessage('next', 'epic')}`])
 })
 
 test('/ledger:go and /ledger:next in an interactive session still send go <slug> after the clear', async ($, on) => {
@@ -1423,7 +1423,7 @@ for (const [what, send] of Object.entries(notTheQueuedGo)) {
     await $.turn.complete(turnEnd)
 
     expect(w.armed).toEqual([{ ...NEXT_ARM, typed: true }])
-    expect(w.events).toEqual(['clear'])
+    expect(w.events).toEqual(['clear', `log: ${notQueuedMessage('next', 'epic')}`])
   })
 }
 
@@ -1438,7 +1438,7 @@ test('a queued go T3 refused leaves the arm as it was, so /ledger:next with no p
 
   expect(answer.deny).toBe('no such thread')
   expect(w.armed).toEqual([{ ...NEXT_ARM, typed: true }])
-  expect(w.events).toEqual(['clear'])
+  expect(w.events).toEqual(['clear', `log: ${notQueuedMessage('next', 'epic')}`])
 })
 
 test('a T3 send with no arm passes through and arms nothing', async ($, on) => {
@@ -1474,7 +1474,7 @@ test('a queued go that T3 answers with an error leaves the arm as it was, so /le
   await $.turn.complete(turnEnd)
 
   expect(w.armed).toEqual([{ ...NEXT_ARM, typed: true }])
-  expect(w.events).toEqual(['clear'])
+  expect(w.events).toEqual(['clear', `log: ${notQueuedMessage('next', 'epic')}`])
 })
 
 test('a T3 send in an interactive session is no queued go: /ledger:next still clears and sends go <slug>', async ($, on) => {
