@@ -7,7 +7,7 @@ import { folderEntries, isFolder } from './files.js';
 import { lostText, parseLedger } from './format.js';
 import { checkoutRoot, currentBranch, mainCheckout, repairWorktree } from './git.js';
 import { withLock } from './lock.js';
-import { messageOf, moveLedger, namedMain, places, shown, type Place } from './migrate-repo-ids.js';
+import { messageOf, moveLedger, namedMain, places, relativeMainReason, shown, type Place } from './migrate-repo-ids.js';
 import { samePath } from './paths.js';
 import { parseRecord } from './record.js';
 import { isRepoKey, repoKey, repoLabel } from './repo-key.js';
@@ -48,10 +48,10 @@ type Renamed = { old: string; keys: Map<string, string> };
  * Keys from before D10, folder names, are left to ledger store migrate --repo-ids. A named checkout whose key is the
  * same repo as `old`, once aliases are resolved, is no rename; another named checkout that still has `old` hides none.
  */
-function renamedKeys(store: LedgerStore, aliases: ReadonlyMap<string, string>): Renamed[] {
+function renamedKeys(store: LedgerStore, aliases: ReadonlyMap<string, string>, home: string): Renamed[] {
   const repos = [...new Set(places.flatMap((place) => store[place].repos()))].filter((key) => key.includes('/')).sort();
   return repos.flatMap((old) => {
-    const mains = new Set(places.flatMap((place) => store[place].list(old).flatMap(({ text }) => namedMain(text) ?? [])));
+    const mains = new Set(places.flatMap((place) => store[place].list(old).flatMap(({ text }) => namedMain(text, home) ?? [])));
     const keys = new Map<string, string>();
     for (const main of mains) {
       const key = keyNow(main);
@@ -176,11 +176,11 @@ function searchRoots(cwd: string, search: string[] | undefined): string[] {
 }
 
 function report(context: Context, search: string[] | undefined, print: Print): number {
-  const { store, cwd } = context;
+  const { store, cwd, paths } = context;
   const roots = searchRoots(cwd, search);
   const aliases = store.aliases.read();
   const missing = missingTasks(store);
-  const renamed = renamedKeys(store, aliases);
+  const renamed = renamedKeys(store, aliases, paths.home);
   const problems = missing.length + renamed.length;
   if (problems === 0) {
     print('No problems found.');
@@ -258,7 +258,8 @@ function pointTo(context: Context, writable: () => LedgerStore, name: string, to
   const current = currentBranch(folder);
   if (current !== branch) fail(`${folder} is on ${current === undefined ? 'no branch' : `the branch ${current}`}, not on ${task.slug}'s branch ${branch ?? '(none recorded)'}.`);
   // The recorded main, not task.main, which may be inferred from the old folder: the next rename is found by the record.
-  let recordedMain = task.ledger.location.main;
+  const { home } = context.paths;
+  let recordedMain = parseLedger(readLedger(context, task), { home }).location.main;
   const namesMain = (recorded: string | undefined): boolean => recorded !== undefined && samePath(recorded, main);
   const would = (done: string, planned: string): string => (dryRun ? `Would ${planned}` : done);
 
@@ -268,7 +269,7 @@ function pointTo(context: Context, writable: () => LedgerStore, name: string, to
     // a --to that pointed the task into another clone of its repo, whose main checkout this one replaces.
     const repoint = (text: string): string => {
       refuseTaken(store, folder, task);
-      recordedMain = parseLedger(text).location.main;
+      recordedMain = parseLedger(text, { home }).location.main;
       // The lost mark names the old folder, so it goes before the worktree changes.
       const found = setLostMark(text, undefined) ?? text;
       return withBullet(namesMain(recordedMain) ? found : withBullet(found, 'main', main), 'worktree', folder);
@@ -333,7 +334,7 @@ function keyToFileUnder(cwd: string, old: string): string {
 const nothingFiledUnder = (old: string): never => fail(`No task is filed under ${old}, so nothing was moved.`);
 
 /** `ledger store repair --remote <old-key>`: as ledger store migrate --repo-ids, it moves only what is sure. Gives how many ledgers it left. */
-function refileRemote({ store, cwd }: Context, writable: () => LedgerStore, old: string, dryRun: boolean, print: Print): number {
+function refileRemote({ store, cwd, paths }: Context, writable: () => LedgerStore, old: string, dryRun: boolean, print: Print): number {
   const key = keyToFileUnder(cwd, old);
   if (store.sharesFolder?.(old, key) === true) fail(`${old} and ${key}, the key of this repo, are the same repository folder in the store, so its tasks are filed under ${key} already. Nothing was changed.`);
   const problem = store.aliases.problem();
@@ -373,10 +374,14 @@ function refileRemote({ store, cwd }: Context, writable: () => LedgerStore, old:
   const conflict = (place: Place, ledger: { name: string; text: string }): string | undefined => {
     // The earlier run checked the checkout before making the link. It may have disappeared since.
     if (!store[place].movedHalfway?.(old, ledger.name, key)) {
-      const main = namedMain(ledger.text);
+      const main = namedMain(ledger.text, paths.home);
       // As in ledger store migrate --repo-ids, an alias old → key already says where a ledger that names no main belongs.
       const now = main === undefined ? saved : keyNow(main);
-      if (now === undefined) return main === undefined ? 'it names no main checkout, so its repo is not known' : `its main checkout ${main} is not one any more`;
+      if (now === undefined) {
+        if (main !== undefined) return `its main checkout ${main} is not one any more`;
+        const relative = parseLedger(ledger.text).location.relativeMain;
+        return relative === undefined ? 'it names no main checkout, so its repo is not known' : relativeMainReason(relative);
+      }
       if (!sameRepo(aliases, now, key)) return `its main checkout ${main} is a checkout of ${shown(now)}`;
     }
     if (place === 'archive') return undefined;

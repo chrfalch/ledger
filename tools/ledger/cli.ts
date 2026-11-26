@@ -514,13 +514,14 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
     .description(
       "Archive a task's ledger and evidence, remove its worktree or backlog ledger, mark it retired in its parent, and delete its merged branch and its Xcode build folders. Exits 1, with nothing changed, when a check stops it.",
     )
-    .argument('[slug]', "the task in this repo; by default the task of the worktree you are in")
+    .argument('[slug]', "the task in this repo, or in the repo --repo names; by default the task of the worktree you are in")
+    .option('--repo <repo>', 'retire a backlog task of that repo from any folder, also when no checkout of it is on this machine: its key, such as github.com/me/app, an alias, or its short label, such as me/app')
     .option('--dry-run', 'print what would be checked and done; it fetches the default branch from origin, and changes nothing else')
     .option('--force', 'retire it anyway with uncommitted changes, an unmerged branch or active children')
     .option('--json', JSON_HELP)
-    .action((slug: string | undefined, { dryRun = false, force = false }: { dryRun?: boolean; force?: boolean }) => {
+    .action((slug: string | undefined, { repo, dryRun = false, force = false }: { repo?: string; dryRun?: boolean; force?: boolean }) => {
       const silent = { line: () => {}, warn: () => {} };
-      show(json ? retireTask(context, slug, { dryRun, force }, silent) : retireTask(context, slug, { dryRun, force }), retireText);
+      show(json ? retireTask(context, slug, { repo, dryRun, force }, silent) : retireTask(context, slug, { repo, dryRun, force }), retireText);
     });
   taskGroup
     .command('abandon')
@@ -833,7 +834,7 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
               print(json ? JSON.stringify({ moves }, null, 2) : pendingText(moves));
               return;
             }
-            const conflicts = active ? migrateActive(store, { dryRun, cwd, home: paths.home }, print) : (records ? migrateRecords : migrateRepoIds)(store, { dryRun }, print);
+            const conflicts = active ? migrateActive(store, { dryRun, cwd, home: paths.home }, print) : records ? migrateRecords(store, { dryRun }, print) : migrateRepoIds(store, { dryRun, home: paths.home }, print);
             if (conflicts > 0) exitCode = 1;
           } finally {
             dryStore?.close?.();

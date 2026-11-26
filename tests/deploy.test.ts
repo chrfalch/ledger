@@ -788,7 +788,7 @@ const FINISHED = ['2026-10-14-core-only-evidence', '2026-10-12-keychain-keys', '
 const finishedLines = (gone: string): string[] => [
   'moves    3 finished tasks stay under their old repo folder name, as that folder is gone or unknown. Nothing to do: they stay readable in the archive.',
   'moves    expo/2026-10-14-core-only-evidence: notes of a finished task whose ledger is not in the store',
-  'moves    jev-sim-controller/2026-10-12-keychain-keys: its ledger does not say which repo folder it came from',
+  'moves    jev-sim-controller/2026-10-12-keychain-keys: its saved main checkout "." is a relative path, so its repo folder cannot be recovered',
   `moves    react-native-netinfo/2026-10-28-spm-package: its repo folder ${gone} is gone`,
 ];
 

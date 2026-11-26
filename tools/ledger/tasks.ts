@@ -228,20 +228,34 @@ export type RepoOf = (main: string) => string | undefined;
 
 /**
  * repoKey from the store alone, for the session start, which must run no git in another repo: the key `known` has for
- * its main, else that of a live task whose main is `main`, else undefined, so a task there counts as not found.
+ * its main, else that of a live task whose main is `main`, by its ledger or by its parent's line for it, else undefined,
+ * so a task there counts as not found.
  */
 export function storedRepoOf(tasks: Task[], known?: { main: string; key: string }): RepoOf {
-  const live = tasks.filter((task) => task.main !== undefined && task.place !== 'archive');
+  const current = tasks.filter((task) => task.place !== 'archive');
+  // A parent's child line can be stale, so a main a ledger names wins over one only a child line names.
+  const live = [
+    ...current.flatMap((task) => (task.main === undefined ? [] : [{ main: task.main, key: keyOf(task) }])),
+    ...current.flatMap((task) => {
+      const main = task.main === undefined ? mainNamedByParent(tasks, task) : undefined;
+      return main === undefined ? [] : [{ main, key: keyOf(task) }];
+    }),
+  ];
   const keys = new Map<string, string | undefined>();
-  const find = (main: string): string | undefined => {
-    if (known !== undefined && samePath(main, known.main)) return known.key;
-    const task = live.find((each) => each.main !== undefined && samePath(each.main, main));
-    return task && keyOf(task);
-  };
+  const find = (main: string): string | undefined =>
+    known !== undefined && samePath(main, known.main) ? known.key : live.find((each) => samePath(each.main, main))?.key;
   return (main) => {
     if (!keys.has(main)) keys.set(main, find(main));
     return keys.get(main);
   };
+}
+
+/** For a task whose ledger names no main: the main its parent in another repo names it by under ## Children, if any. */
+export function mainNamedByParent(tasks: Task[], task: Task): string | undefined {
+  const { slug, main } = task.ledger.location.parent ?? {};
+  if (main === undefined) return undefined;
+  const parent = tasks.find((each) => each.place !== 'archive' && each.slug === slug && each.main !== undefined && samePath(each.main, main));
+  return parent?.ledger.children.find((line) => line.slug === task.slug)?.main;
 }
 
 const PRECEDENCE: Place[] = ['active', 'backlog', 'archive'];

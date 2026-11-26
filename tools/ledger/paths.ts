@@ -32,6 +32,15 @@ export function mainOfTaskWorktree(worktree: string): string | undefined {
   return path.basename(worktrees) === 'worktrees' && path.basename(claude) === '.claude' ? path.dirname(claude) : undefined;
 }
 
+/**
+ * A saved main checkout as an absolute path: one under ~ in `home`, as a person may write it. Undefined for a relative
+ * one such as `.`, which would resolve against the cwd of whoever reads it, and for one under ~ without a home.
+ */
+export function absoluteMain(saved: string, home: string | undefined): string | undefined {
+  const main = home === undefined ? saved : saved.replace(/^~(?=\/|$)/, () => home);
+  return path.isAbsolute(main) ? main : undefined;
+}
+
 /** The folder may be gone; then its resolved path stands in. */
 export function realPath(file: string): string {
   try {

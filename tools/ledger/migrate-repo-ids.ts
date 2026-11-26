@@ -3,7 +3,7 @@ import path from 'node:path';
 import { exists, isEntryName } from './files.js';
 import { parseLedger } from './format.js';
 import { mainCheckout } from './git.js';
-import { mainOfTaskWorktree, realPath, samePath } from './paths.js';
+import { absoluteMain, mainOfTaskWorktree, realPath, samePath } from './paths.js';
 import { repoKey, repoLabel } from './repo-key.js';
 import type { Move, OnMove } from './pending.js';
 import type { LedgerStore, StoredLedger } from './store.js';
@@ -23,19 +23,25 @@ type Moved = { repo: string; location: string };
 /** A key from before D10: the folder name of a main checkout. Every D10 key, an address or a path, holds a slash. */
 const isFolderName = (repo: string): boolean => !repo.includes('/');
 
-/** The main checkout a ledger names: its `- main:` line, else the repo of its worktree under .claude/worktrees. */
-export function namedMain(text: string): string | undefined {
-  const { main, worktree } = parseLedger(text).location;
+/** The main checkout a ledger names: its `- main:` line, ~ in `home`, else the repo of its worktree under .claude/worktrees. */
+export function namedMain(text: string, home?: string): string | undefined {
+  const { main, worktree } = parseLedger(text, { home }).location;
   return main ?? (worktree === undefined ? undefined : mainOfTaskWorktree(worktree));
 }
 
+/** Why a ledger whose saved main checkout is the relative path `main` stays: nothing tells which folder it meant. */
+export const relativeMainReason = (main: string): string => `its saved main checkout "${main}" is a relative path, so its repo folder cannot be recovered`;
+
 /**
  * The folder that holds an active entry's ledger, and its main checkout: the entry's `main`, else the one git
- * reports for the folder, else the repo whose .claude/worktrees holds it.
+ * reports for the folder, else the repo whose .claude/worktrees holds it. Undefined for an entry with a relative path.
  */
-function activeFolder(entry: OldTaskListEntry): { folder: string; main: string } {
+function activeFolder(entry: OldTaskListEntry, home: string | undefined): { folder: string; main: string } | undefined {
+  if (!path.isAbsolute(entry.path)) return undefined;
   const folder = path.dirname(path.dirname(entry.path));
-  return { folder, main: entry.main ?? mainCheckout(folder) ?? mainOfTaskWorktree(folder) ?? folder };
+  if (entry.main === undefined) return { folder, main: mainCheckout(folder) ?? mainOfTaskWorktree(folder) ?? folder };
+  const main = absoluteMain(entry.main, home);
+  return main === undefined ? undefined : { folder, main };
 }
 
 /** Where an entry says its ledger is: an archive copy's location, else its path. */
@@ -158,7 +164,7 @@ export function conversionHint(store: LedgerStore): string | undefined {
  * evidence folder and alias conflict, and returns how many ledgers, evidence folders and alias conflicts it left, or
  * with `dryRun` would leave, under a folder name for a person to move.
  */
-export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dryRun: boolean }, line: (text: string) => void, onMove?: OnMove): number {
+export function migrateRepoIds(store: LedgerStore | undefined, { dryRun, home }: { dryRun: boolean; home?: string }, line: (text: string) => void, onMove?: OnMove): number {
   line(`Convert repo keys from folder names to repo addresses${dryRun ? ' · dry run, nothing changed' : ''}`);
   const report = (from: string, to: string, reason?: string, accepted = false): void =>
     onMove?.({ kind: 'repo-ids', from, to, auto: reason === undefined, ...(reason === undefined ? {} : { reason }), ...(accepted ? { accepted } : {}) });
@@ -183,9 +189,10 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
     return [...filed.values()].flat().length + orphans.length;
   }
 
+  const savedMain = (main: string | undefined): string | undefined => (main === undefined ? undefined : absoluteMain(main, home));
   const recorded = [
-    ...entries.flatMap((entry) => [entry.main, entry.parentMain, entry.status === 'active' ? activeFolder(entry).main : undefined]),
-    ...[...filed.values()].flat().map(({ ledger }) => namedMain(ledger.text)),
+    ...entries.flatMap((entry) => [savedMain(entry.main), savedMain(entry.parentMain), entry.status === 'active' ? activeFolder(entry, home)?.main : undefined]),
+    ...[...filed.values()].flat().map(({ ledger }) => namedMain(ledger.text, home)),
   ].filter((main) => main !== undefined);
   const keys = new Map<string, string | undefined>();
   const keyOf = (main: string): string | undefined => {
@@ -210,29 +217,38 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
     if (volume !== undefined && statError(volume) !== undefined) return { left: `its repo folder ${main} is on a disk that is not mounted` };
     return { left: `its repo folder ${main} is gone`, noRepo: true };
   };
-  const ownerless = (old: string): Outcome => {
+  /** `unsaid` is why it stays when no record and no alias tells its repo. */
+  const ownerless = (old: string, unsaid: Left): Outcome => {
     const candidates = [...new Map(recorded.filter((main) => path.basename(main) === old).map((main) => [realPath(main), main])).values()];
     const found = new Set(candidates.map(keyOf));
     const [key] = found;
     if (candidates.length === 0) {
       // An earlier run decided it, from records that may have moved on since: the ledgers it moved.
       const saved = aliases.get(old);
-      return saved === undefined ? { left: 'its ledger does not say which repo folder it came from', noRepo: true } : { to: saved };
+      return saved === undefined ? unsaid : { to: saved };
     }
     if (found.size === 1 && key !== undefined) return { to: key };
     if (candidates.length === 1) return noKey(candidates[0]);
     return { left: `ambiguous: ${old} was the folder name of ${candidates.length} checkouts, ${candidates.join(', ')}` };
   };
-  const ledgerOutcome = (old: string, text: string): Outcome => {
-    const own = namedMain(text);
-    if (own === undefined) return ownerless(old);
+  /** The relative main checkout the ledger, or the old task list entry of it, saved. */
+  const relativeMain = ({ text, location }: StoredLedger): string | undefined =>
+    parseLedger(text, { home }).location.relativeMain ??
+    entries.find((entry) => entryLocation(entry) === location && entry.main !== undefined && savedMain(entry.main) === undefined)?.main;
+  const ledgerOutcome = (old: string, ledger: StoredLedger): Outcome => {
+    const own = namedMain(ledger.text, home);
+    if (own === undefined) {
+      const relative = relativeMain(ledger);
+      return ownerless(old, { left: relative === undefined ? 'its ledger does not say which repo folder it came from' : relativeMainReason(relative), noRepo: true });
+    }
     const key = keyOf(own);
     return key === undefined ? noKey(own) : { to: key };
   };
   /** The key an active entry of the old task list says its folder name stands for, when it says one. */
   const activeTarget = (entry: OldTaskListEntry): string | undefined => {
-    if (!exists(entry.path)) return undefined;
-    const { folder, main } = activeFolder(entry);
+    const active = exists(entry.path) ? activeFolder(entry, home) : undefined;
+    if (active === undefined) return undefined;
+    const { folder, main } = active;
     const checkout = mainCheckout(folder);
     if (checkout !== undefined) {
       if (path.basename(checkout) !== entry.repo) return undefined;
@@ -252,7 +268,7 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
   const strayOutcome = (old: string, name: string): Outcome => {
     const found = store.archive.repos().filter((repo) => {
       const copy = isFolderName(repo) ? undefined : store.archive.read(repo, name);
-      const main = copy && namedMain(copy.text);
+      const main = copy && namedMain(copy.text, home);
       return main !== undefined && path.basename(main) === old && keyOf(main) === repo;
     });
     const [key] = found;
@@ -291,16 +307,17 @@ export function migrateRepoIds(store: LedgerStore | undefined, { dryRun }: { dry
     const place: Place = entry.status === 'archived' ? 'archive' : 'backlog';
     const name = nameAt(store, place, entry.repo, location);
     if (name === undefined || store[place].has(entry.repo, name)) return undefined;
-    const key = (entry.main === undefined ? undefined : keyOf(entry.main)) ?? aliases.get(entry.repo);
+    const recordedMain = savedMain(entry.main);
+    const key = (recordedMain === undefined ? undefined : keyOf(recordedMain)) ?? aliases.get(entry.repo);
     const ledger = key === undefined ? undefined : store[place].read(key, name);
     // A ledger that names no main is placed by the records, this stale entry among them, so it is no proof of its own.
-    const main = ledger && namedMain(ledger.text);
+    const main = ledger && namedMain(ledger.text, home);
     if (key === undefined || main === undefined || keyOf(main) !== key) return undefined;
     const to = store[place].location(key, name);
     return entries.some((other) => entryLocation(other) === to) ? undefined : { repo: key, location: to };
   };
   // Planned before anything moves, so a dry run plans what the run does: a ledger this run moves is no sign of an earlier run.
-  const outcomes = new Map([...filed].map(([old, list]) => [old, list.map((each) => ({ ...each, outcome: ledgerOutcome(old, each.ledger.text) }))]));
+  const outcomes = new Map([...filed].map(([old, list]) => [old, list.map((each) => ({ ...each, outcome: ledgerOutcome(old, each.ledger) }))]));
   const resumed = legacyEntries.flatMap((entry) => {
     const moved = earlierMove(entry);
     return moved === undefined ? [] : [{ old: entry.repo, key: moved.repo }];

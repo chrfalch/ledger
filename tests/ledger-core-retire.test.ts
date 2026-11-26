@@ -1594,3 +1594,96 @@ test('ledger task abandon says "Not abandoned:" when active children stop it', (
   backlogTask(h, app, { slug: 'part', parent: 'epic' });
   failed(ledger(h, app, 'task', 'abandon', 'epic', '--reason', 'no longer needed'), /^Not abandoned: epic has active children: part\. Retire them first, or pass --force\.$/m);
 });
+
+// --- A backlog task of a repo with no checkout, retired by --repo ---
+
+const EXACT = 'github.com/me/exact2';
+const KERB = 'github.com/me/kerb-racer';
+
+/** Replaces git and gh on PATH with scripts that leave a mark, for a command that must run neither. */
+function markCalls(h: string): string {
+  const mark = path.join(h, 'git-or-gh-was-called');
+  for (const tool of ['git', 'gh']) {
+    const file = path.join(h, 'stub-bin', tool);
+    writeFileSync(file, `#!/bin/sh\ntouch ${JSON.stringify(mark)}\nexit 1\n`);
+    chmodSync(file, 0o755);
+  }
+  return mark;
+}
+
+/** The operator's case: a child in exact2 whose parent is in kerb-racer, both in the backlog, with neither repo checked out. */
+function uncheckedOut(t: TestContext) {
+  const h = home(t);
+  const [exact, kerb] = [path.join(h, 'repos/exact2'), path.join(h, 'repos/kerb-racer')];
+  const store = fileStore(ledgerPaths(h));
+  const child = 'ios-silent-and-volume-signals';
+  store.backlog.write(EXACT, child, ledgerText({ slug: child, main: exact, branch: child, parent: `ios-game-sound @ ${kerb}`, report: ['Dropped: the game has no sound yet.'] }));
+  store.backlog.write(KERB, 'ios-game-sound', ledgerText({ slug: 'ios-game-sound', main: kerb, branch: 'ios-game-sound', children: [`- ${child} @ ${exact}`] }));
+  return { h, exact, kerb, store, child };
+}
+
+test('ledger retire --repo archives a backlog task of a repo with no checkout, run outside any git repo, and runs neither git nor gh', (t) => {
+  const { h, store, child } = uncheckedOut(t);
+  const text = store.backlog.read(EXACT, child)?.text;
+  const mark = markCalls(h);
+  ok(ledger(h, h, 'task', 'retire', child, '--repo', 'me/exact2'));
+  assert.equal(store.backlog.has(EXACT, child), false);
+  assert.equal(store.archive.read(EXACT, `${today()}-${child}`)?.text, text);
+  assert.equal(existsSync(mark), false, 'git or gh was called');
+});
+
+test('ledger retire --repo takes the repo key too, and records the retirement in a parent in another repo with no checkout', (t) => {
+  const { h, exact, kerb, store, child } = uncheckedOut(t);
+  const stdout = ok(ledger(h, h, 'task', 'retire', child, '--repo', EXACT));
+  const parent = store.backlog.read(KERB, 'ios-game-sound')?.text ?? assert.fail('the parent is gone');
+  assert.match(parent, new RegExp(`^- ${child} @ ${exact.replaceAll('/', '\\/')} \\(retired ${today()}\\)$`, 'm'));
+  assert.match(parent, new RegExp(`### ${child}@${exact.replaceAll('/', '\\/')}\\nDropped: the game has no sound yet\\.`));
+  assert.match(stdout, new RegExp(`^Parent ios-game-sound @ ${kerb.replaceAll('/', '\\/')} has no active children left\\.`, 'm'));
+});
+
+test('ledger retire --repo --dry-run prints the plan of a backlog task with no checkout and changes nothing', (t) => {
+  const { h, child } = uncheckedOut(t);
+  const before = snapshot(h);
+  const stdout = ok(ledger(h, h, 'task', 'retire', child, '--repo', 'me/exact2', '--dry-run'));
+  assert.deepEqual(snapshot(h), before);
+  assert.match(stdout, /dry run/i);
+  assert.match(stdout, /delete the backlog ledger /);
+  assert.match(stdout, /mark ios-silent-and-volume-signals @ .* retired under ## Children of ios-game-sound/);
+});
+
+test('ledger retire --repo refuses an active task and points to ledger store repair --lost', (t) => {
+  const { h, store } = uncheckedOut(t);
+  store.active.write(EXACT, 'live', ledgerText({ slug: 'live', main: path.join(h, 'repos/exact2'), worktree: path.join(h, 'repos/exact2/.claude/worktrees/live'), branch: 'live' }));
+  const before = snapshot(h);
+  failed(ledger(h, h, 'task', 'retire', 'live', '--repo', 'me/exact2'), /ledger store repair .*--lost/);
+  assert.deepEqual(snapshot(h), before);
+});
+
+test('ledger retire --repo names what it cannot find: a repo the store does not know, or a slug that repo has no task of', (t) => {
+  const { h } = uncheckedOut(t);
+  const before = snapshot(h);
+  failed(ledger(h, h, 'task', 'retire', 'ios-game-sound', '--repo', 'me/nowhere'), /me\/nowhere/);
+  failed(ledger(h, h, 'task', 'retire', 'nothing', '--repo', 'me/exact2'), /^No task ledger is named "nothing" in the repo me\/exact2\./m);
+  assert.deepEqual(snapshot(h), before);
+});
+
+/** A parent in kerb-racer whose child in exact2 has a ledger that names no main, so only the parent's line says where exact2 is. */
+function childWithoutMain(t: TestContext) {
+  const { h, exact, kerb, store, child } = uncheckedOut(t);
+  store.backlog.write(EXACT, child, ledgerText({ slug: child, branch: child, parent: `ios-game-sound @ ${kerb}`, report: ['Dropped: the game has no sound yet.'] }));
+  return { h, exact, store, child };
+}
+
+test('ledger retire --repo refuses a parent whose live child in another repo names no main, as a normal retire does', (t) => {
+  const { h } = childWithoutMain(t);
+  const before = snapshot(h);
+  failed(ledger(h, h, 'task', 'retire', 'ios-game-sound', '--repo', 'me/kerb-racer'), /^ios-game-sound has active children: ios-silent-and-volume-signals @ .*Retire them first, or pass --force\.$/m);
+  assert.deepEqual(snapshot(h), before);
+});
+
+test('ledger retire --repo marks the parent of a child that names no main as retired', (t) => {
+  const { h, exact, store, child } = childWithoutMain(t);
+  ok(ledger(h, h, 'task', 'retire', child, '--repo', 'me/exact2'));
+  const parent = store.backlog.read(KERB, 'ios-game-sound')?.text ?? assert.fail('the parent is gone');
+  assert.match(parent, new RegExp(`^- ${child} @ ${exact.replaceAll('/', '\\/')} \\(retired ${today()}\\)$`, 'm'));
+});
