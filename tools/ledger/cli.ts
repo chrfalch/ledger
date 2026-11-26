@@ -133,6 +133,7 @@ function listed(task: Task) {
     ...(task.elsewhere ? { elsewhere: true } : {}),
     ...(task.host === undefined ? {} : { host: task.host }),
     branch: task.branch ?? '',
+    ...(ledger.location.designRefs === undefined ? {} : { designRefs: ledger.location.designRefs }),
     ...(parent === undefined ? {} : { parent: { slug: parent.slug, ...(parentMain === undefined ? {} : { main: parentMain }) } }),
     updated: new Date(task.mtimeMs).toISOString(),
     goal: ledger.goal,

@@ -13,6 +13,7 @@ import {
   lostText,
   parseClaim,
   parseDependencies,
+  parseDesignRefs,
   parseLedger,
   parseLost,
   parseOrder,
@@ -201,17 +202,6 @@ const asText = (value: string): string => value;
 const asCount = (value: string): number | undefined => (/^[1-9]\d*$/.test(value) ? Number(value) : undefined);
 const showRef = ({ slug, main }: TaskRef): string => (main === undefined ? slug : `${slug} @ ${main}`);
 
-/** Each comma-separated item of `value` as `parse` reads it; undefined when any item does not read. */
-function listOf<T>(value: string, parse: (item: string) => T | undefined): T[] | undefined {
-  const items: T[] = [];
-  for (const part of value.split(',')) {
-    const item = parse(part.trim());
-    if (item === undefined) return undefined;
-    items.push(item);
-  }
-  return items;
-}
-
 /** Split as parseLedger splits it; a second ` @ ` stays in the commit, so no text is lost. */
 function parseBase(value: string): TaskRecord['base'] {
   const [ref, ...commit] = value.split(/[ \t]+@[ \t]+/);
@@ -248,7 +238,7 @@ const BULLETS: Bullet[] = [
   bullet('host', 'host', asText, asText),
   bullet('branch', 'branch', asText, asText, { template: '<name>' }),
   bullet('base', 'base', parseBase, ({ ref, commit }) => (commit === undefined ? ref : `${ref} @ ${commit}`), { template: '<branch/commit>' }),
-  bullet('design refs', 'designRefs', (value) => (value === 'none' ? 'none' : listOf(value, (item) => item || undefined)), (refs) => (refs === 'none' ? refs : refs.join(',')), {
+  bullet('design refs', 'designRefs', parseDesignRefs, (refs) => (refs === 'none' ? refs : refs.join(',')), {
     template: '<LLP numbers, comma-separated, or none>',
     written: false,
   }),

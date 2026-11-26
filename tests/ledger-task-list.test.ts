@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { FORMAT } from '../tools/ledger/clone.js';
 import { openStore } from '../tools/ledger/open-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
@@ -23,16 +23,33 @@ function oldTaskListRows(h: string): number {
   }
 }
 
+type Storage = 'file' | 'sqlite' | 'git';
+
+function storageHome(t: TestContext, storage: Storage): string {
+  const h = home(t);
+  copyFileSync(path.join(REPO, 'ledger.template.md'), path.join(h, '.claude/ledger.template.md'));
+  if (storage !== 'file') writeFileSync(path.join(h, '.claude/ledger-settings.json'), JSON.stringify({ storage }));
+  if (storage === 'git') {
+    const clone = path.join(h, '.claude/ledger-data');
+    git(h, h, 'init', '--quiet', clone);
+    writeFileSync(path.join(clone, '.ledger-data'), `${JSON.stringify({ format: FORMAT })}\n`);
+  }
+  return h;
+}
+
+const withDesignRefs = (text: string, line: string | undefined): string =>
+  text.replace('- design refs: none\n', line === undefined ? '' : `${line}\n`);
+
+const DESIGN_REFS: { slug: string; line?: string; designRefs?: string[] | 'none' }[] = [
+  { slug: 'refs', line: '- design refs: 3, LLP 0004', designRefs: ['3', 'LLP 0004'] },
+  { slug: 'none', line: '- design refs: none', designRefs: 'none' },
+  { slug: 'placeholder', line: '- design refs: <LLP numbers, comma-separated, or none>' },
+  { slug: 'unset' },
+];
+
 for (const storage of ['file', 'sqlite', 'git'] as const) {
   test(`${storage} store: a task list read, a write and a session start cache no task list`, { skip: storage === 'sqlite' && noSqlite }, (t) => {
-    const h = home(t);
-    copyFileSync(path.join(REPO, 'ledger.template.md'), path.join(h, '.claude/ledger.template.md'));
-    if (storage !== 'file') writeFileSync(path.join(h, '.claude/ledger-settings.json'), JSON.stringify({ storage }));
-    if (storage === 'git') {
-      const clone = path.join(h, '.claude/ledger-data');
-      git(h, h, 'init', '--quiet', clone);
-      writeFileSync(path.join(clone, '.ledger-data'), `${JSON.stringify({ format: FORMAT })}\n`);
-    }
+    const h = storageHome(t, storage);
     const app = repository(h, path.join(h, 'repos/app'));
     const worktree = worktreeOf(app, 'task');
     git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/task', worktree, 'main');
@@ -50,5 +67,35 @@ for (const storage of ['file', 'sqlite', 'git'] as const) {
 
     for (const file of ['ledgers.json', 'ledgers-git.json']) assert.equal(existsSync(path.join(h, '.claude', file)), false, `~/.claude/${file} was written`);
     if (storage === 'sqlite') assert.equal(oldTaskListRows(h), 0);
+  });
+}
+
+for (const storage of ['file', 'sqlite', 'git'] as const) {
+  test(`${storage} store: list --json gives each task's design refs as its ledger names them`, { skip: storage === 'sqlite' && noSqlite }, (t) => {
+    const h = storageHome(t, storage);
+    const app = repository(h, path.join(h, 'repos/app'));
+    const repo = repoKeyOf(app);
+    const store = openStore(ledgerPaths(h), storage, { backgroundSync: false });
+    for (const { slug, line } of DESIGN_REFS) {
+      const worktree = worktreeOf(app, slug);
+      git(h, app, 'worktree', 'add', '--quiet', '-b', `me/${slug}`, worktree, 'main');
+      mkdirSync(path.join(worktree, '.claude'));
+      store.active.create(repo, slug, withDesignRefs(ledgerText({ slug, worktree, branch: `me/${slug}` }), line));
+      store.archive.write(repo, `2026-10-01-old-${slug}`, withDesignRefs(ledgerText({ slug: `old-${slug}`, worktree: worktreeOf(app, `old-${slug}`), branch: `me/old-${slug}` }), line));
+    }
+    store.close?.();
+
+    const rows = (JSON.parse(ok(ledger(h, app, 'list', '--archived', '--json'))) as { tasks: Record<string, unknown>[] }).tasks;
+    const bySlug = new Map(rows.map((row) => [row.slug, row]));
+    for (const { slug, designRefs } of DESIGN_REFS) {
+      for (const listed of [slug, `old-${slug}`]) {
+        const row = bySlug.get(listed);
+        assert.ok(row, `${listed} is listed`);
+        assert.deepEqual(row.designRefs, designRefs, listed);
+        assert.equal(Object.hasOwn(row, 'designRefs'), designRefs !== undefined, listed);
+      }
+    }
+    const active = (JSON.parse(ok(ledger(h, app, 'list', '--json'))) as { tasks: Record<string, unknown>[] }).tasks;
+    assert.deepEqual(active.find(({ slug }) => slug === 'refs')?.designRefs, ['3', 'LLP 0004']);
   });
 }
