@@ -277,8 +277,13 @@ that the setting names.
 
 `ledger store sync init <url>` makes the clone, once on each machine. It
 accepts only a private GitHub repository. `ledger store sync`
-(`tools/ledger/sync.ts`) commits, pulls with a rebase, checks that only ledgers
-and no secret-like text go out, and pushes. A pre-push hook in the clone runs
+(`tools/ledger/sync.ts`) commits, pulls, checks that only ledgers and no
+secret-like text go out, and pushes. The pull rebases the commits made here
+onto the fetched commit (`rebaseOnto`). With no commit made here, it moves the
+branch forward with `git merge --ff-only` instead, and starts no rebase. Before
+it commits, a sync clears a rebase that an earlier git left in the clone, when
+that loses nothing (`clearLeftoverRebase` in `tools/ledger/clone.ts`; see
+[Known gaps](#known-gaps)). A pre-push hook in the clone runs
 the same secret scan (`tools/ledger/secret-scan.ts`). Both read a line of a task
 record also with its JSON escapes undone, so a secret after an escaped line
 break starts a line, as it does in Markdown.
@@ -665,7 +670,10 @@ because its turn end does not clear the session.
   that needs the operator is a line in the report's one *Needs you:* section,
   which in the open-trees report comes above the trees. The time
   is set in three parts. The pull, every git call and every lock wait share one
-  five-second deadline. Then gh gets 3 seconds for all PRs at once. The writes
+  five-second deadline. A git call still running at the deadline is stopped,
+  so the pull starts a rebase only for commits made here, and the next sync
+  clears a rebase that was stopped while it wrote its state (`pullForSession`
+  in `tools/ledger/sync.ts`). Then gh gets 3 seconds for all PRs at once. The writes
   that gh's answers ask for then get 2 seconds of their own, from when gh is
   done, as the five seconds may be up by then.
 - `prompt-submit`: titles the session when the prompt is exactly
@@ -939,6 +947,9 @@ a worktree are the main repository's.
 
 The git store also keeps a clone lock, `~/.claude/ledger-data.lock`, and the
 last sync problem, `~/.claude/ledger-data.status.json`, outside the clone.
+Every git call that changes the clone holds the clone lock, so no two of them
+run at once. The clearing of a rebase left in the clone holds it too, and needs
+no lock of its own.
 
 The file store writes backlog and active ledgers atomically. It holds a
 lock file, `<target>.lock`, during each such write. `ledger store repair`
@@ -1107,3 +1118,27 @@ code does not track PR state. `ledger notes step` sets a step's status as free
 text, and only rules guard most steps. [LLP 0001
 section 15](0001-ledger-workflow.plan.md#15-from-today-to-this-spec) lists each
 gap and the planned work.
+
+A git stopped at the session-start deadline can leave a rebase half written:
+`.git/rebase-merge` empty, or with only some of its files. `git rebase --abort`
+fails on such a rebase, so a sync that asked for it stopped every later sync
+too. A sync now clears a rebase with `git rebase --quit`, which leaves HEAD,
+the index and the files as they are, but only when that loses nothing. All of
+these must hold:
+
+- HEAD is on the branch, and the rebase names that branch, if it names one.
+- No commit was rebased (`done`) or stopped at (`stopped-sha`).
+- The rebase started from the branch's tip (`orig-head`), if it names one.
+- No file has a conflict.
+
+Ledger changes not committed yet do not stop it, and neither do commits not
+pushed yet: a pull rebases only when there are such commits, and `--quit`
+leaves the branch on them. The sync then commits, pulls and pushes them. Any
+other rebase stays, and the sync says what a person would lose and what to
+run. It names `git rebase --continue` only for a rebase that got partway: HEAD
+detached, a commit rebased or stopped at. A `.git/rebase-apply`, which `git am`
+or a rebase that applies patches leaves, always stays, and the sync asks the
+operator to finish or stop it. So `rebaseOnto` runs `git rebase --merge`, even
+when the clone sets `rebase.backend` to `apply`: a rebase the sync itself leaves
+behind is then always one in `.git/rebase-merge`, which it can clear. A fast-forward stopped at the deadline can still leave
+`.git/index.lock`, which stops the next sync until a person removes it.

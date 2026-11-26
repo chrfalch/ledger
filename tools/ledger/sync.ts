@@ -7,6 +7,7 @@ import {
   ASK_THE_OPERATOR,
   branchOf,
   checkFinished,
+  clearLeftoverRebase,
   clearStatus,
   clonePaths,
   cloneGit,
@@ -510,13 +511,17 @@ const ABORT_MS = 500;
 
 /**
  * Rebases the commits made here onto `incoming`, the commit the fetch found, once every commit it brings holds only
- * ledgers as plain files. A rebase that stops or runs out of time is aborted, so the clone is left as it was, with
- * every commit made here; an abort that fails is a problem a person must fix. When the remote has nothing new, there
- * is nothing to rebase, and a merge stays a merge; otherwise a merge made here stops it, as a rebase would drop it.
+ * ledgers as plain files; with no commit made here, it moves the branch forward to `incoming` without a rebase. A
+ * rebase that stops or runs out of time is aborted, so the clone is left as it was, with every commit made here; when
+ * the abort fails, the rebase left is cleared if it holds no work, and is otherwise a problem a person must fix. When
+ * the remote has nothing new, there is nothing to rebase, and a merge stays a merge; otherwise a merge made here stops
+ * it, as a rebase would drop it.
  */
 function rebaseOnto({ clone, where, remote }: Sync, { upstream, incoming }: { upstream: string; incoming: string }, deadline?: number): void {
   if (incoming === '' || isAncestor(clone, incoming, 'HEAD', deadline)) return;
-  if (must(cloneGit(clone, ['rev-list', '--merges', '--count', 'HEAD', '--not', incoming], { deadline })).trim() !== '0') {
+  // "<commit> <parent>...", one line for each commit made here.
+  const made = must(cloneGit(clone, ['rev-list', '--parents', 'HEAD', '--not', incoming], { deadline })).split('\n').filter(Boolean);
+  if (made.some((line) => line.split(' ').length > 2)) {
     throw new SyncProblem(
       'conflict',
       `The commits not pushed yet in ${where} hold a merge commit, which the pull from ${remote.shown} would drop with its rebase, so nothing was pulled or pushed.\nRewrite them without a merge there, for example with git rebase ${upstream.replace(/^refs\/remotes\//, '')}, then run ledger store sync.\n${ASK_THE_OPERATOR}`,
@@ -529,16 +534,18 @@ function rebaseOnto({ clone, where, remote }: Sync, { upstream, incoming }: { up
       `The commits to pull from ${remote.shown} hold ${shownPaths(unsafe)}, which ledger never checks out, so nothing was pulled or pushed.\nOnly ledgers and the marker, as plain files, belong there: remove the rest from the repository, then run ledger store sync.`,
     );
   }
-  const rebased = committingGit(clone, ['rebase', '--quiet', '--no-autostash', incoming], deadline === undefined ? undefined : deadline - ABORT_MS);
+  if (made.length === 0) {
+    // Nothing needs a rebase, whose state a git stopped by the deadline leaves half written.
+    const forwarded = cloneGit(clone, ['merge', '--quiet', '--ff-only', '--no-autostash', '--no-verify-signatures', incoming], { deadline });
+    if (forwarded.ok) return;
+    if (forwarded.timedOut) throw new SyncProblem('timeout', `The pull from ${remote.shown} ran out of time; the next sync pulls again.`);
+    throw new SyncProblem('conflict', `The pull from ${remote.shown} failed, so nothing was pushed.\n${forwarded.stderr}\n${ASK_THE_OPERATOR}`);
+  }
+  const rebased = committingGit(clone, ['rebase', '--quiet', '--merge', '--no-autostash', incoming], deadline === undefined ? undefined : deadline - ABORT_MS);
   if (rebased.ok) return;
   const conflicted = rebased.timedOut ? [] : nulSeparated(cloneGit(clone, ['diff', '--name-only', '-z', '--diff-filter=U'], { deadline }).stdout);
-  const aborted = cloneGit(clone, ['rebase', '--abort'], { deadline });
-  if (['rebase-merge', 'rebase-apply'].some((mark) => isTaken(path.join(clone, '.git', mark)))) {
-    throw new SyncProblem(
-      'conflict',
-      `The pull from ${remote.shown} stopped halfway, and git rebase --abort failed too, so a rebase is left in ${where}; nothing was pushed.\nRun git rebase --abort there, then ledger store sync.\n${ASK_THE_OPERATOR}\n${aborted.stderr}`,
-    );
-  }
+  cloneGit(clone, ['rebase', '--abort'], { deadline });
+  clearLeftoverRebase(clone, deadline);
   if (rebased.timedOut) throw new SyncProblem('timeout', `The pull from ${remote.shown} ran out of time, so it was undone; the next sync pulls again.`);
   if (conflicted.length === 0) throw new SyncProblem('conflict', `The pull from ${remote.shown} failed, so nothing was pushed.\n${rebased.stderr.trimEnd()}\n${ASK_THE_OPERATOR}`);
   throw new SyncProblem(
