@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import module from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,6 +14,7 @@ import { parseRecord, readRecordJson, recordJson, renderRecord } from '../tools/
 import { repoKey } from '../tools/ledger/repo-key.js';
 import { hostLabel } from '../tools/ledger/settings.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
+import { replay } from './git-fixture-copies.js';
 import { freshHome, REPO } from './helpers.js';
 
 export const LEDGER_BIN = path.join(REPO, 'bin/ledger');
@@ -220,17 +221,28 @@ export function home(t: TestContext): string {
   return folder;
 }
 
-/** A main checkout with one commit, pushed to a bare origin whose HEAD is main. */
+/**
+ * A main checkout with one commit, pushed to a bare origin whose HEAD is main. After the first in a process, it is a
+ * copy of the first, so every such repository has the same commit. The sample hooks are removed: their text names
+ * words such as "app", and a copy is refused when a file names a root's folder. The folder's name and the git config
+ * in `h` are part of the step's name: a name such as "main" that cannot be copied must not stop other names copying.
+ */
 export function repository(h: string, main: string): string {
   const origin = path.join(h, 'remotes', `${path.basename(main)}.git`);
   mkdirSync(origin, { recursive: true });
-  git(h, origin, 'init', '--quiet', '--bare', '-b', 'main');
   mkdirSync(main, { recursive: true });
+  const gitconfig = path.join(h, '.gitconfig');
+  const config = existsSync(gitconfig) ? readFileSync(gitconfig, 'utf8') : '';
+  const replayed = replay(`repository ${path.basename(main)}\0${config}`, [origin, main]);
+  if (replayed.copied) return main;
+  git(h, origin, 'init', '--quiet', '--bare', '-b', 'main');
   git(h, main, 'init', '--quiet', '-b', 'main');
+  for (const hooks of [path.join(origin, 'hooks'), path.join(main, '.git/hooks')]) rmSync(hooks, { recursive: true, force: true });
   git(h, main, 'commit', '--quiet', '--allow-empty', '-m', 'first');
   git(h, main, 'remote', 'add', 'origin', origin);
   git(h, main, 'push', '--quiet', '-u', 'origin', 'main');
   git(h, main, 'remote', 'set-head', 'origin', 'main');
+  replayed.record();
   return main;
 }
 
