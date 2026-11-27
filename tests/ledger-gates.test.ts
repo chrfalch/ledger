@@ -412,6 +412,6 @@ test('ledger task gate goal asks whether the goal of a task with no PR is met, w
   assert.equal(gateQuestion('goal').question, 'Every stage of this task has passed. Is its goal met?');
 });
 
-test('the gates come in the order of the lifecycle: plan, pr, merge, goal, abandon', () => {
-  assert.deepEqual(GATE_NAMES, ['plan', 'pr', 'merge', 'goal', 'abandon']);
+test('the gates come in the order of the lifecycle: plan, pr, merge, goal, abandon, finalize', () => {
+  assert.deepEqual(ALL_GATE_NAMES, ['plan', 'pr', 'merge', 'goal', 'abandon', 'finalize']);
 });
