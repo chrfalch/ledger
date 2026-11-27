@@ -8,7 +8,10 @@ import { fileURLToPath } from 'node:url';
 
 export const REPO = fileURLToPath(new URL('../', import.meta.url));
 
-const PATH_WITHOUT_STUB = process.env.PATH ?? '';
+// /usr/bin/git is Apple's launcher: under each new HOME it rewrites xcrun's 70 MB cache through a temp copy (80 ms
+// against 5 ms), and a process stopped in that window leaves the copy in the system temp folder. Full runs filled the disk.
+const REAL_GIT = process.platform === 'darwin' ? spawnSync('xcrun', ['--find', 'git'], { encoding: 'utf8' }).stdout?.trim() : '';
+const PATH_WITHOUT_STUB = [REAL_GIT && path.dirname(REAL_GIT), process.env.PATH ?? ''].filter(Boolean).join(path.delimiter);
 const STUB_ROOT = mkdtempSync(path.join(tmpdir(), 'ledger-claude-stub-'));
 process.on('exit', () => rmSync(STUB_ROOT, { recursive: true, force: true }));
 

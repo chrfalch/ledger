@@ -1,9 +1,20 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { snapshot } from './helpers.js';
+import { freshHome, run, runWithoutClaude, snapshot } from './helpers.js';
+
+const realGit = process.platform === 'darwin' ? spawnSync('xcrun', ['--find', 'git'], { encoding: 'utf8' }).stdout?.trim() : '';
+
+test('tests and the commands they start find the real git, not the /usr/bin/git launcher', { skip: !realGit && 'no xcrun git' }, (t) => {
+  const home = freshHome(t);
+  const found = (result: { stdout: string }) => result.stdout.trim();
+  assert.equal(found(spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' })), realGit);
+  assert.equal(found(run(home, ['sh', '-c', 'command -v git'])), realGit);
+  assert.equal(found(runWithoutClaude(home, ['sh', '-c', 'command -v git'])), realGit);
+});
 
 function tree(t: TestContext, make: (root: string) => void): Record<string, string> {
   const root = mkdtempSync(path.join(tmpdir(), 'ledger-snapshot-'));
