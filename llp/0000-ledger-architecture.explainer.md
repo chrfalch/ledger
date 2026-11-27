@@ -756,7 +756,8 @@ because its turn end does not clear the session.
   so is code that names a file of the same name elsewhere. Among what it
   does not see: a script file that the agent writes and then runs, a path
   built from a variable or a command substitution, a write by awk, php or
-  lua, rsync's `--log-file` and `--remove-source-files`, a backslash
+  lua, rsync's `--log-file` and `--remove-source-files`, an rsync option
+  whose value comes after the destination (`--bwlimit 500`), a backslash
   inside a path, a `cd` inside `eval`, and a second quoted prefix such as
   `'sudo' 'rm'`. It also denies more than it should in two cases: it reads
   `||` as a pipe, so `test -f <marker> || node -e ...` is denied, and it
