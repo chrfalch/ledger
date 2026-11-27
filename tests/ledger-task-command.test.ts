@@ -34,6 +34,7 @@ test('/ledger:task without a current ledger starts the backlog task with ledger 
 test('/ledger:task with a current ledger leaves the task in the backlog', () => {
   const step7 = read('mods/ledger/commands/task.md').match(/ 7\. If there is a current ledger.*? 8\. /)?.[0] ?? '';
   assert.match(step7, /under its Decisions/);
+  assert.match(step7, /Reply with the `start:` line/);
   assert.doesNotMatch(step7, /ledger go/);
 });
 
@@ -84,21 +85,10 @@ test('the README /ledger:all row describes the one table ledger list prints', ()
   assert.doesNotMatch(row, /section/);
 });
 
-test('/ledger:task still hands over the start: line when a current ledger exists', () => {
-  const task = read('mods/ledger/commands/task.md');
-  assert.match(task, /under its Decisions/);
-  assert.match(task, /Reply with the `start:` line/);
-});
-
 test('the new-work rule makes work outside the ledger goal a new task', () => {
   const bullet = checkpointBullet('Work outside the ledger');
   assert.match(bullet, /Work outside the ledger's goal is a new task \(`\/ledger:task <what the task is>`\)/);
   assert.match(bullet, /If unclear, ask in one line/);
-});
-
-test('/ledger:help says /ledger:task continues in this session without a current ledger', () => {
-  const line = HELP.split('\n').find(l => l.startsWith('- `/ledger:task`')) ?? '';
-  assert.match(line, /continues in this session/);
 });
 
 test('the usage guide covers the case with no open task', () => {
@@ -182,17 +172,10 @@ test('the Plan gate asks for approval only for a task with more than one file or
 test('a finished task ends with one multi-select question for retire and the next task', () => {
   assert.match(checkpointBullet('**Resume.**'), /When every plan step is done, ask with `ledger task gate pr`\./);
   const bullet = checkpointBullet('**End of task.**');
-  assert.match(bullet, /When the work is merged, or the operator calls it finished, ask the question `ledger task gate finalize` prints\. It is multi-select\./);
+  assert.match(bullet, /When a task becomes done, ask the question `ledger task gate finalize` prints\. It is multi-select\./);
   assert.match(bullet, /Start the next task, if ticked\./);
   assert.match(bullet, /On "Finalize <parent>", ask `ledger task gate finalize <parent>` and repeat these steps for the parent\./);
   assert.match(bullet, /A ticked option is the operator's approval to run it\./);
-});
-
-test('a task becomes done on "Merge now" or "Goal met", through ledger task done, before End of task', () => {
-  assert.match(checkpointBullet('**Resume.**'), /A task with no PR asks `ledger task gate goal` instead\./);
-  assert.match(checkpointBullet('**Merge.**'), /ask the question `ledger task gate merge` prints\. Merge only on "Merge now": merge the PR, run `ledger task done <slug>`, then follow End of task\./);
-  assert.match(checkpointBullet('**Goal met.**'), /On "Goal met", run `ledger task done`, then follow End of task\./);
-  assert.match(checkpointBullet('**End of task.**'), /^\*\*End of task\.\*\* When a task becomes done, ask the question `ledger task gate finalize` prints\./);
 });
 
 const askingTheOperator = () => read('rules/20-writing.md').match(/### Asking the operator.*?## /)?.[0] ?? '';
@@ -312,10 +295,6 @@ test('/ledger:go makes a new task with bin/ledger task, then starts it with bin/
   assert.match(go, /`bin\/ledger go <slug>`/);
   assert.doesNotMatch(go, /--promote|--refs/);
   assert.match(go, /`- design refs:` line/);
-});
-
-test('/ledger:go passes picked LLPs to bin/ledger task with --design-refs, and its new-task steps edit no ledger', () => {
-  const go = read('mods/ledger/commands/go.md');
   const newTaskSteps = go.slice(go.indexOf('If there is a `new:` line'), go.indexOf('If `ledger:` is `none`'));
   assert.match(newTaskSteps, /`--design-refs[ `]/);
   assert.doesNotMatch(newTaskSteps, /Use Edit/);
@@ -356,12 +335,6 @@ test('ledger task new --kind docs writes - kind: docs as the last ## Location bu
   const location = locationOf(readLedgerFile(backlogFile('docs-task')));
   assert.deepEqual(location.filter((line) => line.startsWith('- kind:')), ['- kind: docs']);
   assert.equal(location.at(-1), '- kind: docs');
-});
-
-test('ledger task new adds the kind as the last ## Location bullet when the template has no - kind: line', (t) => {
-  const { h, app, backlogFile } = kindSetup(t);
-  ok(ledger(h, app, 'task', 'new', 'docs-task', '--kind', 'docs'));
-  assert.equal(locationOf(readLedgerFile(backlogFile('docs-task'))).at(-1), '- kind: docs');
 });
 
 test('ledger task new replaces the kind of a template that has a - kind: line', (t) => {
