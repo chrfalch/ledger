@@ -10,7 +10,8 @@
   },
   "scripts": {
     "llp": "tsx tools/llp-refs.ts",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "files=$(tsx tools/quick-tests.ts) && tsx --test $files",
+    "test:full": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
