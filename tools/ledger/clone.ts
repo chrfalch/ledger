@@ -1,12 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, lstatSync, readdirSync, realpathSync, rmdirSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { fail, Failure } from './failure.js';
 import { folderOf, readFileAliases } from './file-store.js';
-import { folderEntries, isReadableFile, isTaken, readText, writeAtomic } from './files.js';
+import { folderEntries, isReadableFile, isTaken, readText, treeEntries, writeAtomic } from './files.js';
 import { withLock, type LockOptions } from './lock.js';
-import type { LedgerPaths } from './paths.js';
+import { ledgerPaths, type LedgerPaths } from './paths.js';
 import { readRecordJson } from './record.js';
 import { runConsole, runEnv } from './run-io.js';
 import { isSecretLike, prePushHook, RAW_CHANGES_LOG, WITHHELD } from './secret-scan.js';
@@ -395,11 +396,112 @@ export function clearLeftoverRebase(clone: string, deadline?: number): void {
   );
 }
 
+/** A git lock file older than this was left by a git that stopped, unless a program has it open or a git runs in the clone. */
+const STALE_GIT_LOCK_MS = 5 * 60_000;
+
+const LSOF_TIMEOUT_MS = 10_000;
+
+const warnOnStderr = (text: string): void => runConsole().error(`warning: ${text}`);
+
+/** The clone as a person reads it, with HOME as ~, as the command that runs takes HOME. */
+const shownClone = (clone: string): string => ledgerPaths(runEnv().HOME || homedir()).tilde(clone);
+
+type GitLock = { file: string; name: string; mtimeMs: number; ino: number };
+
+/** The lock files git takes while it writes the index, the config, HEAD or a ref: each *.lock in .git and under .git/refs. */
+function gitLocks(real: string): GitLock[] {
+  const dotGit = path.join(real, '.git');
+  const refs = path.join(dotGit, 'refs');
+  const inRefs = lstatSync(refs, { throwIfNoEntry: false })?.isDirectory() ? treeEntries(refs) : [];
+  return [...folderEntries(dotGit), ...inRefs].flatMap((entry) => {
+    const file = path.join(entry.parentPath, entry.name);
+    // A git that finishes meanwhile removes its lock.
+    const stat = entry.isFile() && entry.name.endsWith('.lock') ? lstatSync(file, { throwIfNoEntry: false }) : undefined;
+    return stat === undefined ? [] : [{ file, name: path.relative(real, file), mtimeMs: stat.mtimeMs, ino: stat.ino }];
+  });
+}
+
+type Unknown = { unknown: string };
+
+/** The names lsof prints (-Fn) for `args`, or why it could not say. */
+function lsofNames(args: string[], deadline?: number): string[] | Unknown {
+  const timeout = Math.min(LSOF_TIMEOUT_MS, Math.min(deadline ?? Infinity, lastDeadline) - Date.now());
+  if (timeout <= 0) return { unknown: 'the time for it was up' };
+  const result = spawnSync('lsof', ['-w', '-Fn', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: runEnv(), timeout });
+  if (result.error) return { unknown: redacted(result.error.message) };
+  const stderr = result.stderr.trim();
+  // Exit 1 with no error text is lsof's answer when no process has a file it was given open, or none matches.
+  if ((result.status !== 0 && result.status !== 1) || stderr !== '') return { unknown: redacted(stderr || `lsof exited with ${result.status}`) };
+  return result.stdout.split('\n').flatMap((line) => (line.startsWith('n') ? [line.slice(1)] : []));
+}
+
+/** Which of `locks` a program has open, and whether a git runs in the clone at `real`; or why lsof could not say. */
+function lockUsers(real: string, locks: GitLock[], deadline?: number): { open: string[]; gitRuns: boolean } | Unknown {
+  const files = locks.map(({ file }) => file);
+  const open = lsofNames(['--', ...files], deadline);
+  if (!Array.isArray(open)) return open;
+  // lsof names a file by its real path, as `real` is; any other name leaves which lock is open unclear.
+  if (open.some((name) => !files.includes(name))) return { unknown: 'lsof named a file it was not asked about' };
+  const cwds = lsofNames(['-a', '-c', 'git', '-d', 'cwd'], deadline);
+  if (!Array.isArray(cwds)) return cwds;
+  return { open, gitRuns: cwds.some((cwd) => cwd === real || cwd.startsWith(`${real}${path.sep}`)) };
+}
+
+const ageText = (ms: number): string => {
+  const [count, unit] = ms < 60_000 ? [Math.floor(ms / 1000), 'second'] : [Math.floor(ms / 60_000), 'minute'];
+  return `${count} ${unit}${count === 1 ? '' : 's'}`;
+};
+
+const pad = (part: number): string => String(part).padStart(2, '0');
+
+const localTime = (ms: number): string => {
+  const at = new Date(ms);
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+};
+
+/**
+ * Removes the lock files a git that stopped left in the clone, as one stopped at the session-start deadline does, since
+ * each fails every later commit and sync. A lock goes only when it is older than five minutes, no program has it open,
+ * and no git runs in the clone. Every ledger git call that changes the clone holds the clone lock, so under it only a
+ * git from outside ledger can hold a git lock here, and these checks are enough. Call it under the clone lock. When any
+ * lock stays, none is removed, and this throws why. `warn` names each lock it removed.
+ */
+export function clearStaleGitLocks(clone: string, deadline?: number, warn = warnOnStderr): void {
+  const real = realpathSync(clone);
+  const locks = gitLocks(real);
+  if (locks.length === 0) return;
+  const where = shownClone(clone);
+  const names = locks.map(({ name }) => name).join(', ');
+  const kept = (why: string[], advice = 'Wait for that git to finish, then run ledger store sync.'): SyncProblem =>
+    new SyncProblem('git', [`${names} in ${where} ${locks.length === 1 ? 'was' : 'were'} not removed, so nothing was committed or pushed.`, ...why, advice].join('\n'));
+  // An mtime is on the file system's clock, so the age is taken on real time, not on the run's clock.
+  const now = Date.now();
+  const young = locks.filter(({ mtimeMs }) => now - mtimeMs <= STALE_GIT_LOCK_MS);
+  if (young.length > 0) throw kept(young.map(({ name, mtimeMs }) => `${name} is ${ageText(Math.max(0, now - mtimeMs))} old: the git that took it may still be running.`));
+  const users = lockUsers(real, locks, deadline);
+  if ('unknown' in users) {
+    throw kept([`Ledger could not check for a running git: ${users.unknown}.`], `Once no git runs in ${where}, ${names} may be removed there by hand; then run ledger store sync.\n${ASK_THE_OPERATOR}`);
+  }
+  const inUse = locks.flatMap(({ file, name }) => {
+    if (users.open.includes(file)) return [`${name} is open in a running program.`];
+    return users.gitRuns ? [`${name} may still be in use, as a git is running in ${where}.`] : [];
+  });
+  if (inUse.length > 0) throw kept(inUse);
+  for (const { file, name, mtimeMs, ino } of locks) {
+    // A lock removed by someone else since the check may have been taken again by a new git, which this must not break.
+    const current = lstatSync(file, { throwIfNoEntry: false });
+    if (current === undefined || current.ino !== ino || current.mtimeMs !== mtimeMs) continue;
+    rmSync(file, { force: true });
+    warn(`Removed ${name} from ${where}, left by a git that stopped at ${localTime(mtimeMs)}; no git is running there.`);
+  }
+}
+
 /**
  * Stops when a person left work in the clone halfway, such as a conflict after git stash pop: `git add` would mark it
- * resolved. A rebase that holds no work is cleared first.
+ * resolved. Lock files a stopped git left and a rebase that holds no work are cleared first; `warn` says which lock was.
  */
-export function checkFinished(clone: string, deadline?: number): void {
+export function checkFinished(clone: string, deadline?: number, warn?: (text: string) => void): void {
+  clearStaleGitLocks(clone, deadline, warn);
   clearLeftoverRebase(clone, deadline);
   const unfinished = UNFINISHED.find(([mark]) => isTaken(path.join(clone, '.git', mark)));
   if (unfinished !== undefined) {
@@ -496,7 +598,7 @@ export type CommitOptions = {
   /** Clone paths this command wrote itself, such as the removal of a record a forced retire made: committed whatever host they name. */
   own?: ReadonlySet<string>;
   pending?: ReadonlySet<string>;
-  /** Says that a record of another machine was put back; on stderr by default. */
+  /** Says that a record of another machine was put back, or a lock a stopped git left removed; on stderr by default. */
   warn?: (text: string) => void;
 };
 
@@ -504,8 +606,8 @@ export type CommitOptions = {
  * Commits the changes of the clone's working tree; true when it made a commit. Unfinished work, or any changed path
  * outside the allowlist, staged or not, stops it with nothing committed. Call it under the clone lock.
  */
-export function commitChanges(clone: string, { message = 'Update ledgers', deadline, host, ownHosts = new Set(), own = new Set(), pending, warn = (text) => runConsole().error(`warning: ${text}`) }: CommitOptions = {}): boolean {
-  let changed = checkedChanges(clone, deadline);
+export function commitChanges(clone: string, { message = 'Update ledgers', deadline, host, ownHosts = new Set(), own = new Set(), pending, warn = warnOnStderr }: CommitOptions = {}): boolean {
+  let changed = checkedChanges(clone, deadline, warn);
   // unique: a staged removal of a file that is still on disk is two entries.
   const foreign = unique(changed).flatMap((file) => {
     const owner = own.has(file) ? undefined : otherOwner(clone, file, { host, ownHosts, deadline });
@@ -516,7 +618,7 @@ export function commitChanges(clone: string, { message = 'Update ledgers', deadl
   if (theirs.length > 0) {
     restoreFromHead(clone, theirs.map(({ file }) => file), deadline);
     for (const { file, owner } of theirs) warn(`put back ${shownPaths([file])} as git storage holds it: it is the record of a task on ${owner}, and only ${owner} changes it.`);
-    changed = checkedChanges(clone, deadline);
+    changed = checkedChanges(clone, deadline, warn);
   }
   if (changed.length === 0) return false;
   must(cloneGit(clone, ['add', '-A', '-f', '--pathspec-from-file=-', '--pathspec-file-nul'], { input: changed.join('\0'), env: { GIT_LITERAL_PATHSPECS: '1' }, deadline }));
@@ -526,8 +628,8 @@ export function commitChanges(clone: string, { message = 'Update ledgers', deadl
 }
 
 /** The paths a commit would take, once no rebase or merge is unfinished; throws, as a commit does, for a path no commit may take. */
-function checkedChanges(clone: string, deadline?: number): string[] {
-  checkFinished(clone, deadline);
+function checkedChanges(clone: string, deadline?: number, warn?: (text: string) => void): string[] {
+  checkFinished(clone, deadline, warn);
   // Porcelain v1 with -z: "XY <path>", and no second path as renames are off. An ignored path is "!! <path>": the
   // allowlist decides whether it is a ledger to commit, so no .gitignore from the remote or exclude file can hide one.
   const entries = nulSeparated(must(cloneGit(clone, ['status', '--porcelain', '-z', '--no-renames', '--untracked-files=all', '--ignored'], { deadline })));

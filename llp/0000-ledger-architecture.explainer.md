@@ -1016,7 +1016,11 @@ The git store also keeps a clone lock, `~/.claude/ledger-data.lock`, and the
 last sync problem, `~/.claude/ledger-data.status.json`, outside the clone.
 Every git call that changes the clone holds the clone lock, so no two of them
 run at once. The clearing of a rebase left in the clone holds it too, and needs
-no lock of its own.
+no lock of its own. So does the clearing of a git lock file a stopped git left
+(see [Known gaps](#known-gaps)). While the clearing holds the clone lock, no
+ledger git that changes the clone runs, so only a git started outside ledger
+can still use a git lock file there. A check of the lock's age and of running
+programs is then enough.
 
 The file store writes backlog and active ledgers atomically. It holds a
 lock file, `<target>.lock`, during each such write. `ledger store repair`
@@ -1207,5 +1211,18 @@ detached, a commit rebased or stopped at. A `.git/rebase-apply`, which `git am`
 or a rebase that applies patches leaves, always stays, and the sync asks the
 operator to finish or stop it. So `rebaseOnto` runs `git rebase --merge`, even
 when the clone sets `rebase.backend` to `apply`: a rebase the sync itself leaves
-behind is then always one in `.git/rebase-merge`, which it can clear. A fast-forward stopped at the deadline can still leave
-`.git/index.lock`, which stops the next sync until a person removes it.
+behind is then always one in `.git/rebase-merge`, which it can clear.
+
+A git stopped at the deadline can also leave a lock file, such as
+`.git/index.lock` or a `.lock` under `.git/refs`, which fails every later commit.
+A sync or a ledger write removes such a lock, and says so, only when all of
+these hold:
+
+- The lock is older than five minutes.
+- No program has it open, as `lsof` shows.
+- No git runs with its folder inside the clone, as `lsof` shows.
+
+Otherwise every lock stays, nothing is committed or pushed, and the message
+says why and to wait for that git, then run `ledger store sync`. When `lsof`
+cannot run, the message says the lock may be removed by hand once no git runs
+there.
