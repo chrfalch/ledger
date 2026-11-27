@@ -55,7 +55,7 @@ function storeContract(
   { skip = false, markdown = true, reads = true }: { skip?: string | false; markdown?: boolean; reads?: boolean } = {},
 ): void {
   const makeStore = (t: TestContext): LedgerStore => open(home(t));
-  /** A test that only reads what was written: left out where `reads` is false, as for the git store, whose reads are the file store's. */
+  /** A test of what the git store hands straight to the file store, outside its clone lock: left out where `reads` is false. */
   const readTest = (title: string, options: TestOptions, run: (t: TestContext) => void | Promise<void>): void => {
     if (reads) test(title, options, run);
   };
@@ -672,7 +672,7 @@ test('sqlite store: the old task list reads back from the registry table of a da
   assert.equal(store.oldTaskList(), '[]\n');
 });
 
-for (const [name, open] of [['file store', (h: string) => fileStore(ledgerPaths(h))]] as const) {
+for (const [name, open] of [['file store', (h: string) => fileStore(ledgerPaths(h))], ['git store', openGitStore]] as const) {
   for (const linked of ['repo folder', 'evidence folder'] as const) {
     test(`${name}: copyEvidence and remove refuse evidence whose ${linked} is a symbolic link, and change nothing behind it`, (t) => {
       const h = home(t);
@@ -742,7 +742,7 @@ for (const [name, open] of [['file store', (h: string) => fileStore(ledgerPaths(
     });
   }
 
-  if (name === 'file store') test(`${name}: an archive write, copyEvidence and remove refuse an evidence root that is a symbolic link, and change nothing behind it`, (t) => {
+  test(`${name}: an archive write, copyEvidence and remove refuse an evidence root that is a symbolic link, and change nothing behind it`, (t) => {
     const h = home(t);
     const store = open(h);
     const from = path.join(h, 'from');
@@ -768,7 +768,7 @@ for (const [name, open] of [['file store', (h: string) => fileStore(ledgerPaths(
     assert.ok(store.archive.has('app', '2026-11-01-old'), 'the copy was removed');
   });
 
-  if (name === 'file store') test(`${name}: remove deletes the evidence before the copy, so a failed evidence delete leaves the copy to find`, { skip: process.getuid?.() === 0 }, (t) => {
+  test(`${name}: remove deletes the evidence before the copy, so a failed evidence delete leaves the copy to find`, { skip: process.getuid?.() === 0 }, (t) => {
     const h = home(t);
     const store = open(h);
     const from = path.join(h, 'from');
@@ -845,7 +845,7 @@ test('file store: an archive remove that finds the copy changed as it deletes it
   );
 });
 
-for (const [name, open] of [['file store', (h: string) => fileStore(ledgerPaths(h))]] as const) {
+for (const [name, open] of [['file store', (h: string) => fileStore(ledgerPaths(h))], ['git store', openGitStore]] as const) {
   const replacements = [
     ['toRecord of a backlog ledger', 'backlog', 'old', (store: LedgerStore) => store.backlog.toRecord?.('app', 'old')],
     ['toRecord of an archive copy', 'archive', '2026-11-01-old', (store: LedgerStore) => store.archive.toRecord?.('app', '2026-11-01-old')],
