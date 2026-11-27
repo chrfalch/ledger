@@ -281,10 +281,15 @@ test('the app build folder is allowed when a quoted -workspace path has a space'
   assertAllowed(gate(root, session.dir, `xcodebuild -workspace '${workspace}' -derivedDataPath '${app.buildFolder}'`));
 });
 
-/** The marker `ledger root on` writes, ending at `untilEpoch`, or `text` as the marker, in the .claude folder of HOME `root`. */
+const nowEpoch = (): number => Math.floor(Date.now() / 1000);
+
+/** The marker `ledger root on` writes, switched on now and ending at `untilEpoch`, or `text` as the marker, in the .claude folder of HOME `root`. */
 function rootMarker(root: string, untilEpoch: number | string): void {
   mkdirSync(path.join(root, '.claude'), { recursive: true });
-  writeFileSync(path.join(root, '.claude/ledger-root.json'), typeof untilEpoch === 'string' ? untilEpoch : JSON.stringify({ since: '', until: '', untilEpoch }));
+  const iso = (epoch: number): string => new Date(epoch * 1000).toISOString();
+  const sinceEpoch = nowEpoch();
+  const text = typeof untilEpoch === 'string' ? untilEpoch : JSON.stringify({ since: iso(sinceEpoch), sinceEpoch, until: iso(untilEpoch), untilEpoch });
+  writeFileSync(path.join(root, '.claude/ledger-root.json'), text);
 }
 
 const rootLog = (root: string): string => path.join(root, '.claude/ledger-root.log');
@@ -314,6 +319,11 @@ for (const [name, marker] of [
   ['is not JSON', 'not json'],
   ['has no untilEpoch', '{"until":"2999-01-01T00:00:00Z"}'],
   ['has an untilEpoch that is not a number', '{"untilEpoch":"9999999999"}'],
+  ['ends more than 240 minutes after sinceEpoch', JSON.stringify({ sinceEpoch: nowEpoch(), untilEpoch: nowEpoch() + 241 * 60 })],
+  ['has no sinceEpoch', JSON.stringify({ untilEpoch: nowEpoch() + 60 })],
+  ['has a sinceEpoch that is not a number', JSON.stringify({ sinceEpoch: String(nowEpoch()), untilEpoch: nowEpoch() + 60 })],
+  ['has a sinceEpoch in the future', JSON.stringify({ sinceEpoch: nowEpoch() + 600, untilEpoch: nowEpoch() + 1200 })],
+  ['has an untilEpoch that is not finite', `{"sinceEpoch":${nowEpoch()},"untilEpoch":1e999}`],
 ] as const) {
   test(`a build folder elsewhere is still denied when the ledger root marker ${name}`, (t) => {
     const { root, session } = repositories(t);

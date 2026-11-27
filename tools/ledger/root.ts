@@ -6,11 +6,12 @@ import { plural } from './views.js';
 
 // @ref LLP 0000#hooks — the operator's override of the pre-tool-use gates, and the log of what it let through.
 
-/** hooks/derived-data-gate.sh reads `untilEpoch` of this file too. */
+/** hooks/derived-data-gate.sh reads `sinceEpoch` and `untilEpoch` of this file too. */
 export const rootMarker = (home: string): string => path.join(home, '.claude', 'ledger-root.json');
 const rootLog = (home: string): string => path.join(home, '.claude', 'ledger-root.log');
 /** Holds the byte offset of the log up to which session start has reported. */
 const reportedOffsetFile = (home: string): string => path.join(home, '.claude', 'ledger-root.reported');
+export const rootLogFiles = (home: string): string[] => [rootLog(home), reportedOffsetFile(home)];
 
 export const ROOT_MINUTES = { default: 30, max: 240 } as const;
 
@@ -20,7 +21,7 @@ export function rootMinutes(value: string): number {
   return minutes >= 1 && minutes <= ROOT_MINUTES.max ? minutes : fail(`--minutes takes a whole number from 1 to ${ROOT_MINUTES.max}, not "${value}".`);
 }
 
-type Marker = { since: string; until: string; untilEpoch: number };
+type Marker = { since: string; sinceEpoch: number; until: string; untilEpoch: number };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const text = (value: unknown): string => (typeof value === 'string' ? value : '');
@@ -33,18 +34,26 @@ export function rootState(home: string, now: Date): RootState {
   } catch {
     return { on: false };
   }
-  if (!isRecord(marker) || typeof marker.untilEpoch !== 'number') return { on: false };
+  if (!isRecord(marker) || typeof marker.untilEpoch !== 'number' || !Number.isFinite(marker.untilEpoch)) return { on: false };
+  const since = Date.parse(text(marker.since));
   const until = new Date(marker.untilEpoch * 1000);
   const left = until.getTime() - now.getTime();
-  if (left <= 0) return { on: false };
-  return { on: true, since: text(marker.since) || now.toISOString(), until, minutesLeft: Math.ceil(left / 60_000) };
+  if (Number.isNaN(since) || since > now.getTime() || !withinWindow(since, until.getTime()) || left <= 0) return { on: false };
+  return { on: true, since: text(marker.since), until, minutesLeft: Math.ceil(left / 60_000) };
 }
 
-/** A switch while on keeps `since`, so the marker still says when the operator first switched it on. */
+/** No marker `ledger root on` writes ends more than the longest switch after its `since`; one that does was written by hand. */
+const withinWindow = (since: number, until: number): boolean => until - since <= ROOT_MINUTES.max * 60_000;
+
+/**
+ * A switch while on keeps `since`, so the marker still says when the operator first switched it on, unless the new end
+ * lies past the longest switch after it: then `since` starts again now.
+ */
 export function switchRootOn(home: string, now: Date, minutes: number): RootState {
   const current = rootState(home, now);
   const untilEpoch = Math.floor(now.getTime() / 1000) + minutes * 60;
-  const marker: Marker = { since: current.on ? current.since : now.toISOString(), until: new Date(untilEpoch * 1000).toISOString(), untilEpoch };
+  const since = current.on && withinWindow(Date.parse(current.since), untilEpoch * 1000) ? current.since : now.toISOString();
+  const marker: Marker = { since, sinceEpoch: Math.floor(Date.parse(since) / 1000), until: new Date(untilEpoch * 1000).toISOString(), untilEpoch };
   mkdirSync(path.dirname(rootMarker(home)), { recursive: true });
   writeFileSync(rootMarker(home), `${JSON.stringify(marker)}\n`);
   return rootState(home, now);

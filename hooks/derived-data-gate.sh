@@ -118,9 +118,11 @@ reason=$(printf '%s\n' \
   "Never put a build folder in the session scratchpad or in /tmp.")
 
 # While the operator's `ledger root on` lasts, allow the call and log it, as tools/ledger/root.ts does for its gates.
-# A missing or garbled marker leaves untilEpoch empty or not a number, and the test fails, so the deny stands.
-until_epoch=$(jq -r '.untilEpoch | numbers | floor' "$HOME/.claude/ledger-root.json" 2>/dev/null)
-if [ -n "$until_epoch" ] && [ "$until_epoch" -gt "$(date +%s)" ] 2>/dev/null; then
+# A missing or garbled marker, or one spanning more than the 240 minutes `ledger root on` allows, fails jq -e, so the
+# deny stands.
+if jq -e --argjson now "$(date +%s)" \
+  '(.sinceEpoch | numbers) as $since | (.untilEpoch | numbers) as $until | $since <= $now and $now < $until and $until - $since <= 14400' \
+  "$HOME/.claude/ledger-root.json" >/dev/null 2>&1; then
   jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg cwd "$cwd" --arg reason "$reason" --arg command "$command" \
     '{at: $at, tool: "Bash", cwd: $cwd, reason: $reason, command: $command}' >>"$HOME/.claude/ledger-root.log" 2>/dev/null
   exit 0

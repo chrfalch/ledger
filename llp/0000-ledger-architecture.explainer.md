@@ -719,16 +719,23 @@ because its turn end does not clear the session.
   just approved in the chat. The operator lifts the four checks above for a
   while with `/ledger:root`, which runs `ledger root on`
   (`tools/ledger/root.ts`). That writes `~/.claude/ledger-root.json`, with
-  its end time as `untilEpoch`. While that time lies ahead, a call the checks
+  its start as `sinceEpoch` and its end as `untilEpoch`. A marker whose end
+  is not a finite time, or lies more than 240 minutes after its start, reads
+  as off. While that time lies ahead, a call the checks
   would deny goes ahead. Each such call is appended as one JSON line to
   `~/.claude/ledger-root.log`: the time, tool, folder, deny reason, and the
   command or file. The next `session-start` lists the lines not yet reported
   under *Allowed only because ledger root was on:*, below the hook failures,
   and `ledger statusline` adds `ROOT <minutes>m`. A fifth check, which runs
   first, is never lifted (`rootSwitchReason` in `tools/ledger/hooks.ts`). It
-  denies an agent's `ledger root on`, by any path to `ledger`, and any write
-  of the marker file. `ledger root off`, `ledger root status` and removing
-  the marker stay allowed.
+  denies an agent's `ledger root on`, by any path to `ledger` or run through
+  node, tsx or npx, and any write of the marker file. It also denies any
+  write or removal of the log and of its `.reported` offset file. It reads
+  the script of `bash -c`, `sh -c`, `zsh -c` and `eval` the same way. Inline
+  interpreter code, or a program fed on standard input, is denied when the
+  command names one of those files or `ledger root on`. If the check itself
+  fails, it denies the call. `ledger root off`, `ledger root status` and
+  removing the marker stay allowed.
 
 When a hook fails, `tools/ledger/cli.ts` prints the error to stderr and exits
 0. Claude Code then allows the tool call. A hook never blocks work by accident.
@@ -766,8 +773,9 @@ runs through `hooks/logged.sh`, except the status line:
 - `derived-data-gate.sh` runs before each Bash call and denies an Xcode build
   folder other than the one LLP 0001 D44 names. While `ledger root` is on, it
   allows that call instead and logs it to `~/.claude/ledger-root.log`, as the
-  `ledger hook pre-tool-use` checks do. It reads only `untilEpoch` with `jq`,
-  so a missing or broken marker keeps the deny.
+  `ledger hook pre-tool-use` checks do. It reads only `sinceEpoch` and
+  `untilEpoch` with `jq`, so a missing or broken marker, or one spanning more
+  than 240 minutes, keeps the deny.
 
 ### Worktree layout
 
