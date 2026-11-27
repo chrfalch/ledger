@@ -52,13 +52,19 @@ const failure = (needle: string) => (error: unknown): boolean => error instanceo
 
 /** A HOME with the repo ~/repos/app, whose origin is a local bare repo, the folder ~/old that held a repo, and the store of `storage`. */
 function appWorld(t: TestContext, storage: Storage = 'file') {
+  const world = storeWorld(t, storage);
+  const app = repository(world.h, path.join(world.h, 'repos/app'));
+  return { ...world, app, key: repoKeyOf(app) };
+}
+
+/** appWorld without the repo, for a test of the store alone. */
+function storeWorld(t: TestContext, storage: Storage = 'file') {
   const h = home(t);
   if (storage === 'sqlite') useSqlite(h);
-  const app = repository(h, path.join(h, 'repos/app'));
   mkdirSync(path.join(h, 'old'));
   const store = openStore(h, storage);
   t.after(() => store.close?.());
-  return { h, app, key: repoKeyOf(app), store };
+  return { h, store };
 }
 
 const created = '2025-12-01T00:00:00.000Z';
@@ -120,7 +126,7 @@ test('notes left under a folder name whose ledger an earlier run moved before it
 // --- 2. File-store moves rename on one disk, onto nothing ---
 
 test('file store: a backlog move onto a hard link of the ledger, as a move stopped after its link leaves it, finishes the move', (t) => {
-  const { store } = appWorld(t);
+  const { store } = storeWorld(t);
   store.backlog.write('app', 'x', 'same\n');
   mkdirSync(store.backlog.repoLocation('github.com/me/app'), { recursive: true });
   linkSync(store.backlog.location('app', 'x'), store.backlog.location('github.com/me/app', 'x'));
@@ -131,7 +137,7 @@ test('file store: a backlog move onto a hard link of the ledger, as a move stopp
 });
 
 test('file store: a move between two keys kept in one repo folder, such as a key and its encoding, moves and removes nothing', (t) => {
-  const { store } = appWorld(t);
+  const { store } = storeWorld(t);
   store.backlog.write(OTHER, 'x', 'mine\n');
   store.active.write(OTHER, 'x', 'mine\n');
   store.archive.write(OTHER, '2026-01-01-old', 'old\n');
@@ -157,7 +163,7 @@ function archivedWithEvidence(h: string, store: LedgerStore): void {
 }
 
 test('file store: an archive move onto evidence the target has, with the copy still in the source, is refused, and both stay', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   archivedWithEvidence(h, store);
   mkdirSync(store.archive.repoLocation(OTHER), { recursive: true });
   renameSync(store.archive.evidenceLocation('app', '2026-01-01-old'), store.archive.evidenceLocation(OTHER, '2026-01-01-old'));
@@ -168,7 +174,7 @@ test('file store: an archive move onto evidence the target has, with the copy st
 });
 
 test('file store: an archive move onto a hard link of the copy, as a move stopped after its link leaves it, finishes the move with the evidence', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   archivedWithEvidence(h, store);
   mkdirSync(store.archive.repoLocation(OTHER), { recursive: true });
   linkSync(store.archive.location('app', '2026-01-01-old'), store.archive.location(OTHER, '2026-01-01-old'));
@@ -180,7 +186,7 @@ test('file store: an archive move onto a hard link of the copy, as a move stoppe
 
 for (const storage of ['file', 'sqlite'] as const) {
   test(`${storage} store: a move of a copy that is already in the target, with its evidence left in the source, moves the evidence`, { skip: storage === 'sqlite' && noSqlite }, (t) => {
-    const { h, store } = appWorld(t, storage);
+    const { h, store } = storeWorld(t, storage);
     archivedWithEvidence(h, store);
     store.archive.write(OTHER, '2026-01-01-old', 'old\n');
     if (storage === 'file') rmSync(store.archive.location('app', '2026-01-01-old'));
@@ -197,7 +203,7 @@ for (const storage of ['file', 'sqlite'] as const) {
 }
 
 test('file store: an archive move of a name the source does not have makes no target folder', (t) => {
-  const { store } = appWorld(t);
+  const { store } = storeWorld(t);
   store.archive.write('app', '2026-01-01-other', 'other\n');
   assert.equal(store.archive.canMove('app', '2026-01-01-old', OTHER), false);
   assert.throws(() => store.archive.move('app', '2026-01-01-old', OTHER), failure('does not exist'));
@@ -205,7 +211,7 @@ test('file store: an archive move of a name the source does not have makes no ta
 });
 
 test('file store: a move onto a name that differs only in case is refused where the disk ignores case', (t) => {
-  const { store } = appWorld(t);
+  const { store } = storeWorld(t);
   store.backlog.write('app', 'fix', 'mine\n');
   store.backlog.write(OTHER, 'Fix', 'theirs\n');
   if (!existsSync(store.backlog.location(OTHER, 'fix'))) return t.skip('this disk tells case apart');
@@ -216,7 +222,7 @@ test('file store: a move onto a name that differs only in case is refused where 
 });
 
 test('file store: an archive move that fails leaves the copy and its evidence where they were', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   archivedWithEvidence(h, store);
   const target = store.archive.repoLocation('github.com/me/app');
   mkdirSync(target, { recursive: true });
@@ -228,7 +234,7 @@ test('file store: an archive move that fails leaves the copy and its evidence wh
 });
 
 test('file store: an archive move onto a different copy of the same name is refused, and moves nothing', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   archivedWithEvidence(h, store);
   store.archive.write('github.com/me/app', '2026-01-01-old', 'another\n');
   assert.equal(store.archive.move('app', '2026-01-01-old', 'github.com/me/app'), false);
@@ -448,7 +454,7 @@ test('ledger go of a legacy backlog task that names no main ends its other-repo 
 // --- 18. Names that would climb out of the store ---
 
 test('file store: the files ...md and .md are no ledgers, and the names .., ., empty and a/b reach no path', (t) => {
-  const { store } = appWorld(t);
+  const { store } = storeWorld(t);
   store.archive.write('lost', '2026-01-03-x', 'kept\n');
   const folder = store.archive.repoLocation('app');
   mkdirSync(folder, { recursive: true });
@@ -475,7 +481,7 @@ test('a conversion leaves an archive file named ...md where it is, and the rest 
 });
 
 test('sqlite store: an evidence path that climbs out of its folder is never written', { skip: noSqlite }, (t) => {
-  const { h, store } = appWorld(t, 'sqlite');
+  const { h, store } = storeWorld(t, 'sqlite');
   store.archive.write('app', '2026-01-01-old', 'old\n');
   const db = sqliteDb(h);
   db.prepare(`INSERT INTO evidence VALUES ('app', '2026-01-01-old', '../escape.txt', 'file', ?)`).run(Buffer.from('out\n'));
@@ -490,7 +496,7 @@ test('sqlite store: an evidence path that climbs out of its folder is never writ
 
 for (const kind of ['another file with the same bytes', 'a symbolic link to the ledger'] as const) {
   test(`file store: a backlog move onto ${kind} is refused, and both stay`, (t) => {
-    const { store } = appWorld(t);
+    const { store } = storeWorld(t);
     store.backlog.write('app', 'x', 'same\n');
     const bytes = readFileSync(store.backlog.location('app', 'x'), 'utf8');
     const target = store.backlog.location(OTHER, 'x');
@@ -505,7 +511,7 @@ for (const kind of ['another file with the same bytes', 'a symbolic link to the 
 }
 
 test('file store: an archive move onto another copy with the same bytes is refused, and the evidence stays', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   archivedWithEvidence(h, store);
   store.archive.write(OTHER, '2026-01-01-old', 'old\n');
   assert.equal(store.archive.move('app', '2026-01-01-old', OTHER), false);
@@ -515,7 +521,7 @@ test('file store: an archive move onto another copy with the same bytes is refus
 });
 
 test('file store: an archive move onto evidence with the same files is refused, and both evidence folders stay', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   archivedWithEvidence(h, store);
   cpSync(store.archive.evidenceLocation('app', '2026-01-01-old'), store.archive.evidenceLocation(OTHER, '2026-01-01-old'), { recursive: true });
   assert.equal(store.archive.move('app', '2026-01-01-old', OTHER), false);
@@ -553,7 +559,7 @@ const failed = (code: string) => (): never => {
 };
 
 test('file store: a move to another disk leaves the ledger, its evidence and no target folder or temporary copy', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   store.backlog.write('app', 'x', 'x\n');
   archivedWithEvidence(h, store);
   const otherDisk = fileStore(ledgerPaths(h), { link: failed('EXDEV'), rename: failed('EXDEV') });
@@ -579,7 +585,7 @@ test('a conversion reports a ledger on another disk as one to move by hand, reco
 });
 
 test('file store: a move that fails leaves no target folder behind', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   store.backlog.write('app', 'x', 'x\n');
   archivedWithEvidence(h, store);
   const failing = fileStore(ledgerPaths(h), { link: failed('EIO'), rename: failed('EIO') });
@@ -599,7 +605,7 @@ function madeWithoutLock(store: LedgerStore, place: 'backlog' | 'active' | 'arch
 }
 
 test('file store: a move refuses, replacing nothing, when a program that takes no lock makes a ledger of that name in the target just before the move', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   store.backlog.write('app', 'x', 'mine\n');
   store.active.write('app', 'x', 'mine\n');
   archivedWithEvidence(h, store);
@@ -627,7 +633,7 @@ test('file store: a move refuses, replacing nothing, when a program that takes n
 });
 
 test('file store: a move stopped right after it linked a ledger at the target leaves the ledger under both repos and nothing else at the target', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   store.backlog.write('app', 'x', 'mine\n');
   store.active.write('app', 'x', 'mine\n');
   archivedWithEvidence(h, store);
@@ -648,7 +654,7 @@ test('file store: a move stopped right after it linked a ledger at the target le
 });
 
 test('file store: a move that fails at the Markdown a record hides takes its link back and leaves the source record as another command wrote it meanwhile', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   store.backlog.write('app', 'x', 'mine\n');
   const { record, markdown } = { record: store.backlog.location('app', 'x'), markdown: path.join(store.backlog.repoLocation('app'), 'x.md') };
   writeFileSync(markdown, 'hidden\n');
@@ -669,7 +675,7 @@ test('file store: a move that fails at the Markdown a record hides takes its lin
 });
 
 test('file store: a move of a ledger kept as Markdown refuses when a program that takes no lock makes a record of that name at the target just before the move', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   const markdownOf = (place: 'backlog' | 'archive', name: string) => {
     mkdirSync(store[place].repoLocation('app'), { recursive: true });
     const file = path.join(store[place].repoLocation('app'), `${name}.md`);
@@ -707,7 +713,7 @@ function withoutLockWaits<T>(work: () => T): T {
 }
 
 test('file store: a move holds the locks of the ledger under both repos, so a create or archive copy of that name at the target waits for it', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   store.backlog.write('app', 'x', 'mine\n');
   store.active.write('app', 'x', 'mine\n');
   archivedWithEvidence(h, store);
@@ -740,7 +746,7 @@ test('file store: a move holds the locks of the ledger under both repos, so a cr
 });
 
 test('file store: a move refuses a ledger whose record hides Markdown that is a symbolic link, and moves nothing', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   const elsewhere = path.join(h, 'elsewhere.md');
   writeFileSync(elsewhere, 'hidden\n');
   store.backlog.write('app', 'x', 'mine\n');
@@ -757,7 +763,7 @@ test('file store: a move refuses a ledger whose record hides Markdown that is a 
 });
 
 test('file store: an evidence folder whose name ends in .md or .json is no ledger', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   const evidence = path.join(h, 'evidence');
   mkdirSync(evidence);
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
@@ -783,7 +789,7 @@ test('a rerun files an archive copy that names no main under the alias an earlie
 
 for (const storage of ['file', 'sqlite'] as const) {
   test(`${storage} store: an alias is never pointed at another key`, { skip: storage === 'sqlite' && noSqlite }, (t) => {
-    const { store } = appWorld(t, storage);
+    const { store } = storeWorld(t, storage);
     store.aliases.add('app', OTHER);
     store.aliases.add('app', OTHER);
     assert.throws(() => store.aliases.add('app', 'github.com/me/other'), failure(OTHER));
@@ -892,7 +898,7 @@ test('file store: an alias map with a target that is no repo key refuses alias w
 });
 
 test('sqlite store: an alias row with a target that is no repo key refuses alias writes', { skip: noSqlite }, (t) => {
-  const { h, store } = appWorld(t, 'sqlite');
+  const { h, store } = storeWorld(t, 'sqlite');
   const db = sqliteDb(h);
   db.exec(`INSERT INTO aliases VALUES ('lib', '..')`);
   db.close();
@@ -940,7 +946,7 @@ function orphanNotes(h: string, store: LedgerStore, storage: Storage): void {
 
 for (const storage of ['file', 'sqlite'] as const) {
   test(`${storage} store: evidence under a folder name whose ledger is nowhere in the store is kept: no hint, and a conversion counts it kept and exits 0`, { skip: storage === 'sqlite' && noSqlite }, (t) => {
-    const { h, store } = appWorld(t, storage);
+    const { h, store } = storeWorld(t, storage);
     orphanNotes(h, store, storage);
     assert.equal(conversionHint(store), undefined);
     assert.equal(sessionStart(h), '');
@@ -972,7 +978,7 @@ for (const storage of ['file', 'sqlite'] as const) {
 }
 
 test('the hint counts a backlog and an active ledger whose repo folder is gone, and not an archive copy whose repo folder is gone', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   const gone = path.join(h, 'old/app');
   store.backlog.write('app', 'later', ledgerText({ slug: 'later', main: gone }));
   store.active.write('app', 'busy', ledgerText({ slug: 'busy', main: gone }));
@@ -989,7 +995,7 @@ test('the hint counts a backlog and an active ledger whose repo folder is gone, 
 });
 
 test('an archive copy whose main is a folder that is no git repo needs a person: the hint counts it, and a conversion exits 1', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   const plain = path.join(h, 'work/plain');
   mkdirSync(plain, { recursive: true });
   store.archive.write('plain', '2026-01-01-done', ledgerText({ slug: 'done', main: plain }));
@@ -1001,7 +1007,7 @@ test('an archive copy whose main is a folder that is no git repo needs a person:
 });
 
 test('an archive copy whose main is on a disk that is not mounted, or cannot be read, needs a person', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   const unmounted = `/Volumes/ledger-test-not-mounted-${process.pid}/app`;
   store.archive.write('disk', '2026-01-01-done', ledgerText({ slug: 'done', main: unmounted }));
   const doubled = `/Volumes//ledger-test-not-mounted-${process.pid}/app`;
@@ -1027,7 +1033,7 @@ test('an archive copy whose main is on a disk that is not mounted, or cannot be 
 });
 
 test('session-start runs no git for an archive copy whose repo folder is gone', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   const gone = path.join(h, 'old/app');
   store.archive.write('app', '2026-01-01-done', ledgerText({ slug: 'done', main: gone }));
   const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
@@ -1280,7 +1286,7 @@ test('tree add of an active task named from another clone of the repo lists the 
 // --- 33. SQLite evidence is never written through a link it holds ---
 
 test('sqlite store: an evidence file under an evidence link is never written through the link', { skip: noSqlite }, (t) => {
-  const { h, store } = appWorld(t, 'sqlite');
+  const { h, store } = storeWorld(t, 'sqlite');
   store.archive.write('app', '2026-01-01-old', 'old\n');
   const outside = path.join(h, 'outside');
   mkdirSync(outside);
@@ -1419,7 +1425,7 @@ test('a folder name with one ledger the key already has and one that moves still
 // --- 41. SQLite evidence is never written through a link restored before it ---
 
 test('sqlite store: an evidence link under an evidence link restored before it is never written through it', { skip: noSqlite }, (t) => {
-  const { h, store } = appWorld(t, 'sqlite');
+  const { h, store } = storeWorld(t, 'sqlite');
   store.archive.write('app', '2026-01-01-old', 'old\n');
   const outside = path.join(h, 'outside');
   mkdirSync(outside);
@@ -1508,7 +1514,7 @@ test('store migrate --to sqlite stops, also as a dry run, when the alias file it
 // --- 46. SQLite evidence checks the folders it writes into, by the platform's own path rules ---
 
 test('sqlite store: an evidence link whose name holds a backslash is restored beside a link, not refused as under it', { skip: noSqlite || process.platform === 'win32' }, (t) => {
-  const { h, store } = appWorld(t, 'sqlite');
+  const { h, store } = storeWorld(t, 'sqlite');
   store.archive.write('app', '2026-01-01-old', 'old\n');
   const outside = path.join(h, 'outside');
   mkdirSync(outside);
@@ -1808,7 +1814,7 @@ test('a ledger whose main line is under ~ is filed under the key of that checkou
 });
 
 test('rollback preserves a replaced target record', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   store.backlog.write('app', 'x', 'mine\n');
   writeFileSync(path.join(store.backlog.repoLocation('app'), 'x.md'), 'hidden\n');
   const moving = fileStore(ledgerPaths(h), {
@@ -1828,7 +1834,7 @@ test('rollback preserves a replaced target record', (t) => {
 });
 
 test('a writer reclaiming the source lock keeps its update', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   store.active.write('app', 'x', 'mine\n');
   const moving = fileStore(ledgerPaths(h), {
     link: (from, to) => {
@@ -1844,7 +1850,7 @@ test('a writer reclaiming the source lock keeps its update', (t) => {
 });
 
 test('rollback preserves a record another mover finished moving', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   store.backlog.write('app', 'x', 'mine\n');
   writeFileSync(path.join(store.backlog.repoLocation('app'), 'x.md'), 'hidden\n');
   const moving = fileStore(ledgerPaths(h), {
@@ -1859,7 +1865,7 @@ test('rollback preserves a record another mover finished moving', (t) => {
 });
 
 test('rollback takes back moved Markdown a writer turned into a record at the source', (t) => {
-  const { h, store } = appWorld(t);
+  const { h, store } = storeWorld(t);
   const source = store.backlog.repoLocation('app');
   mkdirSync(source, { recursive: true });
   writeFileSync(path.join(source, 'x.md'), 'mine\n');

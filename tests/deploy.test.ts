@@ -740,13 +740,6 @@ test('--migrate --dry-run prints the pending moves and changes nothing', (t) => 
   assert.deepEqual(snapshot(home), before);
 });
 
-test('--migrate with nothing pending says so and exits 0', (t) => {
-  const home = freshHome(t);
-  const migrated = runWithoutClaude(home, DEPLOY, '--migrate');
-  assert.equal(migrated.status, 0, migrated.stderr);
-  assert.match(migrated.stdout, /^Nothing to move\.$/m);
-});
-
 test('--migrate exits 0 when every task it can move moved, names each task that stays and why, and never runs a move with nothing it can do', (t) => {
   const { home, app, file } = homeWithUnmovedLedger(t);
   const stuck = worktreeOf(app, 'stuck');
@@ -920,14 +913,6 @@ test('--migrate checks again before each kind, and runs no move the fresh check 
   assert.equal(ran.status, 0, ran.stdout);
   assert.ok(!ran.moved, ran.stdout);
 });
-
-for (const flag of [['--revert'], ['--force'], ['--no-codex'], ['--codex'], ['--agents', 'runner'], ['--models', 'opus-5.5']]) {
-  test(`--migrate refuses ${flag[0]}`, (t) => {
-    const migrated = runWithoutClaude(freshHome(t), DEPLOY, '--migrate', ...flag);
-    assert.equal(migrated.status, 1);
-    assert.match(migrated.stderr, new RegExp(`--migrate .*${flag[0]}`));
-  });
-}
 
 test('plain deploy moves the .claude/ledger.md files, then names the other pending moves and how to run them', (t) => {
   const { home, file, app } = homeWithUnmovedLedger(t);

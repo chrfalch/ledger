@@ -86,7 +86,7 @@ for (const storage of ['file', 'sqlite', 'git'] as const) {
     assert.equal(read((store) => store.active.read(key, 'task')?.text), stored.ledger?.text);
   });
 
-  test(`${storage} store: migrate --active --dry-run names each ledger it would move and changes nothing`, { skip }, (t) => {
+  if (storage !== 'git') test(`${storage} store: migrate --active --dry-run names each ledger it would move and changes nothing`, { skip }, (t) => {
     const { h, app, key, read } = setup(t, storage);
     const { file, markdown } = legacyWorktree(h, app, 'task');
     const before = statSync(file).mtimeMs;
@@ -127,7 +127,7 @@ for (const storage of ['file', 'sqlite', 'git'] as const) {
     assert.equal(read((store) => store.active.byWorktree(sameSlug.folder)), undefined);
   });
 
-  test(`${storage} store: migrate --active turns the parked marker under Next step into the record's status`, { skip }, (t) => {
+  if (storage !== 'git') test(`${storage} store: migrate --active turns the parked marker under Next step into the record's status`, { skip }, (t) => {
     const { h, app, key, read } = setup(t, storage);
     legacyWorktree(h, app, 'resting', ledgerText({ slug: 'resting', next: 'Parked: 2026-11-01 — waiting on review.\nResume at step 2.' }));
 

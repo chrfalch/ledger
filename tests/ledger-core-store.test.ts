@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import fs, { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
-import test, { type TestContext } from 'node:test';
+import test, { type TestContext, type TestOptions } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { FORMAT } from '../tools/ledger/clone.js';
 import { setStatus } from '../tools/ledger/edit.js';
@@ -49,8 +49,16 @@ function plantMarkdown(h: string, store: LedgerStore, place: 'backlog' | 'archiv
  * The behaviour every store shares, whatever keeps the ledgers. `open` opens the store of a HOME; `skip` says why it
  * cannot run here. A store with `markdown: false` keeps no ledgers from before task records, so their tests skip it.
  */
-function storeContract(name: string, open: (home: string) => LedgerStore, { skip = false, markdown = true }: { skip?: string | false; markdown?: boolean } = {}): void {
+function storeContract(
+  name: string,
+  open: (home: string) => LedgerStore,
+  { skip = false, markdown = true, reads = true }: { skip?: string | false; markdown?: boolean; reads?: boolean } = {},
+): void {
   const makeStore = (t: TestContext): LedgerStore => open(home(t));
+  /** A test of what the git store hands straight to the file store, outside its clone lock: left out where `reads` is false. */
+  const readTest = (title: string, options: TestOptions, run: (t: TestContext) => void | Promise<void>): void => {
+    if (reads) test(title, options, run);
+  };
   const skipMarkdown = skip || (!markdown && `${name} keeps no Markdown from before task records`);
 
   /** A folder under `h` with a file, a binary file, a file and an empty folder in subfolders, and a relative link. */
@@ -76,7 +84,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.deepEqual(second.archive.evidenceFiles('app', '2026-11-01-old'), ['logs/build.log', 'logs/old/trace.bin', 'red.txt']);
   });
 
-  test(`${name}: archived evidence reads back: its files as sorted relative paths, without folders and links, and each file's bytes exactly`, { skip }, (t) => {
+  readTest(`${name}: archived evidence reads back: its files as sorted relative paths, without folders and links, and each file's bytes exactly`, { skip }, (t) => {
     const h = home(t);
     const store = open(h);
     store.archive.write('app', '2026-11-01-fix-login', text('fix-login'), evidenceFolder(h));
@@ -85,7 +93,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.deepEqual(store.archive.readEvidence('app', '2026-11-01-fix-login', 'logs/old/trace.bin'), BYTES);
   });
 
-  test(`${name}: a symbolic link to a folder in the evidence is not followed: the files behind it are not evidence files`, { skip }, (t) => {
+  readTest(`${name}: a symbolic link to a folder in the evidence is not followed: the files behind it are not evidence files`, { skip }, (t) => {
     const h = home(t);
     const store = open(h);
     const from = evidenceFolder(h);
@@ -96,7 +104,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.equal(store.archive.evidenceState('app', '2026-11-01-fix-login', from), 'same');
   });
 
-  test(`${name}: evidence files with mixed-case and Unicode names are listed in UTF-16 code-unit order, not by UTF-8 bytes or locale`, { skip }, (t) => {
+  readTest(`${name}: evidence files with mixed-case and Unicode names are listed in UTF-16 code-unit order, not by UTF-8 bytes or locale`, { skip }, (t) => {
     const h = home(t);
     const store = open(h);
     const from = path.join(h, 'evidence');
@@ -107,7 +115,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.deepEqual(store.archive.evidenceFiles('app', '2026-11-01-fix-login'), ['Zebra.txt', 'apple.txt', 'é.txt', '😀.txt', '～.txt']);
   });
 
-  test(`${name}: ledger text with a NUL byte reads back with the NUL bytes, in the backlog and the archive`, { skip }, (t) => {
+  readTest(`${name}: ledger text with a NUL byte reads back with the NUL bytes, in the backlog and the archive`, { skip }, (t) => {
     const store = makeStore(t);
     const withNul = 'before\0after\n\0';
     store.backlog.write('app', 'fix-login', withNul);
@@ -118,7 +126,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, rendered(withNul));
   });
 
-  test(`${name}: no evidence reads back as none, and readEvidence gives nothing for a path that is not an evidence file`, { skip }, (t) => {
+  readTest(`${name}: no evidence reads back as none, and readEvidence gives nothing for a path that is not an evidence file`, { skip }, (t) => {
     const h = home(t);
     const store = open(h);
     store.archive.write('app', '2026-11-01-plain', text('plain'));
@@ -131,7 +139,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.equal(store.archive.readEvidence('app', '2026-11-01-plain', 'red.txt'), undefined);
   });
 
-  test(`${name}: evidenceState compares archived evidence with a folder: files by content, links by their text, folders, and types`, { skip }, (t) => {
+  readTest(`${name}: evidenceState compares archived evidence with a folder: files by content, links by their text, folders, and types`, { skip }, (t) => {
     const h = home(t);
     const store = open(h);
     const name = '2026-11-01-fix-login';
@@ -167,7 +175,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     }
   });
 
-  test(`${name}: nameTaken is false for a new name and true once a copy uses it, with or without evidence`, { skip }, (t) => {
+  readTest(`${name}: nameTaken is false for a new name and true once a copy uses it, with or without evidence`, { skip }, (t) => {
     const h = home(t);
     const store = open(h);
     assert.equal(store.archive.nameTaken('app', '2026-11-01-plain'), false);
@@ -178,7 +186,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.equal(store.archive.nameTaken('lib', '2026-11-01-plain'), false);
   });
 
-  test(`${name}: an archive write with evidence refuses a taken name and adds no evidence to the first copy`, { skip }, (t) => {
+  readTest(`${name}: an archive write with evidence refuses a taken name and adds no evidence to the first copy`, { skip }, (t) => {
     const h = home(t);
     const store = open(h);
     store.archive.write('app', '2026-11-01-fix-login', 'first');
@@ -188,7 +196,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.equal(store.archive.evidenceState('app', '2026-11-01-fix-login'), 'none');
   });
 
-  test(`${name}: a backlog ledger reads back as written, with its repo, name, times and location`, { skip }, (t) => {
+  readTest(`${name}: a backlog ledger reads back as written, with its repo, name, times and location`, { skip }, (t) => {
     const store = makeStore(t);
     store.backlog.write('app', 'fix-login', text('fix-login'));
     const entry = store.backlog.read('app', 'fix-login');
@@ -201,7 +209,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.ok(entry.birthtimeMs > 0);
   });
 
-  test(`${name}: a child's order and dependencies, by slug, address and path, read back from the backlog and the archive`, { skip }, (t) => {
+  readTest(`${name}: a child's order and dependencies, by slug, address and path, read back from the backlog and the archive`, { skip }, (t) => {
     const store = makeStore(t);
     const ordered = text('b').replace('- design refs: none\n', '- design refs: none\n- parent: epic\n- order: 2\n- depends on: a, api @ github.com/acme/api, lib-x @ /repos/lib\n');
     store.backlog.write('app', 'b', ordered);
@@ -223,7 +231,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.equal(store.backlog.list('app').length, 1);
   });
 
-  test(`${name}: backlog list holds the ledgers of one repo, by name`, { skip }, (t) => {
+  readTest(`${name}: backlog list holds the ledgers of one repo, by name`, { skip }, (t) => {
     const store = makeStore(t);
     for (const slug of ['zeta', 'alpha', 'mid']) store.backlog.write('app', slug, text(slug));
     store.backlog.write('lib', 'other', text('other'));
@@ -234,7 +242,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.deepEqual(store.backlog.repos(), ['app', 'lib']);
   });
 
-  test(`${name}: a list is in the order of the file names, so fix-login.md comes before fix.md`, { skip }, (t) => {
+  readTest(`${name}: a list is in the order of the file names, so fix-login.md comes before fix.md`, { skip }, (t) => {
     const store = makeStore(t);
     store.backlog.write('app', 'fix', text('fix'));
     store.backlog.write('app', 'fix-login', text('fix-login'));
@@ -244,7 +252,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.deepEqual(store.archive.list('app').map(({ name: copy }) => copy), ['2026-11-01-fix-login', '2026-11-01-fix']);
   });
 
-  test(`${name}: repos and lists with mixed-case and Unicode names are in UTF-16 code-unit order, not by UTF-8 bytes or locale`, { skip }, (t) => {
+  readTest(`${name}: repos and lists with mixed-case and Unicode names are in UTF-16 code-unit order, not by UTF-8 bytes or locale`, { skip }, (t) => {
     const store = makeStore(t);
     // By UTF-8 bytes ～ (EF BD 9E) comes before 😀 (F0 9F 98 80); by code unit 😀 (D83D DE00) comes before ～ (FF5E).
     for (const each of ['～', 'apple', '😀', 'é', 'Zebra']) {
@@ -280,7 +288,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.equal(store.archive.read('app', '2026-11-01-fix-login')?.text, rendered('first'));
   });
 
-  test(`${name}: an unknown repo or name is empty, not an error`, { skip }, (t) => {
+  readTest(`${name}: an unknown repo or name is empty, not an error`, { skip }, (t) => {
     const store = makeStore(t);
     assert.deepEqual(store.backlog.repos(), []);
     assert.deepEqual(store.backlog.list('nowhere'), []);
@@ -303,7 +311,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.deepEqual(store.backlog.list('app').map(({ name: slug }) => slug), ['keep']);
   });
 
-  test(`${name}: the archive keeps its own ledgers, apart from the backlog`, { skip }, (t) => {
+  readTest(`${name}: the archive keeps its own ledgers, apart from the backlog`, { skip }, (t) => {
     const store = makeStore(t);
     store.archive.write('app', '2026-11-02-fix-login', text('fix-login'));
     store.archive.write('app', '2026-11-01-fix-login', text('fix-login'));
@@ -320,7 +328,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.equal(store.backlog.has('app', '2026-11-02-fix-login'), false);
   });
 
-  test(`${name}: an evidence location is the same before and after the write, and apart from every ledger and other evidence`, { skip }, (t) => {
+  readTest(`${name}: an evidence location is the same before and after the write, and apart from every ledger and other evidence`, { skip }, (t) => {
     const store = makeStore(t);
     const before = store.archive.evidenceLocation('app', '2026-11-02-fix-login');
     store.archive.write('app', '2026-11-02-fix-login', text('fix-login'));
@@ -334,7 +342,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     for (const other of others) assert.notEqual(before, other);
   });
 
-  test(`${name}: a new store has no old task list, and no write makes one`, { skip }, (t) => {
+  readTest(`${name}: a new store has no old task list, and no write makes one`, { skip }, (t) => {
     const store = makeStore(t);
     assert.equal(store.oldTaskList(), undefined);
     store.backlog.write('app', 'fix-login', text('fix-login'));
@@ -342,7 +350,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.equal(store.oldTaskList(), undefined);
   });
 
-  test(`${name}: a ledger is kept as a task record, so read gives the record rendered, also for text out of the template layout`, { skip }, (t) => {
+  readTest(`${name}: a ledger is kept as a task record, so read gives the record rendered, also for text out of the template layout`, { skip }, (t) => {
     const store = makeStore(t);
     store.backlog.write('app', 'stray', STRAY);
     store.archive.write('app', '2026-11-01-stray', STRAY);
@@ -354,7 +362,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     }
   });
 
-  test(`${name}: a claim reads back as written, in the backlog and in the archive`, { skip }, (t) => {
+  readTest(`${name}: a claim reads back as written, in the backlog and in the archive`, { skip }, (t) => {
     const store = makeStore(t);
     const claimed = text('claimed').replace('- design refs: none\n', '- design refs: none\n- claim: session s-1 since 2026-11-20T10:00:00Z, active 2026-11-20T10:20:00Z\n');
     store.backlog.write('app', 'claimed', claimed);
@@ -364,7 +372,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     }
   });
 
-  test(`${name}: a ledger kept as Markdown from before records reads as its record, rendered, and lists with the records`, { skip: skipMarkdown }, (t) => {
+  readTest(`${name}: a ledger kept as Markdown from before records reads as its record, rendered, and lists with the records`, { skip: skipMarkdown }, (t) => {
     const h = home(t);
     const store = open(h);
     store.backlog.write('app', 'b-record', text('b-record'));
@@ -542,7 +550,7 @@ function storeContract(name: string, open: (home: string) => LedgerStore, { skip
     assert.deepEqual(store.archive.orphanEvidence(), []);
   });
 
-  test(`${name}: a ledger with a repeated section is the same record converted or written, its repeat a note, and it stays listed`, { skip: skipMarkdown }, (t) => {
+  readTest(`${name}: a ledger with a repeated section is the same record converted or written, its repeat a note, and it stays listed`, { skip: skipMarkdown }, (t) => {
     const h = home(t);
     const store = open(h);
     plantMarkdown(h, store, 'backlog', 'app', 'converted', REPEATED_CHILDREN);
@@ -640,7 +648,7 @@ const openGitStore = (h: string): LedgerStore => {
 
 storeContract('file store', (h) => fileStore(ledgerPaths(h)));
 storeContract('sqlite store', (h) => sqliteStore({ home: h }), { skip: noSqlite });
-storeContract('git store', openGitStore);
+storeContract('git store', openGitStore, { reads: false });
 storeContract('memory store', (h) => memoryStore({ home: h }), { markdown: false });
 
 test('file and git store: the old task list reads back from ~/.claude/ledgers.json and ~/.claude/ledgers-git.json', (t) => {

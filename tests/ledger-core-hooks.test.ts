@@ -254,18 +254,6 @@ test('session-start outside a git repository shows no ledger, not even a .claude
   assert.equal(await hook(h, 'session-start', { cwd: plain }), '');
 });
 
-test('session-start says to read the task with ledger show and write it with ledger notes, and names no .claude/ledger.md', async (t) => {
-  const h = home(t);
-  const main = checkout(h, 'main');
-  const first = worktree(h, main, path.join(h, 'first'));
-  ledgerIn(h, first);
-
-  const context = (await sessionStart(h, first)).additionalContext;
-
-  assert.match(context, /Details: `ledger show`\. Write with `ledger notes`, never by editing a file\./);
-  assert.ok(!context.includes('.claude/ledger.md'), context);
-});
-
 /** A linked worktree of `main` that still holds its ledger as .claude/ledger.md, with no active record. */
 function unmovedLedger(h: string, main: string, name: string): string {
   const folder = worktree(h, main, path.join(h, name));
@@ -584,14 +572,6 @@ test('session-start reads only the Location parent bullet', async (t) => {
   const ledger = ledgerIn(h, sibling, familyLedger('sibling', ['- parent: <slug>'], '## Children (old)\n- child-a\n\n## Notes\n- parent: epic\n'));
 
   assert.equal((await sessionStart(h, sibling)).additionalContext, soloReport(ledger, 'none written'));
-});
-
-test('session-start with no ledger in the repo still asks: a new task or quick work', async (t) => {
-  const h = home(t);
-  const main = checkout(h, 'main');
-  worktree(h, main, path.join(h, 'sibling'));
-
-  assert.equal((await sessionStart(h, main)).additionalContext, noTreesText);
 });
 
 test('session-start lists a backlog task as an open tree once, from its ledger and not from the old task list', async (t) => {

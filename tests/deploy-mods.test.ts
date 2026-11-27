@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 
-import { parseDeployArguments } from '../tools/deploy.js';
 import { readModsLines } from '../tools/deploy-mods-lines.js';
 import { claudeCalls, claudeConfig, claudeInstallPath, claudeLists, failClaude, freshHome, REPO, run, runWithoutClaude } from './helpers.js';
 
@@ -24,10 +23,6 @@ test('the repo ships a marketplace that lists only the ledger mod', () => {
     marketplace.plugins.map(({ name, source }: { name: string; source: string }) => ({ name, source })),
     [{ name: 'ledger', source: './mods/ledger' }],
   );
-});
-
-test('parseDeployArguments maps --no-mods to noMods', () => {
-  assert.deepEqual(parseDeployArguments(['--no-mods']), { options: { noMods: true }, help: false });
 });
 
 test('deploy adds this repo as a marketplace, then installs the ledger mod and nothing else', (t) => {

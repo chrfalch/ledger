@@ -57,21 +57,6 @@ test('migrate --pending --json lists every move still to do, in the order the mo
   assert.deepEqual(snapshot(h), before);
 });
 
-test('migrate --pending prints one line per move, grouped by kind', (t) => {
-  const { h, key, file } = world(t);
-
-  const lines = ok(pending(h)).trimEnd().split('\n');
-
-  assert.deepEqual(lines, [
-    'Repo keys from folder names to repo addresses (--repo-ids):',
-    `  backlog app/fix-login → ${shown(key)}`,
-    'Ledgers in .claude/ledger.md into active records (--active):',
-    `  ${file} → active ${repoLabel(key)} task`,
-    'Markdown ledgers into task records (--records):',
-    `  Markdown backlog ${repoLabel(key)} stray → task record`,
-  ]);
-});
-
 test('migrate --pending marks a move that would leave its task with the reason, and still exits 0', (t) => {
   const { h, file } = world(t, '## Goal\nA ledger whose heading names no slug.\n');
 

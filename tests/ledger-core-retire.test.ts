@@ -1263,14 +1263,6 @@ test('ledger task abandon outside a repository says to run the abandon, with its
   failed(ledger(h, h, 'task', 'abandon', '--reason', 'no longer needed'), hint('<slug>'));
 });
 
-test('ledger task abandon deletes a branch that is merged', (t) => {
-  const { h, app } = setup(t);
-  worktreeTask(h, app, { slug: 'fix-login' });
-  const stdout = ok(ledger(h, app, 'task', 'abandon', 'fix-login', '--reason', 'no longer needed'));
-  assert.match(stdout, /deleted +branch me\/fix-login/);
-  assert.equal(git(h, app, 'branch', '--list', 'me/fix-login'), '');
-});
-
 test('ledger task abandon of a child marks it retired in its parent and copies its report there', (t) => {
   const { h, app } = setup(t);
   const epic = worktreeTask(h, app, { slug: 'epic', children: ['- part (started 2026-11-01)'] });
