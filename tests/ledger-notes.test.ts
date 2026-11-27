@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawn as spawnAsync, spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import type { Storage } from '../tools/ledger/settings.js';
 import { today } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
 import { FORMAT } from '../tools/ledger/clone.js';
-import { archivedTask, backlogTask, commandEnv, git, home, LEDGER_BIN, noSqlite, readLedgerFile, repository, worktreeOf, worktreeTask, writeLedgerFile, type Ran } from './ledger-core-fixtures.js';
+import { archivedTask, backlogTask, commandEnv, git, home, LEDGER_BIN, noSqlite, readLedgerFile, recordFile, repository, worktreeOf, worktreeTask, writeLedgerFile, type Ran } from './ledger-core-fixtures.js';
 
 const TODAY = today();
 
@@ -314,6 +314,124 @@ test('note appends to the general notes; next replaces the next step', (t) => {
   refused(notes('note', ''));
   refused(notes('next', ' '));
   assert.equal(read(), before);
+});
+
+const bytesOf = (file: string): Buffer => readFileSync(existsSync(recordFile(file)) ? recordFile(file) : file);
+
+test('remove decision drops the decision by its place, prints its text, and leaves a ledger that checks ok', (t) => {
+  const { notes, read } = withWorktree(t);
+  passed(notes('decide', 'Use SQLite', '--because', 'it locks rows', '--tag', 'confirmed'));
+  assert.equal(passed(notes('remove', 'decision', '1')), 'Removed decision 1 of wt: Keep the old format.');
+  assert.deepEqual(linesOf(read(), /^## Decisions$/), [`- ${TODAY}: Use SQLite — because it locks rows [confirmed]`]);
+  assert.equal(passed(notes('check')), 'ok');
+});
+
+test('remove constraint drops the constraint by its place and prints its text', (t) => {
+  const { notes, read } = withWorktree(t);
+  passed(notes('constraint', 'Node 22 or later', '--source', 'package.json'));
+  passed(notes('constraint', 'No network in hooks', '--source', 'hooks.ts', '--tag', 'observed'));
+  assert.equal(passed(notes('remove', 'constraint', '2')), 'Removed constraint 2 of wt: No network in hooks.');
+  assert.deepEqual(linesOf(read(), /^## Constraints discovered$/), ['- Node 22 or later — found in package.json']);
+  assert.equal(passed(notes('check')), 'ok');
+});
+
+test('remove question renumbers the questions after it', (t) => {
+  const { notes, read } = withWorktree(t);
+  for (const text of ['Which API', 'Which port', 'Which host']) passed(notes('question', text));
+  assert.equal(passed(notes('remove', 'question', '1')), 'Removed question 1 of wt: Which API.');
+  assert.deepEqual(linesOf(read(), /^## Open questions$/), ['- Which port', '- Which host']);
+  passed(notes('question', '--resolve', '1'));
+  assert.deepEqual(linesOf(read(), /^## Open questions$/), ['- (resolved) Which port', '- Which host']);
+  assert.equal(passed(notes('check')), 'ok');
+});
+
+test('remove step finds the step by its number, and the other steps keep theirs', (t) => {
+  const { notes, read } = withWorktree(t);
+  assert.equal(passed(notes('remove', 'step', '1')), 'Removed step 1 of wt: write the tests.');
+  assert.deepEqual(linesOf(read(), /^## Plan/).slice(2), ['| 2 | implement | todo | opus-implementer | |']);
+  assert.equal(passed(notes('check')), 'ok');
+  assert.equal(passed(notes('plan', 'add', 'review', '--owner', 'reviewer')), 'Added step 3 to wt.');
+  assert.equal(passed(notes('remove', 'step', '2')), 'Removed step 2 of wt: implement.');
+  assert.deepEqual(linesOf(read(), /^## Plan/).slice(2), ['| 3 | review | todo | reviewer | |']);
+});
+
+test('remove step of the highest number frees it for the next plan add, and removing every step leaves a ledger that checks ok', (t) => {
+  const { notes, read } = withWorktree(t);
+  passed(notes('remove', 'step', '2'));
+  assert.equal(passed(notes('plan', 'add', 'review', '--owner', 'reviewer')), 'Added step 2 to wt.');
+  passed(notes('remove', 'step', '2'));
+  passed(notes('remove', 'step', '1'));
+  assert.doesNotMatch(read(), /^\| \d+ \|/m);
+  assert.equal(passed(notes('check')), 'ok');
+});
+
+test('remove step refuses a step with a report or an open question that blocks it, and a resolved question does not stop it', (t) => {
+  const { worktree, notes, read } = withWorktree(t);
+  writeFileSync(path.join(worktree, 'red.txt'), 'failing\n');
+  passed(notes('report', '--step', '1', '--file', 'red.txt'));
+  passed(notes('question', 'Which port', '--blocks', '2'));
+  const before = read();
+  assert.match(refused(notes('remove', 'step', '1')), /report/);
+  assert.match(refused(notes('remove', 'step', '2')), /question/);
+  assert.equal(read(), before);
+  passed(notes('question', '--resolve', '1'));
+  assert.equal(passed(notes('remove', 'step', '2')), 'Removed step 2 of wt: implement.');
+  assert.equal(passed(notes('check')), 'ok');
+});
+
+test('remove note drops one line of the notes, and refuses a line that is a copied heading', (t) => {
+  const { file, notes, read } = withWorktree(t);
+  passed(notes('note', 'The CI is slow on Mondays'));
+  passed(notes('note', 'Ask about the cache'));
+  writeLedgerFile(file, `${read().trimEnd()}\n\n## Scratch\nleft over\n`);
+  assert.deepEqual(linesOf(read(), /^## Notes$/), ['The CI is slow on Mondays', 'Ask about the cache']);
+  assert.equal(passed(notes('remove', 'note', '1')), 'Removed note 1 of wt: The CI is slow on Mondays.');
+  assert.deepEqual(linesOf(read(), /^## Notes$/), ['Ask about the cache']);
+  assert.deepEqual(linesOf(read(), /^## Scratch$/), ['left over']);
+  assert.equal(passed(notes('check')), 'ok');
+  const before = read();
+  assert.match(refused(notes('remove', 'note', '2')), /heading/);
+  assert.equal(read(), before);
+});
+
+test('remove --dry-run prints what it would remove and changes nothing', (t) => {
+  const { file, notes } = withWorktree(t);
+  const before = bytesOf(file);
+  assert.equal(passed(notes('remove', 'decision', '1', '--dry-run')), 'Would remove decision 1 of wt: Keep the old format.');
+  assert.equal(passed(notes('remove', 'step', '2', '--dry-run')), 'Would remove step 2 of wt: implement.');
+  const result = JSON.parse(passed(notes('remove', 'step', '1', '--dry-run', '--json')));
+  assert.equal(result.dryRun, true);
+  assert.deepEqual(bytesOf(file), before);
+});
+
+test('remove --json gives the kind, number, slug and the removed item', (t) => {
+  const { notes } = withWorktree(t);
+  const result = JSON.parse(passed(notes('remove', 'step', '1', '--json')));
+  assert.equal(result.kind, 'step');
+  assert.equal(result.n, 1);
+  assert.equal(result.dryRun, false);
+  assert.equal(result.slug, 'wt');
+  assert.match(JSON.stringify(result), /"write the tests"/);
+});
+
+test('remove refuses an unknown kind, a number that is not a positive whole number, and an item that does not exist, and writes nothing', (t) => {
+  const { notes, read } = withWorktree(t);
+  const before = read();
+  refused(notes('remove', 'goal', '1'));
+  for (const n of ['0', '-1', 'two', '1.5', '']) refused(notes('remove', 'decision', n));
+  assert.match(refused(notes('remove', 'decision', '9')), /decision 9/);
+  assert.match(refused(notes('remove', 'step', '9')), /step 9/);
+  refused(notes('remove', 'question', '1'));
+  refused(notes('remove', 'constraint', '1'));
+  refused(notes('remove', 'note', '1'));
+  assert.equal(read(), before);
+});
+
+test('remove --help names each kind', (t) => {
+  const { notes } = withWorktree(t);
+  const help = passed(notes('remove', '--help'));
+  assert.match(help, /^Usage: ledger notes remove /);
+  for (const kind of ['step', 'decision', 'constraint', 'question', 'note']) assert.match(help, new RegExp(`\\b${kind}\\b`));
 });
 
 test('--task names the task from anywhere in its repo', (t) => {

@@ -163,6 +163,14 @@ changes one item of the task record (D29 in LLP 0001):
 | `note "<text>"` | adds a line to the general notes |
 | `next "<text>"` | sets the next step |
 | `stage <stage> pass [--step <n>]`, `stage <stage> fail [--back <earlier>]`, `stage <stage> --skip "<reason>"` | records the outcome of the current stage, moves the stage, and adds a dated note |
+| `remove <kind> <n> [--dry-run]` | removes one step, decision, constraint, question or note; `--dry-run` prints it and writes nothing |
+
+`remove` counts `<n>` from 1, by the item's place in its section as `ledger
+show` lists it. A note is one line of `## Notes`. A step's `<n>` is its `#`
+number, and the other steps keep their numbers. The questions after a removed
+question move up one number. A step with a report is refused. A step that an
+open question blocks is refused too; a resolved question blocks nothing. A
+note line that starts with `#` is a copied heading, and is refused.
 
 A tag is `observed`, `confirmed` or `inferred`. A step report keeps only the
 path of its file: relative to the worktree when the file is inside it, else

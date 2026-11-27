@@ -47,6 +47,10 @@ import {
   positive,
   recordStage,
   recordStageText,
+  REMOVABLE,
+  removeItem,
+  removeItemText,
+  type Removable,
   reportStep,
   reportStepText,
   reportToParent,
@@ -579,6 +583,7 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
         '  ledger notes question "Which port?" --blocks 2',
         '  ledger notes report --step 2 --file .claude/evidence/red.txt',
         '  ledger notes stage review fail --back build',
+        '  ledger notes remove decision 2 --dry-run',
         '  ledger notes next "Review step 2 with reviewer" --task fix-login',
       ].join('\n'),
     );
@@ -649,6 +654,17 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
   notesCommand(notesGroup, 'next', 'Set the next step, in place of the one there.')
     .argument('<text>', 'exactly one action, with the agent and effort to use')
     .action((text: string, { task }: TaskOption) => written(setNext(context, task, text), setNextText));
+  notesCommand(
+    notesGroup,
+    'remove',
+    'Remove one step, decision, constraint, question or note. n is its place in its section as ledger show lists it, counting from 1. A step\'s n is its # number, and the other steps are not renumbered. The questions after a removed one are renumbered. A step with a report, or with an open question that blocks it, is refused. A note is one line of the notes; a line that is a copied heading is refused.',
+  )
+    .addArgument(new Argument('<kind>', 'what to remove').choices(REMOVABLE))
+    .argument('<n>', 'its number')
+    .option('--dry-run', 'print what would be removed, and write nothing')
+    .action((kind: Removable, n: string, { dryRun, task }: TaskOption & { dryRun?: boolean }) =>
+      written(removeItem(context, task, kind, positive(n, 'The number'), { dryRun }), removeItemText),
+    );
   const kindStages = Object.entries(STAGES)
     .map(([kind, stages]) => `${kind}: ${stages.join(', ')}`)
     .join('; ');
