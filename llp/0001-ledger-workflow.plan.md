@@ -442,8 +442,9 @@ the icon: ✅ done, ⛔ blocked, 💤 parked, 🟡 an open question for the oper
 ⏳ waiting, 🔍 at the review stage, 🔨 working on anything else. The name
 changes each time the session creates, enters or switches to a task, and each
 time that task's state changes, so the session list shows which task each
-session holds and which ones need the operator (D43). How the tool sets the
-name is a technical choice; the operator never renames by hand.
+session holds and which ones need the operator (D43). In T3 Code, the thread
+title follows the same name. How the tool sets the name is a technical choice;
+the operator never renames by hand.
 
 A plain "go" lists the claimable tasks. With one, the agent continues. With
 more, it asks in a widget.

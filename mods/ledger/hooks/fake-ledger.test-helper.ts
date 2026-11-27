@@ -59,9 +59,10 @@ export type Breakable = 'markdown' | 'skill' | 'clear' | 'rename' | 'submit' | '
 /**
  * `replies` are keyed by the arguments after bin/ledger, joined by spaces. Any other program, and any arguments with no
  * reply, are refused, so a test fails on a call it did not expect. `missing` are folders fs.stat does not find.
- * `events` records, in order, each /clear, /rename, prompt submit and ui.log line that went through.
+ * `events` records, in order, each /clear, /rename, prompt submit and ui.log line that went through, and each T3 thread
+ * rename as `t3: <title>`. With no `t3`, the session runs outside T3 Code: there is no t3-code server to call.
  */
-export function world(on: On, replies: Record<string, Reply>, { cwd: startCwd, missing = [] }: { cwd: string; missing?: string[] }) {
+export function world(on: On, replies: Record<string, Reply>, { cwd: startCwd, missing = [], t3 }: { cwd: string; missing?: string[]; t3?: 'renames' | 'fails' }) {
   let cwd = startCwd
   const calls: Call[] = []
   const callsBeforeClear: number[] = []
@@ -152,6 +153,12 @@ export function world(on: On, replies: Record<string, Reply>, { cwd: startCwd, m
     events.push(`submit: ${e.text}`)
     reminders.push(...(e.context ?? []))
     return { text: '' }
+  })
+  on('mcp.call', async (_, e) => {
+    if (t3 === undefined || e.server !== 't3-code') return { deny: `no MCP server ${e.server}` }
+    if (e.tool !== 't3_thread_update' || e.args.action !== 'rename' || 'threadId' in e.args) return { deny: `unexpected T3 call: ${e.tool} ${JSON.stringify(e.args)}` }
+    events.push(`t3: ${e.args.title}`)
+    return { value: { content: [], isError: t3 === 'fails' } }
   })
   on('ui.log', async (_, e) => {
     events.push(`log: ${e.text}`)

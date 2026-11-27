@@ -120,3 +120,34 @@ test('D43: a session that claimed a task the session reply does not list is name
 
   expect(renames(w.events)).toEqual(['rename: beta'])
 })
+
+const t3Renames = (events: string[]) => events.filter(event => event.startsWith('t3: '))
+
+test('D43: in T3 Code the turn that names the session also renames its thread, once per task', async ($, on) => {
+  const w = world(on, ownTasks, { cwd: A, t3: 'renames' })
+
+  await $.turn.complete(turnEnd)
+  await $.turn.complete(turnEnd)
+  w.enterWorktree(B)
+  await $.turn.complete(turnEnd)
+
+  expect(w.events).toEqual(['rename: 🔍 alpha', 't3: 🔍 alpha', 'rename: 🔨 beta', 't3: 🔨 beta'])
+})
+
+test('D43: outside T3 Code the session is named as before, and nothing is logged', async ($, on) => {
+  const w = world(on, ownTasks, { cwd: A })
+
+  await $.turn.complete(turnEnd)
+  await $.turn.complete(turnEnd)
+
+  expect(w.events).toEqual(['rename: 🔍 alpha'])
+})
+
+test('D43: a T3 thread rename that fails is not tried again, nor is /rename', async ($, on) => {
+  const w = world(on, ownTasks, { cwd: A, t3: 'fails' })
+
+  await $.turn.complete(turnEnd)
+  await $.turn.complete(turnEnd)
+
+  expect(w.events).toEqual(['rename: 🔍 alpha', 't3: 🔍 alpha'])
+})
