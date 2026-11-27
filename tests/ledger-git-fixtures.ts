@@ -12,10 +12,8 @@ import { limitHookTimeForTests } from '../tools/ledger/hooks.js';
 import { limitLockWaitForTests, limitLockWaits } from '../tools/ledger/lock.js';
 import { limitPrCheckTimeForTests } from '../tools/ledger/pr-check.js';
 import { readRecordJson, renderRecord } from '../tools/ledger/record.js';
-import { forgetRepoKeys } from '../tools/ledger/repo-key.js';
 import { runEnv } from '../tools/ledger/run-io.js';
 import { limitBusyWaitForTests } from '../tools/ledger/sqlite-store.js';
-import { forgetCreatedCopies } from '../tools/ledger/store.js';
 import { allowRemoteForTests } from '../tools/ledger/sync.js';
 import { processFolder, replay, type Replay } from './git-fixture-copies.js';
 import { REPO } from './helpers.js';
@@ -218,17 +216,12 @@ export async function runHere(m: Machine, args: string[], { cwd = m.app, env = q
     return await runInProcessWith(m.h, cwd, { env, input }, ...args);
   } finally {
     for (const restore of restores) restore();
-    // A hook run leaves its deadlines set until the next run starts; a test that calls ledger code directly must not inherit them.
-    resetGitLimits();
-    limitCloneGitCalls(Infinity);
-    limitLockWaits(Infinity);
+    clearRunLimits();
   }
 }
 
-/** Leaves the modules as a ledger run does at its start, and as `runHere` does at its end. */
-function resetRunState(): void {
-  forgetRepoKeys();
-  forgetCreatedCopies();
+/** A hook run leaves its deadlines set until the next run starts; a test that calls ledger code directly must not inherit them. */
+function clearRunLimits(): void {
   resetGitLimits();
   limitCloneGitCalls(Infinity);
   limitLockWaits(Infinity);
@@ -296,7 +289,7 @@ export async function setUpHere(m: Machine, url = URL): Promise<void> {
   if (replayed.copied) {
     allowRemoteForTests(m.bare);
     onBackgroundSyncForTests(noteBackgroundSync);
-    resetRunState();
+    clearRunLimits();
   } else {
     ok(await runHere(m, ['store', 'sync', 'init', url]));
     replayed.record();

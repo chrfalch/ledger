@@ -74,6 +74,7 @@ function changes(before: Tree, after: Tree, roots: readonly string[]): Change[] 
   for (const [relative, entry] of after) {
     const old = before.get(relative);
     if (entry.data !== undefined && namesRootUnsafely(entry.data, roots)) return undefined;
+    if (entry.link !== undefined && roots.some((root) => entry.link?.includes(path.basename(root)))) return undefined;
     const same = old !== undefined && old.mode === entry.mode && old.link === entry.link && (old.data === undefined ? entry.data === undefined : entry.data !== undefined && old.data.equals(entry.data));
     if (!same) changed.push([relative, entry.data === undefined ? entry : { ...entry, data: withPlaceholders(entry.data, roots) }]);
   }
@@ -126,9 +127,12 @@ export type Replay = { copied: true } | { copied: false; record: () => void };
  * For a step named `name` that changes only files under `roots`: when it ran before in this process on the same files
  * under other roots, with the same environment, writes what it changed then, with each root's path rewritten, and
  * gives copied. Otherwise the caller runs the step, then calls `record`, so the next run of it on such files is a copy.
+ * File times are not compared, so a step whose result depends on them must not be replayed. LEDGER_TEST_REAL_INIT=1
+ * turns copying off, to check that a suite passes the same way with every step run for real.
  */
 export function replay(name: string, roots: readonly string[]): Replay {
   const unrecorded: Replay = { copied: false, record: () => {} };
+  if (process.env.LEDGER_TEST_REAL_INIT === '1') return unrecorded;
   if (roots.some((root, index) => roots.some((other, at) => at !== index && inside(root, other)))) return unrecorded;
   const before = roots.map(tree);
   const key = fingerprint(name, before, roots);

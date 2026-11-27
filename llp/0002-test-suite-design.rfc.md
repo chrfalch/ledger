@@ -310,8 +310,14 @@ Existing test files move one at a time.
 - **Lowering production limits.** The limits protect session start from a
   hung network.
 - **Building git fixtures once and copying them per test.** This could speed
-  up the git-store files that remain. It is deferred until the full run is
-  measured after the moves below.
+  up the git-store files that remain. It was deferred until the full run is
+  measured after the moves below. Done on 2026-11-27, ahead of that
+  measurement: `tests/git-fixture-copies.ts` copies the empty remote and
+  the app clone, and replays a recorded `store sync init` for a machine
+  whose files and environment match an earlier one. `ledger-git-store`
+  run alone went from 364.9 s to about 170 s [observed].
+  `LEDGER_TEST_REAL_INIT=1` runs every init for real, to check that a
+  suite passes the same way without the copies.
 
 ## Plan
 
