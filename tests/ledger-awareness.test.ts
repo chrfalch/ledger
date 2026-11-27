@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { finalizeAdvice, statusLineText, sessionReport } from '../tools/ledger/awareness.js';
+import { finalizeAdvice, statusLineText, sessionReport, taskTitle } from '../tools/ledger/awareness.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import type { GateQuestion } from '../tools/ledger/gates.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
@@ -138,7 +138,7 @@ test('D26: the session start in a task folder gives the report in its fixed orde
 
   const { context, title } = await sessionStart(h, folder);
 
-  assert.equal(title, 'part-b');
+  assert.equal(title, '🟡 part-b');
   assert.equal(
     context,
     [
@@ -918,6 +918,34 @@ test('D28: the status line text counts several ledgers of one folder', (t) => {
   assert.equal(statusLineText({ tasks, own: true }), '2 tasks');
   assert.equal(statusLineText({ tasks: tasks.slice(0, 1), own: true }), `${tasks[0].slug} · plan`);
   assert.equal(statusLineText({ tasks, own: false }), '');
+});
+
+// D. The session title (D43)
+
+test('D43: a task title is its state icon and slug, the first state that applies giving the icon', (t) => {
+  const h = home(t);
+  const main = checkout(h, 'app');
+  const status = (value: string): string => `- status: ${value} 2026-11-20`;
+  const asked = ['- Which API version?'];
+  const cases: [slug: string, spec: Spec, title: string][] = [
+    ['finished', { location: [status('done')] }, '✅ finished'],
+    ['stuck', { location: [status('blocked')] }, '⛔ stuck'],
+    ['resting', { location: [status('parked')] }, '💤 resting'],
+    ['asking', { questions: asked }, '🟡 asking'],
+    ['pending', { location: [status('waiting')] }, '⏳ pending'],
+    ['checked', { location: ['- stage: review'] }, '🔍 checked'],
+    ['plain', {}, '🔨 plain'],
+    ['building', { location: ['- stage: implement'] }, '🔨 building'],
+    ['answered', { questions: ['- (resolved) Old one?'] }, '🔨 answered'],
+    ['done-asking', { location: [status('done')], questions: asked }, '✅ done-asking'],
+    ['parked-asking', { location: [status('parked')], questions: asked }, '💤 parked-asking'],
+    ['waiting-asking', { location: [status('waiting')], questions: asked }, '🟡 waiting-asking'],
+    ['waiting-review', { location: ['- stage: review', status('waiting')] }, '⏳ waiting-review'],
+  ];
+  for (const [slug, spec] of cases) recorded(h, main, slug, spec);
+  const tasks = activeTasks(fileStore(ledgerPaths(h)));
+
+  for (const [slug, , title] of cases) assert.equal(taskTitle(tasks.find((task) => task.slug === slug)!), title, slug);
 });
 
 /**

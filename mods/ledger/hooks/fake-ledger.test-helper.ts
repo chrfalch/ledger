@@ -20,11 +20,12 @@ export const ledgerOf = (slug: string, main = MAIN): string => `/home/.claude/le
 
 type Ref = { slug: string; main: string }
 
-/** A task as `ledger session --json` and `ledger list --json` list it. */
-export function task(slug: string, extra: { main?: string; parent?: Ref; finished?: boolean; status?: string; parked?: { date: string; reason: string } } = {}) {
-  const { main = MAIN, finished = false, status = 'active', ...rest } = extra
+/** A task as `ledger session --json` and `ledger list --json` list it; its title carries the icon of a plain active task unless given. */
+export function task(slug: string, extra: { main?: string; parent?: Ref; finished?: boolean; status?: string; parked?: { date: string; reason: string }; title?: string } = {}) {
+  const { main = MAIN, finished = false, status = 'active', title = `🔨 ${slug}`, ...rest } = extra
   return {
     slug,
+    title,
     repo: 'repo',
     main,
     status,
@@ -42,7 +43,7 @@ export function task(slug: string, extra: { main?: string; parent?: Ref; finishe
 
 /** `ledger session <folder> --json` for a session in the worktree of `own`, or in `folder` with no own ledger; both in the repo at MAIN. */
 export function session(folder: string, own?: ReturnType<typeof task>, others: ReturnType<typeof task>[] = []): Reply {
-  return done({ folder, removed: false, main: MAIN, repo: 'repo', own: own !== undefined, ...(own === undefined ? {} : { title: own.slug }), ledgers: own === undefined ? others : [own] })
+  return done({ folder, removed: false, main: MAIN, repo: 'repo', own: own !== undefined, ...(own === undefined ? {} : { title: own.title }), ledgers: own === undefined ? others : [own] })
 }
 
 export const removedSession = (folder: string): Reply => done({ folder, removed: true, own: false, ledgers: [] })

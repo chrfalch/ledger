@@ -1,6 +1,6 @@
 import type { EngineInterface, PluginState, Register, ToolCallResult } from 'claude-code'
 
-import { ledgerBin, ledgerJson, ledgerSucceeded, ledgerText, LONG_TIMEOUT_MS, message, ownTask, readSession, type AutoPruned, type Claimed, type NextChild, type OwnTask, type Parked, type RetirePlan, type Started } from './cli'
+import { ledgerBin, ledgerJson, ledgerSucceeded, ledgerText, LONG_TIMEOUT_MS, message, ownTask, readSession, type AutoPruned, type Claimed, type NextChild, type OwnTask, type Parked, type RetirePlan, type Session, type Started } from './cli'
 import {
   claimFailedMessage,
   CLEAR_POINT_OPTION,
@@ -286,17 +286,18 @@ async function showRetireHint($: EngineInterface, previous: PreviousTask, namesN
 
 /**
  * Names the session after its task with /rename, because a hook's sessionTitle does not reach Remote Control in VS Code.
- * Only a new task renames, so a title the operator gave stays while the task does. A failure is tried again next turn;
- * the title is not worth a line in the transcript.
+ * Only a new title renames: a new task, or a new state of the task, which replaces a title the operator gave too. A
+ * failure is tried again next turn; the title is not worth a line in the transcript.
  */
-async function titleSession($: EngineInterface, slug: string): Promise<void> {
+async function titleSession($: EngineInterface, title: string): Promise<void> {
   try {
     const sessionId = await $.session.id()
     const { value: last } = await $.state.get(titled)
-    // A title from before titles were kept per session is a plain string, and so names no session.
-    if (last?.sessionId === sessionId && last.slug === slug) return
-    await $.command.run({ command: 'rename', args: slug })
-    await $.state.set(titled, { sessionId, slug })
+    // A title from before titles were kept per session is a plain string, and so names no session; one from before
+    // titles had icons holds a slug, and so never equals a title.
+    if (last?.sessionId === sessionId && last.title === title) return
+    await $.command.run({ command: 'rename', args: title })
+    await $.state.set(titled, { sessionId, title })
   } catch {}
 }
 
@@ -389,13 +390,17 @@ async function releaseClaims($: EngineInterface, sessionId?: string): Promise<vo
   } catch {}
 }
 
+/** The title of the claimed task `slug` from `session`'s ledgers; its bare slug when they do not list it. */
+const claimedTitle = ({ ledgers }: Session, slug: string | undefined): string | undefined =>
+  slug === undefined ? undefined : (ledgers.find(ledger => ledger.slug === slug)?.title ?? slug)
+
 /** At a turn end that does not clear: the model may have just finished or reopened the task, which auto-prune acts on once. */
 async function finishTurn($: EngineInterface, clearPointTokens: number): Promise<void> {
   const session = await readSession($)
   if (!session.ok) return
   // A worktree's own task replaces the claim as the task the session works on, so the claim must not name it again later.
   if (session.title !== undefined) await $.state.set(claimedTask, null).catch(() => undefined)
-  const title = session.title ?? (await claimedSlug($))
+  const title = session.title ?? claimedTitle(session, await claimedSlug($))
   if (title !== undefined) await titleSession($, title)
   const own = ownTask(session)
   if (own === undefined) return

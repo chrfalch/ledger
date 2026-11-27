@@ -187,7 +187,7 @@ test('session-start in a linked worktree reports only on its own task and titles
 
   const output = await sessionStart(h, sibling);
 
-  assert.equal(output.sessionTitle, 'window-title');
+  assert.equal(output.sessionTitle, '🔨 window-title');
   assert.equal(output.additionalContext, soloReport(ledger, 'none written'));
 });
 
@@ -196,7 +196,7 @@ test('session-start accepts a hyphen instead of an em dash in the ledger heading
   const sibling = worktree(h, checkout(h, 'main'), path.join(h, 'sibling'));
   ledgerIn(h, sibling, '# Task ledger - hyphenated\n');
 
-  assert.equal((await sessionStart(h, sibling)).sessionTitle, 'hyphenated');
+  assert.equal((await sessionStart(h, sibling)).sessionTitle, '🔨 hyphenated');
 });
 
 test('session-start omits the title when the ledger has no heading', async (t) => {
@@ -597,7 +597,7 @@ test('session-start keeps quotes, backslashes, tabs and non-ASCII text intact', 
 
   const output = await sessionStart(h, sibling);
 
-  assert.equal(output.sessionTitle, 'quoted');
+  assert.equal(output.sessionTitle, '🔨 quoted');
   assert.equal(output.additionalContext, soloReport(ledger, next));
 });
 
@@ -1028,7 +1028,7 @@ test('prompt-submit titles an untitled session in the main checkout with the slu
   const main = checkout(h, 'main');
   ledgerIn(h, worktree(h, main, path.join(h, 'alpha')));
 
-  assert.equal(await promptSubmitTitle(h, { prompt: 'go alpha', cwd: main }), 'alpha');
+  assert.equal(await promptSubmitTitle(h, { prompt: 'go alpha', cwd: main }), '🔨 alpha');
 });
 
 test('prompt-submit replaces the title of another worktree\'s task', async (t) => {
@@ -1038,7 +1038,7 @@ test('prompt-submit replaces the title of another worktree\'s task', async (t) =
   ledgerIn(h, alpha);
   ledgerIn(h, worktree(h, main, path.join(main, '.claude/worktrees/beta')));
 
-  assert.equal(await promptSubmitTitle(h, { prompt: '  go beta\n', cwd: alpha, session_title: 'alpha' }), 'beta');
+  assert.equal(await promptSubmitTitle(h, { prompt: '  go beta\n', cwd: alpha, session_title: 'alpha' }), '🔨 beta');
 });
 
 test('prompt-submit replaces a title that names an archived task', async (t) => {
@@ -1047,7 +1047,7 @@ test('prompt-submit replaces a title that names an archived task', async (t) => 
   ledgerIn(h, worktree(h, main, path.join(h, 'alpha')));
   archive(h, 'main', 'finished-task');
 
-  assert.equal(await promptSubmitTitle(h, { prompt: 'go alpha', cwd: main, session_title: 'finished-task' }), 'alpha');
+  assert.equal(await promptSubmitTitle(h, { prompt: 'go alpha', cwd: main, session_title: 'finished-task' }), '🔨 alpha');
 });
 
 test('prompt-submit replaces a title that names an archived task of another repository', async (t) => {
@@ -1056,7 +1056,7 @@ test('prompt-submit replaces a title that names an archived task of another repo
   ledgerIn(h, worktree(h, main, path.join(h, 'alpha')));
   archive(h, 'other', 'finished-task');
 
-  assert.equal(await promptSubmitTitle(h, { prompt: 'go alpha', cwd: main, session_title: 'finished-task' }), 'alpha');
+  assert.equal(await promptSubmitTitle(h, { prompt: 'go alpha', cwd: main, session_title: 'finished-task' }), '🔨 alpha');
 });
 
 test('prompt-submit keeps a title the operator chose while the session stays on the task it claims', async (t) => {
@@ -1065,7 +1065,7 @@ test('prompt-submit keeps a title the operator chose while the session stays on 
   ledgerIn(h, worktree(h, main, path.join(h, 'alpha')), familyLedger('alpha', ['- claim: session s1 since 2026-11-20T10:00:00Z, active 2026-11-20T10:00:00Z']));
 
   assert.equal(await promptSubmit(h, { prompt: 'go alpha', cwd: main, session_id: 's1', session_title: 'my custom name' }), '');
-  assert.equal(await promptSubmitTitle(h, { prompt: 'go alpha', cwd: main, session_id: 's2', session_title: 'my custom name' }), 'alpha');
+  assert.equal(await promptSubmitTitle(h, { prompt: 'go alpha', cwd: main, session_id: 's2', session_title: 'my custom name' }), '🔨 alpha');
 });
 
 test('prompt-submit keeps a title the operator chose when the session claims the task among other claims', async (t) => {
@@ -1083,7 +1083,19 @@ test('prompt-submit prints nothing when the title already names the task', async
   const alpha = worktree(h, checkout(h, 'main'), path.join(h, 'alpha'));
   ledgerIn(h, alpha);
 
-  assert.equal(await promptSubmit(h, { prompt: 'go alpha', cwd: alpha, session_title: 'alpha' }), '');
+  assert.equal(await promptSubmit(h, { prompt: 'go alpha', cwd: alpha, session_title: '🔨 alpha' }), '');
+});
+
+test('D43: prompt-submit titles go <slug> with the task\'s state icon, and replaces a title of the same slug with another icon', async (t) => {
+  const h = home(t);
+  const main = checkout(h, 'main');
+  const alpha = worktree(h, main, path.join(h, 'alpha'));
+  ledgerIn(h, alpha, familyLedger('alpha', ['- stage: review']));
+
+  assert.equal(await promptSubmitTitle(h, { prompt: 'go alpha', cwd: main }), '🔍 alpha');
+  assert.equal(await promptSubmitTitle(h, { prompt: 'go alpha', cwd: main, session_title: 'alpha' }), '🔍 alpha');
+  assert.equal(await promptSubmitTitle(h, { prompt: 'go alpha', cwd: main, session_title: '🔨 alpha' }), '🔍 alpha');
+  assert.equal(await promptSubmit(h, { prompt: 'go alpha', cwd: main, session_title: '🔍 alpha' }), '');
 });
 
 test('prompt-submit prints nothing for a slug with no active ledger', async (t) => {
@@ -1121,7 +1133,7 @@ test('prompt-submit skips a worktree whose folder is gone', async (t) => {
   ledgerIn(h, worktree(h, main, path.join(h, 'alpha')));
   rmSync(worktree(h, main, path.join(h, 'gone')), { recursive: true, force: true });
 
-  assert.equal(await promptSubmitTitle(h, { prompt: 'go alpha', cwd: main }), 'alpha');
+  assert.equal(await promptSubmitTitle(h, { prompt: 'go alpha', cwd: main }), '🔨 alpha');
 });
 
 // D43: the session name follows the task at every task change.
@@ -1133,8 +1145,8 @@ test('D43: prompt-submit after a clear replaces the slug of the previous task, f
   const beta = worktree(h, main, path.join(main, '.claude/worktrees/beta'));
   ledgerIn(h, beta);
 
-  assert.equal(await promptSubmitTitle(h, { prompt: 'go beta', cwd: main, session_title: 'alpha' }), 'beta');
-  assert.equal(await promptSubmitTitle(h, { prompt: 'go beta', cwd: beta, session_title: 'alpha' }), 'beta');
+  assert.equal(await promptSubmitTitle(h, { prompt: 'go beta', cwd: main, session_title: 'alpha' }), '🔨 beta');
+  assert.equal(await promptSubmitTitle(h, { prompt: 'go beta', cwd: beta, session_title: 'alpha' }), '🔨 beta');
 });
 
 test('D43: prompt-submit replaces the slug of a previous task in another repository', async (t) => {
@@ -1144,7 +1156,7 @@ test('D43: prompt-submit replaces the slug of a previous task in another reposit
   const other = checkout(h, 'other');
   ledgerIn(h, worktree(h, other, path.join(other, '.claude/worktrees/alpha')));
 
-  assert.equal(await promptSubmitTitle(h, { prompt: 'go beta', cwd: main, session_title: 'alpha' }), 'beta');
+  assert.equal(await promptSubmitTitle(h, { prompt: 'go beta', cwd: main, session_title: 'alpha' }), '🔨 beta');
 });
 
 test('D43: prompt-submit replaces the slug of a previous task that is in the backlog', async (t) => {
@@ -1153,7 +1165,7 @@ test('D43: prompt-submit replaces the slug of a previous task that is in the bac
   ledgerIn(h, worktree(h, main, path.join(main, '.claude/worktrees/beta')));
   backlogLedger(h, 'main', 'umbrella', main);
 
-  assert.equal(await promptSubmitTitle(h, { prompt: 'go beta', cwd: main, session_title: 'umbrella' }), 'beta');
+  assert.equal(await promptSubmitTitle(h, { prompt: 'go beta', cwd: main, session_title: 'umbrella' }), '🔨 beta');
 });
 
 test('D43: session-start after a clear titles the session with the slug of the worktree it is in', async (t) => {
@@ -1164,7 +1176,7 @@ test('D43: session-start after a clear titles the session with the slug of the w
 
   const output = JSON.parse(await hook(h, 'session-start', { hook_event_name: 'SessionStart', source: 'clear', cwd: beta })) as SessionStartOutput;
 
-  assert.equal(output.hookSpecificOutput.sessionTitle, 'beta');
+  assert.equal(output.hookSpecificOutput.sessionTitle, '🔨 beta');
 });
 
 // PreToolUse: the ledger gate
@@ -3259,7 +3271,7 @@ test('session-start reports the unreported hook failures above the ledger, once'
 
   const first = await sessionStartIn(h, sibling);
   assert.equal(first?.additionalContext, `${failureReport('2 hook failures', '2026-11-01T10:00:00Z')}\n\n${soloReport(ledger)}`);
-  assert.equal(first?.sessionTitle, 'sibling');
+  assert.equal(first?.sessionTitle, '🔨 sibling');
   assert.equal((await sessionStartIn(h, sibling))?.additionalContext, soloReport(ledger));
 
   writeFileSync(failureLog(h), failureLine('2026-11-03T12:00:00Z'), { flag: 'a' });

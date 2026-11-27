@@ -176,7 +176,7 @@ test('a failed usage read leaves the turn end and the next prompt as they were',
   await $.prompt.submit({ text: 'one' })
 
   expect(w.argvs()).toEqual([['session', CWD, '--json'], ['worktrees', 'auto-prune', CWD, '--json']])
-  expect(w.events).toEqual(['rename: epic', 'submit: one'])
+  expect(w.events).toEqual(['rename: 🔨 epic', 'submit: one'])
   expect(w.reminders).toEqual([])
 })
 
@@ -188,6 +188,6 @@ test('a failed offer write at the prompt passes the prompt on without the remind
   w.breakCall('offer')
   await $.prompt.submit({ text: 'one' })
 
-  expect(w.events).toEqual(['rename: epic', 'submit: one'])
+  expect(w.events).toEqual(['rename: 🔨 epic', 'submit: one'])
   expect(w.reminders).toEqual([])
 })

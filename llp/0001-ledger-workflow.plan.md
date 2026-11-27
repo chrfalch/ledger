@@ -436,10 +436,14 @@ quick work (section 6).
 **The status line** shows the current task and stage. It reads only the store,
 never GitHub or the network, because it refreshes often (D28).
 
-**The session name** is always the slug of the task the session works on. It
-changes each time the session creates, enters or switches to a task, so the
-session list shows which task each session holds (D43). How the tool sets
-the name is a technical choice; the operator never renames by hand.
+**The session name** is always `<icon> <slug>` for the task the session works
+on, where the icon shows the task's state. The first state that applies gives
+the icon: ✅ done, ⛔ blocked, 💤 parked, 🟡 an open question for the operator,
+⏳ waiting, 🔍 at the review stage, 🔨 working on anything else. The name
+changes each time the session creates, enters or switches to a task, and each
+time that task's state changes, so the session list shows which task each
+session holds and which ones need the operator (D43). How the tool sets the
+name is a technical choice; the operator never renames by hand.
 
 A plain "go" lists the claimable tasks. With one, the agent continues. With
 more, it asks in a widget.
@@ -747,8 +751,9 @@ Decided 2026-11-19:
 - **D42** A zero-test run is not a pass; scripted agent runs are on demand
   and before release, not in `npm test`, and check commands, not wording
   (section 13).
-- **D43** The session name is always the current task's slug, set on every
-  task change (section 9).
+- **D43** The session name is always `<icon> <slug>` for the current task, the
+  icon showing its state (section 9), set on every task change and every state
+  change.
 - **D6** (decided 2026-11-19) Worktrees live in one folder next to the main
   checkout, `<repo>.worktrees/<slug>`, not inside it; the tool finds the main
   checkout through git, not the folder path. Reason: a test runner that
@@ -882,6 +887,6 @@ Decided 2026-11-26:
 | Report size (D31) | every `ledger notes` write shortens the report of each reviewed or done step to one line; `ledger notes check` fails over 16,000 characters and names the three largest sections (`tools/ledger/notes.ts`) | none |
 | Deploy permissions (D32) | `settings.policy.json` allows `ledger notes`, `go`, `list`, `show`, `tree show`, `tree next`, `tree ready` and every `task` command except `retire` and `abandon`; deploy merges the list into `~/.claude/settings.json` | none |
 | Merge and goal gates (D4, D15) | `ledger task gate merge` asks *Merge now* and `ledger task gate goal` asks *Goal met* (`tools/ledger/gates.ts`); the PR check's line for a PR whose checks and review passed names the merge gate (`tools/ledger/pr-check.ts`); `ledger task done [<slug>]` marks a task done: one with no PR at once, one with a PR only once gh says it is merged, and it refuses a backlog task and every move the state table refuses (`doneTask` in `tools/ledger/write.ts`); the Merge and Goal met bullets in `rules/10-operating-model.md` run it, then End of task | none |
-| Session name (D43) | renamed to the task slug on every task change: the prompt hook titles each `go <slug>` the session does not already claim; the turn end renames to the worktree's task, else to the task the session claimed | none |
+| Session name (D43) | renamed to `<icon> <slug>` on every task change and every state change: the prompt hook titles each `go <slug>` the session does not already claim, unless the title is already that; the turn end renames to the worktree's task, else to the task the session claimed, whenever the title differs from the last one it set | none |
 | Worktree location (D6) | inside the main checkout | unchanged: the session-switch test failed (confirmation on every switch); D42 is the safeguard |
 | Build folders (D44, D45) | `.claude/worktrees/.build/<name>/<configuration>`, from `bin/cc-dd-path`; `rules/90-builds.md` and `hooks/derived-data-gate.sh` use it; retire deletes the task's folder; `ledger worktrees derived-data` is gone; `prune-orphans` matches folder names to worktrees (`tools/ledger/worktrees.ts`) | none |

@@ -20,7 +20,7 @@ const TREE_CAP = 12;
 /** The report is read again on every turn, so it stays within this many lines. */
 const REPORT_LINES = 20;
 
-const recordOf = (task: Task): TaskRecord => parseRecord(serializeLedger(task.ledger));
+const recordOf = ({ ledger }: Pick<Task, 'ledger'>): TaskRecord => parseRecord(serializeLedger(ledger));
 
 /** A record with no kind is code, and one with no stage is at the first stage of its kind. */
 function stageOf({ kind = 'code', stage }: TaskRecord): { kind: string; stage: string } {
@@ -262,6 +262,23 @@ export function openTreesReport(tasks: Task[], main: string, checked: readonly C
     'Ask the operator in one question widget: continue one of these trees (name it), make a new task, or quick work (a small change with no task).',
   ].join('\n');
 }
+
+/** The icon of each task state in a session title (D43). */
+export const TASK_ICONS = { done: '✅', blocked: '⛔', parked: '💤', operator: '🟡', waiting: '⏳', review: '🔍', working: '🔨' } as const;
+
+export type TitledTask = Pick<Task, 'slug' | 'status' | 'ledger'>;
+
+function iconOf(task: TitledTask): string {
+  const { status } = task;
+  if (status === 'done' || status === 'blocked' || status === 'parked') return TASK_ICONS[status];
+  const record = recordOf(task);
+  if (record.questions.some(({ resolved }) => !resolved)) return TASK_ICONS.operator;
+  if (status === 'waiting') return TASK_ICONS.waiting;
+  return stageOf(record).stage === 'review' ? TASK_ICONS.review : TASK_ICONS.working;
+}
+
+/** The session title of `task` (D43): its state icon, the first state that applies giving it, then its slug. */
+export const taskTitle = (task: TitledTask): string => `${iconOf(task)} ${task.slug}`;
 
 /** The status line text of a folder (D28): its task and stage, and its state unless plain active; empty when it owns none. */
 export function statusLineText({ tasks, own }: SessionLedgers): string {

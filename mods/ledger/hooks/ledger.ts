@@ -3,6 +3,8 @@ type Ref = { slug: string; main: string }
 /** A task as `ledger list --json` and `ledger session --json` give it; only the fields the mod reads. */
 export type ListedTask = {
   slug: string
+  /** `<icon> <slug>`, the session title of the task (D43). */
+  title?: string
   main?: string
   status: string
   /** The linked worktree of an active task; a backlog task has none. */

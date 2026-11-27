@@ -58,10 +58,13 @@ type Found = {
   host?: string;
 };
 
+/** The status of an active task with `ledger`. */
+export const activeStatus = ({ location }: Ledger): TaskStatus => (location.lost ? 'lost' : (location.status?.value ?? 'active'));
+
 function toTask({ file, name, place, repo, aliases, fallbackSlug, mainOf, branch, worktree, elsewhere, host }: Found, { text, mtimeMs, birthtimeMs }: TimedText): Task {
   const ledger = parseLedger(text);
   const currentRepo = aliases.get(repo);
-  const status: TaskStatus = place === 'archive' ? 'retired' : place === 'backlog' ? 'backlog' : ledger.location.lost ? 'lost' : (ledger.location.status?.value ?? 'active');
+  const status: TaskStatus = place === 'archive' ? 'retired' : place === 'backlog' ? 'backlog' : activeStatus(ledger);
   const main = mainOf(ledger);
   const knownBranch = branch ?? ledger.location.branch;
   const archived = place === 'archive' ? parseArchiveName(name)?.date : undefined;

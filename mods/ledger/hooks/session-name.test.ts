@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { done, ledgerOf, MAIN, session, task, turnEnd, world, worktreeOf } from './fake-ledger.test-helper'
 
-// D43: the session name is always the slug of the task the session works on, and changes at each task change.
+// D43: the session name is always the state icon and slug of the task the session works on, and changes at each task change and each state change.
 
 const A = worktreeOf('alpha')
 const B = worktreeOf('beta')
@@ -24,7 +24,7 @@ test('D43: after /ledger:go clears and sends go <slug>, the turn that entered th
   w.clearsTo('session-2')
 
   await $.turn.complete(turnEnd)
-  expect(renames(w.events)).toEqual(['rename: alpha'])
+  expect(renames(w.events)).toEqual(['rename: 🔨 alpha'])
 
   await $.command.run({ command: 'ledger:go', args: 'beta' })
   await $.turn.complete(turnEnd)
@@ -33,7 +33,7 @@ test('D43: after /ledger:go clears and sends go <slug>, the turn that entered th
   w.enterWorktree(B)
   await $.turn.complete(turnEnd)
 
-  expect(renames(w.events)).toEqual(['rename: alpha', 'rename: beta'])
+  expect(renames(w.events)).toEqual(['rename: 🔨 alpha', 'rename: 🔨 beta'])
 })
 
 test('D43: a session that enters another task\'s worktree without a clear is renamed to that task at the turn end', async ($, on) => {
@@ -43,7 +43,7 @@ test('D43: a session that enters another task\'s worktree without a clear is ren
   w.enterWorktree(B)
   await $.turn.complete(turnEnd)
 
-  expect(renames(w.events)).toEqual(['rename: alpha', 'rename: beta'])
+  expect(renames(w.events)).toEqual(['rename: 🔨 alpha', 'rename: 🔨 beta'])
 })
 
 test('D43: a session in the main checkout that claimed a task with go <slug> is named after it at the turn end', async ($, on) => {
@@ -52,7 +52,7 @@ test('D43: a session in the main checkout that claimed a task with go <slug> is 
   await $.prompt.submit({ text: 'go beta' })
   await $.turn.complete(turnEnd)
 
-  expect(renames(w.events)).toEqual(['rename: beta'])
+  expect(renames(w.events)).toEqual(['rename: 🔨 beta'])
 })
 
 test('D43: a session that claimed a task, then worked in another task\'s worktree, is not renamed back to the claim in the main checkout', async ($, on) => {
@@ -65,7 +65,7 @@ test('D43: a session that claimed a task, then worked in another task\'s worktre
   w.enterWorktree(MAIN)
   await $.turn.complete(turnEnd)
 
-  expect(renames(w.events)).toEqual(['rename: beta', 'rename: alpha'])
+  expect(renames(w.events)).toEqual(['rename: 🔨 beta', 'rename: 🔨 alpha'])
 })
 
 test('D43: a new session in a task\'s worktree is named after it even when an earlier session last took that name', async ($, on) => {
@@ -75,7 +75,7 @@ test('D43: a new session in a task\'s worktree is named after it even when an ea
   w.newSession('session-2')
   await $.turn.complete(turnEnd)
 
-  expect(renames(w.events)).toEqual(['rename: beta', 'rename: beta'])
+  expect(renames(w.events)).toEqual(['rename: 🔨 beta', 'rename: 🔨 beta'])
 })
 
 test('D43: a new session that claims a task with go <slug> is named after it at the turn end, though its claim leaves the prompt hook no title to give', async ($, on) => {
@@ -87,5 +87,36 @@ test('D43: a new session that claims a task with go <slug> is named after it at 
   await $.prompt.submit({ text: 'go beta' })
   await $.turn.complete(turnEnd)
 
-  expect(renames(w.events)).toEqual(['rename: beta', 'rename: beta'])
+  expect(renames(w.events)).toEqual(['rename: 🔨 beta', 'rename: 🔨 beta'])
+})
+
+test('D43: a session is renamed when its own task\'s state changes, and only then', async ($, on) => {
+  const w = world(on, ownTasks, { cwd: A })
+
+  await $.turn.complete(turnEnd)
+  w.reply(sessionAt(A), session(A, task('alpha', { title: '🔍 alpha' })))
+  await $.turn.complete(turnEnd)
+  await $.turn.complete(turnEnd)
+
+  expect(renames(w.events)).toEqual(['rename: 🔨 alpha', 'rename: 🔍 alpha'])
+})
+
+test('D43: a session that claimed a task is named with that task\'s title, and renamed when its state changes', async ($, on) => {
+  const w = world(on, { [sessionAt(MAIN)]: session(MAIN, undefined, [task('alpha'), task('beta', { title: '🟡 beta' })]), 'task claim beta --session session-1 --json': claimed('beta', 'session-1') }, { cwd: MAIN })
+
+  await $.prompt.submit({ text: 'go beta' })
+  await $.turn.complete(turnEnd)
+  w.reply(sessionAt(MAIN), session(MAIN, undefined, [task('beta', { title: '⏳ beta' })]))
+  await $.turn.complete(turnEnd)
+
+  expect(renames(w.events)).toEqual(['rename: 🟡 beta', 'rename: ⏳ beta'])
+})
+
+test('D43: a session that claimed a task the session reply does not list is named with its bare slug', async ($, on) => {
+  const w = world(on, { [sessionAt(MAIN)]: session(MAIN, undefined, [task('alpha')]), 'task claim beta --session session-1 --json': claimed('beta', 'session-1') }, { cwd: MAIN })
+
+  await $.prompt.submit({ text: 'go beta' })
+  await $.turn.complete(turnEnd)
+
+  expect(renames(w.events)).toEqual(['rename: beta'])
 })
