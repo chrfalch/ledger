@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, type TestContext } from 'node:test';
@@ -15,6 +15,7 @@ import { readRecordJson, renderRecord } from '../tools/ledger/record.js';
 import { runEnv } from '../tools/ledger/run-io.js';
 import { limitBusyWaitForTests } from '../tools/ledger/sqlite-store.js';
 import { allowRemoteForTests } from '../tools/ledger/sync.js';
+import { processFolder, replay, type Replay } from './git-fixture-copies.js';
 import { REPO } from './helpers.js';
 import { commandEnv, git, home, LEDGER_BIN, ok, PRELOAD_OPTIONS, runInProcessWith, type Ran } from './ledger-core-fixtures.js';
 
@@ -51,9 +52,31 @@ export type Machine = { h: string; clone: string; app: string; status: string; b
 /** A bare repository that stands in for the private GitHub repository. */
 export function remote(t: TestContext): string {
   const bare = path.join(home(t), 'ledgers.git');
-  git(path.dirname(bare), path.dirname(bare), 'init', '--quiet', '--bare', '-b', 'main', bare);
+  cpSync(EMPTY_BARE(), bare, { recursive: true });
   return bare;
 }
+
+/** Built on first use. A copy equals one built anew, as neither git init nor this clone writes the path of its own folder into it. */
+const once = <T>(build: () => T): (() => T) => {
+  let built: { value: T } | undefined;
+  return () => (built ??= { value: build() }).value;
+};
+
+const EMPTY_BARE = once(() => {
+  const folder = path.join(processFolder(), 'remote');
+  mkdirSync(folder);
+  const bare = path.join(folder, 'ledgers.git');
+  git(folder, folder, 'init', '--quiet', '--bare', '-b', 'main', bare);
+  return bare;
+});
+
+const APP_CLONE = once(() => {
+  const folder = path.join(processFolder(), 'app-clone');
+  mkdirSync(folder);
+  const app = path.join(folder, 'app');
+  git(folder, folder, 'clone', '--quiet', APP_ORIGIN, app);
+  return app;
+});
 
 type GhAnswer = { visibility: string; isEmpty: boolean } | 'fail';
 
@@ -98,7 +121,8 @@ export function machine(t: TestContext, bare: string): Machine {
   answerGh(h, { visibility: 'PRIVATE', isEmpty: true });
   copyFileSync(path.join(REPO, 'ledger.template.md'), path.join(h, '.claude/ledger.template.md'));
   const app = path.join(h, 'repos', 'app');
-  git(h, h, 'clone', '--quiet', APP_ORIGIN, app);
+  mkdirSync(path.dirname(app));
+  cpSync(APP_CLONE(), app, { recursive: true });
   writeFileSync(path.join(app, '.git/info/exclude'), '.claude/\n');
   return { h, app, bare, clone: path.join(h, '.claude/ledger-data'), status: path.join(h, '.claude/ledger-data.status.json') };
 }
@@ -192,11 +216,15 @@ export async function runHere(m: Machine, args: string[], { cwd = m.app, env = q
     return await runInProcessWith(m.h, cwd, { env, input }, ...args);
   } finally {
     for (const restore of restores) restore();
-    // A hook run leaves its deadlines set until the next run starts; a test that calls ledger code directly must not inherit them.
-    resetGitLimits();
-    limitCloneGitCalls(Infinity);
-    limitLockWaits(Infinity);
+    clearRunLimits();
   }
+}
+
+/** A hook run leaves its deadlines set until the next run starts; a test that calls ledger code directly must not inherit them. */
+function clearRunLimits(): void {
+  resetGitLimits();
+  limitCloneGitCalls(Infinity);
+  limitLockWaits(Infinity);
 }
 
 /** `ledgerOk` inside this process. */
@@ -231,15 +259,41 @@ export const remoteLedger = (bare: string, file: string): string => renderRecord
 
 export const useGitStorage = (m: Machine): void => writeFileSync(path.join(m.h, '.claude/ledger-settings.json'), JSON.stringify({ storage: 'git' }));
 
+/**
+ * Writes what `store sync init` wrote when it last ran on a machine with the same files, if it did. A copy still needs
+ * what init does at its own time: the time of its privacy check, and the stat data of the clone's files in its index.
+ */
+function copiedInit(m: Machine, name: string): Replay {
+  const replayed = replay(name, [m.h, path.dirname(m.bare)]);
+  if (replayed.copied) {
+    const config = path.join(m.clone, '.git/config');
+    writeFileSync(config, readFileSync(config, 'utf8').replace(/^(\tcheckedPrivate = )\d+/m, `$1${Date.now()}`));
+    git(m.h, m.clone, 'update-index', '-q', '--refresh');
+  }
+  return replayed;
+}
+
 /** `ledger store sync init` on a machine, then git storage. */
 export function setUp(m: Machine, url = URL): void {
-  ok(run(m, ['store', 'sync', 'init', url]));
+  const replayed = copiedInit(m, `spawned init ${url}`);
+  if (!replayed.copied) {
+    ok(run(m, ['store', 'sync', 'init', url]));
+    replayed.record();
+  }
   useGitStorage(m);
 }
 
 /** `setUp` inside this process. */
 export async function setUpHere(m: Machine, url = URL): Promise<void> {
-  ok(await runHere(m, ['store', 'sync', 'init', url]));
+  const replayed = copiedInit(m, `init here ${url}`);
+  if (replayed.copied) {
+    allowRemoteForTests(m.bare);
+    onBackgroundSyncForTests(noteBackgroundSync);
+    clearRunLimits();
+  } else {
+    ok(await runHere(m, ['store', 'sync', 'init', url]));
+    replayed.record();
+  }
   useGitStorage(m);
 }
 
