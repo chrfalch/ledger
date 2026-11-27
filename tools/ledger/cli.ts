@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { statusLineText } from './awareness.js';
+import { statusLineText, taskTitle } from './awareness.js';
 import { claimResultText, claimTask, Held, knownSession, releaseAll, releaseTask, requiredSession, touchAll, touchTask, type AllResult } from './claims.js';
 import { limitCloneGitCalls } from './clone.js';
 import { systemClock, type Clock } from './clock.js';
@@ -130,6 +130,7 @@ function listed(task: Task) {
   const parentMain = parent?.main ?? task.main;
   return {
     slug: task.slug,
+    title: taskTitle(task),
     repo: task.repo,
     ...(task.currentRepo === undefined ? {} : { currentRepo: task.currentRepo }),
     ...(task.main === undefined ? {} : { main: task.main }),

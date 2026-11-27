@@ -1,6 +1,6 @@
 import { statSync, type Stats } from 'node:fs';
 import path from 'node:path';
-import { openTreesReport, sessionReport } from './awareness.js';
+import { openTreesReport, sessionReport, taskTitle } from './awareness.js';
 import { claimClock, otherClaim, type ClaimClock } from './claims.js';
 import { clonePaths, limitCloneGitCalls } from './clone.js';
 import { Failure } from './failure.js';
@@ -20,7 +20,7 @@ import { holdsUnmovedLedger, keepsUnmovedLedger } from './unmoved.js';
 import { sqliteFile } from './sqlite-store.js';
 import { pullForSession, syncNotice } from './sync.js';
 import { keyAndAliases, type LedgerStore } from './store.js';
-import { activeTask, activeTasks, archivedTasks, inRepo, storedTasks, type Task } from './tasks.js';
+import { activeStatus, activeTask, activeTasks, archivedTasks, inRepo, storedTasks, type Task } from './tasks.js';
 import { plural } from './views.js';
 import type { Context } from './write.js';
 
@@ -124,8 +124,9 @@ export function sessionLedgers(store: LedgerStore, cwd: string, stored?: (main: 
   return { tasks: task === undefined ? [] : [task], own };
 }
 
-/** The slug that titles the session: only when its one ledger is its folder's own. */
-export const sessionTitle = ({ tasks, own }: SessionLedgers): string | undefined => (own && tasks.length === 1 ? tasks[0].ledger.slug : undefined);
+/** The title of the session: only when its one ledger is its folder's own and names its slug. */
+export const sessionTitle = ({ tasks, own }: SessionLedgers): string | undefined =>
+  own && tasks.length === 1 && tasks[0].ledger.slug !== undefined ? taskTitle(tasks[0]) : undefined;
 
 /** A hint for the linked worktrees of the repo of `cwd` whose ledger is still a .claude/ledger.md. A git call that times out lists no worktree. */
 function unmovedHint(store: LedgerStore, cwd: string): string | undefined {
@@ -239,9 +240,10 @@ export function preCompactText({ tasks }: SessionLedgers): string {
 const GO = /^\s*go[ \t]+(\S+)\s*$/;
 
 /**
- * Titles the session for a prompt of exactly `go <slug>` that names an active ledger in a worktree of the repo, because
- * Claude Code ignores the SessionStart title after a clear. Any title gives way, one the operator typed too, unless this
- * session already claims that task. The worktree's own task does not count: after a clear into it, the old title remains.
+ * Titles the session with the task title (D43) for a prompt of exactly `go <slug>` that names an active ledger in a
+ * worktree of the repo, because Claude Code ignores the SessionStart title after a clear. Any other title gives way, one
+ * the operator typed too, unless this session already claims that task. The worktree's own task does not count: after a
+ * clear into it, the old title remains.
  */
 export function promptSubmit(input: HookInput, context: HookContext): PromptSubmitOutput | undefined {
   const target = GO.exec(input.prompt)?.[1];
@@ -251,9 +253,12 @@ export function promptSubmit(input: HookInput, context: HookContext): PromptSubm
   const { store } = context;
   // From the records alone: the hook runs at every prompt, so it asks git nothing per task.
   const active = keyAndAliases(store.aliases.read(), repoKey(main)).flatMap((repo) => store.active.list(repo).map(({ text }) => parseLedger(text)));
-  if (!active.some(({ slug }) => slug === target) || input.sessionTitle === target) return undefined;
+  const ledger = active.find(({ slug }) => slug === target);
+  if (ledger === undefined) return undefined;
+  const title = taskTitle({ slug: target, status: activeStatus(ledger), ledger });
+  if (input.sessionTitle === title) return undefined;
   if (input.sessionId !== '' && active.some(({ slug, location }) => slug === target && location.claim?.session === input.sessionId)) return undefined;
-  return { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', sessionTitle: target } };
+  return { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', sessionTitle: title } };
 }
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));

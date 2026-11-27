@@ -857,13 +857,13 @@ test('/ledger:park with no reason answers its usage and runs nothing', async ($,
 
 // turn end without a switch
 
-test('an answered turn names the session after its task once per slug, and runs auto-prune once per turn', async ($, on) => {
+test('an answered turn names the session after its task once per title, and runs auto-prune once per turn', async ($, on) => {
   const w = world(on, { [SESSION]: ownEpic(), [autoPrune(CWD)]: unchanged(CWD) }, { cwd: CWD })
 
   await $.turn.complete(turnEnd)
   await $.turn.complete({ ...turnEnd, turnId: 't2' })
 
-  expect(w.events).toEqual(['rename: epic'])
+  expect(w.events).toEqual(['rename: 🔨 epic'])
   expect(w.argvs()).toEqual([['session', CWD, '--json'], ['worktrees', 'auto-prune', CWD, '--json'], ['session', CWD, '--json'], ['worktrees', 'auto-prune', CWD, '--json']])
 })
 
@@ -876,7 +876,7 @@ test('an answered turn shows the line auto-prune gives when it pruned a finished
 
   await $.turn.complete(turnEnd)
 
-  expect(w.events).toEqual(['rename: epic', 'log: Pruned the build folders of epic.'])
+  expect(w.events).toEqual(['rename: 🔨 epic', 'log: Pruned the build folders of epic.'])
 })
 
 test('a turn that clears neither renames nor runs auto-prune a second time', async ($, on) => {
@@ -1279,7 +1279,7 @@ test('a /rename that fails is tried again at the next turn end', async ($, on) =
   await $.turn.complete({ ...turnEnd, turnId: 't2' })
   await $.turn.complete({ ...turnEnd, turnId: 't3' })
 
-  expect(w.events).toEqual(['rename: epic'])
+  expect(w.events).toEqual(['rename: 🔨 epic'])
 })
 
 // a host with no person at the prompt, where a submitted prompt gets no turn

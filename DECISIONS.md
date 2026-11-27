@@ -1504,3 +1504,22 @@ its entries.
 **`ledger store migrate --to` no longer carries it.** A storage switch copies
 the ledgers, the archive with its evidence, and the repo aliases. It neither
 copies nor removes the old task list.
+
+## 2026-11-27 — The session name shows the task's state
+
+**The name is `<icon> <slug>`.** A slug alone said which task a session holds,
+not whether it needs the operator. The icon now says that too, so the session
+list shows at a glance which sessions to look at. The first state that applies
+gives the icon: ✅ done, ⛔ blocked, 💤 parked, 🟡 an open question for the
+operator, ⏳ waiting, 🔍 at the review stage, 🔨 working on anything else. The
+tool defines the icons and the title in one place, and every path that names a
+session uses it.
+
+**A state change renames too.** Before, the session was renamed only when its
+task changed, so a title the operator typed stayed while the task did. Now the
+turn end renames whenever the title differs from the last one it set, which
+also replaces a typed title when the state changes. The state is what the name
+is for, so it wins.
+
+**T3 follows once its rename lands.** The T3 thread name gets the same title
+when the T3 rename sync (branch `wf-t3-rename-sync`) is merged.

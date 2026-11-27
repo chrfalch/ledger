@@ -195,7 +195,7 @@ test('/ledger:go <slug> --take-over forwards --take-over to ledger go and switch
 
   expect(w.argvs()[1]).toEqual(['go', 'kid', '--session', 'session-1', '--take-over', '--json'])
   expect(w.markdown()).toEqual({ command: 'ledger:go', args: 'task: kid\nledger: epic' })
-  expect(w.events.filter(event => event !== 'rename: epic')).toEqual(['clear', 'submit: go kid'])
+  expect(w.events.filter(event => event !== 'rename: 🔨 epic')).toEqual(['clear', 'submit: go kid'])
 })
 
 const HELD_QUESTION = 'Task kid is held by session session-2. What now?'
@@ -467,7 +467,7 @@ test('a touch that exits nonzero is tried again at the next turn end, and says n
   await $.turn.complete(turnEnd)
 
   expect(touches(w)).toEqual([touchAllArgv(), touchAllArgv()])
-  expect(w.events).toEqual(['rename: epic'])
+  expect(w.events).toEqual(['rename: 🔨 epic'])
 })
 
 test('a touch that bin/ledger could not run is tried again at the next turn end', async ($, on) => {

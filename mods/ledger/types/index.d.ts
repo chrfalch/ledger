@@ -21,7 +21,7 @@ export type LedgerArmed =
 declare module 'claude-code' {
   interface PluginState {
     /**
-     * `titled`: the slug the mod last named session `sessionId` after with /rename. `claimedTask`: the task session
+     * `titled`: the title the mod last gave session `sessionId` with /rename. `claimedTask`: the task session
      * `sessionId` last claimed with a `go <slug>` prompt, which names the session in a folder with no ledger of its own. `clearApproved`: the operator's last answer in a
      * question box picked "Save, clear and continue", so the model may start /ledger:next once. `clearPoint`: for session
      * `sessionId`, the context size in tokens that marks the next clear-point offer, and `pending`, the size at a marked
@@ -35,7 +35,7 @@ declare module 'claude-code' {
      */
     ledger: {
       armed: LedgerArmed | null
-      titled: { sessionId: string; slug: string } | null
+      titled: { sessionId: string; title: string } | null
       claimedTask: { sessionId: string; slug: string } | null
       clearApproved: boolean
       heldTask: { sessionId: string; slug: string } | null

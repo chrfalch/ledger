@@ -645,7 +645,7 @@ test('session --json gives the ledger of a linked worktree as its own, those of 
 
   const own = done(await json(h, path.join(worktree, '.claude'), 'session'));
   assert.equal(own.own, true);
-  assert.equal(own.title, 'epic');
+  assert.equal(own.title, '🔨 epic');
   assert.equal(own.removed, false);
   const [task] = own.ledgers as Record<string, unknown>[];
   assert.equal(task.worktree, worktree);
@@ -655,11 +655,12 @@ test('session --json gives the ledger of a linked worktree as its own, those of 
   assert.deepEqual(task.current, { number: '2', step: 'implement', status: 'todo' });
   assert.deepEqual(task.parent, { slug: 'umbrella', main: app });
   assert.deepEqual(task.children, [{ slug: 'part', main: app, mark: { kind: 'started', date: '2026-11-02' } }]);
+  assert.equal(task.title, '🔨 epic');
 
   const main = done(await json(h, app, 'session'));
   assert.equal(main.own, false);
   assert.equal(main.title, undefined);
-  assert.deepEqual((main.ledgers as { slug: string }[]).map(({ slug }) => slug).sort(), ['epic', 'other']);
+  assert.deepEqual((main.ledgers as { title: string }[]).map(({ title }) => title).sort(), ['🔨 epic', '🔨 other']);
 
   const gone = path.join(h, 'gone');
   assert.deepEqual(done(await json(h, app, 'session', gone)), { ok: true, folder: gone, removed: true, own: false, ledgers: [] });
