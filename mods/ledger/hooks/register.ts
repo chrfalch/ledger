@@ -48,6 +48,7 @@ import {
   type Switch,
   type GoFields,
 } from './ledger'
+import { renameT3Thread } from './t3'
 
 type Armed = NonNullable<PluginState['ledger']['armed']>
 type GoArm = Extract<Armed, { mode: 'go' }>
@@ -285,9 +286,10 @@ async function showRetireHint($: EngineInterface, previous: PreviousTask, namesN
 }
 
 /**
- * Names the session after its task with /rename, because a hook's sessionTitle does not reach Remote Control in VS Code.
- * Only a new title renames: a new task, or a new state of the task, which replaces a title the operator gave too. A
- * failure is tried again next turn; the title is not worth a line in the transcript.
+ * Names the session after its task with /rename, because a hook's sessionTitle does not reach Remote Control in VS Code,
+ * and renames its T3 Code thread. Only a new title renames: a new task, or a new state of the task, which replaces a title
+ * the operator gave too. A failed /rename is tried again next turn, a failed thread rename is not; neither is worth a line
+ * in the transcript.
  */
 async function titleSession($: EngineInterface, title: string): Promise<void> {
   try {
@@ -297,6 +299,7 @@ async function titleSession($: EngineInterface, title: string): Promise<void> {
     // titles had icons holds a slug, and so never equals a title.
     if (last?.sessionId === sessionId && last.title === title) return
     await $.command.run({ command: 'rename', args: title })
+    await renameT3Thread($, title)
     await $.state.set(titled, { sessionId, title })
   } catch {}
 }
