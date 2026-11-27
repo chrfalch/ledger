@@ -6,7 +6,7 @@ import { plural } from './views.js';
 
 // @ref LLP 0000#hooks — the operator's override of the pre-tool-use gates, and the log of what it let through.
 
-/** hooks/derived-data-gate.sh reads `sinceEpoch` and `untilEpoch` of this file too. */
+/** hooks/derived-data-gate.sh reads `sinceEpoch` and `untilEpoch` of this file too, by the rule of `rootState`. */
 export const rootMarker = (home: string): string => path.join(home, '.claude', 'ledger-root.json');
 const rootLog = (home: string): string => path.join(home, '.claude', 'ledger-root.log');
 /** Holds the byte offset of the log up to which session start has reported. */
@@ -14,6 +14,7 @@ const reportedOffsetFile = (home: string): string => path.join(home, '.claude', 
 export const rootLogFiles = (home: string): string[] => [rootLog(home), reportedOffsetFile(home)];
 
 export const ROOT_MINUTES = { default: 30, max: 240 } as const;
+const MAX_SECONDS = ROOT_MINUTES.max * 60;
 
 /** The value of `ledger root on --minutes`. */
 export function rootMinutes(value: string): number {
@@ -21,29 +22,33 @@ export function rootMinutes(value: string): number {
   return minutes >= 1 && minutes <= ROOT_MINUTES.max ? minutes : fail(`--minutes takes a whole number from 1 to ${ROOT_MINUTES.max}, not "${value}".`);
 }
 
+/** `since` and `until` are for a person reading the file; only the epochs count. */
 type Marker = { since: string; sinceEpoch: number; until: string; untilEpoch: number };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const text = (value: unknown): string => (typeof value === 'string' ? value : '');
-export type RootState = { on: false } | { on: true; since: string; until: Date; minutesLeft: number };
+const isEpoch = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value);
+const epochOf = (at: Date): number => Math.floor(at.getTime() / 1000);
+const isoOf = (epoch: number): string => new Date(epoch * 1000).toISOString();
+export type RootState = { on: false } | { on: true; sinceEpoch: number; until: Date; minutesLeft: number };
 
+/**
+ * On while the current second lies from `sinceEpoch` up to, not including, `untilEpoch`: whole numbers at most the longest
+ * switch apart, in a marker that is one JSON document. A byte order mark is skipped, as jq in the shell hook skips it.
+ */
 export function rootState(home: string, now: Date): RootState {
   let marker: unknown;
   try {
-    marker = JSON.parse(readFileSync(rootMarker(home), 'utf8'));
+    marker = JSON.parse(readFileSync(rootMarker(home), 'utf8').replace(/^\uFEFF/, ''));
   } catch {
     return { on: false };
   }
-  if (!isRecord(marker) || typeof marker.untilEpoch !== 'number' || !Number.isFinite(marker.untilEpoch)) return { on: false };
-  const since = Date.parse(text(marker.since));
-  const until = new Date(marker.untilEpoch * 1000);
-  const left = until.getTime() - now.getTime();
-  if (Number.isNaN(since) || since > now.getTime() || !withinWindow(since, until.getTime()) || left <= 0) return { on: false };
-  return { on: true, since: text(marker.since), until, minutesLeft: Math.ceil(left / 60_000) };
+  if (!isRecord(marker)) return { on: false };
+  const { sinceEpoch, untilEpoch } = marker;
+  const second = epochOf(now);
+  if (!isEpoch(sinceEpoch) || !isEpoch(untilEpoch) || sinceEpoch > second || second >= untilEpoch || untilEpoch - sinceEpoch > MAX_SECONDS) return { on: false };
+  return { on: true, sinceEpoch, until: new Date(untilEpoch * 1000), minutesLeft: Math.ceil((untilEpoch - second) / 60) };
 }
-
-/** No marker `ledger root on` writes ends more than the longest switch after its `since`; one that does was written by hand. */
-const withinWindow = (since: number, until: number): boolean => until - since <= ROOT_MINUTES.max * 60_000;
 
 /**
  * A switch while on keeps `since`, so the marker still says when the operator first switched it on, unless the new end
@@ -51,9 +56,9 @@ const withinWindow = (since: number, until: number): boolean => until - since <=
  */
 export function switchRootOn(home: string, now: Date, minutes: number): RootState {
   const current = rootState(home, now);
-  const untilEpoch = Math.floor(now.getTime() / 1000) + minutes * 60;
-  const since = current.on && withinWindow(Date.parse(current.since), untilEpoch * 1000) ? current.since : now.toISOString();
-  const marker: Marker = { since, sinceEpoch: Math.floor(Date.parse(since) / 1000), until: new Date(untilEpoch * 1000).toISOString(), untilEpoch };
+  const untilEpoch = epochOf(now) + minutes * 60;
+  const sinceEpoch = current.on && untilEpoch - current.sinceEpoch <= MAX_SECONDS ? current.sinceEpoch : epochOf(now);
+  const marker: Marker = { since: isoOf(sinceEpoch), sinceEpoch, until: isoOf(untilEpoch), untilEpoch };
   mkdirSync(path.dirname(rootMarker(home)), { recursive: true });
   writeFileSync(rootMarker(home), `${JSON.stringify(marker)}\n`);
   return rootState(home, now);
@@ -73,12 +78,10 @@ export const rootSegment = (state: RootState): string => (state.on ? `ROOT ${sta
 /** One call a gate would have denied: a Bash call names its command, a file tool its file. */
 export type RootAction = { tool: string; cwd: string; reason: string } & ({ command: string } | { file: string });
 
-/** A log that cannot be written is skipped, as a hook must not fail on its way to allowing a call. */
+/** Throws when the log cannot be written, so that the caller denies the call: root lets through only what the operator will see. */
 export function logRootAction(home: string, action: RootAction, now: Date): void {
-  try {
-    mkdirSync(path.dirname(rootLog(home)), { recursive: true });
-    appendFileSync(rootLog(home), `${JSON.stringify({ at: now.toISOString().replace(/\.\d+Z$/, 'Z'), ...action })}\n`);
-  } catch {}
+  mkdirSync(path.dirname(rootLog(home)), { recursive: true });
+  appendFileSync(rootLog(home), `${JSON.stringify({ at: now.toISOString().replace(/\.\d+Z$/, 'Z'), ...action })}\n`);
 }
 
 const SUBJECT_LIMIT = 80;

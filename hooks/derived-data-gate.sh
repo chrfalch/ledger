@@ -117,15 +117,20 @@ reason=$(printf '%s\n' \
   "in the folder of the app you build." \
   "Never put a build folder in the session scratchpad or in /tmp.")
 
-# While the operator's `ledger root on` lasts, allow the call and log it, as tools/ledger/root.ts does for its gates.
-# A missing or garbled marker, or one spanning more than the 240 minutes `ledger root on` allows, fails jq -e, so the
-# deny stands.
-if jq -e --argjson now "$(date +%s)" \
-  '(.sinceEpoch | numbers) as $since | (.untilEpoch | numbers) as $until | $since <= $now and $now < $until and $until - $since <= 14400' \
+# While the operator's `ledger root on` lasts, allow the call and log it, as tools/ledger/root.ts does for its gates and
+# by its rule: one JSON document whose whole-number sinceEpoch and untilEpoch hold the current second, at most 240 minutes
+# apart. jq -s reads every document in the file; `. + 0` compares the numbers as doubles, as JSON.parse reads them. When
+# the log cannot be written, the deny stands, so root lets through only what the operator will see.
+if jq -se --argjson now "$(date +%s)" '
+  def epoch: numbers | . + 0 | select((isinfinite | not) and . == floor);
+  length == 1 and (.[0] | objects | (.sinceEpoch | epoch) as $since | (.untilEpoch | epoch) as $until
+    | $since <= $now and $now < $until and $until - $since <= 14400)' \
   "$HOME/.claude/ledger-root.json" >/dev/null 2>&1; then
-  jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg cwd "$cwd" --arg reason "$reason" --arg command "$command" \
-    '{at: $at, tool: "Bash", cwd: $cwd, reason: $reason, command: $command}' >>"$HOME/.claude/ledger-root.log" 2>/dev/null
-  exit 0
+  if { jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg cwd "$cwd" --arg reason "$reason" --arg command "$command" \
+    '{at: $at, tool: "Bash", cwd: $cwd, reason: $reason, command: $command}' >>"$HOME/.claude/ledger-root.log"; } 2>/dev/null; then
+    exit 0
+  fi
+  reason=$(printf '%s\n' "Ledger root is on, but the root log could not be written, so this call is denied." "$reason")
 fi
 
 printf '%s' "$reason" | jq -Rs '{

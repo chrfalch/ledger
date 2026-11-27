@@ -719,26 +719,49 @@ because its turn end does not clear the session.
   just approved in the chat. The operator lifts the four checks above for a
   while with `/ledger:root`, which runs `ledger root on`
   (`tools/ledger/root.ts`). That writes `~/.claude/ledger-root.json`, with
-  its start as `sinceEpoch` and its end as `untilEpoch`. A marker whose end
-  is not a finite time, or lies more than 240 minutes after its start, reads
-  as off. While that time lies ahead, a call the checks
-  would deny goes ahead. Each such call is appended as one JSON line to
-  `~/.claude/ledger-root.log`: the time, tool, folder, deny reason, and the
-  command or file. The next `session-start` lists the lines not yet reported
-  under *Allowed only because ledger root was on:*, below the hook failures,
-  and `ledger statusline` adds `ROOT <minutes>m`. A fifth check, which runs
-  first, is never lifted (`rootSwitchReason` in `tools/ledger/hooks.ts`). It
-  denies an agent's `ledger root on`, by any path to `ledger` or run through
-  node, tsx or npx, and any write of the marker file. It also denies any
-  write or removal of the log and of its `.reported` offset file. It reads
-  the script of `bash -c`, `sh -c`, `zsh -c` and `eval` the same way. Inline
-  interpreter code, or a program fed on standard input, is denied when the
-  command names one of those files or `ledger root on`. If the check itself
-  fails, it denies the call. `ledger root off`, `ledger root status` and
-  removing the marker stay allowed.
+  its start as `sinceEpoch` and its end as `untilEpoch`, in whole seconds.
+  Root is on while the current second lies from the start up to the end,
+  the end lies at most 240 minutes after the start, and the file holds one
+  JSON document. Its `since` and `until` texts are only for a reader. While
+  root is on, a call the checks would deny goes ahead, and is appended as
+  one JSON line to `~/.claude/ledger-root.log`: the time, tool, folder, deny
+  reason, and the command or file. A call whose line cannot be appended is
+  denied. The next `session-start` lists the lines not yet reported under
+  *Allowed only because ledger root was on:*, below the hook failures, and
+  `ledger statusline` adds `ROOT <minutes>m`.
+
+  A fifth check, which runs first, is never lifted (`rootCheck` in
+  `tools/ledger/hooks.ts`). It denies an agent's `ledger root on`, by
+  `ledger` itself or a path that ends in `bin/ledger` or
+  `tools/ledger/cli.ts`, run directly or through node, tsx, npx, bun or
+  deno. With `-h` or `--help` it only prints help, so it is allowed. The
+  check denies any write that may reach the marker file, by a glob too, and
+  rsync into `~/.claude`. It denies a write or removal of the log or of its
+  `.reported` offset file by a path that names the file or a folder above
+  it. A glob does not count, so `rm ~/.claude/*.log` is allowed. But root
+  lifts no other check's deny for a call that reaches the log, by a glob
+  too. When this check and another both deny a call, the other check's
+  reason is given. The check reads a command name, and dd's `of=`, after
+  removing quotes and backslashes. It reads the script of `bash -c`,
+  `sh -c`, `zsh -c` and `eval` the same way, in the folder that script
+  starts in. Inline interpreter code is denied when its own command names
+  one of those files or `ledger root on`. A program fed on standard input,
+  by a pipe or a here-document, is denied when the whole command names
+  one. If the check itself fails, it denies the call. `ledger root off`,
+  `ledger root status` and removing the marker stay allowed.
+
+  The check catches the usual ways an agent writes these commands. It is
+  not a sandbox. It does not see a script file that the agent writes and
+  then runs, a path built from a variable or a command substitution, or a
+  write by awk, php or lua. Two sessions that start at the same time may
+  both list the same allowed calls. A Bash call that `derived-data-gate.sh`
+  and one of these checks would both deny is logged by each, so it is
+  listed twice.
 
 When a hook fails, `tools/ledger/cli.ts` prints the error to stderr and exits
-0. Claude Code then allows the tool call. A hook never blocks work by accident.
+0. Claude Code then allows the tool call, so a failing hook does not block work.
+The root check is the one exception: when it fails, `pre-tool-use` denies the
+call, as root might otherwise lift a deny that the check would have kept.
 The failure is also appended as one line to `~/.claude/ledger-hook-failures.log`
 (`tools/ledger/hook-failures.ts`). The shell hooks run through `hooks/logged.sh`,
 which logs any exit other than 0 or 2 the same way and exits 0. The next
@@ -773,9 +796,11 @@ runs through `hooks/logged.sh`, except the status line:
 - `derived-data-gate.sh` runs before each Bash call and denies an Xcode build
   folder other than the one LLP 0001 D44 names. While `ledger root` is on, it
   allows that call instead and logs it to `~/.claude/ledger-root.log`, as the
-  `ledger hook pre-tool-use` checks do. It reads only `sinceEpoch` and
-  `untilEpoch` with `jq`, so a missing or broken marker, or one spanning more
-  than 240 minutes, keeps the deny.
+  `ledger hook pre-tool-use` checks do. When the log cannot be written, the
+  deny stands. It reads the marker with `jq -s`, by the rule of `rootState`
+  in `tools/ledger/root.ts`. jq also accepts some numbers that are not JSON,
+  such as `01` or `NaN`. A marker written by hand that way may read as on
+  here alone.
 
 ### Worktree layout
 

@@ -120,25 +120,6 @@ test('an unreadable marker is off', async (t) => {
 
 const epoch = (iso: string): number => Date.parse(iso) / 1000;
 
-test('a marker whose end is not finite, lies more than 240 minutes after since, or has no valid since, is off', async (t) => {
-  const h = home(t);
-  const clock = fakeClock(START);
-  const since = clock.now().toISOString();
-  const markers = [
-    `{"since":"${since}","sinceEpoch":${epoch(START)},"untilEpoch":1e999}`,
-    JSON.stringify({ since, sinceEpoch: epoch(START), untilEpoch: epoch(at(clock, 241)) }),
-    JSON.stringify({ sinceEpoch: epoch(START), untilEpoch: epoch(at(clock, 30)) }),
-    JSON.stringify({ since: 'soon', sinceEpoch: epoch(START), untilEpoch: epoch(at(clock, 30)) }),
-    JSON.stringify({ since: at(clock, 10), sinceEpoch: epoch(at(clock, 10)), untilEpoch: epoch(at(clock, 30)) }),
-  ];
-  for (const text of markers) {
-    writeFileSync(marker(h), text);
-    assert.equal(await ok(h, clock, 'root', 'status'), OFF_LINE, text);
-  }
-  writeFileSync(marker(h), JSON.stringify({ since, sinceEpoch: epoch(START), untilEpoch: epoch(at(clock, 240)) }));
-  assert.equal(await ok(h, clock, 'root', 'status'), onLine(240, at(clock, 240)));
-});
-
 test('ledger root on past 240 minutes after since starts a new window from now', async (t) => {
   const h = home(t);
   const clock = fakeClock(START);
@@ -167,6 +148,8 @@ test('ledger root --help explains on, off and status in plain words', async (t) 
   const help = await ok(h, fakeClock(START), 'root', '--help');
   for (const command of ['on', 'off', 'status']) assert.match(help, new RegExp(`^  ${command}\\b.*\\S`, 'm'), command);
   assert.match(await ok(h, fakeClock(START), 'root', 'on', '--help'), /--minutes <n>/);
+  assert.match(await ok(h, fakeClock(START), 'root', 'on', '-h'), /--minutes <n>/);
+  assert.equal(existsSync(marker(h)), false);
   assert.match(await ok(h, fakeClock(START), '--help'), /^  root\b/m);
 });
 
@@ -337,6 +320,7 @@ const MARKER_WRITES = [
   `perl -e 'open(my $f, ">", "$ENV{HOME}/.claude/ledger-root.json")'`,
   `ruby -e 'File.write(Dir.home + "/.claude/ledger-root.json", "{}")'`,
   `python3 - <<'PY'\nopen('/x/.claude/ledger-root.json', 'w')\nPY`,
+  `echo "open('$HOME/.claude/ledger-root.json', 'w')" | python3`,
 ];
 
 const LOG_REASON = 'The ledger root log and its report offset are written only by the ledger hooks, so that the operator sees every call root let through. Leave them as they are.';
@@ -427,6 +411,116 @@ test('ledger root off and status, a removal or read of the marker, and text that
   for (const command of commands) assert.equal(await gate(h, clock, h, 'Bash', { command }), '', command);
   assert.equal(await gate(h, clock, h, 'Write', { file_path: path.join(h, '.claude/ledger-root.json.bak'), content: '' }), '');
   assert.deepEqual(logged(h), []);
+});
+
+/**
+ * What bash runs as a root switch or a root file write once it removes quotes and backslashes, a program piped into a
+ * quoted interpreter, rsync into ~/.claude or onto a root file, and rsync --delete into a folder above the log.
+ */
+const SPELLED_DENIED: [command: string, reason: string][] = [
+  ["l'edger' root on", SWITCH_REASON],
+  ['\\ledger root on', SWITCH_REASON],
+  ["$'ledger' root on", SWITCH_REASON],
+  ['ledger ro\\ot o"n"', SWITCH_REASON],
+  ["'bash' -c 'ledger root on'", SWITCH_REASON],
+  ['"eval" ledger root on', SWITCH_REASON],
+  ["'node' ~/.claude/bin/ledger root on", SWITCH_REASON],
+  ['n\\ode /repo/tools/ledger/cli.ts root on', SWITCH_REASON],
+  [`echo "open('$HOME/.claude/ledger-root.json', 'w')" | 'python3'`, SWITCH_REASON],
+  [`"python3" -c "open('$HOME/.claude/ledger-root.json', 'w')"`, SWITCH_REASON],
+  ["'cp' /tmp/x ~/.claude/ledger-root.json", SWITCH_REASON],
+  ['\\tee ~/.claude/ledger-root.json < /tmp/x', SWITCH_REASON],
+  ["'dd' of=~/.claude/ledger-root.json", SWITCH_REASON],
+  ['dd "of=$HOME/.claude/ledger-root.json"', SWITCH_REASON],
+  [`dd 'of='"$HOME"/.claude/ledger-root.json`, SWITCH_REASON],
+  ['dd o\\f=$HOME/.claude/ledger-root.json', SWITCH_REASON],
+  ["'rm' ~/.claude/ledger-root.log", LOG_REASON],
+  ['\\rm -f ~/.claude/ledger-root.reported', LOG_REASON],
+  ["$'rm' ~/.claude/ledger-root.log", LOG_REASON],
+  [`'truncate' -s 0 "$HOME/.claude/ledger-root.log"`, LOG_REASON],
+  ["'rsync' -a /tmp/src/ ~/.claude/", SWITCH_REASON],
+  ['rsync -a /tmp/src/ "$HOME/.claude"', SWITCH_REASON],
+  ['rsync -av -e ssh /tmp/x ~/.claude/ --exclude .git', SWITCH_REASON],
+  ['cd ~ && rsync /tmp/x .claude/', SWITCH_REASON],
+  ['rsync -a --delete /tmp/empty/ ~/.claude/', SWITCH_REASON],
+  ['rsync /tmp/x ~/.claude/ledger-root.log', LOG_REASON],
+  ['rsync -a --delete /tmp/home/ ~/', LOG_REASON],
+];
+
+for (const [command, reason] of SPELLED_DENIED) {
+  test(`Bash ${JSON.stringify(command)} is denied while root is on`, async (t) => {
+    const h = home(t);
+    const clock = fakeClock(START);
+    await ok(h, clock, 'root', 'on');
+    assert.equal(denied(await gate(h, clock, h, 'Bash', { command })), reason);
+    assert.deepEqual(logged(h), []);
+  });
+}
+
+/**
+ * What only resembles a root switch or a root file write: a root file's name in another folder, another cli.js or
+ * ledger, inline code beside a later command that names a root file, help, and rsync that leaves ~/.claude alone.
+ */
+const RESEMBLING_ALLOWED = [
+  "bash -c 'rm -f /tmp/test-output/*.log'",
+  "sh -c 'printf x > /tmp/ledger-root.json'",
+  "cd /tmp && bash -c 'rm ledger-root.log'",
+  'node /tmp/unrelated/cli.js root on',
+  '/tmp/unrelated/ledger root on',
+  "node -e 'console.log(1)' && ls ~/.claude/ledger-root.json",
+  "python3 -c 'print(1)'; cat ~/.claude/ledger-root.log",
+  'ledger root on --help',
+  'ledger root on -h',
+  "bash -c 'ledger root on --help'",
+  'rsync -a ~/.claude/ /tmp/backup/',
+  'rsync -a --delete ~/.claude/ /tmp/backup/',
+  'rsync -a /tmp/x/ ~/.claude/plugins/',
+  'dd if=~/.claude/ledger-root.log of=/tmp/copy',
+];
+
+for (const command of RESEMBLING_ALLOWED) {
+  test(`Bash ${JSON.stringify(command)} is allowed while root is on`, async (t) => {
+    const h = home(t);
+    const clock = fakeClock(START);
+    await ok(h, clock, 'root', 'on');
+    assert.equal(await gate(h, clock, h, 'Bash', { command }), '');
+    assert.deepEqual(logged(h), []);
+  });
+}
+
+const STORE_REASON = /^The ledger store is changed only by the ledger tool/;
+
+test('while root is on, a call the store check denies that also reaches the root log stays denied, with the store check reason', async (t) => {
+  const h = home(t);
+  const clock = fakeClock(START);
+  await ok(h, clock, 'root', 'on');
+  const commands = [
+    'rm -rf ~/.claude',
+    'rm -rf ~',
+    'rm -rf $HOME',
+    'rm -rf "${HOME}"',
+    'rmdir ~/.claude',
+    'cd ~ && rm -rf .claude',
+    'mv ~/.claude /tmp/claude-old',
+    'rm -rf ~/.claude/ledger-*',
+    'rm ~/.claude/*',
+    'rm -rf ~/.c*',
+    'rm -rf "$HOME"/.claude/ledger-*',
+  ];
+  for (const command of commands) assert.match(denied(await gate(h, clock, h, 'Bash', { command })), STORE_REASON, command);
+  assert.equal(await gate(h, clock, h, 'Bash', { command: 'rm ~/.claude/*.log' }), '');
+  assert.deepEqual(logged(h), []);
+});
+
+test('while root is on, a call a gate denies stays denied when the root log cannot be written', async (t) => {
+  const w = world(t);
+  const clock = fakeClock(START);
+  await ok(w.h, clock, 'root', 'on');
+  mkdirSync(logFile(w.h));
+
+  const reason = denied(await gate(w.h, clock, w.main, 'Bash', { command: STORE_COMMAND }));
+  assert.match(reason, /^Ledger root is on, but the root log could not be written, so this call is denied: /);
+  assert.match(reason, /\nThe ledger store is changed only by the ledger tool/);
 });
 
 // session-start

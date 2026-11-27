@@ -256,9 +256,12 @@ export function promptSubmit(input: HookInput, context: HookContext): PromptSubm
   return { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', sessionTitle: target } };
 }
 
+const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
 /**
  * Each gate runs on its own, so one that throws cannot disable the other; with no deny, the first error is thrown. The
- * root switch check alone fails closed: had it missed an agent's switch, root would lift the other gates' denies.
+ * root check alone fails closed: had it missed an agent's switch, root would lift the other gates' denies. When it and
+ * another gate both deny, the other gate's reason is the one given.
  */
 export function preToolUse(input: HookInput, context: HookContext): PreToolUseOutput | undefined {
   const errors: unknown[] = [];
@@ -271,21 +274,27 @@ export function preToolUse(input: HookInput, context: HookContext): PreToolUseOu
     }
   };
   const deny = (reason: string): PreToolUseOutput => ({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } });
-  let switchReason: string | undefined;
+  let root: RootCheck;
   try {
-    switchReason = rootSwitchReason(input, context);
+    root = rootCheck(input, context);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = messageOf(error);
     logHookFailure(context.paths.home, 'ledger hook pre-tool-use', message);
     return deny(`The ledger root check failed, so this call is denied: ${message}`);
   }
-  if (switchReason !== undefined) return deny(switchReason);
   const reason = check(worktreeRemovalReason) ?? check(ledgerWriteReason) ?? check(storeWriteReason);
-  if (reason === undefined && errors.length > 0) throw errors[0];
-  if (reason === undefined) return undefined;
+  if (reason === undefined) {
+    if (root.reason !== undefined) return deny(root.reason);
+    if (errors.length > 0) throw errors[0];
+    return undefined;
+  }
   const now = runClock().now();
-  if (!rootState(context.paths.home, now).on) return deny(reason);
-  logRootAction(context.paths.home, { tool: input.toolName, cwd: folderOf(input, context), reason, ...actionSubject(input, context) }, now);
+  if (!root.liftable || !rootState(context.paths.home, now).on) return deny(reason);
+  try {
+    logRootAction(context.paths.home, { tool: input.toolName, cwd: folderOf(input, context), reason, ...actionSubject(input, context) }, now);
+  } catch (error) {
+    return deny(`Ledger root is on, but the root log could not be written, so this call is denied: ${messageOf(error)}\n${reason}`);
+  }
   return undefined;
 }
 
@@ -500,7 +509,8 @@ const LEADING_REDIRECT = String.raw`\d*(?:&>>?|>[>|&]?|<<<|<<-?|<&?)\s*[^\s;&|<>
 const BEFORE_COMMAND = String.raw`(?:^|[\n;&|({])\s*(?:(?:if|elif|while|until|for|then|else|do|!|time(?:\s+-p)?|coproc(?:\s+[A-Za-z_]\w*)?)(?:\s+|$))*`;
 // The & of an &> starts no command, or `ls &>log rm x` would read rm as one. A { starts one only where it opens a group,
 // as in `f() {` or `function f {`: in `echo {` it is an argument.
-const COMMAND_START = String.raw`(?:^|[;|(]|&(?!>)|(?<=(?:${BEFORE_COMMAND}|\)\s*|\bfunction\s+[^\s;&|()]+\s+))\{)\s*(?:(?:sudo|xargs|env|command|exec|nohup|time|if|elif|then|else|do|while|until|!|[A-Za-z_]\w*=\S*|${LEADING_REDIRECT})\s+(?:-\S*\s+)*)*(?:\/\S*\/)?`;
+const COMMAND_PREFIX = String.raw`(?:^|[;|(]|&(?!>)|(?<=(?:${BEFORE_COMMAND}|\)\s*|\bfunction\s+[^\s;&|()]+\s+))\{)\s*(?:(?:sudo|xargs|env|command|exec|nohup|time|if|elif|then|else|do|while|until|!|[A-Za-z_]\w*=\S*|${LEADING_REDIRECT})\s+(?:-\S*\s+)*)*`;
+const COMMAND_START = String.raw`${COMMAND_PREFIX}(?:\/\S*\/)?`;
 /**
  * A command's arguments as read here. The & of a `>&`, `<&` or `&>` redirects and ends no command, so `git reset 2>&1 -h`
  * keeps its -h. A `<(` or `>(` ends them: the words of a process substitution are not the arguments of the command around it.
@@ -1287,15 +1297,15 @@ function cdInto(word: string, folder: string, home: string, laterLine: boolean):
 }
 
 /**
- * A heuristic, line by line, a line that ends in &&, || or | read with the next: what `writers` read, each resolved
- * against the folder the cds before it lead to. A cd counts up to the end of its ( ... ) group, on a later line too, of
- * its command substitution, of a pipeline it is in, a shell group spanning lines that a pipe leads into too, or of a
- * list that & sends to the background, also one that groups spanning lines extend; one at the top of a line
- * carries over to later lines. A redirect on the close of a shell group, with the command substitutions in its word, is
- * made where the group started, as bash makes it before the group runs. Braces in a word are expanded before a writer
- * reads it.
+ * A heuristic, line by line, a line that ends in &&, || or | read with the next: what `readLine` finds on each line of a
+ * script and of its command substitutions, given the folder that the cds before a place in the line lead to. A cd
+ * counts up to the end of its ( ... ) group, on a later line too, of its command substitution, of a pipeline it is in, a
+ * shell group spanning lines that a pipe leads into too, or of a list that & sends to the background, also one that
+ * groups spanning lines extend; one at the top of a line carries over to later lines. A redirect on the close of a shell
+ * group, with the command substitutions in its word, is made where the group started, as bash makes it before the group
+ * runs.
  */
-function bashWriteTargets({ lines, substitutions }: Script, cwd: string, home: string, writers: Writer[]): Target[] {
+function readScript<T>({ lines, substitutions }: Script, cwd: string, home: string, readLine: (line: string, folderAt: (at: number) => string) => T[]): T[] {
   let folder = cwd;
   const openSubshells: OpenGroup[] = [];
   const openShellGroups: OpenGroup[] = [];
@@ -1329,20 +1339,27 @@ function bashWriteTargets({ lines, substitutions }: Script, cwd: string, home: s
     openShellGroups.push(...shellGroups.opens.map((open) => ({ folder: folderAt(open), listFolder: listFolderAt(open), subshell: pipedLevels(line, open).at(-1) === true })));
     const groupRedirects = [...shellGroupsClosed.map(({ at, open }) => ({ at, folder: open.folder })), ...shellGroups.within.map(({ open, close }) => ({ at: close, folder: folderAt(open) }))].map((group) => ({ ...group, end: commandEnd(line, group.at) }));
     const targetFolderAt = (at: number): string => groupRedirects.find((group) => group.at < at && at < group.end)?.folder ?? folderAt(at);
-    const written = writers.flatMap(([pattern, read, effect = 'writes']) =>
+    const found = readLine(line, targetFolderAt);
+    const substituted = [...line.matchAll(SUBSTITUTIONS)].flatMap(({ index }) => {
+      const script = substitutions[next++];
+      return script === undefined ? [] : readScript(script, targetFolderAt(index), home, readLine);
+    });
+    return [...found, ...substituted];
+  });
+}
+
+/** What `writers` read in a script, each word resolved against the folder its command runs in. Braces in a word are expanded before a writer reads it. */
+function bashWriteTargets(script: Script, cwd: string, home: string, writers: Writer[]): Target[] {
+  return readScript(script, cwd, home, (line, folderAt) =>
+    writers.flatMap(([pattern, read, effect = 'writes']) =>
       [...line.matchAll(pattern)].flatMap(({ 1: part = '', index }) => {
-        const resolve = (word: string): string => pathOf(unmask(word), targetFolderAt(index), home);
+        const resolve = (word: string): string => pathOf(unmask(word), folderAt(index), home);
         return read(braceExpanded(part), (word) => statOf(resolve(word))?.isDirectory() ?? false)
           .filter((word) => word !== '')
           .map((word) => ({ file: resolve(word), effect, tailOnly: unquote(word).startsWith(SUBSTITUTION), foldersOnly: unquote(word).endsWith('/') }));
       }),
-    );
-    const substituted = [...line.matchAll(SUBSTITUTIONS)].flatMap(({ index }) => {
-      const script = substitutions[next++];
-      return script === undefined ? [] : bashWriteTargets(script, targetFolderAt(index), home, writers);
-    });
-    return [...written, ...substituted];
-  });
+    ),
+  );
 }
 
 /** The files a file tool or a Bash command writes, as `writers` find them in a command. */
@@ -1450,12 +1467,19 @@ function storeWriteReason(input: HookInput, context: HookContext): string | unde
   ].join('\n');
 }
 
-/** A run of `ledger` by any path to it, such as ~/.claude/bin/ledger, with its arguments as the first group. */
-const LEDGER = invocation(String.raw`["']?(?:[^\s;&|()<>]*\/)?ledger["']?`);
+/** Each simple command of a line: the text before its command word, that word, and the words after it. */
+const SIMPLE_COMMAND = new RegExp(`(${COMMAND_PREFIX}${DESCRIBED})([^\\s;&|()<>]+)(${ARGUMENTS})`, 'g');
+/** The ledger tool: `ledger` itself, a path that ends in its bin, or its entry point under tools/ledger. */
+const LEDGER_CLI = /(?:^ledger|bin\/ledger|tools\/ledger\/cli\.ts)$/;
+/** `word` without its quotes and backslashes, as the shell passes it on, with a quoted blank or operator still masked. */
+const dequoted = (word: string): string =>
+  word.replace(/\$'((?:\\.|[^'\\])*)'|'([^']*)'|\$?"((?:\\.|[^"\\])*)"|\\(.)/gs, (_: string, ansi?: string, single?: string, double?: string, escaped?: string) =>
+    ansi === undefined ? (single ?? double?.replace(/\\([\\"$`])/g, '$1') ?? escaped ?? '') : [...ansiC(unmask(ansi))].map(mask).join(''),
+  );
+/** A word as the shell passes it on. */
+const shellText = (word: string): string => unmask(dequoted(word));
 /** A run of node, tsx, npx and the like, with its options, the script it runs and that script's arguments as the first group. */
 const SCRIPT_RUNNER = invocation('node|tsx|npx|bun|bunx|deno');
-/** The ledger tool as a script: its bin, or the entry point under tools/ledger. */
-const LEDGER_SCRIPT = /(?:^|\/)(?:ledger|cli\.[cm]?[jt]s)$/;
 const SHELL_NAMES = '(?:ba|z|da|k)?sh';
 const INTERPRETER_NAMES = 'python[\\d.]*|node|perl|ruby';
 const SHELL = invocation(SHELL_NAMES);
@@ -1468,12 +1492,34 @@ const NAMES_ROOT_ON = /\bledger\b[\s\S]*\broot\b[\s\S]*\bon\b/;
 const INSTALL = invocation('install');
 const RSYNC = invocation('rsync');
 const DD = invocation('dd');
-/** Also what install and rsync copy, and the file of dd's of=. */
+/** The rsync options whose value is the next word. */
+const RSYNC_VALUE_OPTIONS = ['-e', '--rsh', '-f', '--filter', '--exclude', '--include', '--exclude-from', '--include-from', '--files-from', '-T', '--temp-dir', '--partial-dir', '--backup-dir', '--compare-dest', '--copy-dest', '--link-dest', '--chmod', '--chown', '--rsync-path', '--log-file', '--out-format', '--suffix'];
+/** --delete, --del and the variants that say when to delete, such as --delete-after. */
+const RSYNC_DELETE = /^--del(?:ete(?:-[\w-]+)?)?$/;
+
+/** rsync's destination: its last operand, when a source comes before it. */
+const rsyncDestination = (part: string): string | undefined => operandsOf(words(part.replace(ANY_REDIRECT, '')), RSYNC_VALUE_OPTIONS).slice(1).at(-1);
+/** What rsync writes: its destination, or anything in it, as the sources are not read here. */
+function rsyncWrites(part: string): string[] {
+  const destination = rsyncDestination(part);
+  return destination === undefined ? [] : [destination, `${destination}/*`];
+}
+/** What rsync's --delete removes: anything in its destination folder. */
+function rsyncDeletes(part: string): string[] {
+  const args = words(part.replace(ANY_REDIRECT, ''));
+  const destination = rsyncDestination(part);
+  return destination !== undefined && args.slice(0, optionsEnd(args)).some((arg) => RSYNC_DELETE.test(unquote(arg))) ? [destination] : [];
+}
+/** The file of dd's of=, read once quotes and backslashes are removed. */
+const ddOutput = (part: string): string[] => words(part).map(shellText).flatMap((word) => (word.startsWith('of=') ? [word.slice('of='.length)] : []));
+
+/** Also what install copies, what rsync writes and its --delete removes, and the file of dd's of=. */
 const ROOT_WRITERS: Writer[] = [
   ...LEDGER_WRITERS,
   [INSTALL, unlessInfo(copiedFiles)],
-  [RSYNC, unlessInfo(copiedFiles)],
-  [DD, (part) => words(part).flatMap((word) => (word.startsWith('of=') ? [word.slice('of='.length)] : []))],
+  [RSYNC, unlessInfo(rsyncWrites)],
+  [RSYNC, unlessInfo(rsyncDeletes), 'removes'],
+  [DD, ddOutput],
 ];
 const MAX_NESTING = 10;
 
@@ -1481,94 +1527,99 @@ const ROOT_SWITCH_REASON = 'Only the operator can switch the ledger root overrid
 const ROOT_LOG_REASON = 'The ledger root log and its report offset are written only by the ledger hooks, so that the operator sees every call root let through. Leave them as they are.';
 const ROOT_NESTING_REASON = 'This command nests shells or eval too deeply for the ledger root check to read, so it is denied. Run the inner command directly.';
 
-/** The files the root check guards; an agent may remove the marker, which switches root off, but not the log. */
-const rootFiles = (home: string): { file: string; reason: string; removable: boolean }[] => [
-  { file: rootMarker(home), reason: ROOT_SWITCH_REASON, removable: true },
-  ...rootLogFiles(home).map((file) => ({ file, reason: ROOT_LOG_REASON, removable: false })),
-];
+/** The script of a Bash command with each command word as bash runs it, so that `'rm'`, `\rm` or `$'rm'` is read as rm. */
+const plainCommandWords = ({ lines, substitutions }: Script): Script => ({
+  lines: lines.map((line) => line.replace(SIMPLE_COMMAND, (_: string, before: string, name: string, args: string) => `${before}${dequoted(name)}${args}`)),
+  substitutions: substitutions.map(plainCommandWords),
+});
 
-const switchesRootOn = (args: string): boolean => {
-  const [group, command] = operandsOf(words(args.replace(ANY_REDIRECT, '')).map((word) => unquote(unmask(word))), ['--minutes']);
-  return group === 'root' && command === 'on';
-};
-
-function runsRootOn(line: string): boolean {
-  const byScript = ({ 1: args = '' }: RegExpMatchArray): boolean => {
-    const runnerWords = words(args);
-    const script = runnerWords.findIndex((word) => LEDGER_SCRIPT.test(unquote(unmask(word))));
-    return script !== -1 && switchesRootOn(runnerWords.slice(script + 1).join(' '));
-  };
-  return [...line.matchAll(LEDGER)].some(({ 1: args = '' }) => switchesRootOn(args)) || [...line.matchAll(SCRIPT_RUNNER)].some(byScript);
+/** Whether the words after the ledger tool switch root on: `root on`, without the -h or --help that only print its help. */
+function switchesRootOn(args: string): boolean {
+  const plain = words(args.replace(ANY_REDIRECT, '')).map(shellText);
+  const [group, command] = operandsOf(plain, ['--minutes']);
+  return group === 'root' && command === 'on' && !plain.slice(0, optionsEnd(plain)).some((word) => HELP.includes(word));
 }
 
-/** A word as the shell passes it on: its quotes removed, and the escapes in and outside double quotes undone. */
-const shellText = (word: string): string =>
-  unmask(word).replace(/'([^']*)'|"((?:\\.|[^"\\])*)"|\\(.)/gs, (_: string, single?: string, double?: string, escaped?: string) => single ?? double?.replace(/\\([\\"$`])/g, '$1') ?? escaped ?? '');
+/** Whether a line runs the ledger tool to switch root on, by its name or path, or as the script of node and the like. */
+function runsRootOn(line: string): boolean {
+  const byName = [...line.matchAll(SIMPLE_COMMAND)].some(({ 2: name = '', 3: args = '' }) => LEDGER_CLI.test(unmask(name)) && switchesRootOn(args));
+  const byScript = [...line.matchAll(SCRIPT_RUNNER)].some(({ 1: args = '' }) => {
+    const runnerWords = words(args);
+    const script = runnerWords.findIndex((word) => LEDGER_CLI.test(shellText(word)));
+    return script !== -1 && switchesRootOn(runnerWords.slice(script + 1).join(' '));
+  });
+  return byName || byScript;
+}
 
-/** The scripts a line hands on as text: the operand after a shell's -c, and the words of eval. */
-function handedScripts(line: string): string[] {
-  const shellScripts = [...line.matchAll(SHELL)].flatMap(({ 1: args = '' }) => {
-    const shellWords = words(args.replace(ANY_REDIRECT, ''));
+/** The scripts a line hands on as text, each with where its command starts: the operand after a shell's -c, and the words of eval. */
+function handedScripts(line: string): { script: string; at: number }[] {
+  const shellScripts = [...line.matchAll(SHELL)].flatMap(({ 1: args = '', index: at }) => {
+    const shellWords = words(args.replace(ANY_REDIRECT, '')).map(shellText);
     let runsOperand = false;
     for (let index = 0; index < shellWords.length; index++) {
       const word = shellWords[index];
       if (word === '-o' || word === '+o') index++;
       else if (/^-[A-Za-z]*c[A-Za-z]*$/.test(word)) runsOperand = true;
-      else if (word !== '--' && !/^[-+]/.test(word)) return runsOperand ? [shellText(word)] : [];
+      else if (word !== '--' && !/^[-+]/.test(word)) return runsOperand ? [{ script: word, at }] : [];
     }
     return [];
   });
-  const evalScripts = [...line.matchAll(EVAL)].map(({ 1: args = '' }) => words(args.replace(ANY_REDIRECT, '')).map(shellText).join(' '));
+  const evalScripts = [...line.matchAll(EVAL)].map(({ 1: args = '', index: at }) => ({ script: words(args.replace(ANY_REDIRECT, '')).map(shellText).join(' '), at }));
   return [...shellScripts, ...evalScripts];
 }
 
-/** Whether a line runs a program the hook cannot read as shell: inline interpreter code, or one on standard input. */
-function runsUnreadProgram(line: string): boolean {
-  const inlineCode = [...line.matchAll(INTERPRETER)].some(({ 1: args = '' }) => words(args).some((word) => INLINE_CODE.test(word)));
-  const hereDocument = [...line.matchAll(READS_STDIN)].some(({ 1: args = '' }) => args.includes('<<'));
-  return inlineCode || hereDocument || PIPED_INTO.test(line);
+/** Why to deny a program the hook cannot read as shell, by the root file or `ledger root on` it names. */
+function namedRootReason(program: string, home: string): string | undefined {
+  if (program.includes(path.basename(rootMarker(home))) || NAMES_ROOT_ON.test(program)) return ROOT_SWITCH_REASON;
+  return rootLogFiles(home).some((file) => program.includes(path.basename(file))) ? ROOT_LOG_REASON : undefined;
 }
 
 /**
- * Which root file `targets` write, or remove where that is not allowed. A `handed` script is matched by file name too: the
- * folder it runs in, after a cd before the shell or eval, is not followed.
+ * Why to deny the programs a script runs that the hook cannot read as shell, a conservative deny by what they name:
+ * inline interpreter code by the words of its own command, and a program on standard input by the whole `command`, which
+ * holds what a pipe or a here-document feeds it.
  */
-function rootFileReason(targets: Target[], home: string, handed: boolean): string | undefined {
-  const variants = targets.filter(({ tailOnly }) => !tailOnly).flatMap((target) => pathsOf(target.file).map((file) => ({ ...target, file })));
-  const named = ({ file, literal }: Target, name: string): boolean => (literal ? path.basename(file) === name : segmentMatches(path.basename(file), name));
-  return rootFiles(home).find(({ file, removable }) =>
-    variants.some((target) => (target.effect === 'writes' || !removable) && (pathsOf(file).some((variant) => reaches(target, variant)) || (handed && named(target, path.basename(file))))),
-  )?.reason;
+function unreadProgramReasons(lines: string[], command: string, home: string): string[] {
+  const inline = lines.flatMap((line) => [...line.matchAll(INTERPRETER)].flatMap(({ 1: args = '' }) => (words(args).some((word) => INLINE_CODE.test(shellText(word))) ? [unmask(args)] : [])));
+  const fed = lines.some((line) => PIPED_INTO.test(line) || [...line.matchAll(READS_STDIN)].some(({ 1: args = '' }) => args.includes('<<')));
+  return [...inline, ...(fed ? [command] : [])].flatMap((program) => namedRootReason(program, home) ?? []);
 }
 
-/**
- * The root check of a Bash command, and of each script it hands to a shell or eval, read the same way. A program it
- * cannot read is denied when the command names a root file or `ledger root on` anywhere: a conservative deny.
- */
-function scriptRootReason(command: string, cwd: string, home: string, depth: number): string | undefined {
-  const script = parseScript(command);
+/** What the root check reads in a Bash command and in each script it hands to a shell or eval: the reasons its text gives to deny it, and the files it writes. */
+type RootFindings = { reasons: string[]; targets: Target[] };
+
+/** A handed script is read in the folder its shell or eval starts in, so its relative paths resolve where bash resolves them. */
+function bashRootFindings(command: string, cwd: string, home: string, depth: number): RootFindings {
+  const script = plainCommandWords(parseScript(command));
   const lines = allLines(script);
-  if (lines.some(runsRootOn)) return ROOT_SWITCH_REASON;
-  const written = rootFileReason(bashWriteTargets(script, cwd, home, ROOT_WRITERS), home, depth > 0);
-  if (written !== undefined) return written;
-  if (lines.some(runsUnreadProgram)) {
-    const named = rootFiles(home).find(({ file }) => command.includes(path.basename(file)))?.reason ?? (NAMES_ROOT_ON.test(command) ? ROOT_SWITCH_REASON : undefined);
-    if (named !== undefined) return named;
-  }
-  for (const handed of lines.flatMap(handedScripts)) {
-    const reason = depth === MAX_NESTING ? ROOT_NESTING_REASON : scriptRootReason(handed, cwd, home, depth + 1);
-    if (reason !== undefined) return reason;
-  }
-  return undefined;
+  const handed = readScript(script, cwd, home, (line, folderAt) => handedScripts(line).map(({ script: inner, at }) => ({ inner, folder: folderAt(at) })));
+  const nested = handed.map(({ inner, folder }): RootFindings => (depth === MAX_NESTING ? { reasons: [ROOT_NESTING_REASON], targets: [] } : bashRootFindings(inner, folder, home, depth + 1)));
+  return {
+    reasons: [...(lines.some(runsRootOn) ? [ROOT_SWITCH_REASON] : []), ...unreadProgramReasons(lines, command, home), ...nested.flatMap(({ reasons }) => reasons)],
+    targets: [...bashWriteTargets(script, cwd, home, ROOT_WRITERS), ...nested.flatMap(({ targets }) => targets)],
+  };
 }
 
+/** The root check's own reason to deny a call, and whether root may lift another gate's deny of it. */
+type RootCheck = { reason: string | undefined; liftable: boolean };
+
 /**
- * Denies an agent's `ledger root on`, any write of the root marker, and any write or removal of the root log or its report
- * offset, whether root is on or not: otherwise an agent could lift the other gates itself, or hide what root let through.
- * Switching it off, asking its status and removing the marker stay allowed.
+ * Denies an agent's `ledger root on`, a write of the root marker by any path that may reach it, and a write or removal of
+ * the root log or its report offset by a path that names it, whether root is on or not: otherwise an agent could lift
+ * the other gates itself, or hide what root let through. Switching root off, asking its status and removing the marker
+ * stay allowed. Root lifts another gate's deny only for a call that this check allows and that reaches neither log file,
+ * not even by a glob.
  */
-function rootSwitchReason(input: HookInput, context: HookContext): string | undefined {
+function rootCheck(input: HookInput, context: HookContext): RootCheck {
   const { home } = context.paths;
-  if (input.toolName === 'Bash') return scriptRootReason(text(input.toolInput.command), folderOf(input, context), home, 0);
-  return rootFileReason(writtenFiles(input, context, ROOT_WRITERS), home, false);
+  const found: RootFindings =
+    input.toolName === 'Bash' ? bashRootFindings(text(input.toolInput.command), folderOf(input, context), home, 0) : { reasons: [], targets: writtenFiles(input, context, ROOT_WRITERS) };
+  const targets = found.targets.filter(({ tailOnly }) => !tailOnly).flatMap((target) => pathsOf(target.file).map((file) => ({ ...target, file })));
+  const markers = pathsOf(rootMarker(home));
+  const logs = rootLogFiles(home).flatMap(pathsOf);
+  const reachesSome = (target: Target, files: string[]): boolean => files.some((file) => reaches(target, file));
+  const writesMarker = targets.some((target) => target.effect === 'writes' && reachesSome(target, markers));
+  const namesLog = targets.some((target) => reachesSome({ ...target, literal: true }, logs));
+  const reasons = [...found.reasons, ...(writesMarker ? [ROOT_SWITCH_REASON] : []), ...(namesLog ? [ROOT_LOG_REASON] : [])];
+  return { reason: reasons[0], liftable: reasons.length === 0 && !targets.some((target) => reachesSome(target, logs)) };
 }
