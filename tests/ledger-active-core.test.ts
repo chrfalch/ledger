@@ -14,7 +14,7 @@ import { sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { createTask, currentTask, updateLedger } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
-import { backlogTask, commandEnv, git, home, LEDGER_BIN, ledger, ledgerText, noSqlite, ok, repoKeyOf, repository, worktreeOf, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import { backlogTask, commandEnv, git, home, LEDGER_BIN, ledger, ledgerText, noSqlite, ok, repoKeyOf, repository, runInProcess, runInProcessWith, worktreeOf, worktreeTask, type Ran } from './ledger-core-fixtures.js';
 
 /** A HOME with the ledger template and the repo ~/repos/app, whose origin is a local bare repo. */
 function setup(t: TestContext) {
@@ -34,14 +34,18 @@ function hook(h: string, event: string, input: object): string {
   return ran.stdout;
 }
 
-const removalGate = (h: string, cwd: string, folder: string): string =>
-  hook(h, 'pre-tool-use', { cwd, tool_name: 'Bash', tool_input: { command: `git worktree remove ${folder}` } });
+async function inProcessHook(h: string, event: string, input: object): Promise<string> {
+  return ok(await runInProcessWith(h, h, { input: JSON.stringify(input) }, 'hook', event));
+}
 
-test('ledger go moves a backlog task into an active record that names its new worktree, and the backlog ledger is gone', (t) => {
+const removalGate = (h: string, cwd: string, folder: string): Promise<string> =>
+  inProcessHook(h, 'pre-tool-use', { cwd, tool_name: 'Bash', tool_input: { command: `git worktree remove ${folder}` } });
+
+test('ledger go moves a backlog task into an active record that names its new worktree, and the backlog ledger is gone', async (t) => {
   const { h, app, key, store } = setup(t);
   backlogTask(h, app, { slug: 'idea' });
 
-  const started = json(ledger(h, app, 'go', 'idea', '--json'));
+  const started = json(await runInProcess(h, app, 'go', 'idea', '--json'));
 
   const worktree = worktreeOf(app, 'idea');
   const record = store().active.read(key, 'idea');
@@ -53,12 +57,12 @@ test('ledger go moves a backlog task into an active record that names its new wo
   noLedgerFile(worktree);
 });
 
-test('ledger go of a slug an active record already has fails, and leaves the backlog ledger and no worktree', (t) => {
+test('ledger go of a slug an active record already has fails, and leaves the backlog ledger and no worktree', async (t) => {
   const { h, app, key, store } = setup(t);
   backlogTask(h, app, { slug: 'idea' });
   store().active.write(key, 'idea', ledgerText({ slug: 'idea', worktree: path.join(h, 'elsewhere/idea') }));
 
-  const ran = ledger(h, app, 'go', 'idea');
+  const ran = await runInProcess(h, app, 'go', 'idea');
 
   assert.equal(ran.status, 1, ran.stderr);
   assert.match(ran.stderr, /idea/);
@@ -66,12 +70,12 @@ test('ledger go of a slug an active record already has fails, and leaves the bac
   assert.equal(existsSync(worktreeOf(app, 'idea')), false);
 });
 
-test('ledger task new --stack writes an active record for the new worktree, and its decision line to the active record of this worktree', (t) => {
+test('ledger task new --stack writes an active record for the new worktree, and its decision line to the active record of this worktree', async (t) => {
   const { h, app, key, store } = setup(t);
   worktreeTask(h, app, { slug: 'epic' });
   const epic = worktreeOf(app, 'epic');
 
-  const created = json(ledger(h, epic, 'task', 'new', 'part', '--stack', '--json'));
+  const created = json(await runInProcess(h, epic, 'task', 'new', 'part', '--stack', '--json'));
 
   const part = store().active.read(key, 'part');
   assert.ok(part, 'no active record for part');
@@ -83,43 +87,43 @@ test('ledger task new --stack writes an active record for the new worktree, and 
   noLedgerFile(worktreeOf(app, 'part'));
 });
 
-test('ledger task new --here writes an active record for this linked worktree, once', (t) => {
+test('ledger task new --here writes an active record for this linked worktree, once', async (t) => {
   const { h, app, key, store } = setup(t);
   const loose = path.join(app, '.claude/worktrees/loose');
   git(h, app, 'worktree', 'add', '--quiet', '-b', 'loose', loose);
 
-  ok(ledger(h, loose, 'task', 'new', '--here'));
+  ok(await runInProcess(h, loose, 'task', 'new', '--here'));
 
   assert.equal(parseLedger(store().active.read(key, 'loose')?.text ?? '').location.worktree, loose);
   noLedgerFile(loose);
-  const again = ledger(h, loose, 'task', 'new', '--here');
+  const again = await runInProcess(h, loose, 'task', 'new', '--here');
   assert.equal(again.status, 1, again.stderr);
   assert.match(again.stderr, /already has/);
 });
 
-test('notes and park write the active record', (t) => {
+test('notes and park write the active record', async (t) => {
   const { h, app, key, store } = setup(t);
   worktreeTask(h, app, { slug: 'epic' });
   const epic = worktreeOf(app, 'epic');
 
-  ok(ledger(h, epic, 'notes', 'decide', 'Keep records', '--because', 'the store holds them', '--tag', 'observed'));
-  ok(ledger(h, app, 'task', 'park', 'epic', '--reason', 'waiting for review'));
+  ok(await runInProcess(h, epic, 'notes', 'decide', 'Keep records', '--because', 'the store holds them', '--tag', 'observed'));
+  ok(await runInProcess(h, app, 'task', 'park', 'epic', '--reason', 'waiting for review'));
 
   const record = JSON.parse(readFileSync(store().active.location(key, 'epic'), 'utf8'));
   assert.ok(record.decisions.some(({ text }: { text: string }) => text === 'Keep records'));
   assert.deepEqual(record.status, { value: 'parked', date: record.status.date, detail: 'waiting for review' });
-  const { tasks } = json(ledger(h, app, 'list', '--json')) as { tasks: { slug: string; status: string }[] };
+  const { tasks } = json(await runInProcess(h, app, 'list', '--json')) as { tasks: { slug: string; status: string }[] };
   assert.equal(tasks.find(({ slug }) => slug === 'epic')?.status, 'parked');
   noLedgerFile(epic);
 });
 
-test('ledger show with no slug prints the active task of this worktree, and fails in one line naming ledger show <slug> elsewhere', (t) => {
+test('ledger show with no slug prints the active task of this worktree, and fails in one line naming ledger show <slug> elsewhere', async (t) => {
   const { h, app, key, store } = setup(t);
   worktreeTask(h, app, { slug: 'epic' });
 
-  assert.equal(ok(ledger(h, worktreeOf(app, 'epic'), 'show')), store().active.read(key, 'epic')?.text);
+  assert.equal(ok(await runInProcess(h, worktreeOf(app, 'epic'), 'show')), store().active.read(key, 'epic')?.text);
 
-  const ran = ledger(h, app, 'show');
+  const ran = await runInProcess(h, app, 'show');
   assert.equal(ran.status, 1);
   assert.equal(ran.stdout, '');
   assert.equal(ran.stderr.trim().split('\n').length, 1, ran.stderr);
@@ -172,7 +176,7 @@ test('ledger session lists the own active task in a linked worktree, and every a
   assert.deepEqual(ok(ledger(h, app, 'session')).trim().split('\n').sort(), [a, worktreeOf(app, 'b')]);
 });
 
-test('the worktree-removal guard denies a worktree an active record names, and one that holds a .claude/ledger.md not yet moved into the store', (t) => {
+test('the worktree-removal guard denies a worktree an active record names, and one that holds a .claude/ledger.md not yet moved into the store', async (t) => {
   const { h, app } = setup(t);
   worktreeTask(h, app, { slug: 'task' });
   const task = worktreeOf(app, 'task');
@@ -181,11 +185,11 @@ test('the worktree-removal guard denies a worktree an active record names, and o
   mkdirSync(path.join(loose, '.claude'), { recursive: true });
   writeFileSync(path.join(loose, '.claude/ledger.md'), ledgerText({ slug: 'loose', worktree: loose }));
 
-  assert.match(JSON.parse(removalGate(h, app, task)).hookSpecificOutput.permissionDecisionReason, new RegExp(`not archived: ${task}`));
-  assert.match(JSON.parse(removalGate(h, app, loose)).hookSpecificOutput.permissionDecisionReason, new RegExp(`not yet moved into the ledger store: ${loose}`));
+  assert.match(JSON.parse(await removalGate(h, app, task)).hookSpecificOutput.permissionDecisionReason, new RegExp(`not archived: ${task}`));
+  assert.match(JSON.parse(await removalGate(h, app, loose)).hookSpecificOutput.permissionDecisionReason, new RegExp(`not yet moved into the ledger store: ${loose}`));
 });
 
-test('the task list finds active tasks from the store records and no plain-folder ledger under the scan roots', (t) => {
+test('the task list finds active tasks from the store records and no plain-folder ledger under the scan roots', async (t) => {
   const { h } = setup(t);
   const tool = repository(h, path.join(h, 'work/tool'));
   worktreeTask(h, tool, { slug: 'tool-task' });
@@ -193,26 +197,26 @@ test('the task list finds active tasks from the store records and no plain-folde
   mkdirSync(path.join(plain, '.claude'), { recursive: true });
   writeFileSync(path.join(plain, '.claude/ledger.md'), ledgerText({ slug: 'notes' }));
 
-  const { tasks } = json(ledger(h, h, 'list', '--json')) as { tasks: { slug: string; worktree?: string }[] };
+  const { tasks } = json(await runInProcess(h, h, 'list', '--json')) as { tasks: { slug: string; worktree?: string }[] };
 
   assert.deepEqual(tasks.map(({ slug, worktree }) => [slug, worktree]), [['tool-task', worktreeOf(tool, 'tool-task')]]);
 });
 
-test('worktrees auto-prune takes the worktree folder only, not the path of its old .claude/ledger.md', (t) => {
+test('worktrees auto-prune takes the worktree folder only, not the path of its old .claude/ledger.md', async (t) => {
   const { h, app, key, store } = setup(t);
   worktreeTask(h, app, { slug: 'done' });
   const done = worktreeOf(app, 'done');
   assert.ok(store().active.update(key, 'done', (text) => text.replace('| 2 | implement | todo |', '| 2 | implement | done |')));
 
-  const byFolder = json(ledger(h, app, 'worktrees', 'auto-prune', done, '--json'));
+  const byFolder = json(await runInProcess(h, app, 'worktrees', 'auto-prune', done, '--json'));
   assert.deepEqual([byFolder.outcome, byFolder.worktree, byFolder.finished], ['pruned', done, true]);
   assert.ok(existsSync(path.join(done, '.claude/build-folders-pruned')));
 
   const oldLedger = path.join(done, '.claude/ledger.md');
-  const byLedgerPath = ledger(h, app, 'worktrees', 'auto-prune', oldLedger, '--json');
+  const byLedgerPath = await runInProcess(h, app, 'worktrees', 'auto-prune', oldLedger, '--json');
   assert.equal(byLedgerPath.status, 1, byLedgerPath.stdout);
   assert.equal(JSON.parse(byLedgerPath.stdout).error, `No active task has the worktree ${oldLedger}.`);
-  assert.equal(json(ledger(h, done, 'worktrees', 'auto-prune', '--json')).outcome, 'unchanged');
+  assert.equal(json(await runInProcess(h, done, 'worktrees', 'auto-prune', '--json')).outcome, 'unchanged');
 });
 
 /** A clone with git storage set up by hand, its marker naming `format`. */
@@ -282,27 +286,27 @@ const refusedTaken = (ran: Ran, worktree: string): void => {
   assert.ok(ran.stderr.includes(worktree), ran.stderr);
 };
 
-test('ledger go of a slug another clone has active fails, naming the task and its worktree', (t) => {
+test('ledger go of a slug another clone has active fails, naming the task and its worktree', async (t) => {
   const { h, second, taken } = twoClones(t);
-  refusedTaken(ledger(h, second, 'go', 'x'), taken);
+  refusedTaken(await runInProcess(h, second, 'go', 'x'), taken);
   assert.equal(existsSync(worktreeOf(second, 'x')), false);
 });
 
-test('ledger task new --stack and --here of a slug another clone has active fail, naming the task and its worktree', (t) => {
+test('ledger task new --stack and --here of a slug another clone has active fail, naming the task and its worktree', async (t) => {
   const { h, second, taken, key, store } = twoClones(t);
-  refusedTaken(ledger(h, second, 'task', 'new', 'x', '--stack'), taken);
+  refusedTaken(await runInProcess(h, second, 'task', 'new', 'x', '--stack'), taken);
   const loose = path.join(second, '.claude/worktrees/loose');
   git(h, second, 'worktree', 'add', '--quiet', '-b', 'loose', loose);
-  refusedTaken(ledger(h, loose, 'task', 'new', '--here', 'x'), taken);
+  refusedTaken(await runInProcess(h, loose, 'task', 'new', '--here', 'x'), taken);
   assert.equal(parseLedger(store().active.read(key, 'x')?.text ?? '').location.worktree, taken);
 });
 
-test('ledger task retire from a second clone of the repo refuses an active task of the first, also with --dry-run or --force, and changes nothing', (t) => {
+test('ledger task retire from a second clone of the repo refuses an active task of the first, also with --dry-run or --force, and changes nothing', async (t) => {
   const { h, second, taken, key, store } = twoClones(t);
   const before = store().active.read(key, 'x')?.text;
 
   for (const flags of [[], ['--dry-run'], ['--force']]) {
-    const ran = ledger(h, second, 'task', 'retire', 'x', ...flags);
+    const ran = await runInProcess(h, second, 'task', 'retire', 'x', ...flags);
     refusedTaken(ran, taken);
     assert.match(ran.stderr, /The task x is active in another clone of this repo, in .*\. Retire it from there: cd .* task retire x/, flags.join(' '));
   }
@@ -326,52 +330,52 @@ const oneLineRefusal = (ran: Ran, pattern: RegExp): void => {
   assert.match(ran.stderr, pattern);
 };
 
-test('an active record whose worktree is not on this machine is listed as active, marked so', (t) => {
+test('an active record whose worktree is not on this machine is listed as active, marked so', async (t) => {
   const { h, app, worktree } = elsewhere(t);
 
-  const { tasks } = json(ledger(h, app, 'list', '--json')) as { tasks: Record<string, unknown>[] };
+  const { tasks } = json(await runInProcess(h, app, 'list', '--json')) as { tasks: Record<string, unknown>[] };
 
   const far = tasks.find(({ slug }) => slug === 'far');
   assert.deepEqual([far?.status, far?.worktree, far?.elsewhere, far?.host], ['active', worktree, true, 'unknown host']);
-  assert.match(ok(ledger(h, app, 'list')), /active on unknown host/);
+  assert.match(ok(await runInProcess(h, app, 'list')), /active on unknown host/);
 });
 
-test('notes, park and go refuse an active task whose worktree is not on this machine, in one line', (t) => {
+test('notes, park and go refuse an active task whose worktree is not on this machine, in one line', async (t) => {
   const { h, app, key, store } = elsewhere(t);
   const before = store().active.read(key, 'far')?.text;
 
-  oneLineRefusal(ledger(h, app, 'notes', 'note', 'From here.', '--task', 'far'), /not on this machine/);
-  oneLineRefusal(ledger(h, app, 'task', 'park', 'far', '--reason', 'later'), /not on this machine/);
-  oneLineRefusal(ledger(h, app, 'go', 'far'), /not on this machine/);
+  oneLineRefusal(await runInProcess(h, app, 'notes', 'note', 'From here.', '--task', 'far'), /not on this machine/);
+  oneLineRefusal(await runInProcess(h, app, 'task', 'park', 'far', '--reason', 'later'), /not on this machine/);
+  oneLineRefusal(await runInProcess(h, app, 'go', 'far'), /not on this machine/);
 
   assert.equal(store().active.read(key, 'far')?.text, before);
 });
 
-test('ledger task retire of an active task whose worktree is not on this machine needs --force, then archives and removes the record', (t) => {
+test('ledger task retire of an active task whose worktree is not on this machine needs --force, then archives and removes the record, and --json gives its place as active', async (t) => {
   const { h, app, key, store } = elsewhere(t);
   const { text } = store().active.read(key, 'far') ?? assert.fail('no active record');
 
-  const refused = ledger(h, app, 'task', 'retire', 'far');
+  const refused = await runInProcess(h, app, 'task', 'retire', 'far');
   assert.equal(refused.status, 1, refused.stderr);
   assert.match(refused.stderr, /may be live on another machine/);
   assert.match(refused.stderr, /--force/);
   assert.ok(store().active.has(key, 'far'));
   assert.deepEqual(store().archive.list(key), []);
 
-  ok(ledger(h, app, 'task', 'retire', 'far', '--force'));
+  assert.equal(json(await runInProcess(h, app, 'task', 'retire', 'far', '--force', '--json')).place, 'active');
   assert.deepEqual(store().archive.list(key).map((copy) => copy.text), [text]);
   assert.equal(store().active.has(key, 'far'), false);
 });
 
-test('two active records naming one worktree are both listed, and only the lookup of that worktree fails, naming both', (t) => {
+test('two active records naming one worktree are both listed, and only the lookup of that worktree fails, naming both', async (t) => {
   const { h, app, key, store } = setup(t);
   worktreeTask(h, app, { slug: 'a' });
   store().active.write(key, 'b', ledgerText({ slug: 'b', main: app, worktree: worktreeOf(app, 'a') }));
 
-  const { tasks } = json(ledger(h, app, 'list', '--json')) as { tasks: { slug: string }[] };
+  const { tasks } = json(await runInProcess(h, app, 'list', '--json')) as { tasks: { slug: string }[] };
   assert.deepEqual(tasks.map(({ slug }) => slug).sort(), ['a', 'b']);
 
-  const ran = ledger(h, worktreeOf(app, 'a'), 'show');
+  const ran = await runInProcess(h, worktreeOf(app, 'a'), 'show');
   assert.equal(ran.status, 1, ran.stderr);
   assert.match(ran.stderr, /\ba\b.*\bb\b|\bb\b.*\ba\b/);
 });
@@ -393,11 +397,11 @@ test('the pre-push hook allowlist takes active records only as JSON', () => {
   assert.equal(isLedger('active/../task.json'), false);
 });
 
-test('store migrate --repo-ids files an active record kept under a folder name under the repo key', (t) => {
+test('store migrate --repo-ids files an active record kept under a folder name under the repo key', async (t) => {
   const { h, app, key, store } = setup(t);
   store().active.write('app', 'live', ledgerText({ slug: 'live', main: app, worktree: worktreeOf(app, 'live') }));
 
-  ok(ledger(h, h, 'store', 'migrate', '--repo-ids'));
+  ok(await runInProcess(h, h, 'store', 'migrate', '--repo-ids'));
 
   assert.equal(store().active.has('app', 'live'), false);
   assert.equal(parseLedger(store().active.read(key, 'live')?.text ?? '').slug, 'live');
@@ -428,19 +432,19 @@ test('sqlite: reopening a database whose records table was rebuilt for active re
   assert.equal(schemaVersion(), rebuilt);
 });
 
-test('store migrate counts active ledgers as it counts backlog ledgers: no line per ledger in a dry run, and always in the removed line', { skip: noSqlite }, (t) => {
+test('store migrate counts active ledgers as it counts backlog ledgers: no line per ledger in a dry run, and always in the removed line', { skip: noSqlite }, async (t) => {
   const { h, app, key, store } = setup(t);
   backlogTask(h, app, { slug: 'idea' });
   store().active.write(key, 'live', ledgerText({ slug: 'live', worktree: worktreeOf(app, 'live') }));
-  const run = (...args: string[]): string => ok(ledger(h, h, 'store', 'migrate', '--to', 'sqlite', ...args));
+  const run = async (...args: string[]): Promise<string> => ok(await runInProcess(h, h, 'store', 'migrate', '--to', 'sqlite', ...args));
 
-  const dry = run('--dry-run', '--remove-source');
+  const dry = await run('--dry-run', '--remove-source');
   assert.doesNotMatch(dry, /^\s+active /m);
   assert.doesNotMatch(dry, /^\s+backlog /m);
   assert.match(dry, /would remove 1 backlog ledger, 1 active ledger\b/i);
 
   store().active.remove(key, 'live', store().active.read(key, 'live')?.text ?? '');
-  assert.match(run('--remove-source'), /removed 1 backlog ledger, 0 active ledgers\b/i);
+  assert.match(await run('--remove-source'), /removed 1 backlog ledger, 0 active ledgers\b/i);
 });
 
 /** Every git command line the ledger commands of `h` run, one per line, from a git on their PATH that logs and passes on. */
@@ -469,7 +473,7 @@ test('listing active tasks costs git no call per record, and at most one worktre
   assert.equal(promptWithThree.filter((call) => call.includes('worktree list') || call.includes('--git-common-dir')).length <= 1, true, promptWithThree.join('\n'));
 });
 
-test('ledger task new --here refuses a slug of the backlog, and of an active task filed under an old key of the repo', (t) => {
+test('ledger task new --here refuses a slug of the backlog, and of an active task filed under an old key of the repo', async (t) => {
   const { h, app, key, store } = setup(t);
   backlogTask(h, app, { slug: 'idea' });
   store().aliases.add('app', key);
@@ -477,33 +481,33 @@ test('ledger task new --here refuses a slug of the backlog, and of an active tas
   const loose = path.join(app, '.claude/worktrees/loose');
   git(h, app, 'worktree', 'add', '--quiet', '-b', 'loose', loose);
 
-  const backlog = ledger(h, loose, 'task', 'new', '--here', 'idea');
+  const backlog = await runInProcess(h, loose, 'task', 'new', '--here', 'idea');
   assert.equal(backlog.status, 1, backlog.stderr);
   assert.match(backlog.stderr, /backlog task idea/);
-  const aliased = ledger(h, loose, 'task', 'new', '--here', 'old');
+  const aliased = await runInProcess(h, loose, 'task', 'new', '--here', 'old');
   assert.equal(aliased.status, 1, aliased.stderr);
   assert.ok(aliased.stderr.includes(worktreeOf(app, 'old')), aliased.stderr);
   assert.equal(store().active.has(key, 'idea') || store().active.has(key, 'old'), false);
 });
 
-test('ledger task new of a slug that is active in the repo fails, naming its worktree', (t) => {
+test('ledger task new of a slug that is active in the repo fails, naming its worktree', async (t) => {
   const { h, app, key, store } = setup(t);
   const worktree = path.join(h, 'other-machine/app/.claude/worktrees/busy');
   store().active.write(key, 'busy', ledgerText({ slug: 'busy', main: app, worktree }));
 
-  const ran = ledger(h, app, 'task', 'new', 'busy', '--goal', 'Again.');
+  const ran = await runInProcess(h, app, 'task', 'new', 'busy', '--goal', 'Again.');
 
   assert.equal(ran.status, 1, ran.stderr);
   assert.ok(ran.stderr.includes(worktree), ran.stderr);
   assert.equal(store().backlog.has(key, 'busy'), false);
 });
 
-test('the worktree-removal guard denies removing a folder two active records name, naming both', (t) => {
+test('the worktree-removal guard denies removing a folder two active records name, naming both', async (t) => {
   const { h, app, key, store } = setup(t);
   worktreeTask(h, app, { slug: 'a' });
   store().active.write(key, 'b', ledgerText({ slug: 'b', main: app, worktree: worktreeOf(app, 'a') }));
 
-  const output = removalGate(h, app, worktreeOf(app, 'a'));
+  const output = await removalGate(h, app, worktreeOf(app, 'a'));
 
   assert.notEqual(output, '', 'the removal was allowed');
   const reason: string = JSON.parse(output).hookSpecificOutput.permissionDecisionReason;
@@ -511,53 +515,53 @@ test('the worktree-removal guard denies removing a folder two active records nam
   assert.match(reason, /\/b\b/);
 });
 
-test('session-start in a main checkout names no undefined worktree for an active record that names none', (t) => {
+test('session-start in a main checkout names no undefined worktree for an active record that names none', async (t) => {
   const { h, app, key, store } = setup(t);
   worktreeTask(h, app, { slug: 'a' });
   store().active.write(key, 'bare', '# Task ledger — bare\n\n## Goal\nA goal.\n\n## Next step\nA step.\n');
 
-  const context: string = JSON.parse(hook(h, 'session-start', { cwd: app })).hookSpecificOutput.additionalContext;
+  const context: string = JSON.parse(await inProcessHook(h, 'session-start', { cwd: app })).hookSpecificOutput.additionalContext;
 
   assert.match(context, /^- bare active$/m);
   assert.doesNotMatch(context, /undefined/);
 });
 
-test('an active record whose worktree folder exists but is no worktree of its clone is elsewhere, and retire --force retires it', (t) => {
+test('an active record whose worktree folder exists but is no worktree of its clone is elsewhere, and retire --force retires it', async (t) => {
   const { h, app, key, store } = setup(t);
   const folder = worktreeOf(app, 'stale');
   mkdirSync(folder, { recursive: true });
   store().active.write(key, 'stale', ledgerText({ slug: 'stale', main: app, worktree: folder }));
 
-  const { tasks } = json(ledger(h, app, 'list', '--json')) as { tasks: Record<string, unknown>[] };
+  const { tasks } = json(await runInProcess(h, app, 'list', '--json')) as { tasks: Record<string, unknown>[] };
   assert.equal(tasks.find(({ slug }) => slug === 'stale')?.elsewhere, true);
 
-  ok(ledger(h, app, 'task', 'retire', 'stale', '--force'));
+  ok(await runInProcess(h, app, 'task', 'retire', 'stale', '--force'));
   assert.equal(store().active.has(key, 'stale'), false);
   assert.ok(existsSync(folder), 'retire removed a folder that is no worktree');
 });
 
-test('an active record whose worktree path is a checkout of a repo with another key is elsewhere, and retire --force leaves that checkout', (t) => {
+test('an active record whose worktree path is a checkout of a repo with another key is elsewhere, and retire --force leaves that checkout', async (t) => {
   const { h, app, key, store } = setup(t);
   const other = repository(h, path.join(h, 'repos/other'));
   const folder = worktreeOf(other, 'x');
   git(h, other, 'worktree', 'add', '--quiet', '-b', 'me/x', folder);
   store().active.write(key, 'x', ledgerText({ slug: 'x', main: app, worktree: folder }));
 
-  const { tasks } = json(ledger(h, app, 'list', '--json')) as { tasks: Record<string, unknown>[] };
+  const { tasks } = json(await runInProcess(h, app, 'list', '--json')) as { tasks: Record<string, unknown>[] };
   assert.equal(tasks.find(({ slug }) => slug === 'x')?.elsewhere, true);
 
-  ok(ledger(h, app, 'task', 'retire', 'x', '--force'));
+  ok(await runInProcess(h, app, 'task', 'retire', 'x', '--force'));
   assert.equal(store().active.has(key, 'x'), false);
   assert.ok(existsSync(folder), 'retire removed the checkout of the other repo');
 });
 
-test('ledger task retire with no slug, in a folder two active records name, refuses, names both slugs, and removes nothing', (t) => {
+test('ledger task retire with no slug, in a folder two active records name, refuses, names both slugs, and removes nothing', async (t) => {
   const { h, app, key, store } = setup(t);
   worktreeTask(h, app, { slug: 'a' });
   store().active.write(key, 'b', ledgerText({ slug: 'b', main: app, worktree: worktreeOf(app, 'a') }));
 
   for (const flags of [[], ['--force']]) {
-    const ran = ledger(h, worktreeOf(app, 'a'), 'task', 'retire', ...flags);
+    const ran = await runInProcess(h, worktreeOf(app, 'a'), 'task', 'retire', ...flags);
     assert.equal(ran.status, 1, ran.stdout);
     assert.match(ran.stderr, /\ba\b.*\bb\b|\bb\b.*\ba\b/, flags.join(' '));
   }
@@ -577,13 +581,13 @@ function taskWithEvidence(t: TestContext, slug: string) {
   return { ...world, worktree: worktreeOf(world.app, slug), evidence };
 }
 
-test('ledger task retire --force finishes a retire that stopped after it archived the task and removed its worktree', (t) => {
+test('ledger task retire --force finishes a retire that stopped after it archived the task and removed its worktree', async (t) => {
   const { h, app, key, store, worktree, evidence } = taskWithEvidence(t, 'fix');
   const { text } = store().active.read(key, 'fix') ?? assert.fail('no active record');
   store().archive.write(key, '2026-11-01-fix', text, evidence);
   git(h, app, 'worktree', 'remove', '--force', worktree);
 
-  ok(ledger(h, app, 'task', 'retire', 'fix', '--force'));
+  ok(await runInProcess(h, app, 'task', 'retire', 'fix', '--force'));
 
   assert.equal(store().active.has(key, 'fix'), false);
   assert.deepEqual(store().archive.list(key).map((copy) => copy.text), [text]);
@@ -609,14 +613,14 @@ test('a second ledger task retire finishes one whose worktree removal failed hal
   assert.equal(existsSync(worktree), false);
 });
 
-test('ledger task new --here refuses a worktree whose .claude/ledger.md is not moved into the store yet, and names ledger store migrate --active', (t) => {
+test('ledger task new --here refuses a worktree whose .claude/ledger.md is not moved into the store yet, and names ledger store migrate --active', async (t) => {
   const { h, app, key, store } = setup(t);
   const loose = path.join(app, '.claude/worktrees/loose');
   git(h, app, 'worktree', 'add', '--quiet', '-b', 'loose', loose);
   mkdirSync(path.join(loose, '.claude'));
   writeFileSync(path.join(loose, '.claude/ledger.md'), ledgerText({ slug: 'old', worktree: loose }));
 
-  const ran = ledger(h, loose, 'task', 'new', '--here');
+  const ran = await runInProcess(h, loose, 'task', 'new', '--here');
 
   assert.equal(ran.status, 1, ran.stdout);
   assert.match(ran.stderr, /ledger store migrate --active/);
@@ -643,7 +647,7 @@ test('git storage of format 1 whose upgrade commit failed upgrades in a commit o
   assert.equal(git(h, clone, 'show', 'HEAD:.ledger-data'), JSON.stringify({ format: 2 }));
 });
 
-test('store migrate --to sqlite stops, and changes nothing, when an active slug is a backlog slug of the target, or two active records would name one worktree', { skip: noSqlite }, (t) => {
+test('store migrate --to sqlite stops, and changes nothing, when an active slug is a backlog slug of the target, or two active records would name one worktree', { skip: noSqlite }, async (t) => {
   for (const clash of ['backlog', 'worktree'] as const) {
     const { h, app, key, store } = setup(t);
     store().active.write(key, 'x', ledgerText({ slug: 'x', main: app, worktree: worktreeOf(app, 'x') }));
@@ -652,21 +656,13 @@ test('store migrate --to sqlite stops, and changes nothing, when an active slug 
     else target.active.write(key, 'y', ledgerText({ slug: 'y', main: app, worktree: worktreeOf(app, 'x') }));
     target.close?.();
 
-    const ran = ledger(h, h, 'store', 'migrate', '--to', 'sqlite');
+    const ran = await runInProcess(h, h, 'store', 'migrate', '--to', 'sqlite');
 
     assert.equal(ran.status, 1, `${clash}: ${ran.stdout}`);
     assert.match(ran.stderr, /stopped, and nothing changed/, clash);
     assert.ok(ran.stderr.includes(clash === 'backlog' ? 'x' : worktreeOf(app, 'x')), ran.stderr);
     assert.equal(existsSync(path.join(h, '.claude/ledger-settings.json')), false, `${clash}: the setting was switched`);
   }
-});
-
-test('ledger task retire --json of an active task whose worktree is not on this machine gives its place as active', (t) => {
-  const { h, app } = elsewhere(t);
-
-  const retired = json(ledger(h, app, 'task', 'retire', 'far', '--force', '--json'));
-
-  assert.equal(retired.place, 'active');
 });
 
 /** A linked worktree of `app` on a branch of its own, with no task yet. */
@@ -723,14 +719,14 @@ test('a write to an active task whose record a pull replaced with one of another
   assert.equal(store().active.read(key, 'fix')?.text, pulled);
 });
 
-test('ledger task new --here and --stack make no active record while "host" is no host label, and say how to fix it', (t) => {
+test('ledger task new --here and --stack make no active record while "host" is no host label, and say how to fix it', async (t) => {
   const { h, app, key, store } = setup(t);
   worktreeTask(h, app, { slug: 'epic' });
   const loose = looseWorktree(h, app, 'loose');
   writeFileSync(path.join(h, '.claude/ledger-settings.json'), JSON.stringify({ host: 'Not A Label' }));
 
   for (const [cwd, args] of [[loose, ['--here']], [worktreeOf(app, 'epic'), ['side', '--stack']]] as const) {
-    const ran = ledger(h, cwd, 'task', 'new', ...args);
+    const ran = await runInProcess(h, cwd, 'task', 'new', ...args);
     assert.equal(ran.status, 1, ran.stdout);
     assert.match(ran.stderr, /"host"/);
   }
@@ -739,37 +735,26 @@ test('ledger task new --here and --stack make no active record while "host" is n
   assert.equal(existsSync(worktreeOf(app, 'side')), false);
 });
 
-test('ledger task new --here and --stack make no active record from a template with no "- worktree:" bullet, and say so', (t) => {
-  const { h, app, key, store } = setup(t);
-  worktreeTask(h, app, { slug: 'epic' });
-  const loose = looseWorktree(h, app, 'loose');
-  const template = path.join(h, '.claude/ledger.template.md');
-  writeFileSync(template, readFileSync(template, 'utf8').replace(/^- worktree:.*\n/m, ''));
+test('ledger task new --here and --stack make no active record from a template with no "- worktree:" bullet or no ## Location section, and say so', async (t) => {
+  const broken = [
+    { cut: /^- worktree:.*\n/m, says: /worktree/ },
+    { cut: /^## Location\n(?:- .*\n)*\n/m, says: /## Location/, never: /no host label/ },
+  ];
+  for (const { cut, says, never } of broken) {
+    const { h, app, key, store } = setup(t);
+    worktreeTask(h, app, { slug: 'epic' });
+    const loose = looseWorktree(h, app, 'loose');
+    const template = path.join(h, '.claude/ledger.template.md');
+    writeFileSync(template, readFileSync(template, 'utf8').replace(cut, ''));
 
-  for (const [cwd, args] of [[loose, ['--here']], [worktreeOf(app, 'epic'), ['side', '--stack']]] as const) {
-    const ran = ledger(h, cwd, 'task', 'new', ...args);
-    assert.equal(ran.status, 1, ran.stdout);
-    assert.match(ran.stderr, /worktree/);
+    for (const [cwd, args] of [[loose, ['--here']], [worktreeOf(app, 'epic'), ['side', '--stack']]] as const) {
+      const ran = await runInProcess(h, cwd, 'task', 'new', ...args);
+      assert.equal(ran.status, 1, ran.stdout);
+      assert.match(ran.stderr, says);
+      if (never !== undefined) assert.doesNotMatch(ran.stderr, never);
+    }
+    assert.deepEqual(recordsNaming(store(), key, loose), []);
+    assert.equal(store().active.has(key, 'side'), false);
+    assert.equal(existsSync(worktreeOf(app, 'side')), false);
   }
-  assert.deepEqual(recordsNaming(store(), key, loose), []);
-  assert.equal(store().active.has(key, 'side'), false);
-  assert.equal(existsSync(worktreeOf(app, 'side')), false);
-});
-
-test('ledger task new --here and --stack make no active record from a template with no ## Location section, and say so', (t) => {
-  const { h, app, key, store } = setup(t);
-  worktreeTask(h, app, { slug: 'epic' });
-  const loose = looseWorktree(h, app, 'loose');
-  const template = path.join(h, '.claude/ledger.template.md');
-  writeFileSync(template, readFileSync(template, 'utf8').replace(/^## Location\n(?:- .*\n)*\n/m, ''));
-
-  for (const [cwd, args] of [[loose, ['--here']], [worktreeOf(app, 'epic'), ['side', '--stack']]] as const) {
-    const ran = ledger(h, cwd, 'task', 'new', ...args);
-    assert.equal(ran.status, 1, ran.stdout);
-    assert.match(ran.stderr, /## Location/);
-    assert.doesNotMatch(ran.stderr, /no host label/);
-  }
-  assert.deepEqual(recordsNaming(store(), key, loose), []);
-  assert.equal(store().active.has(key, 'side'), false);
-  assert.equal(existsSync(worktreeOf(app, 'side')), false);
 });
