@@ -261,7 +261,60 @@ export function setNext(context: Context, name: string | undefined, text: string
 
 export const setNextText = ({ slug }: ReturnType<typeof setNext>): string => `Set the next step of ${slug}.`;
 
-export type StageCall = { outcome?: string; back?: string; skip?: string; step?: number };
+export const REMOVABLE = ['step', 'decision', 'constraint', 'question', 'note'] as const;
+export type Removable = (typeof REMOVABLE)[number];
+
+type Removed = Step | Decision | Constraint | Question | string;
+
+/** Takes item `n` of `kind` out of `record`, as ledger show numbers it; a Failure when there is none, or when it may not go. */
+function takeOut(record: TaskRecord, slug: string, kind: Removable, n: number): Removed {
+  const takeAt = <T>(list: T[]): T => (n <= list.length ? list.splice(n - 1, 1)[0] : fail(`${slug} has no ${kind} ${n}.`));
+  switch (kind) {
+    case 'step': {
+      const { plan, stepReports, questions } = record;
+      const index = plan.steps.findIndex((each) => each.n === String(n));
+      if (index === -1) fail(`${slug} has no step ${n} in its plan.`);
+      if (stepReports.some(({ step }) => step === String(n))) fail(`Step ${n} of ${slug} has a report, so it stays in the plan.`);
+      const blocking = questions.find(({ blocks, resolved }) => blocks === n && !resolved);
+      if (blocking !== undefined) fail(`Open question ${blocking.id} of ${slug} blocks step ${n}. Resolve the question first.`);
+      const [step] = plan.steps.splice(index, 1);
+      // A plan with no steps reads back with exampleRow false, so the record must say so to round-trip.
+      if (plan.steps.length === 0) plan.exampleRow = false;
+      return step;
+    }
+    case 'decision':
+      return takeAt(record.decisions);
+    case 'constraint':
+      return takeAt(record.constraints);
+    case 'question': {
+      const question = takeAt(record.questions);
+      record.questions.forEach((each, index) => (each.id = index + 1));
+      return question;
+    }
+    case 'note': {
+      if (record.notes[n - 1]?.startsWith('#')) fail(`Note ${n} of ${slug} is a copied heading, "${record.notes[n - 1]}"; remove it by editing the ledger's notes.`);
+      return takeAt(record.notes);
+    }
+  }
+}
+
+/** Removes item `n` of `kind`; with `dryRun`, reads the ledger and writes nothing, but refuses as the removal would. */
+export function removeItem(context: Context, name: string | undefined, kind: Removable, n: number, { dryRun = false }: { dryRun?: boolean } = {}) {
+  const remove = (record: TaskRecord, task: Task) => ({ kind, n, dryRun, removed: takeOut(record, task.slug, kind, n) });
+  if (!dryRun) return write(context, name, remove);
+  const task = notesTask(context, name);
+  const record = parseRecord(readLedger(context, task));
+  return { ...remove(record, task), slug: task.slug, ledger: task.file, warnings: problemsOf(record) };
+}
+
+const mainText = (removed: Removed): string => (typeof removed === 'string' ? removed : 'step' in removed ? removed.step : removed.text);
+
+export function removeItemText({ slug, kind, n, dryRun, removed }: ReturnType<typeof removeItem>): string {
+  const text = mainText(removed);
+  return `${dryRun ? 'Would remove' : 'Removed'} ${kind} ${n} of ${slug}: ${text}${/[.?!]$/.test(text) ? '' : '.'}`;
+}
+
+export type StageCall = {outcome?: string; back?: string; skip?: string; step?: number };
 
 const STEP_STATUS_AFTER: Readonly<Record<string, string>> = { red: 'red', build: 'green', review: 'reviewed' };
 
