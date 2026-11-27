@@ -26,4 +26,9 @@ const quick = readdirSync('tests')
   .filter((file) => !FULL_RUN_ONLY.includes(file))
   .sort();
 
+if (quick.length === 0) {
+  console.error('tools/quick-tests.ts found no quick test files in tests/');
+  process.exit(1);
+}
+
 console.log(quick.join('\n'));
