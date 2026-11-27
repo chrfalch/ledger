@@ -758,7 +758,9 @@ because its turn end does not clear the session.
   built from a variable or a command substitution, a write by awk, php or
   lua, rsync's `--log-file` and `--remove-source-files`, a backslash
   inside a path, a `cd` inside `eval`, and a second quoted prefix such as
-  `'sudo' 'rm'`. Two sessions that start at the same time may
+  `'sudo' 'rm'`. It also denies more than it should in two cases: it reads
+  `||` as a pipe, so `test -f <marker> || node -e ...` is denied, and it
+  counts a `ledger root on` passed as arguments to another script. Two sessions that start at the same time may
   both list the same allowed calls. A Bash call that `derived-data-gate.sh`
   and one of these checks would both deny is logged by each, so it is
   listed twice.
