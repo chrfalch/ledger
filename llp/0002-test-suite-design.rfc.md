@@ -286,6 +286,12 @@ These are the real-process files:
 They are named `*.e2e.test.ts`. E2E means end to end: tests that run the
 whole program.
 
+Until those files are renamed, the full-run files are listed in
+`tools/quick-tests.ts`. `npm test` runs every `tests/*.test.ts` file not on
+that list. A new real-process file must be added to the list by hand. The
+script stops `npm test` if a listed file no longer exists, so a rename to
+`*.e2e.test.ts` forces the list to be updated.
+
 The full run runs before every PR, as the workflow's verify step already
 requires (LLP 0001). It does not run only when the git store's files change.
 Git-store behaviour also depends on `lock.ts`, `sync.ts`, `clone.ts` and
