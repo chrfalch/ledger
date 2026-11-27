@@ -394,7 +394,8 @@ export function syncInBackground(paths: LedgerPaths): void {
 
 /**
  * `host` is this machine's host label, and `ownHosts` the labels it stamped before: a sync commits no change of an
- * active record that names another host. `warn` says that such a change was put back; on stderr by default.
+ * active record that names another host. `warn` says that such a change was put back, or that a lock a stopped git left
+ * was removed; on stderr by default.
  */
 type Sync = { clone: string; where: string; remote: Remote; line: Line; host: string | undefined; ownHosts: ReadonlySet<string>; warn?: Line };
 
@@ -405,7 +406,7 @@ function syncClone(sync: Sync): void {
   const { clone, remote, line, host, warn } = sync;
   // Under the lock, so no other sync leaves unfinished work between the check and the write of the .gitignore.
   withCloneLock(clone, () => {
-    checkFinished(clone);
+    checkFinished(clone, undefined, warn);
     installGitignore(clone);
   });
   const branch = branchOf(clone);
@@ -583,7 +584,7 @@ function checkedOutgoing({ clone, where }: Sync, base: string, branch: string): 
 
 /**
  * For the session-start hook: fetches and rebases by `deadline`, every git step included, the abort of a rebase that
- * ran out of time too, and prints nothing. A problem a person must fix, such as a conflict, is recorded; an unreachable
+ * ran out of time too, and prints nothing but the line for a git lock file it removed. A problem a person must fix, such as a conflict, is recorded; an unreachable
  * remote or a pull that ran out of time is not, as the next sync tries again. Never throws.
  */
 export function pullForSession(paths: LedgerPaths, deadline: number): void {
