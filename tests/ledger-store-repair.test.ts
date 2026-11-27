@@ -1072,12 +1072,12 @@ test('store repair --remote moves a ledger that names no main checkout when the 
   assert.ok(filed(h, newKey).backlog.includes('no-main'), JSON.stringify(filed(h, newKey)));
 });
 
-test('store repair --remote, run in the main checkout, leaves a ledger whose main line is . and says its main is relative', (t) => {
-  const { h, app, key, newKey, repair } = renamedRemote(t);
+test('store repair --remote, run in the main checkout, leaves a ledger whose main line is . and says its main is relative', async (t) => {
+  const { h, app, key, newKey, repair } = await renamedRemote(t);
   const store = fileStore(ledgerPaths(h));
   store.backlog.write(key, 'dot', ledgerText({ slug: 'dot', main: '.' }));
 
-  const ran = repair(app, 'store', 'repair', '--remote', key);
+  const ran = await repair(app, 'store', 'repair', '--remote', key);
   assert.equal(ran.status, 1, `${ran.stdout}${ran.stderr}`);
   assert.ok(ran.stdout.includes('left backlog dot: its saved main checkout "." is a relative path, so its repo folder cannot be recovered'), ran.stdout);
   assert.ok(filed(h, key).backlog.includes('dot'));
@@ -2394,17 +2394,17 @@ test('repair refuses two half-moved ledgers of one slug, one backlog and one act
   }
 });
 
-test('store repair <slug> --to keeps a main line under ~ that names the main checkout, in a dry run too', (t) => {
+test('store repair <slug> --to keeps a main line under ~ that names the main checkout, in a dry run too', async (t) => {
   const { h, app, key } = setup(t);
   const repair = forStorage(h);
-  const { worktree } = start(repair, app, 'fix-login');
+  const { worktree } = await start(repair, app, 'fix-login');
   const store = fileStore(ledgerPaths(h));
   store.active.update(key, 'fix-login', (text) => setLocationBullet(text, 'main', '~/repos/app') ?? text);
   const moved = path.join(h, 'moved', 'fix-login');
   mkdirSync(path.dirname(moved), { recursive: true });
   renameSync(worktree, moved);
 
-  assert.ok(!ok(repair(app, 'store', 'repair', 'fix-login', '--to', moved, '--dry-run')).includes('main checkout'));
-  assert.ok(!ok(repair(app, 'store', 'repair', 'fix-login', '--to', moved)).includes('main checkout'));
+  assert.ok(!ok(await repair(app, 'store', 'repair', 'fix-login', '--to', moved, '--dry-run')).includes('main checkout'));
+  assert.ok(!ok(await repair(app, 'store', 'repair', 'fix-login', '--to', moved)).includes('main checkout'));
   assert.match(store.active.read(key, 'fix-login')?.text ?? '', /^- main: ~\/repos\/app$/m);
 });
