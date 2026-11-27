@@ -13,6 +13,7 @@ import {
   ok,
   repoKeyOf,
   repository,
+  runInProcess,
   storeFolder,
   touch,
   worktreeTask,
@@ -66,9 +67,9 @@ type Shown = { slug: string; main: string; goal: string; children: ShownChild[] 
 
 /** Where older versions of file storage kept their task list, which nothing writes any more. */
 const oldTaskListFile = (h: string): string => path.join(h, '.claude/ledgers.json');
-const listJson = (h: string, cwd: string): ListedTask[] => JSON.parse(ok(ledger(h, cwd, 'list', '--json'))).tasks;
+const listJson = async (h: string, cwd: string): Promise<ListedTask[]> => JSON.parse(ok(await runInProcess(h, cwd, 'list', '--json'))).tasks;
 
-test('each command has --help with its arguments and options', (t) => {
+test('each command has --help with its arguments and options', async (t) => {
   const h = home(t);
   const expected: Record<string, RegExp[]> = {
     list: [/--json/],
@@ -76,11 +77,11 @@ test('each command has --help with its arguments and options', (t) => {
     'tree show': [/<slug>/, /--json/],
   };
   for (const [command, patterns] of Object.entries(expected)) {
-    const stdout = ok(ledger(h, h, ...command.split(' '), '--help'));
+    const stdout = ok(await runInProcess(h, h, ...command.split(' '), '--help'));
     assert.match(stdout, new RegExp(`^Usage: ledger ${command}\\b`, 'm'));
     for (const pattern of patterns) assert.match(stdout, pattern, `${command} --help`);
   }
-  assert.match(ok(ledger(h, h, 'help', 'task')), /^Usage: ledger task\b/m);
+  assert.match(ok(await runInProcess(h, h, 'help', 'task')), /^Usage: ledger task\b/m);
 });
 
 test('ledger deploy --help prints the help of bin/deploy', (t) => {
@@ -100,9 +101,9 @@ test('an unknown command or option exits non-zero and names it', (t) => {
   assert.match(option.stderr, /--nope/);
 });
 
-test('ledger list shows the live tasks of every repo with their status, and no retired task', (t) => {
+test('ledger list shows the live tasks of every repo with their status, and no retired task', async (t) => {
   const { h, app } = world(t);
-  const stdout = ok(ledger(h, app, 'list'));
+  const stdout = ok(await runInProcess(h, app, 'list'));
   assert.match(lineWith(stdout, 'parked-child'), /\bapp\b.*\bparked\b/);
   assert.match(lineWith(stdout, 'live-child'), /\bactive\b.*\bepic\b/);
   assert.match(lineWith(stdout, 'lib-part'), /\blib\b.*\bactive\b/);
@@ -111,9 +112,9 @@ test('ledger list shows the live tasks of every repo with their status, and no r
   assert.doesNotMatch(stdout, /old-[abcd]|lib-old/);
 });
 
-test('ledger list --json gives one object per live task, newest first', (t) => {
+test('ledger list --json gives one object per live task, newest first', async (t) => {
   const { h, app, lib, files } = world(t);
-  const tasks = listJson(h, app);
+  const tasks = await listJson(h, app);
   assert.deepEqual(tasks.map(({ slug }) => slug), ['epic', 'live-child', 'parked-child', 'idea', 'lib-part']);
   const bySlug = new Map(tasks.map((task) => [task.slug, task]));
   assert.deepEqual(
@@ -132,7 +133,7 @@ test('ledger list --json gives one object per live task, newest first', (t) => {
   assert.equal(bySlug.get('epic')?.goal, 'Rewrite the ledger core.');
 });
 
-test('ledger list puts each child task under its parent, marked ↳ and indented per level, a backlog parent too; active children first', (t) => {
+test('ledger list puts each child task under its parent, marked ↳ and indented per level, a backlog parent too; active children first', async (t) => {
   const h = home(t);
   const app = repository(h, path.join(h, 'repos/app'));
   const plan = backlogTask(h, app, { slug: 'plan', children: ['- step-a', '- step-b'] });
@@ -146,7 +147,7 @@ test('ledger list puts each child task under its parent, marked ↳ and indented
   touch(stepB, '2026-11-14T10:00:00Z');
   touch(plan, '2026-11-10T10:00:00Z');
 
-  const rows = ok(ledger(h, app, 'list')).trimEnd().split('\n').slice(3);
+  const rows = ok(await runInProcess(h, app, 'list')).trimEnd().split('\n').slice(3);
   const names = rows.map((row) => /^app\s+(?:\s*↳ )?(\S+)/.exec(row)?.[1]);
   assert.deepEqual(names, ['solo', 'plan', 'step-b', 'deep', 'step-a'], rows.join('\n'));
   const arrow = (slug: string): number => lineWith(rows.join('\n'), `↳ ${slug}`).indexOf('↳');
@@ -155,36 +156,36 @@ test('ledger list puts each child task under its parent, marked ↳ and indented
   assert.equal(arrow('step-a'), arrow('step-b'));
 });
 
-test('list finds the repos of the stored ledgers from any folder, and writes no ~/.claude/ledgers.json', (t) => {
+test('list finds the repos of the stored ledgers from any folder, and writes no ~/.claude/ledgers.json', async (t) => {
   const { h } = world(t);
-  assert.deepEqual(listJson(h, h).map(({ slug }) => slug), ['epic', 'live-child', 'parked-child', 'idea', 'lib-part']);
+  assert.deepEqual((await listJson(h, h)).map(({ slug }) => slug), ['epic', 'live-child', 'parked-child', 'idea', 'lib-part']);
   assert.equal(existsSync(oldTaskListFile(h)), false);
 });
 
-test('a stale old task list changes nothing the list shows, and stays as it was: a gone ledger is not listed, a stored one outside ~/repos is', (t) => {
+test('a stale old task list changes nothing the list shows, and stays as it was: a gone ledger is not listed, a stored one outside ~/repos is', async (t) => {
   const { h, app } = world(t);
   const elsewhere = repository(h, path.join(h, 'work/tool'));
   worktreeTask(h, elsewhere, { slug: 'tool-task' });
   const created = '2020-01-01T00:00:00.000Z';
   const stale = `${JSON.stringify([{ repo: 'app', slug: 'gone', path: path.join(app, '.claude/worktrees/gone/.claude/ledger.md'), branch: 'me/gone', status: 'active', main: app, created, updated: created }], null, 2)}\n`;
   writeFileSync(oldTaskListFile(h), stale);
-  const slugs = listJson(h, h).map(({ slug }) => slug);
+  const slugs = (await listJson(h, h)).map(({ slug }) => slug);
   assert.ok(slugs.includes('tool-task'), 'a stored task of a repo outside ~/repos is listed');
   assert.ok(slugs.includes('idea'), 'a backlog task missing from the old task list is listed');
   assert.ok(!slugs.includes('gone'), 'the store wins');
   assert.equal(readFileSync(oldTaskListFile(h), 'utf8'), stale);
 });
 
-test('an unreadable old task list does not stop the list, and stays as it was', (t) => {
+test('an unreadable old task list does not stop the list, and stays as it was', async (t) => {
   const { h, app } = world(t);
   writeFileSync(oldTaskListFile(h), '{ not json');
-  assert.equal(listJson(h, app).length, 5);
+  assert.equal((await listJson(h, app)).length, 5);
   assert.equal(readFileSync(oldTaskListFile(h), 'utf8'), '{ not json');
 });
 
-test("ledger archive lists this repo's archived ledgers newest first, named by their title slug", (t) => {
+test("ledger archive lists this repo's archived ledgers newest first, named by their title slug", async (t) => {
   const { h, app } = world(t);
-  const stdout = ok(ledger(h, app, 'task', 'archive'));
+  const stdout = ok(await runInProcess(h, app, 'task', 'archive'));
   assert.match(stdout, /Archived ledgers.*\bapp\b.*4 ledgers/);
   const order = ['old-b', 'old-c', 'old-d', 'old-a'].map((slug) => stdout.indexOf(` ${slug} `));
   assert.ok(order.every((index) => index > 0), stdout);
@@ -193,33 +194,33 @@ test("ledger archive lists this repo's archived ledgers newest first, named by t
   assert.doesNotMatch(stdout, /lib-old/);
 });
 
-test('ledger archive <term> keeps the ledgers that contain it, in any case, and shows the matching line', (t) => {
+test('ledger archive <term> keeps the ledgers that contain it, in any case, and shows the matching line', async (t) => {
   const { h, app } = world(t);
-  const stdout = ok(ledger(h, app, 'task', 'archive', 'pr #27'));
+  const stdout = ok(await runInProcess(h, app, 'task', 'archive', 'pr #27'));
   assert.match(stdout, /1 ledger that contains "pr #27"/);
   assert.match(lineWith(stdout, 'old-d'), /Merged in PR #27\./);
   assert.doesNotMatch(stdout, /old-[abc]/);
 });
 
-test('ledger archive --all lists every repo and names the repo of each ledger', (t) => {
+test('ledger archive --all lists every repo and names the repo of each ledger', async (t) => {
   const { h } = world(t);
-  const stdout = ok(ledger(h, h, 'task', 'archive', '--all'));
+  const stdout = ok(await runInProcess(h, h, 'task', 'archive', '--all'));
   assert.match(stdout, /every repo.*5 ledgers/);
   assert.match(lineWith(stdout, 'lib-old'), /^2026-09-01\s+lib\s+lib-old\b/);
   assert.match(lineWith(stdout, 'old-a'), /\bapp\s+old-a\b/);
 });
 
-test('ledger archive says so when nothing is archived or nothing matches', (t) => {
+test('ledger archive says so when nothing is archived or nothing matches', async (t) => {
   const { h, app } = world(t);
   const shown = (main: string): string => `~/${path.relative(h, storeFolder(h, 'ledger-archive', main))}/`;
-  assert.equal(ok(ledger(h, app, 'task', 'archive', 'zzz')).trim(), `No archived ledger in ${shown(app)} contains "zzz".`);
+  assert.equal(ok(await runInProcess(h, app, 'task', 'archive', 'zzz')).trim(), `No archived ledger in ${shown(app)} contains "zzz".`);
   const empty = repository(h, path.join(h, 'repos/empty'));
-  assert.equal(ok(ledger(h, empty, 'task', 'archive')).trim(), `No archived ledgers in ${shown(empty)}.`);
+  assert.equal(ok(await runInProcess(h, empty, 'task', 'archive')).trim(), `No archived ledgers in ${shown(empty)}.`);
 });
 
-test('ledger archive --all says so when nothing is archived in any repo', (t) => {
+test('ledger archive --all says so when nothing is archived in any repo', async (t) => {
   const h = home(t);
-  assert.equal(ok(ledger(h, h, 'task', 'archive', '--all')).trim(), 'No archived ledgers in ~/.claude/ledger-archive/.');
+  assert.equal(ok(await runInProcess(h, h, 'task', 'archive', '--all')).trim(), 'No archived ledgers in ~/.claude/ledger-archive/.');
 });
 
 test('ledger archive outside a git repository fails and suggests --all', (t) => {
@@ -230,9 +231,9 @@ test('ledger archive outside a git repository fails and suggests --all', (t) => 
   assert.equal(ran.stdout, '');
 });
 
-test('ledger parent --json takes each child status from disk: archive, then worktree, then backlog', (t) => {
+test('ledger parent --json takes each child status from disk: archive, then worktree, then backlog', async (t) => {
   const { h, app, lib } = world(t);
-  const shown: Shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'epic', '--json')));
+  const shown: Shown = JSON.parse(ok(await runInProcess(h, app, 'tree', 'show', 'epic', '--json')));
   assert.equal(shown.slug, 'epic');
   assert.equal(shown.main, app);
   assert.equal(shown.goal, 'Rewrite the ledger core.');
@@ -262,9 +263,9 @@ test('ledger parent --json takes each child status from disk: archive, then work
   assert.deepEqual(child('old-d').report, ['Merged in PR #27.'], 'an archived child reports from its archive copy');
 });
 
-test('ledger parent shows the parent, its goal, and a row per child with status and next step', (t) => {
+test('ledger parent shows the parent, its goal, and a row per child with status and next step', async (t) => {
   const { h, app, lib } = world(t);
-  const stdout = ok(ledger(h, app, 'tree', 'show', 'epic'));
+  const stdout = ok(await runInProcess(h, app, 'tree', 'show', 'epic'));
   assert.match(stdout, /^Parent task epic · 9 children, 2 active$/m);
   assert.match(stdout, /^Rewrite the ledger core\.$/m);
   assert.match(lineWith(stdout, 'live-child'), /live-child\s+active\s+Next step of live-child\./);
@@ -274,108 +275,108 @@ test('ledger parent shows the parent, its goal, and a row per child with status 
   assert.match(lineWith(stdout, 'ghost'), /ghost\s+missing/);
 });
 
-test('a child with a live ledger and an archive copy has the live status in both parent and list: the live ledger wins', (t) => {
+test('a child with a live ledger and an archive copy has the live status in both parent and list: the live ledger wins', async (t) => {
   const { h, app } = world(t);
   worktreeTask(h, app, { slug: 'old-a', parent: 'epic' });
-  const shown: Shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'epic', '--json')));
+  const shown: Shown = JSON.parse(ok(await runInProcess(h, app, 'tree', 'show', 'epic', '--json')));
   assert.equal(shown.children.find(({ slug }) => slug === 'old-a')?.status, 'active');
-  assert.equal(listJson(h, app).find(({ slug }) => slug === 'old-a')?.status, 'active');
+  assert.equal((await listJson(h, app)).find(({ slug }) => slug === 'old-a')?.status, 'active');
 });
 
-test('a Children bullet is a child only when it names a known task or has the <slug>@<path> form', (t) => {
+test('a Children bullet is a child only when it names a known task or has the <slug>@<path> form', async (t) => {
   const { h, app, lib } = world(t);
   archivedTask(h, app, '2026-10-02', { slug: 'old-free' });
   worktreeTask(h, app, {
     slug: 'prose',
     children: ['- Superseded by the new plan.', '- RN-side work is tracked in the RN repo.', '- nobody', '- old-free', '- live-child', `- elsewhere @ ${lib}`],
   });
-  const shown: Shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'prose', '--json')));
+  const shown: Shown = JSON.parse(ok(await runInProcess(h, app, 'tree', 'show', 'prose', '--json')));
   assert.deepEqual(
     Object.fromEntries(shown.children.map(({ slug, status }) => [slug, status])),
     { 'old-free': 'retired', 'live-child': 'active', elsewhere: 'missing' },
   );
-  const text = ok(ledger(h, app, 'tree', 'show', 'prose'));
+  const text = ok(await runInProcess(h, app, 'tree', 'show', 'prose'));
   assert.match(text, /^Parent task prose · 3 children, 1 active$/m);
   assert.doesNotMatch(text, /Superseded|RN-side|nobody/);
 });
 
-test('an archive row keeps the branch line as written, a placeholder included, as the old reader showed it', (t) => {
+test('an archive row keeps the branch line as written, a placeholder included, as the old reader showed it', async (t) => {
   const { h, app } = world(t);
   archivedTask(h, app, '2026-10-01', { slug: 'unstarted', branch: '<name>', worktree: '<path>' });
-  assert.match(lineWith(ok(ledger(h, app, 'task', 'archive')), 'unstarted'), /^2026-10-01\s+unstarted\s+<name>\s+Goal of unstarted\./);
+  assert.match(lineWith(ok(await runInProcess(h, app, 'task', 'archive')), 'unstarted'), /^2026-10-01\s+unstarted\s+<name>\s+Goal of unstarted\./);
 });
 
-test('an archive copy of a same-named repo elsewhere does not retire a child', (t) => {
+test('an archive copy of a same-named repo elsewhere does not retire a child', async (t) => {
   const { h, app } = world(t);
   archivedTask(h, path.join(h, 'other/app'), '2026-11-01', { slug: 'ghost', parent: 'epic' });
-  const shown: Shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'epic', '--json')));
+  const shown: Shown = JSON.parse(ok(await runInProcess(h, app, 'tree', 'show', 'epic', '--json')));
   assert.equal(shown.children.find(({ slug }) => slug === 'ghost')?.status, 'missing');
 });
 
-test('a child with no ledger anywhere is missing, even when the parent marks it retired', (t) => {
+test('a child with no ledger anywhere is missing, even when the parent marks it retired', async (t) => {
   const h = home(t);
   const app = repository(h, path.join(h, 'repos/app'));
   worktreeTask(h, app, { slug: 'epic', children: [`- lost @ ${app} (retired 2026-10-01)`] });
-  const shown: Shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'epic', '--json')));
+  const shown: Shown = JSON.parse(ok(await runInProcess(h, app, 'tree', 'show', 'epic', '--json')));
   assert.deepEqual(shown.children.map(({ slug, status }) => [slug, status]), [['lost', 'missing']]);
-  assert.match(lineWith(ok(ledger(h, app, 'tree', 'show', 'epic')), 'lost'), /^lost +missing\b/);
+  assert.match(lineWith(ok(await runInProcess(h, app, 'tree', 'show', 'epic')), 'lost'), /^lost +missing\b/);
 });
 
-test('a reused slug: an archive copy of another parent does not retire a live child', (t) => {
+test('a reused slug: an archive copy of another parent does not retire a live child', async (t) => {
   const h = home(t);
   const app = repository(h, path.join(h, 'repos/app'));
   worktreeTask(h, app, { slug: 'epic', children: ['- fix-ci'] });
   backlogTask(h, app, { slug: 'fix-ci', parent: 'epic' });
   archivedTask(h, app, '2026-10-01', { slug: 'fix-ci', parent: 'other-epic' });
-  const shown: Shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'epic', '--json')));
+  const shown: Shown = JSON.parse(ok(await runInProcess(h, app, 'tree', 'show', 'epic', '--json')));
   assert.deepEqual(shown.children.map(({ slug, status }) => [slug, status]), [['fix-ci', 'backlog']]);
 });
 
-test('an archive copy with no parent line counts only when no live ledger has the slug', (t) => {
+test('an archive copy with no parent line counts only when no live ledger has the slug', async (t) => {
   const h = home(t);
   const app = repository(h, path.join(h, 'repos/app'));
   worktreeTask(h, app, { slug: 'epic', children: ['- old-x', '- both'] });
   archivedTask(h, app, '2026-10-01', { slug: 'old-x' });
   archivedTask(h, app, '2026-10-01', { slug: 'both' });
   worktreeTask(h, app, { slug: 'both' });
-  const shown: Shown = JSON.parse(ok(ledger(h, app, 'tree', 'show', 'epic', '--json')));
+  const shown: Shown = JSON.parse(ok(await runInProcess(h, app, 'tree', 'show', 'epic', '--json')));
   const statuses = Object.fromEntries(shown.children.map(({ slug, status }) => [slug, status]));
   assert.deepEqual(statuses, { 'old-x': 'retired', both: 'active' });
 });
 
-test('ledger parent <slug>@<path> shows a parent in another repo', (t) => {
+test('ledger parent <slug>@<path> shows a parent in another repo', async (t) => {
   const { h, app, lib } = world(t);
-  const shown: Shown = JSON.parse(ok(ledger(h, lib, 'tree', 'show', `epic@${app}`, '--json')));
+  const shown: Shown = JSON.parse(ok(await runInProcess(h, lib, 'tree', 'show', `epic@${app}`, '--json')));
   assert.equal(shown.main, app);
   assert.equal(shown.children.length, 9);
-  const text = ok(ledger(h, lib, 'tree', 'show', `epic@${path.join(app, '.claude/worktrees/live-child')}`));
+  const text = ok(await runInProcess(h, lib, 'tree', 'show', `epic@${path.join(app, '.claude/worktrees/live-child')}`));
   assert.match(text, /^Parent task epic\b/m, 'any folder of the repo names it');
 });
 
-test('ledger parent of a slug that is not in this repo fails and names it', (t) => {
+test('ledger parent of a slug that is not in this repo fails and names it', async (t) => {
   const { h, lib } = world(t);
-  const ran = ledger(h, lib, 'tree', 'show', 'epic');
+  const ran = await runInProcess(h, lib, 'tree', 'show', 'epic');
   assert.equal(ran.status, 1);
   assert.match(ran.stderr, /epic/);
   assert.match(ran.stderr, new RegExp(lib.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 
-test('ledger parent of a task with no children says so', (t) => {
+test('ledger parent of a task with no children says so', async (t) => {
   const { h, app } = world(t);
-  assert.equal(ok(ledger(h, app, 'tree', 'show', 'live-child')).trim(), 'live-child has no child tasks.');
+  assert.equal(ok(await runInProcess(h, app, 'tree', 'show', 'live-child')).trim(), 'live-child has no child tasks.');
 });
 
-test('ledger parent outside a git repository asks for <slug>@<path>', (t) => {
+test('ledger parent outside a git repository asks for <slug>@<path>', async (t) => {
   const { h } = world(t);
   mkdirSync(path.join(h, 'plain'));
-  const ran = ledger(h, path.join(h, 'plain'), 'tree', 'show', 'epic');
+  const ran = await runInProcess(h, path.join(h, 'plain'), 'tree', 'show', 'epic');
   assert.equal(ran.status, 1);
   assert.match(ran.stderr, /epic@<path>/);
 });
 
-test('ledger parent refuses a slug the reading rule does not accept', (t) => {
+test('ledger parent refuses a slug the reading rule does not accept', async (t) => {
   const { h, app } = world(t);
-  const ran = ledger(h, app, 'tree', 'show', 'a b');
+  const ran = await runInProcess(h, app, 'tree', 'show', 'a b');
   assert.equal(ran.status, 1);
   assert.match(ran.stderr, /slug/);
 });
@@ -391,26 +392,26 @@ const withoutUsage = (help: string): string[] => help.split('\n').slice(1);
 const backlogLedger = (h: string, main: string, slug: string): string => path.join(storeFolder(h, 'ledger-backlog', main), `${slug}.json`);
 const listedIn = (command: string): RegExp => new RegExp(`^\\s+${command}\\b`, 'm');
 
-test('ledger --help lists the groups, the short forms and deploy, and hides the commands only Claude Code runs', (t) => {
-  const stdout = ok(ledger(home(t), path.sep, '--help'));
-  for (const command of ['task', 'tree', 'store', 'worktrees', 'go', 'list', 'show', 'deploy']) assert.match(stdout, listedIn(command), `--help lists ${command}`);
-  for (const command of ['hook', 'session', 'auto-prune', 'park', 'unpark', 'retire', 'archive', 'parent', 'migrate']) assert.doesNotMatch(stdout, listedIn(command), `--help hides ${command}`);
+test('ledger --help, ledger task --help and ledger worktrees --help list their commands and hide the ones only Claude Code or a hook runs', async (t) => {
+  const h = home(t);
+  const cases: { group: string[]; lists: string[]; hides: string[] }[] = [
+    { group: [], lists: ['task', 'tree', 'store', 'worktrees', 'go', 'list', 'show', 'deploy'], hides: ['hook', 'session', 'auto-prune', 'park', 'unpark', 'retire', 'archive', 'parent', 'migrate'] },
+    { group: ['task'], lists: ['new', 'go', 'claim', 'touch', 'release', 'park', 'unpark', 'retire', 'show', 'list', 'archive'], hides: [] },
+  ];
+  for (const { group, lists, hides } of cases) {
+    const stdout = ok(await runInProcess(h, path.sep, ...group, '--help'));
+    const name = [...group, '--help'].join(' ');
+    for (const command of lists) assert.match(stdout, listedIn(command), `${name} lists ${command}`);
+    for (const command of hides) assert.doesNotMatch(stdout, listedIn(command), `${name} hides ${command}`);
+  }
+  assert.doesNotMatch(ok(await runInProcess(h, path.sep, 'worktrees', '--help')), /auto-prune/);
 });
 
-test('ledger task --help lists new, go, claim, touch, release, park, unpark, retire, show, list and archive', (t) => {
-  const stdout = ok(ledger(home(t), path.sep, 'task', '--help'));
-  for (const command of ['new', 'go', 'claim', 'touch', 'release', 'park', 'unpark', 'retire', 'show', 'list', 'archive']) assert.match(stdout, listedIn(command), `task --help lists ${command}`);
-});
-
-test('ledger worktrees --help hides auto-prune, which only a hook runs', (t) => {
-  assert.doesNotMatch(ok(ledger(home(t), path.sep, 'worktrees', '--help')), /auto-prune/);
-});
-
-test('the short forms go, list and show take the arguments and options of their ledger task form', (t) => {
+test('the short forms go, list and show take the arguments and options of their ledger task form', async (t) => {
   const h = home(t);
   for (const command of ['go', 'list', 'show']) {
-    const short = ok(ledger(h, h, command, '--help'));
-    const grouped = ok(ledger(h, h, 'task', command, '--help'));
+    const short = ok(await runInProcess(h, h, command, '--help'));
+    const grouped = ok(await runInProcess(h, h, 'task', command, '--help'));
     assert.match(short, new RegExp(`^Usage: ledger ${command} `));
     assert.match(grouped, new RegExp(`^Usage: ledger task ${command} `));
     assert.deepEqual(withoutUsage(short), withoutUsage(grouped), `${command} --help`);
@@ -445,14 +446,14 @@ test('ledger task new, show, list, park, unpark, go, retire and archive take a t
   assert.match(ok(ledger(h, app, 'task', 'archive')), /fix-login/);
 });
 
-test('ledger go and ledger task retire refuse a backlog task whose record hides Markdown: they say why, exit 1, and keep both', (t) => {
+test('ledger go and ledger task retire refuse a backlog task whose record hides Markdown: they say why, exit 1, and keep both', async (t) => {
   const { h, app } = writable(t);
-  ok(ledger(h, app, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.'));
+  ok(await runInProcess(h, app, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.'));
   const record = backlogLedger(h, app, 'fix-login');
   const markdown = record.replace(/\.json$/, '.md');
   writeFileSync(markdown, '# Task ledger — fix-login\n\n## Goal\nAn older copy.\n');
   for (const args of [['go', 'fix-login'], ['task', 'retire', 'fix-login']]) {
-    const ran = ledger(h, app, ...args);
+    const ran = await runInProcess(h, app, ...args);
     assert.equal(ran.status, 1, `${args.join(' ')}\n${ran.stdout}\n${ran.stderr}`);
     assert.match(ran.stderr, new RegExp(`${record.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} has both a task record and Markdown from before records`));
     assert.ok(existsSync(record) && existsSync(markdown), `${args.join(' ')} kept both`);
@@ -460,33 +461,28 @@ test('ledger go and ledger task retire refuse a backlog task whose record hides 
   assert.equal(existsSync(path.join(app, '.claude/worktrees/fix-login')), false);
 });
 
-test('ledger tree show, add, start, next and remove read and change the children of a parent task', (t) => {
+test('ledger tree show, add, start, next and remove read and change the children of a parent task', async (t) => {
   const { h, app } = writable(t);
-  for (const slug of ['epic', 'part']) ok(ledger(h, app, 'task', 'new', slug));
-  assert.equal(ok(ledger(h, app, 'tree', 'add', 'epic', 'part')), 'part is a child of epic.\n');
-  assert.match(ok(ledger(h, app, 'tree', 'show', 'epic')), /^Parent task epic\b[\s\S]*\bpart\b/m);
-  assert.equal(ok(ledger(h, app, 'tree', 'next', 'epic')), 'epic part\n');
-  assert.match(ok(ledger(h, app, 'tree', 'start', 'epic', 'part')), /^Marked part started/);
-  assert.equal(ok(ledger(h, app, 'tree', 'remove', 'epic', 'part')), 'part is no longer a child of epic.\n');
-  assert.equal(ok(ledger(h, app, 'tree', 'show', 'epic')).trim(), 'epic has no child tasks.');
+  for (const slug of ['epic', 'part']) ok(await runInProcess(h, app, 'task', 'new', slug));
+  assert.equal(ok(await runInProcess(h, app, 'tree', 'add', 'epic', 'part')), 'part is a child of epic.\n');
+  assert.match(ok(await runInProcess(h, app, 'tree', 'show', 'epic')), /^Parent task epic\b[\s\S]*\bpart\b/m);
+  assert.equal(ok(await runInProcess(h, app, 'tree', 'next', 'epic')), 'epic part\n');
+  assert.match(ok(await runInProcess(h, app, 'tree', 'start', 'epic', 'part')), /^Marked part started/);
+  assert.equal(ok(await runInProcess(h, app, 'tree', 'remove', 'epic', 'part')), 'part is no longer a child of epic.\n');
+  assert.equal(ok(await runInProcess(h, app, 'tree', 'show', 'epic')).trim(), 'epic has no child tasks.');
 });
 
-test('ledger store migrate --dry-run changes nothing', { skip: noSqlite }, (t) => {
+test('ledger store migrate --dry-run changes nothing', { skip: noSqlite }, async (t) => {
   const { h, app } = writable(t);
-  ok(ledger(h, app, 'store', 'migrate', '--to', 'sqlite', '--dry-run'));
+  ok(await runInProcess(h, app, 'store', 'migrate', '--to', 'sqlite', '--dry-run'));
   assert.equal(existsSync(path.join(h, '.claude/ledger-settings.json')), false);
 });
 
-test('ledger worktrees auto-prune in a folder without its own ledger prints nothing and exits 0', (t) => {
-  const { h, app } = writable(t);
-  assert.deepEqual(ledger(h, app, 'worktrees', 'auto-prune'), { status: 0, stdout: '', stderr: '' });
-});
-
-test('the old command names exit non-zero as unknown commands and change nothing', (t) => {
+test('the old command names exit non-zero as unknown commands and change nothing', async (t) => {
   const { h, app } = writable(t);
   const old = [['park', 'x', '--reason', 'r'], ['unpark', 'x'], ['retire', '--dry-run'], ['archive'], ['parent', 'x'], ['migrate', '--to', 'sqlite', '--dry-run'], ['auto-prune'], ['task', 'fix-login', '--goal', 'g']];
   for (const argv of old) {
-    const ran = ledger(h, app, ...argv);
+    const ran = await runInProcess(h, app, ...argv);
     assert.notEqual(ran.status, 0, `ledger ${argv.join(' ')}`);
     assert.match(ran.stderr, /unknown command/, `ledger ${argv.join(' ')}`);
   }
