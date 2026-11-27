@@ -61,6 +61,8 @@ export const PARK_USAGE =
 
 export const PARENT_USAGE = 'Usage: /ledger:parent <slug> [add|remove <child>]. Run /ledger:all to see the slug of each task.'
 
+export const ROOT_USAGE = 'Usage: /ledger:root [<minutes>|off|status]. With no argument it switches the override on for 30 minutes.'
+
 export const GO_FROM_SUBAGENT = `Only the main session can switch tasks with /ledger:go. ${UNCHANGED}`
 
 export const NEXT_FROM_SUBAGENT = `Only the main session can clear and continue with /ledger:next. ${UNCHANGED}`
@@ -268,6 +270,7 @@ export const HELP = [
   "- `/ledger:retire [<slug>]` — Archive a task's ledger, remove its worktree, and delete its branch when all of its commits are merged. A backlog task of this repo has no worktree or branch: its ledger is archived, then deleted. `--dry-run` only shows what it would do. Uncommitted changes, unmerged work and active child tasks need `--force`. A child task is marked retired in its parent ledger, also in another repo.",
   "- `/ledger:archive [<term>]` — List this repo's archived ledgers, newest first; a term keeps those that contain it, and `--all` lists every repo.",
   "- `/ledger:deploy` — Deploy the latest main of the ledger repo on this machine, and list the open sessions that need `/reload-plugins`. It deploys nothing when the main checkout has uncommitted changes, is on another branch, or has commits that origin lacks. `--machine <name>` starts the deploy on another machine linked in T3, where the operator approves it.",
+  '- `/ledger:root [<minutes>|off|status]` — Switch off the hooks that refuse tool calls, such as a hand edit of the ledger store or a build folder elsewhere, for 30 minutes or for <minutes>, up to 240. Each call they would have refused goes ahead and is logged, and the next session start lists it. `off` switches them back on now, and `status` says how long is left. Only the operator can start it.',
   '- `/ledger:all` — Show every task ledger on this machine, from every repository: active, backlog and archived, each with its parent and next step.',
   '- `/ledger:help` — Show this list.',
 ].join('\n')

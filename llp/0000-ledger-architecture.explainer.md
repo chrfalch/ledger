@@ -139,6 +139,9 @@ each:
   one-time moves that `ledger store migrate --pending` lists. With
   `--latest`, it first fast-forwards the main checkout and runs `bin/deploy`
   with no terminal (see [Deploy](#deploy)).
+- `root`: `on`, `off` and `status` of the operator's override of the
+  pre-tool-use gates (see [Hooks](#hooks)). `on` lasts 30 minutes, or
+  `--minutes`, from 1 to 240; run again, it sets a new end time.
 
 Two commands are for Claude Code and stay out of the help. `session` prints
 the ledgers a session in a folder works on. `hook` answers a Claude Code hook
@@ -641,13 +644,15 @@ so the turn end does the same release and writes the same `handover` itself.
 The queued run then sends its `go <slug>`. That the release comes first is
 not yet checked in T3 [inferred].
 
-Only the operator may type `/ledger:close`, `/ledger:park` and
-`/ledger:fleet` (`TYPED_ONLY` in `register.ts`). The plugin refuses them when the agent starts them through the
+Only the operator may type `/ledger:close`, `/ledger:park`, `/ledger:fleet`
+and `/ledger:root` (`TYPED_ONLY` in `register.ts`). The plugin refuses them when the agent starts them through the
 `Skill` tool. `isTypedOnly` in `register.ts` refuses three more commands from
 the agent: `/ledger:retire` with `--force`, `/ledger:worktrees prune` or
 `prune-orphans` without `--dry-run`, and `/ledger:parent` with an action other
 than `next`, such as `add` or `remove`. The refusal names the command for the
-operator to type.
+operator to type. `/ledger:root` runs `ledger root` from the plugin's own
+hook, not through an agent's Bash call, so the pre-tool-use hook never sees
+it.
 The agent may start `/ledger:next` once, right after the operator
 picks "Save, clear and continue" (`CLEAR_POINT_OPTION` in `ledger.ts`) in the
 clear-point question. Otherwise the plugin refuses it too.
@@ -710,6 +715,21 @@ because its turn end does not clear the session.
   clone it adds that the operator resolves a sync conflict in a terminal, so
   the agent asks them.
 
+  A hook sees only the tool call, so it denies a call the operator has
+  just approved in the chat. The operator lifts the four checks above for a
+  while with `/ledger:root`, which runs `ledger root on`
+  (`tools/ledger/root.ts`). That writes `~/.claude/ledger-root.json`, with
+  its end time as `untilEpoch`. While that time lies ahead, a call the checks
+  would deny goes ahead. Each such call is appended as one JSON line to
+  `~/.claude/ledger-root.log`: the time, tool, folder, deny reason, and the
+  command or file. The next `session-start` lists the lines not yet reported
+  under *Allowed only because ledger root was on:*, below the hook failures,
+  and `ledger statusline` adds `ROOT <minutes>m`. A fifth check, which runs
+  first, is never lifted (`rootSwitchReason` in `tools/ledger/hooks.ts`). It
+  denies an agent's `ledger root on`, by any path to `ledger`, and any write
+  of the marker file. `ledger root off`, `ledger root status` and removing
+  the marker stay allowed.
+
 When a hook fails, `tools/ledger/cli.ts` prints the error to stderr and exits
 0. Claude Code then allows the tool call. A hook never blocks work by accident.
 The failure is also appended as one line to `~/.claude/ledger-hook-failures.log`
@@ -729,7 +749,8 @@ runs through `hooks/logged.sh`, except the status line:
   the model and the five-hour and seven-day usage percentages. It writes those
   rate limits to `~/.claude/state/usage-snapshot.json`. After the branch it
   shows what `ledger statusline <folder>` prints: the task and stage, read
-  from the store alone, with no pull and no gh (D28).
+  from the store alone, with no pull and no gh (D28), then `ROOT <minutes>m`
+  while `ledger root` is on.
 - `usage-pace.sh` runs on each prompt, and only when the Sol or Astra
   implementer agent is deployed. It reads that snapshot and adds a routing
   hint to the prompt when Claude usage runs ahead of an even pace. When Codex
@@ -743,7 +764,10 @@ runs through `hooks/logged.sh`, except the status line:
   retry a Bash command whose every part is a read-only command from a fixed
   list, with no redirect and no command substitution. Any other denial stands.
 - `derived-data-gate.sh` runs before each Bash call and denies an Xcode build
-  folder other than the one LLP 0001 D44 names.
+  folder other than the one LLP 0001 D44 names. While `ledger root` is on, it
+  allows that call instead and logs it to `~/.claude/ledger-root.log`, as the
+  `ledger hook pre-tool-use` checks do. It reads only `untilEpoch` with `jq`,
+  so a missing or broken marker keeps the deny.
 
 ### Worktree layout
 

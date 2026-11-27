@@ -64,10 +64,11 @@ import {
 } from './notes.js';
 import { openStore, openToRead } from './open-store.js';
 import { abandonTask, retireTask, retireText } from './retire.js';
+import { ROOT_MINUTES, rootMinutes, rootSegment, rootState, rootStateText, switchRootOff, switchRootOn } from './root.js';
 import { readStorage, STORAGES, type Storage } from './settings.js';
 import { ownLedger, shownLedger } from './show.js';
 import { sqliteFile } from './sqlite-store.js';
-import { Collected, inRun, runConsole, runEnv } from './run-io.js';
+import { Collected, inRun, runClock, runConsole, runEnv } from './run-io.js';
 import { forgetCreatedCopies, type LedgerStore } from './store.js';
 import { initSync, syncInBackground, syncLedgers } from './sync.js';
 import {
@@ -984,9 +985,14 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
     );
   program
     .command('statusline', { hidden: true })
-    .description('Print the task and stage of a folder for the Claude Code status line, from the store alone; nothing when the folder owns no task or on any error.')
+    .description(
+      'Print the task and stage of a folder for the Claude Code status line, from the store alone, then ROOT <minutes>m while ledger root is on; nothing when neither applies or on any error.',
+    )
     .argument('<folder>', 'the folder of the Claude Code session')
-    .action((folder: string) => print(statusLine(paths, path.resolve(cwd, folder))));
+    .action((folder: string) => {
+      const root = rootSegment(rootState(paths.home, runClock().now()));
+      print([statusLine(paths, path.resolve(cwd, folder)), root].filter((part) => part !== '').join(' · '));
+    });
   program
     .command('hook', { hidden: true })
     .description('Answer a Claude Code hook: read its JSON input on stdin and print the hook output. For settings.json, not for a person.')
@@ -1031,6 +1037,27 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
       stderr.write(run.stderr);
       exitCode = run.code;
     });
+  const rootGroup = program
+    .command('root')
+    .description(
+      "Switch the operator's override of the pre-tool-use gates on or off. While it is on, a call a gate would deny goes ahead, and the next session start lists it. Only the operator switches it on, by typing /ledger:root.",
+    );
+  rootGroup
+    .command('on')
+    .description(`Switch the override on for ${ROOT_MINUTES.default} minutes, or for --minutes. When it is on already, the new time replaces the old one.`)
+    .option('--minutes <n>', `how long it stays on: a whole number from 1 to ${ROOT_MINUTES.max}`, String(ROOT_MINUTES.default))
+    .action(({ minutes }: { minutes: string }) => print(rootStateText(switchRootOn(paths.home, runClock().now(), rootMinutes(minutes)))));
+  rootGroup
+    .command('off')
+    .description('Switch the override off now. Nothing changes when it is off already.')
+    .action(() => {
+      switchRootOff(paths.home);
+      print(rootStateText({ on: false }));
+    });
+  rootGroup
+    .command('status')
+    .description('Say whether the override is on, and for how many more minutes.')
+    .action(() => print(rootStateText(rootState(paths.home, runClock().now()))));
 
   try {
     await program.parseAsync(argv, { from: 'user' });

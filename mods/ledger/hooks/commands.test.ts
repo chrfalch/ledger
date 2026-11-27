@@ -260,6 +260,44 @@ for (const [command, args] of [
   })
 }
 
+for (const [args, key] of [
+  ['', 'root on'],
+  [' 45 ', 'root on --minutes 45'],
+  ['off', 'root off'],
+  ['status', 'root status'],
+] as const) {
+  test(`/ledger:root ${args.trim()} runs \`ledger ${key}\` itself and shows what it prints`, async ($, on) => {
+    const w = world(on, { [key]: ran(0, 'Root override is on for 45 minutes, until 10:45.\n') }, { cwd: CWD })
+
+    const { text } = await $.command.run({ command: 'ledger:root', args })
+
+    expect(w.argvs()).toEqual([key.split(' ')])
+    expect(text).toBe('Root override is on for 45 minutes, until 10:45.')
+    expect(w.skills).toEqual([])
+  })
+}
+
+test('/ledger:root with a word that is no number, off or status answers its usage and runs nothing', async ($, on) => {
+  const w = world(on, {}, { cwd: CWD })
+
+  const { text } = await $.command.run({ command: 'ledger:root', args: 'soon' })
+
+  expect(text).toContain('Usage: /ledger:root [<minutes>|off|status]')
+  expect(w.calls).toEqual([])
+})
+
+for (const args of ['', '45', 'off', 'status']) {
+  test(`/ledger:root ${args} through the Skill tool is refused: only the operator types it`, async ($, on) => {
+    const w = world(on, {}, { cwd: CWD })
+
+    const answer = await $.tool.call({ tool: 'Skill', skill: 'ledger:root', args })
+
+    expect(answer.deny).toBe(typedOnlyMessage('ledger:root', args))
+    expect(w.calls).toEqual([])
+    expect(w.skills).toEqual([])
+  })
+}
+
 test('/ledger:worktrees prune --dry-run through the Skill tool runs, as it deletes nothing', async ($, on) => {
   const w = world(on, { 'worktrees prune --all --dry-run': ran(0, 'planned\n') }, { cwd: CWD })
 

@@ -22,3 +22,10 @@ test('/ledger:deploy deploys the latest main and tells the operator what to relo
     assert.ok(body.includes(expected), `deploy.md mentions ${expected}`);
   }
 });
+
+test('/ledger:root has a command file with its arguments, and the help names it', () => {
+  const file = path.join(REPO, 'mods/ledger/commands/root.md');
+  assert.ok(existsSync(file), 'mods/ledger/commands/root.md exists');
+  assert.match(readFileSync(file, 'utf8'), /^argument-hint: "\[<minutes>\|off\|status\]"$/m);
+  assert.match(HELP, /^- `\/ledger:root \[<minutes>\|off\|status\]` — /m);
+});

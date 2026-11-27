@@ -280,3 +280,45 @@ test('the app build folder is allowed when a quoted -workspace path has a space'
   assertAllowed(gate(root, session.dir, `xcodebuild -workspace "${workspace}" -derivedDataPath "${app.buildFolder}"`));
   assertAllowed(gate(root, session.dir, `xcodebuild -workspace '${workspace}' -derivedDataPath '${app.buildFolder}'`));
 });
+
+/** The marker `ledger root on` writes, ending at `untilEpoch`, or `text` as the marker, in the .claude folder of HOME `root`. */
+function rootMarker(root: string, untilEpoch: number | string): void {
+  mkdirSync(path.join(root, '.claude'), { recursive: true });
+  writeFileSync(path.join(root, '.claude/ledger-root.json'), typeof untilEpoch === 'string' ? untilEpoch : JSON.stringify({ since: '', until: '', untilEpoch }));
+}
+
+const rootLog = (root: string): string => path.join(root, '.claude/ledger-root.log');
+
+test('a build folder elsewhere is allowed while ledger root is on, and the call is logged', (t) => {
+  const { root, session } = repositories(t);
+  rootMarker(root, Math.floor(Date.now() / 1000) + 3600);
+  const command = 'xcodebuild -derivedDataPath /tmp/x';
+  const before = Math.floor(Date.now() / 1000) * 1000;
+
+  assertAllowed(gate(root, session.dir, command));
+
+  const lines = readFileSync(rootLog(root), 'utf8').split('\n').filter((line) => line !== '');
+  assert.equal(lines.length, 1);
+  const entry = JSON.parse(lines[0]);
+  assert.deepEqual(Object.keys(entry), ['at', 'tool', 'cwd', 'reason', 'command']);
+  assert.match(entry.at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+  assert.ok(Date.parse(entry.at) >= before && Date.parse(entry.at) <= Date.now(), entry.at);
+  assert.equal(entry.tool, 'Bash');
+  assert.equal(entry.cwd, session.dir);
+  assert.match(entry.reason, /^Build folder is not reusable: \/tmp\/x/);
+  assert.equal(entry.command, command);
+});
+
+for (const [name, marker] of [
+  ['has expired', Math.floor(Date.now() / 1000) - 60],
+  ['is not JSON', 'not json'],
+  ['has no untilEpoch', '{"until":"2999-01-01T00:00:00Z"}'],
+  ['has an untilEpoch that is not a number', '{"untilEpoch":"9999999999"}'],
+] as const) {
+  test(`a build folder elsewhere is still denied when the ledger root marker ${name}`, (t) => {
+    const { root, session } = repositories(t);
+    rootMarker(root, marker);
+    assertDenied(gate(root, session.dir, 'xcodebuild -derivedDataPath /tmp/x'));
+    assert.throws(() => readFileSync(rootLog(root)), { code: 'ENOENT' });
+  });
+}

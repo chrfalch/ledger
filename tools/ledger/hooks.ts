@@ -14,6 +14,8 @@ import { conversionHint } from './migrate-repo-ids.js';
 import { CITATION_ADVICE, realPath, samePath, SESSION_CITATION, type LedgerPaths } from './paths.js';
 import { prCheckLines, type CheckedLine } from './pr-check.js';
 import { repoKey, repoLabel } from './repo-key.js';
+import { logRootAction, markRootActionsReported, rootMarker, rootState, unreportedRootActions } from './root.js';
+import { runClock } from './run-io.js';
 import { holdsUnmovedLedger, keepsUnmovedLedger } from './unmoved.js';
 import { sqliteFile } from './sqlite-store.js';
 import { pullForSession, syncNotice } from './sync.js';
@@ -194,23 +196,25 @@ function afterPrCheck(store: LedgerStore, found: SessionLedgers, main: string | 
 }
 
 /**
- * Hook failures since the last report come first, above the sync notice and the ledgers, and count as reported once the
- * output is built. When the pull or the ledger part throws, the report still goes out alone and the new failure waits
- * for the next one.
+ * Hook failures since the last report come first, then the calls allowed only because ledger root was on, above the sync
+ * notice and the ledgers; both count as reported once the output is built. When the pull or the ledger part throws, those
+ * reports still go out alone and the new failure waits for the next one.
  */
 export function sessionStart(input: HookInput, context: HookContext, deadline = Date.now() + gitTimeoutMs): SessionStartOutput | undefined {
   const failures = unreportedHookFailures(context.paths);
+  const allowed = unreportedRootActions(context.paths.home);
   let ledgers: { hint?: string; text?: string; title?: string };
   try {
     ledgers = sessionLedgerContext(input, context, deadline);
   } catch (error) {
-    if (failures === undefined) throw error;
+    if (failures === undefined && allowed === undefined) throw error;
     logHookFailure(context.paths.home, 'ledger hook session-start', error instanceof Error ? error.message : String(error));
     ledgers = {};
   }
-  const additionalContext = [failures?.text, ledgers.hint, ledgers.text].filter((part) => part !== undefined).join('\n\n');
+  const additionalContext = [failures?.text, allowed?.text, ledgers.hint, ledgers.text].filter((part) => part !== undefined).join('\n\n');
   if (additionalContext === '') return undefined;
   if (failures !== undefined) markHookFailuresReported(context.paths.home, failures);
+  if (allowed !== undefined) markRootActionsReported(context.paths.home, allowed);
   return {
     hookSpecificOutput: {
       hookEventName: 'SessionStart',
@@ -263,10 +267,20 @@ export function preToolUse(input: HookInput, context: HookContext): PreToolUseOu
       return undefined;
     }
   };
+  const deny = (reason: string): PreToolUseOutput => ({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } });
+  const switchReason = check(rootSwitchReason);
+  if (switchReason !== undefined) return deny(switchReason);
   const reason = check(worktreeRemovalReason) ?? check(ledgerWriteReason) ?? check(storeWriteReason);
   if (reason === undefined && errors.length > 0) throw errors[0];
-  return reason === undefined ? undefined : { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } };
+  if (reason === undefined) return undefined;
+  const now = runClock().now();
+  if (!rootState(context.paths.home, now).on) return deny(reason);
+  logRootAction(context.paths.home, { tool: input.toolName, cwd: folderOf(input, context), reason, ...actionSubject(input, context) }, now);
+  return undefined;
 }
+
+const actionSubject = (input: HookInput, context: HookContext): { command: string } | { file: string } =>
+  input.toolName === 'Bash' ? { command: text(input.toolInput.command) } : { file: toolFile(input, context) };
 
 /** `word` without its quotes, with each quoted *, ? and [ escaped, as bash matches them literally. */
 const unquote = (word: string): string => word.replace(/'([^']*)'|"([^"]*)"|["']/g, (_: string, single?: string, double?: string) => (single ?? double ?? '').replace(/[*?[]/g, '\\$&'));
@@ -1324,11 +1338,13 @@ function bashWriteTargets({ lines, substitutions }: Script, cwd: string, home: s
 /** The files a file tool or a Bash command writes, as `writers` find them in a command. */
 function writtenFiles(input: HookInput, context: HookContext, writers: Writer[]): Target[] {
   const { toolName, toolInput } = input;
-  const cwd = folderOf(input, context);
-  const { home } = context.paths;
-  if (toolName === 'Bash') return bashWriteTargets(parseScript(text(toolInput.command)), cwd, home, writers);
-  return FILE_TOOLS.includes(toolName) ? [{ file: path.resolve(cwd, text(toolInput.file_path).replace(/^~(?=\/|$)/, () => home)), effect: 'writes', literal: true }] : [];
+  if (toolName === 'Bash') return bashWriteTargets(parseScript(text(toolInput.command)), folderOf(input, context), context.paths.home, writers);
+  return FILE_TOOLS.includes(toolName) ? [{ file: toolFile(input, context), effect: 'writes', literal: true }] : [];
 }
+
+/** The absolute path a file tool's file_path names. */
+const toolFile = (input: HookInput, context: HookContext): string =>
+  path.resolve(folderOf(input, context), text(input.toolInput.file_path).replace(/^~(?=\/|$)/, () => context.paths.home));
 
 /** `file` as written, with the symbolic links to it resolved, and with those of its folder resolved. */
 const pathsOf = (file: string): string[] => [file, realPath(file), path.join(realPath(path.dirname(file)), path.basename(file))];
@@ -1423,4 +1439,28 @@ function storeWriteReason(input: HookInput, context: HookContext): string | unde
     `The ledger store is changed only by the ledger tool, not by hand. ${ledgerCommands(bin)} To move or sync the store, see \`${bin} store --help\`.`,
     ...(reached.some(({ effect }) => effect === 'git') ? ['A sync conflict in the clone is resolved by the operator in a terminal, not by an agent: ask the operator.'] : []),
   ].join('\n');
+}
+
+/** A run of `ledger` by any path to it, such as ~/.claude/bin/ledger, with its arguments as the first group. */
+const LEDGER = invocation(String.raw`["']?(?:[^\s;&|()<>]*\/)?ledger["']?`);
+const ROOT_SWITCH_REASON = 'Only the operator can switch the ledger root override on, by typing /ledger:root. Ask the operator to type it.';
+
+const switchesRootOn = (args: string): boolean => {
+  const [group, command] = operandsOf(words(args.replace(ANY_REDIRECT, '')).map((word) => unquote(unmask(word))), ['--minutes']);
+  return group === 'root' && command === 'on';
+};
+
+/**
+ * Denies an agent's `ledger root on` and any write of the root marker, whether root is on or not: otherwise an agent could
+ * lift the other gates itself. Switching it off, asking its status and removing the marker stay allowed.
+ */
+function rootSwitchReason(input: HookInput, context: HookContext): string | undefined {
+  if (input.toolName === 'Bash' && allLines(parseScript(text(input.toolInput.command))).some((line) => [...line.matchAll(LEDGER)].some(({ 1: args = '' }) => switchesRootOn(args)))) {
+    return ROOT_SWITCH_REASON;
+  }
+  const markers = pathsOf(rootMarker(context.paths.home));
+  const writes = writtenFiles(input, context, LEDGER_WRITERS)
+    .filter(({ effect, tailOnly }) => effect === 'writes' && !tailOnly)
+    .flatMap((target) => pathsOf(target.file).map((file) => ({ ...target, file })));
+  return writes.some((target) => markers.some((marker) => reaches(target, marker))) ? ROOT_SWITCH_REASON : undefined;
 }
