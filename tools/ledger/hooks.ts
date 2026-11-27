@@ -1525,6 +1525,7 @@ const MAX_NESTING = 10;
 
 const ROOT_SWITCH_REASON = 'Only the operator can switch the ledger root override on, by typing /ledger:root. Ask the operator to type it.';
 const ROOT_LOG_REASON = 'The ledger root log and its report offset are written only by the ledger hooks, so that the operator sees every call root let through. Leave them as they are.';
+const ROOT_UNREAD_LOG_REASON = 'This command runs code the ledger root check cannot read, and that code names the root log or its report offset, which only the ledger hooks may write. To read the log, run cat or less on it alone.';
 const ROOT_NESTING_REASON = 'This command nests shells or eval too deeply for the ledger root check to read, so it is denied. Run the inner command directly.';
 
 /** The script of a Bash command with each command word as bash runs it, so that `'rm'`, `\rm` or `$'rm'` is read as rm. */
@@ -1571,7 +1572,7 @@ function handedScripts(line: string): { script: string; at: number }[] {
 /** Why to deny a program the hook cannot read as shell, by the root file or `ledger root on` it names. */
 function namedRootReason(program: string, home: string): string | undefined {
   if (program.includes(path.basename(rootMarker(home))) || NAMES_ROOT_ON.test(program)) return ROOT_SWITCH_REASON;
-  return rootLogFiles(home).some((file) => program.includes(path.basename(file))) ? ROOT_LOG_REASON : undefined;
+  return rootLogFiles(home).some((file) => program.includes(path.basename(file))) ? ROOT_UNREAD_LOG_REASON : undefined;
 }
 
 /**

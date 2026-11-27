@@ -339,7 +339,14 @@ const logWrites = (file: string): string[] => [
   `dd if=/dev/null of=~/.claude/${file}`,
   `bash -c ': > ~/.claude/${file}'`,
   `cd ~/.claude && eval 'rm ${file}'`,
+];
+
+const UNREAD_LOG_REASON = 'This command runs code the ledger root check cannot read, and that code names the root log or its report offset, which only the ledger hooks may write. To read the log, run cat or less on it alone.';
+
+/** Interpreter code that names the root log or its offset file, which the hook cannot tell a read from a write. */
+const unreadLogPrograms = (file: string): string[] => [
   `python3 -c "open('$HOME/.claude/${file}', 'w')"`,
+  `cat ~/.claude/${file} | python3 -m json.tool`,
 ];
 
 for (const rootOn of [false, true]) {
@@ -374,6 +381,7 @@ for (const rootOn of [false, true]) {
         assert.equal(denied(await gate(h, clock, h, tool, { file_path: path.join(h, '.claude', file), content: '' })), LOG_REASON, `${tool} ${file}`);
       }
       for (const command of logWrites(file)) assert.equal(denied(await gate(h, clock, h, 'Bash', { command })), LOG_REASON, command);
+      for (const command of unreadLogPrograms(file)) assert.equal(denied(await gate(h, clock, h, 'Bash', { command })), UNREAD_LOG_REASON, command);
     }
     assert.deepEqual(logged(h), []);
   });

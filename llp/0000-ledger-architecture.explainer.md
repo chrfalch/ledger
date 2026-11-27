@@ -751,9 +751,14 @@ because its turn end does not clear the session.
   `ledger root status` and removing the marker stay allowed.
 
   The check catches the usual ways an agent writes these commands. It is
-  not a sandbox. It does not see a script file that the agent writes and
-  then runs, a path built from a variable or a command substitution, or a
-  write by awk, php or lua. Two sessions that start at the same time may
+  not a sandbox. Inline or piped interpreter code is judged by the file
+  names in it, so a read that names one of those files is denied too, and
+  so is code that names a file of the same name elsewhere. Among what it
+  does not see: a script file that the agent writes and then runs, a path
+  built from a variable or a command substitution, a write by awk, php or
+  lua, rsync's `--log-file` and `--remove-source-files`, a backslash
+  inside a path, a `cd` inside `eval`, and a second quoted prefix such as
+  `'sudo' 'rm'`. Two sessions that start at the same time may
   both list the same allowed calls. A Bash call that `derived-data-gate.sh`
   and one of these checks would both deny is logged by each, so it is
   listed twice.
