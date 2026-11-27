@@ -34,6 +34,7 @@ import {
   parkFailedMessage,
   removedFolderMessage,
   retireHint,
+  ROOT_USAGE,
   SCAN_DROPPED,
   skillFailedMessage,
   slugExpectedMessage,
@@ -440,12 +441,25 @@ function answerOf($: EngineInterface, command: string, args: string | undefined)
       return ledgerText($, ['task', 'retire', ...given], LONG_TIMEOUT_MS)
     case 'ledger:help':
       return Promise.resolve(HELP)
+    case 'ledger:root': {
+      const args = rootArgs(given)
+      return args === undefined ? Promise.resolve(ROOT_USAGE) : ledgerText($, args)
+    }
   }
   return undefined
 }
 
+/** /ledger:root takes `[<minutes>|off|status]`; with no argument it is `ledger root on`. */
+function rootArgs(given: string[]): string[] | undefined {
+  if (given.length === 0) return ['root', 'on']
+  if (given.length > 1) return undefined
+  const [word] = given
+  if (word === 'off' || word === 'status') return ['root', word]
+  return /^\d+$/.test(word) ? ['root', 'on', '--minutes', word] : undefined
+}
+
 // /ledger:next is typed-only too, unless the operator just picked the clear-point option: its own Skill hook decides.
-const TYPED_ONLY = new Set(['ledger:close', 'ledger:park', 'ledger:fleet'])
+const TYPED_ONLY = new Set(['ledger:close', 'ledger:park', 'ledger:fleet', 'ledger:root'])
 
 /** The operator's answers in a question box. An answer the box gave itself after the operator was away is not the operator's. */
 function operatorAnswers(asked: ToolCallResult<'AskUserQuestion'>): string[] {
@@ -653,7 +667,7 @@ export const register: Register = (on, options) => {
     return next.called ? next(e) : { text: lookupFailedMessage(next.error.message ?? next.error.kind) }
   })
 
-  for (const command of ['ledger:all', 'ledger:archive', 'ledger:parent', 'ledger:worktrees', 'ledger:retire', 'ledger:help']) {
+  for (const command of ['ledger:all', 'ledger:archive', 'ledger:parent', 'ledger:worktrees', 'ledger:retire', 'ledger:help', 'ledger:root']) {
     // Typed as always a string, but `claude plugin test` leaves it undefined when the caller omits it.
     on('command.run', { command }, async ($, e) => ({ text: (await answerOf($, command, e.args)) ?? '' }))
   }

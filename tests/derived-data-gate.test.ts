@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 
+import { rootState } from '../tools/ledger/root.js';
 import { REPO } from './helpers.js';
 
 const DERIVED_DATA_GATE = path.join(REPO, 'hooks/derived-data-gate.sh');
@@ -279,4 +280,96 @@ test('the app build folder is allowed when a quoted -workspace path has a space'
   const workspace = path.join(app.dir, 'App.xcworkspace');
   assertAllowed(gate(root, session.dir, `xcodebuild -workspace "${workspace}" -derivedDataPath "${app.buildFolder}"`));
   assertAllowed(gate(root, session.dir, `xcodebuild -workspace '${workspace}' -derivedDataPath '${app.buildFolder}'`));
+});
+
+const nowEpoch = (): number => Math.floor(Date.now() / 1000);
+const iso = (epoch: number): string => new Date(epoch * 1000).toISOString();
+
+/** The marker `ledger root on` writes, switched on now and ending at `untilEpoch`, in the .claude folder of HOME `root`. */
+function rootMarker(root: string, untilEpoch: number): void {
+  mkdirSync(path.join(root, '.claude'), { recursive: true });
+  const sinceEpoch = nowEpoch();
+  writeFileSync(path.join(root, '.claude/ledger-root.json'), JSON.stringify({ since: iso(sinceEpoch), sinceEpoch, until: iso(untilEpoch), untilEpoch }));
+}
+
+const rootLog = (root: string): string => path.join(root, '.claude/ledger-root.log');
+
+test('a build folder elsewhere is allowed while ledger root is on, and the call is logged', (t) => {
+  const { root, session } = repositories(t);
+  rootMarker(root, Math.floor(Date.now() / 1000) + 3600);
+  const command = 'xcodebuild -derivedDataPath /tmp/x';
+  const before = Math.floor(Date.now() / 1000) * 1000;
+
+  assertAllowed(gate(root, session.dir, command));
+
+  const lines = readFileSync(rootLog(root), 'utf8').split('\n').filter((line) => line !== '');
+  assert.equal(lines.length, 1);
+  const entry = JSON.parse(lines[0]);
+  assert.deepEqual(Object.keys(entry), ['at', 'tool', 'cwd', 'reason', 'command']);
+  assert.match(entry.at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+  assert.ok(Date.parse(entry.at) >= before && Date.parse(entry.at) <= Date.now(), entry.at);
+  assert.equal(entry.tool, 'Bash');
+  assert.equal(entry.cwd, session.dir);
+  assert.match(entry.reason, /^Build folder is not reusable: \/tmp\/x/);
+  assert.equal(entry.command, command);
+});
+
+test('a build folder elsewhere stays denied while ledger root is on when the root log cannot be written', (t) => {
+  const { root, session } = repositories(t);
+  rootMarker(root, nowEpoch() + 3600);
+  mkdirSync(rootLog(root));
+
+  const reason = assertDenied(gate(root, session.dir, 'xcodebuild -derivedDataPath /tmp/x'));
+  assert.match(reason, /^Ledger root is on, but the root log could not be written, so this call is denied/);
+  assert.match(reason, /\nBuild folder is not reusable: \/tmp\/x/);
+});
+
+const validMarker = (now: number): string => JSON.stringify({ sinceEpoch: now - 60, untilEpoch: now + 60 });
+
+/**
+ * Markers that tools/ledger/root.ts and this hook must read alike, as written at `now`, the current second: on only for
+ * one JSON document whose whole-number sinceEpoch and untilEpoch hold now, at most 240 minutes apart.
+ */
+const ROOT_MARKERS: { name: string; on: boolean; text: (now: number) => string }[] = [
+  { name: 'as ledger root on writes it', on: true, text: (now) => JSON.stringify({ since: iso(now), sinceEpoch: now, until: iso(now + 1800), untilEpoch: now + 1800 }) },
+  { name: 'with no since or until text', on: true, text: validMarker },
+  { name: 'with since text that is no time', on: true, text: (now) => JSON.stringify({ since: 'soon', sinceEpoch: now - 60, untilEpoch: now + 60 }) },
+  { name: 'spanning exactly 240 minutes', on: true, text: (now) => JSON.stringify({ sinceEpoch: now - 60, untilEpoch: now - 60 + 14_400 }) },
+  { name: 'with whole numbers written as decimals', on: true, text: (now) => `{"sinceEpoch":${now - 60}.0,"untilEpoch":${now + 60}.0}` },
+  { name: 'after a byte order mark', on: true, text: (now) => `\uFEFF${validMarker(now)}` },
+  { name: 'with untilEpoch twice, the last one valid', on: true, text: (now) => `{"sinceEpoch":${now - 60},"untilEpoch":"soon","untilEpoch":${now + 60}}` },
+  { name: 'with no sinceEpoch', on: false, text: (now) => JSON.stringify({ since: iso(now - 60), untilEpoch: now + 60 }) },
+  { name: 'with no untilEpoch', on: false, text: (now) => JSON.stringify({ sinceEpoch: now - 60, until: iso(now + 60) }) },
+  { name: 'with a fractional end', on: false, text: (now) => JSON.stringify({ sinceEpoch: now - 60, untilEpoch: now + 60.5 }) },
+  { name: 'with a fractional start', on: false, text: (now) => JSON.stringify({ sinceEpoch: now - 60.5, untilEpoch: now + 60 }) },
+  { name: 'with an end that is a string', on: false, text: (now) => JSON.stringify({ sinceEpoch: now - 60, untilEpoch: String(now + 60) }) },
+  { name: 'with a start that is a string', on: false, text: (now) => JSON.stringify({ sinceEpoch: String(now - 60), untilEpoch: now + 60 }) },
+  { name: 'with a huge end', on: false, text: (now) => `{"sinceEpoch":${now - 60},"untilEpoch":1e20}` },
+  { name: 'with a huge negative start', on: false, text: (now) => `{"sinceEpoch":-1e20,"untilEpoch":${now + 60}}` },
+  { name: 'with an end too large to be finite', on: false, text: (now) => `{"sinceEpoch":${now - 60},"untilEpoch":1e999}` },
+  { name: 'with a start in the future', on: false, text: (now) => JSON.stringify({ sinceEpoch: now + 600, untilEpoch: now + 1200 }) },
+  { name: 'that has expired', on: false, text: (now) => JSON.stringify({ sinceEpoch: now - 120, untilEpoch: now - 60 }) },
+  { name: 'spanning more than 240 minutes', on: false, text: (now) => JSON.stringify({ sinceEpoch: now - 60, untilEpoch: now - 60 + 14_401 }) },
+  { name: 'as two documents', on: false, text: (now) => validMarker(now).repeat(2) },
+  { name: 'as an expired document before a valid one', on: false, text: (now) => `{"sinceEpoch":0,"untilEpoch":1}\n${validMarker(now)}` },
+  { name: 'that is not JSON', on: false, text: () => 'not json' },
+  { name: 'that is empty', on: false, text: () => '' },
+  { name: 'that is null', on: false, text: () => 'null' },
+  { name: 'that is an array holding a valid marker', on: false, text: (now) => `[${validMarker(now)}]` },
+];
+
+const logLines = (root: string): number => (existsSync(rootLog(root)) ? readFileSync(rootLog(root), 'utf8').split('\n').filter((line) => line !== '').length : 0);
+
+test('tools/ledger/root.ts and this hook read each ledger root marker alike', async (t) => {
+  const { root, session } = repositories(t);
+  mkdirSync(path.join(root, '.claude'));
+  for (const { name, on, text } of ROOT_MARKERS) {
+    await t.test(`a marker ${name} is ${on ? 'on' : 'off'} for both`, () => {
+      writeFileSync(path.join(root, '.claude/ledger-root.json'), text(nowEpoch()));
+      const logged = logLines(root);
+      const hookAllows = gate(root, session.dir, 'xcodebuild -derivedDataPath /tmp/x') === '';
+      assert.deepEqual({ 'root.ts': rootState(root, new Date()).on, 'derived-data-gate.sh': hookAllows }, { 'root.ts': on, 'derived-data-gate.sh': on });
+      assert.equal(logLines(root), logged + (on ? 1 : 0));
+    });
+  }
 });

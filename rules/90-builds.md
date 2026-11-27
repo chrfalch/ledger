@@ -35,4 +35,4 @@ and the scratchpad root held 23 GB.
   override it.
 
 A `PreToolUse` hook denies any other `-derivedDataPath`. The deny message names the
-path to use.
+path to use. When the operator types `/ledger:root`, the hook allows it for a while.
