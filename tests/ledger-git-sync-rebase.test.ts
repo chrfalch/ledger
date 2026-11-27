@@ -105,16 +105,18 @@ for (const [what, files] of LEFTOVERS) {
 
     assertPulled(s);
   });
-
-  test(`the session-start pull clears a leftover rebase with ${what} when nothing is unpushed, and pulls`, (t) => {
-    const s = behindOrigin(t);
-    leaveRebase(s.b, files(s));
-
-    hookContext(s.b);
-
-    assertPulled(s);
-  });
 }
+
+// The pull of session-start clears a leftover by the same check as ledger store sync, so one shape shows it is called.
+const [sessionWhat, sessionFiles] = LEFTOVERS[LEFTOVERS.length - 1];
+test(`the session-start pull clears a leftover rebase with ${sessionWhat} when nothing is unpushed, and pulls`, (t) => {
+  const s = behindOrigin(t);
+  leaveRebase(s.b, sessionFiles(s));
+
+  hookContext(s.b);
+
+  assertPulled(s);
+});
 
 // A rebase starts only for commits made here, so a rebase that git was stopped in always has a commit not pushed yet.
 const UNPUSHED_LEFTOVERS: [what: string, files: (s: Behind, mine: string) => Record<string, string>][] = [

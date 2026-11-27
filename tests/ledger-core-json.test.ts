@@ -4,6 +4,7 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { REPO } from './helpers.js';
 import { fileStore } from '../tools/ledger/file-store.js';
+import { limitLockWaitForTests } from '../tools/ledger/lock.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { activeFile, archivedTask, backlogTask, git, home, ledgerText, lineWith, ok, readLedgerFile, recordFile, repoKeyOf, repository, runInProcess, storeFolder, worktreeOf, worktreeTask, writeLedgerFile, type Fields, type Ran } from './ledger-core-fixtures.js';
 
@@ -177,6 +178,8 @@ test('with --json, list and show give the task as done in the JSON, and print th
 });
 
 test('a merged PR whose done mark cannot be written fails neither list nor show: one warning line, and the task stays waiting', async (t) => {
+  const lockWaitMs = limitLockWaitForTests(200);
+  t.after(() => limitLockWaitForTests(lockWaitMs));
   const { h, app } = setup(t);
   stubGh(h, path.join(h, 'gh-calls'), prState('MERGED'));
   const file = locatedTask(h, app, 'review', '- status: waiting 2026-11-20', '- pr: 42');

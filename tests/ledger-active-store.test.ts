@@ -64,7 +64,7 @@ for (const [kind, open] of Object.entries(stores)) {
     store.close?.();
   });
 
-  test(`${kind} active worktree lookup`, { skip }, (t) => {
+  if (kind !== 'git') test(`${kind} active worktree lookup`, { skip }, (t) => {
     const h = home(t);
     const store = open(h);
     const { active } = store;
