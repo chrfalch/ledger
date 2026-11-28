@@ -63,6 +63,8 @@ export type Filled = {
   designRefs?: string | null;
   /** Replaces the value of the `- kind:` bullet, or is added at the end of ## Location. */
   kind?: string;
+  /** The `- labels:` bullet, written as `kind` is; none for an empty list. */
+  labels?: readonly string[];
 };
 
 const PLACEHOLDER_TITLE = /^# Task ledger[ \t]*[—-][ \t]*<.*>$/;
@@ -92,7 +94,11 @@ export function fillLedger(text: string, fields: Filled): string {
       return index === location?.start && fields.main !== undefined ? [...kept, `- main: ${fields.main}${cr}`] : kept;
     })
     .join('\n');
-  return fields.kind === undefined ? filled : (setLocationBullet(filled, 'kind', fields.kind) ?? filled);
+  const bullets: [string, string | undefined][] = [
+    ['kind', fields.kind],
+    ['labels', fields.labels?.length ? fields.labels.join(', ') : undefined],
+  ];
+  return bullets.reduce((text, [name, value]) => (value === undefined ? text : (setLocationBullet(text, name, value) ?? text)), filled);
 }
 
 /** `text` with a `- design refs:` bullet at the end of ## Location when that section has none; undefined without the section. */

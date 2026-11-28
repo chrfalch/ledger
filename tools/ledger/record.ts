@@ -1,6 +1,7 @@
 // @ref LLP 0001#4-storage — D29: each task is one structured record; the Markdown is a view rendered from it.
 import { isDeepStrictEqual } from 'node:util';
 import { fail, Failure } from './failure.js';
+import { isLabel } from './labels.js';
 import {
   claimText,
   findSection,
@@ -14,6 +15,7 @@ import {
   parseClaim,
   parseDependencies,
   parseDesignRefs,
+  parseLabels,
   parseLedger,
   parseLost,
   parseOrder,
@@ -52,6 +54,8 @@ export type TaskRecord = {
   slug: string;
   title?: string;
   kind?: string;
+  /** Absent for none, so a record never holds an empty list, which its Markdown could not tell from none. */
+  labels?: string[];
   /** A person's `- state:` line from before the status line; one with a status value reads as `status`. */
   state?: string;
   stage?: string;
@@ -97,6 +101,7 @@ const FIELDS = [
   'slug',
   'title',
   'kind',
+  'labels',
   'state',
   'stage',
   'reviewRounds',
@@ -168,7 +173,7 @@ function tidy(lines: readonly string[]): string[] {
   return kept;
 }
 
-type LocationKey = 'main' | 'worktree' | 'host' | 'branch' | 'base' | 'designRefs' | 'parent' | 'title' | 'kind' | 'state' | 'stage' | 'reviewRounds' | 'order' | 'dependencies' | 'claim' | 'pr' | 'repo' | 'status' | 'lost';
+type LocationKey = 'main' | 'worktree' | 'host' | 'branch' | 'base' | 'designRefs' | 'parent' | 'title' | 'kind' | 'labels' | 'state' | 'stage' | 'reviewRounds' | 'order' | 'dependencies' | 'claim' | 'pr' | 'repo' | 'status' | 'lost';
 
 /**
  * A `- <name>: <value>` bullet under ## Location. `template` is the value ledger.template.md gives it, which reads as
@@ -245,6 +250,7 @@ const BULLETS: Bullet[] = [
   bullet('parent', 'parent', parseRef, showRef),
   bullet('title', 'title', asText, asText),
   bullet('kind', 'kind', asText, asText),
+  bullet('labels', 'labels', parseLabels, (labels) => labels.join(', '), { written: false }),
   stateBullet,
   bullet('stage', 'stage', asText, asText),
   bullet('review rounds', 'reviewRounds', asCount, String),
@@ -576,6 +582,10 @@ const listOfChecks = (item: Check): Check => (value, where) => {
   if (!Array.isArray(value)) return invalid(where, 'is not a list');
   value.forEach((each, index) => item(each, `${where}[${index}]`));
 };
+const isLabels = passes(
+  (value) => Array.isArray(value) && value.length > 0 && value.every((label) => typeof label === 'string' && isLabel(label)) && new Set(value).size === value.length,
+  'is not a list of one or more distinct labels',
+);
 const isDesignRefs = passes((value) => value === 'none' || (Array.isArray(value) && value.every((ref) => typeof ref === 'string')), 'is not "none" or a list of strings');
 function shape(required: Record<string, Check>, optional: Record<string, Check> = {}): Check {
   return (value, where) => {
@@ -617,6 +627,7 @@ const isRecord = shape(
     dependencies: listOfChecks(shape({ slug: isSlug }, { repo: isKey })),
     base: shape({ ref: isText }, { commit: isText }),
     designRefs: isDesignRefs,
+    labels: isLabels,
     status: shape({ value: isOne(...STATUS_VALUES) }, { date: isDate, detail: isTrimmedLine }),
     lost: shape({ date: isText }),
   },

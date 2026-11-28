@@ -3,6 +3,7 @@ import { nextInTree, type NextInTree } from './finalize.js';
 import { isStatusValue, serializeLedger, type Claim } from './format.js';
 import type { SessionLedgers } from './hooks.js';
 import { isKind, STAGES } from './kinds.js';
+import { labelPainter, withLabels, type PaintLabels } from './labels.js';
 import { samePath } from './paths.js';
 import type { CheckedLine } from './pr-check.js';
 import { parseRecord, type TaskRecord } from './record.js';
@@ -135,16 +136,19 @@ const checkedItem = ({ text }: CheckedLine): string => item(text);
 /** The Needs you heading over the first `cap` of `items`; nothing for no item. */
 const needsSection = (items: readonly string[], cap: number): string[] => (items.length === 0 ? [] : ['Needs you:', ...capped(items, cap)]);
 
-function header(task: Task, record: TaskRecord): string {
+function header(task: Task, record: TaskRecord, paint: PaintLabels): string {
   const { kind, stage } = stageOf(record);
   const where = task.worktree === undefined ? '' : ` in ${task.worktree}`;
-  return `Task ${task.slug}${where} — ${task.status}, stage ${stage} (${kind}). Details: \`ledger show\`. Write with \`ledger notes\`, never by editing a file.`;
+  return `Task ${withLabels(task.slug, record.labels, paint)}${where} — ${task.status}, stage ${stage} (${kind}). Details: \`ledger show\`. Write with \`ledger notes\`, never by editing a file.`;
 }
+
+/** Each label after the square its name gives it, for a caller that passes no registry. */
+const SQUARES: PaintLabels = labelPainter(new Map(), 'square');
 
 const nextLine = (task: Task): string => `Next: ${task.ledger.next || 'none written'}`;
 
 /** The report for the one task a folder owns: what needs the operator, where the task is in its tree, and what comes next. */
-function taskReport(task: Task, tasks: Task[], heldElsewhere: HeldElsewhere, checked: readonly CheckedLine[]): string[] {
+function taskReport(task: Task, tasks: Task[], heldElsewhere: HeldElsewhere, checked: readonly CheckedLine[], paint: PaintLabels): string[] {
   const record = recordOf(task);
   const repo = task.currentRepo ?? task.repo;
   const known: Known = { tasks, repoOf: storedRepoOf(tasks, task.main === undefined ? undefined : { main: task.main, key: repo }) };
@@ -185,7 +189,7 @@ function taskReport(task: Task, tasks: Task[], heldElsewhere: HeldElsewhere, che
   const next = at === -1 || task.main === undefined ? undefined : nextInTree(tasks, { task, ref: { slug: task.slug, main: task.main } }, known.repoOf);
   const then = thenLine(next, at === children.length - 1, known);
   return [
-    header(task, record),
+    header(task, record, paint),
     ...(needs.length === 0 ? ['Needs you: nothing.'] : needsSection(needs, ITEM_CAP)),
     ancestors.length === 0 ? `Where: ${path} (no parent)` : `Where: ${path}`,
     ...(siblings.length === 0 ? [] : [`Siblings: ${siblingStates.join(', ')}`]),
@@ -195,20 +199,21 @@ function taskReport(task: Task, tasks: Task[], heldElsewhere: HeldElsewhere, che
 }
 
 /** Each task of a folder that owns several, with its Next step; the operator picks one. */
-function choiceReport(ledgers: Task[], checked: readonly CheckedLine[]): string[] {
+function choiceReport(ledgers: Task[], checked: readonly CheckedLine[], paint: PaintLabels): string[] {
   const needs = needsSection(checked.map(checkedItem), ITEM_CAP);
   // Two lines a task, and room for the line that says how many more and the question.
   const fits = Math.floor((REPORT_LINES - needs.length - 2) / 2);
   const more = ledgers.length > fits ? [`+${ledgers.length - fits} more`] : [];
-  return [...needs, ...ledgers.slice(0, fits).flatMap((task) => [header(task, recordOf(task)), nextLine(task)]), ...more, 'Ask the operator which task to continue.'];
+  return [...needs, ...ledgers.slice(0, fits).flatMap((task) => [header(task, recordOf(task), paint), nextLine(task)]), ...more, 'Ask the operator which task to continue.'];
 }
 
 /**
  * The SessionStart report for the ledgers a folder owns (D26). `tasks` are all known tasks, for the tree; `heldElsewhere`
- * gives the live claim of another session; `checked` is what the PR check of the session start found, a line each.
+ * gives the live claim of another session; `checked` is what the PR check of the session start found, a line each;
+ * `paint` shows a task's labels after its slug.
  */
-export function sessionReport({ tasks: ledgers }: SessionLedgers, tasks: Task[], heldElsewhere: HeldElsewhere, checked: readonly CheckedLine[] = []): string {
-  return (ledgers.length === 1 ? taskReport(ledgers[0], tasks, heldElsewhere, checked) : choiceReport(ledgers, checked)).join('\n');
+export function sessionReport({ tasks: ledgers }: SessionLedgers, tasks: Task[], heldElsewhere: HeldElsewhere, checked: readonly CheckedLine[] = [], paint = SQUARES): string {
+  return (ledgers.length === 1 ? taskReport(ledgers[0], tasks, heldElsewhere, checked, paint) : choiceReport(ledgers, checked, paint)).join('\n');
 }
 
 const PLACE_ORDER: Task['place'][] = ['active', 'backlog', 'archive'];
@@ -221,9 +226,9 @@ const TREES_NEEDS_CAP = REPORT_LINES - 6;
  * The open trees of the repo at `main`, for a session outside any task (D27), under what the PR check found (`checked`):
  * each root task that is live or has a live task below it; a lost task is not live. A task heads a tree unless its parent
  * in this repo lists it as a child, so a live task under a missing, lost or forgetful parent is never hidden. An active
- * task lives only in a linked worktree, so a record that names the main checkout is none.
+ * task lives only in a linked worktree, so a record that names the main checkout is none. `paint` shows a root's labels.
  */
-export function openTreesReport(tasks: Task[], main: string, checked: readonly CheckedLine[] = []): string {
+export function openTreesReport(tasks: Task[], main: string, checked: readonly CheckedLine[] = [], paint = SQUARES): string {
   const known: Known = { tasks, repoOf: storedRepoOf(tasks, { main, key: repoKey(main) }) };
   const here = tasks.filter((task) => inRepo(task, main, known.repoOf) && !(task.place === 'active' && task.worktree !== undefined && samePath(task.worktree, main)));
   // Every task of `here` is of the repo at `main`, so each walk below starts at `main`, never at a main a record names, which may be relative.
@@ -253,7 +258,7 @@ export function openTreesReport(tasks: Task[], main: string, checked: readonly C
     .sort((a, b) => rank(a) - rank(b) || a.slug.localeCompare(b.slug))
     .map((head) => {
       const children = openChildren(head, main, known).filter((child) => isLive(child.task)).length;
-      return `- ${head.slug} ${head.status}${children === 0 ? '' : ` — ${plural(children, 'open child', 'open children')}`}`;
+      return `- ${withLabels(head.slug, head.ledger.location.labels, paint)} ${head.status}${children === 0 ? '' : ` — ${plural(children, 'open child', 'open children')}`}`;
     });
   return [
     ...needs,

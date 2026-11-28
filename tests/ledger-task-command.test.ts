@@ -80,7 +80,7 @@ test('each document names the stored --base first when it describes where promot
 });
 
 test('the README /ledger:all row describes the one table ledger list prints', () => {
-  const row = read('README.md').match(/\| `\/ledger:all` \|[^|]*\|/)?.[0] ?? '';
+  const row = read('README.md').match(/\| `\/ledger:all[^`]*` \|[^|]*\|/)?.[0] ?? '';
   assert.match(row, /one table .*status: active, parked, backlog or retired\. The title line counts the live tasks: active, parked and backlog\./);
   assert.doesNotMatch(row, /section/);
 });

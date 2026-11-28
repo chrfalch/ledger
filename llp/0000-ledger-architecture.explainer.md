@@ -165,6 +165,7 @@ changes one item of the task record (D29 in LLP 0001):
 | `report --step <n> --file <path>`, `report --parent "<text>"` | sets the report of a step, or `## Report` |
 | `note "<text>"` | adds a line to the general notes |
 | `next "<text>"` | sets the next step |
+| `label add <label…>`, `label remove <label…>` | adds the labels the task lacks, after its others, and registers the colour of each label the registry lacks; removes labels, and fails, removing none, when the task lacks one |
 | `stage <stage> pass [--step <n>]`, `stage <stage> fail [--back <earlier>]`, `stage <stage> --skip "<reason>"` | records the outcome of the current stage, moves the stage, and adds a dated note |
 | `remove <kind> <n> [--dry-run]` | removes one step, decision, constraint, question or note; `--dry-run` prints it and writes nothing |
 
@@ -279,9 +280,10 @@ Three stores implement the interfaces:
   archive ledgers in `~/.claude/ledger-data`, a clone of a private GitHub repository.
   It is the file store with other folders. After a command writes, it commits
   once and starts `ledger store sync --quiet` in the background, so a command
-  never waits for the network. Only the ledgers, a
-  `.ledger-data` marker and a `.gitignore` are committed. Evidence, the
-  old task list and the repo aliases stay on this machine.
+  never waits for the network. Only the ledgers, the label colours in
+  `labels/<label>.json`, a `.ledger-data` marker and a `.gitignore` are
+  committed. Evidence, the old task list and the repo aliases stay on this
+  machine.
 
 `readStorage` in `tools/ledger/settings.ts` picks the store. It reads
 `"storage"` from `~/.claude/ledger-settings.json`. With no file and no key, the
@@ -300,6 +302,18 @@ that loses nothing (`clearLeftoverRebase` in `tools/ledger/clone.ts`; see
 the same secret scan (`tools/ledger/secret-scan.ts`). Both read a line of a task
 record also with its JSON escapes undone, so a secret after an escaped line
 break starts a line, as it does in Markdown.
+
+A rebase that stops on a conflict only in `labels/<label>.json` files, as when
+two machines first used one label before either synced, does not stop the
+sync: `resolveLabelConflicts` in `tools/ledger/sync.ts` stages, for each file,
+the entry with the earlier `firstUsed`, the lower colour on a tie (`earlier`
+in `tools/ledger/labels.ts`), and the rebase continues. A commit that then
+changes nothing is skipped. A conflict in any other file still aborts the
+rebase, as before. The `.gitignore`, the commit allowlist (`isAllowed` in
+`tools/ledger/clone.ts`) and the pre-push hook take `labels/<name>.json`,
+whose name is not `.` or `..` and holds no `/`, `\` or line break. A machine
+with an older ledger refuses to pull such a file, as it is outside that
+version's allowlist, until it is updated.
 
 `migrateStorage` in `tools/ledger/migrate.ts` copies everything from one store
 to another, between any two of the three. It reads every copy back before it
@@ -540,6 +554,18 @@ in `tools/ledger/format.ts` reads for the task list and the task record alike.
 `- design refs: 3, 12` gives `["3", "12"]`, each ref as written.
 `- design refs: none` gives `"none"`. A ledger with no such line, or with the
 template's placeholder, has no `designRefs` key.
+
+Each row also has `labels`, the labels of the ledger's `- labels:` line in
+their order, `[]` for none (D53 in LLP 0001; `parseLabels` in
+`tools/ledger/format.ts`). A line with a value that is no label, or a label
+twice, is no labels line, and the record keeps it as a note. `ledger list
+--json` also has `labelColours`, an object with a key for each label its rows
+carry: `{"square": "🟦", "hex": "#4a90d9"}`, the registered colour, or the
+fallback colour of its name while the registry lacks it. The rows of
+`ledger task archive --json` and the children of `ledger tree show --json`
+have `labels` too, and so has the `ledger` of a `ledger worktrees --json` row.
+`--label <l>` on each of those commands, repeatable, keeps the rows that carry
+every label named.
 
 Older versions kept a cache of it, the registry: `~/.claude/ledgers.json`, the
 `registry` table of `~/.claude/ledgers.db`, or `~/.claude/ledgers-git.json`.
@@ -1084,6 +1110,7 @@ the operator approves it.
 | Archive evidence | `~/.claude/ledger-archive/<repo key>/<YYYY-MM-DD>-<slug>/` | `~/.claude/ledgers.db`, as bytes | `~/.claude/ledger-evidence/<repo key>/<YYYY-MM-DD>-<slug>/`, never committed |
 | Old task list, read-only | `~/.claude/ledgers.json` | `~/.claude/ledgers.db`, table `registry`, only in a database an older version made | `~/.claude/ledgers-git.json`, never committed |
 | Repo aliases | `~/.claude/ledger-aliases.json` | `~/.claude/ledgers.db` | `~/.claude/ledger-aliases-git.json`, never committed |
+| Label colours (D53), `{"colour": <palette index>, "firstUsed": <ISO time>}` a label | `~/.claude/ledger-labels/<label>.json` | `~/.claude/ledgers.db`, table `labels` | `~/.claude/ledger-data/labels/<label>.json`, committed |
 | Active ledger | `~/.claude/ledger-active/<repo key>/<slug>.json` | `~/.claude/ledgers.db`, table `records` | `~/.claude/ledger-data/active/<repo key>/<slug>.json`, committed |
 | Store setting | `~/.claude/ledger-settings.json` | the same file | the same file |
 

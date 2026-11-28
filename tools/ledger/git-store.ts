@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { lstatSync } from 'node:fs';
 import path from 'node:path';
-import { aliasMoves, checkCommitted, cloneEnv, cloneGit, clonePaths, commitChanges, hiddenMoveRemovals, otherOwner, recordProblem, removeLegacyCopies, repairHook, setUpClone, shownPaths, SyncProblem, uncommittedMoves, upgradeFormat, withCloneLock } from './clone.js';
+import { aliasMoves, checkCommitted, cloneEnv, cloneGit, clonePaths, commitChanges, hiddenMoveRemovals, LABELS, otherOwner, recordProblem, removeLegacyCopies, repairHook, setUpClone, shownPaths, SyncProblem, uncommittedMoves, upgradeFormat, withCloneLock } from './clone.js';
 import { fail, Failure } from './failure.js';
 import { fileStoreAt, keptCreated } from './file-store.js';
 import { folderEntries } from './files.js';
@@ -56,7 +56,7 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
   const clone = setUpClone(paths);
   if (!readOnly) repairHook(clone);
   const { evidence, registry, aliases } = clonePaths(paths);
-  const files = fileStoreAt({ backlog: path.join(clone, 'backlog'), active: path.join(clone, 'active'), archive: path.join(clone, 'archive'), evidence, registry, aliases });
+  const files = fileStoreAt({ backlog: path.join(clone, 'backlog'), active: path.join(clone, 'active'), archive: path.join(clone, 'archive'), evidence, registry, aliases, labels: path.join(clone, LABELS) });
   /** The clone paths of the record of a ledger and of the Markdown it replaces, both of which a write changes. */
   const ledgerFiles = (collection: WrittenLedger['place'], repo: string, name: string): string[] => {
     const record = path.relative(clone, files[collection].location(repo, name)).replace(/\.(md|json)$/, '');
@@ -154,6 +154,13 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
     const entries = folderEntries(files.active.repoLocation(repo));
     return entries.some((entry) => entry.isFile() && entry.name.endsWith('.json')) || !entries.some((entry) => entry.isDirectory());
   };
+  const writeLabels = (write: () => void): void =>
+    withCloneLock(clone, () => {
+      const folder = path.join(clone, LABELS);
+      if (lstatSync(folder, { throwIfNoEntry: false })?.isSymbolicLink()) fail(`${folder} is a symbolic link, so git storage writes no label colour through it. Replace it with a folder.`);
+      write();
+      wrote = true;
+    });
   return {
     host,
     ownHosts: hosts,
@@ -168,6 +175,11 @@ export function gitStore(paths: LedgerPaths, { backgroundSync, readOnly = false 
     },
     oldTaskList: files.oldTaskList,
     aliases: files.aliases,
+    labels: {
+      read: files.labels.read,
+      register: (labels, firstUsed) => writeLabels(() => files.labels.register(labels, firstUsed)),
+      copy: (entries) => writeLabels(() => files.labels.copy(entries)),
+    },
     sharesFolder: files.sharesFolder,
     commit,
     commitPending: (from, to) =>

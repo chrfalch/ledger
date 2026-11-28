@@ -1,5 +1,6 @@
 import { statSync } from 'node:fs';
 import path from 'node:path';
+import { isLabel } from './labels.js';
 import { absoluteMain } from './paths.js';
 
 // Not starting with a dot, so a slug never names ., .. or a hidden folder when it becomes a worktree folder.
@@ -43,6 +44,7 @@ export type Location = {
   base?: { ref: string; commit?: string };
   main?: string;
   designRefs?: string[] | 'none';
+  labels?: string[];
   /** A `- main:` value that is a relative path, such as `.`: it names no main, as it would resolve against the cwd. */
   relativeMain?: string;
   /** The line of `- main:`, also when its value names no main. */
@@ -171,6 +173,12 @@ export function parseDesignRefs(text: string): string[] | 'none' | undefined {
   if (text === 'none') return 'none';
   const refs = text.split(',').map((ref) => ref.trim());
   return refs.includes('') ? undefined : refs;
+}
+
+/** The value of a `- labels:` bullet: each comma-separated label; undefined unless each is a label, and none repeats. */
+export function parseLabels(text: string): string[] | undefined {
+  const labels = text.split(',').map((label) => label.trim());
+  return labels.every(isLabel) && new Set(labels).size === labels.length ? labels : undefined;
 }
 
 export const showDependencies = (dependencies: readonly Dependency[]): string => dependencies.map(({ slug, repo }) => (repo === undefined ? slug : `${slug} @ ${repo}`)).join(', ');
@@ -338,6 +346,9 @@ function parseLocation(plain: string[], range: number[], home: string | undefine
     } else if (name === 'design refs' && location.designRefs === undefined) {
       const designRefs = parseDesignRefs(value);
       if (designRefs !== undefined) location.designRefs = designRefs;
+    } else if (name === 'labels' && location.labels === undefined) {
+      const labels = parseLabels(value);
+      if (labels !== undefined) location.labels = labels;
     } else if (name === 'depends on' && location.dependencies === undefined) {
       const dependencies = parseDependencies(value);
       if (dependencies !== undefined) location.dependencies = dependencies;

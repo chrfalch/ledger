@@ -1,6 +1,6 @@
 ---
-description: List this repo's archived ledgers, newest first, one line each. A term keeps the ledgers that contain it, in any case, and shows the first matching line. `--all` lists every repo.
-argument-hint: "[<term>] [--all]"
+description: List this repo's archived ledgers, newest first, one line each. A term keeps the ledgers that contain it, in any case, and shows the first matching line. `--all` lists every repo. `--label <label>`, repeatable, keeps the ledgers that carry every label named.
+argument-hint: "[<term>] [--all] [--label <label>]…"
 ---
 
 The ledger mod's hook answers this command, so this text reaches you only when

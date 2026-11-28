@@ -1419,6 +1419,11 @@ function recording(inner: LedgerStore): { store: LedgerStore; calls: string[] } 
       remove: (old, key) => (note('aliases.remove', old, key), inner.aliases.remove(old, key)),
       replace: (removed, added) => (note('aliases.replace'), inner.aliases.replace(removed, added)),
     },
+    labels: {
+      read: () => (note('labels.read'), inner.labels.read()),
+      register: (labels, firstUsed) => (note('labels.register'), inner.labels.register(labels, firstUsed)),
+      copy: (entries) => (note('labels.copy'), inner.labels.copy(entries)),
+    },
   };
   return { store, calls };
 }

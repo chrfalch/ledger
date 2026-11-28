@@ -8,6 +8,7 @@ import { fileStoreRoots } from './file-store.js';
 import { folderEntries } from './files.js';
 import { logHookFailure, markHookFailuresReported, unreportedHookFailures } from './hook-failures.js';
 import { parseLedger, type Claim } from './format.js';
+import { labelPainter, type PaintLabels } from './labels.js';
 import { checkoutRoot, gitTimedOut, inMainCheckout, limitGitCalls, mainCheckout, worktrees } from './git.js';
 import { limitLockWaits, lockFile, reclaimGuard } from './lock.js';
 import { conversionHint } from './migrate-repo-ids.js';
@@ -138,6 +139,9 @@ function unmovedHint(store: LedgerStore, cwd: string): string | undefined {
   return count === 0 ? undefined : `${plural(count, 'ledger')} still kept in .claude/ledger.md; run \`ledger store migrate --active\`.`;
 }
 
+/** The report goes to the model, which reads no escape codes, so a label is always its square and name. */
+const squares = (store: LedgerStore): PaintLabels => labelPainter(store.labels.read(), 'square');
+
 /**
  * The report on the task the folder owns (D26), else the open trees of the repo at `main` (D27); undefined outside a
  * repo. A main checkout owns no task, so it gets the trees. `checked` is what the PR check found, for its Needs you section.
@@ -147,9 +151,9 @@ function awarenessText(input: HookInput, context: HookContext, found: SessionLed
     let clock: ClaimClock | undefined;
     const heldElsewhere = ({ ledger: { location } }: Task): Claim | undefined =>
       location.claim && otherClaim(location.claim, input.sessionId || undefined, (clock ??= claimClock(context.paths.home)));
-    return sessionReport(found, tasks, heldElsewhere, checked);
+    return sessionReport(found, tasks, heldElsewhere, checked, squares(context.store));
   }
-  return main === undefined ? undefined : openTreesReport(tasks, main, checked);
+  return main === undefined ? undefined : openTreesReport(tasks, main, checked, squares(context.store));
 }
 
 /**
@@ -1432,9 +1436,9 @@ function ledgerWriteReason(input: HookInput, context: HookContext): string | und
 
 /** Each file and folder of the ledger store, under each storage, with the files beside git storage's clone. */
 function storePaths(paths: LedgerPaths): string[] {
-  const { backlog, active, archive, registry, aliases } = fileStoreRoots(paths);
+  const { backlog, active, archive, registry, aliases, labels } = fileStoreRoots(paths);
   const database = sqliteFile(paths.home);
-  return [backlog, active, archive, registry, aliases, ...Object.values(clonePaths(paths)), ...['', '-wal', '-shm', '-journal'].map((suffix) => `${database}${suffix}`)];
+  return [backlog, active, archive, registry, aliases, labels, ...Object.values(clonePaths(paths)), ...['', '-wal', '-shm', '-journal'].map((suffix) => `${database}${suffix}`)];
 }
 
 /** As bash matches a path segment: a glob by its pattern, with a leading dot matched only by a leading dot. */

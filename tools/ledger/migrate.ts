@@ -5,6 +5,7 @@ import { redacted } from './clone.js';
 import { fail } from './failure.js';
 import { exists, holdsAnything } from './files.js';
 import { parseLedger } from './format.js';
+import type { LabelColour } from './labels.js';
 import { openStore } from './open-store.js';
 import type { LedgerPaths } from './paths.js';
 import { readStorage, shownSettingsFile, writeStorage, type Storage } from './settings.js';
@@ -58,8 +59,8 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 
 /**
  * `ledger store migrate --to <storage> [--from <storage>] [--remove-source] [--dry-run]`: copies backlog and active ledgers, the
- * archive copies with their evidence, and the aliases from one storage to another, reads every copy back, and only then
- * switches the setting and, with `removeSource`, removes what was copied. Exits 1 with nothing changed when the target
+ * archive copies with their evidence, the aliases and the label colours from one storage to another, reads every copy
+ * back, and only then switches the setting and, with `removeSource`, removes what was copied. Exits 1 with nothing changed when the target
  * has a name to copy, and when a copy fails or reads back different: then it removes every copy it made first. Prints
  * one line per step to `line`. When git storage changed, it then pushes, and a failed push is reported, not a failure.
  * `open` is for tests.
@@ -155,7 +156,9 @@ function migrate({ paths, from, to, setting, source, target, evidenceRoot, line,
       `ledger store migrate stopped: ${reason} ${undone} The setting stays "${setting}", and nothing was removed from the ${STORAGE_NAME[from]}.`;
     const kept = target.aliases.read();
     const aliases = [...source.aliases.read()].filter(([old]) => !kept.has(old));
-    copyChecked(source, target, { ...ledgers, aliases, evidenceRoot, targetName: STORAGE_NAME[to] }, stopped);
+    const registered = target.labels.read();
+    const labels = [...source.labels.read()].filter(([label]) => !registered.has(label));
+    copyChecked(source, target, { ...ledgers, aliases, labels, evidenceRoot, targetName: STORAGE_NAME[to] }, stopped);
   }
   line(`${act('copied', 'copy')} ${plural(backlog.length, 'backlog ledger')}`);
   line(`${act('copied', 'copy')} ${plural(active.length, 'active ledger')}`);
@@ -192,7 +195,8 @@ type Copied = Record<WrittenLedger['place'], StoredLedger[]>;
 /** What a copy wrote to the target, so a copy that stops can take it back: aliases, by old key and key, too. */
 type Written = Copied & { aliases: [string, string][] };
 
-type Planned = Written & { evidenceRoot: string };
+/** `labels` are the label colours the target lacks; one it has keeps its own colour. */
+type Planned = Written & { labels: [string, LabelColour][]; evidenceRoot: string };
 
 const evidenceFolder = (evidenceRoot: string, index: number): string => path.join(evidenceRoot, String(index));
 
@@ -256,6 +260,8 @@ function copy(source: LedgerStore, target: LedgerStore, planned: Planned, writte
     written.archive.push(ledger);
     target.archive.setModified?.(repo, name, mtimeMs);
   });
+  // After the ledgers, so a ledger copy that fails leaves no label colour behind: undo takes back none.
+  target.labels.copy(planned.labels);
 }
 
 type Removal = 'removed' | 'changed' | 'hidden';
@@ -298,12 +304,17 @@ function undo(target: LedgerStore, written: Written, targetName: string): string
   }
 }
 
-/** What reads back from `target` unlike the source: a ledger's text, or an evidence tree or file. */
+/** What reads back from `target` unlike the source: a ledger's text, an evidence tree or file, or a label colour. */
 function check(source: LedgerStore, target: LedgerStore, planned: Planned): string[] {
   const differs: string[] = [];
   const { archive, evidenceRoot } = planned;
   for (const place of slugPlaces) {
     for (const ledger of planned[place]) if (target[place].read(ledger.repo, ledger.name)?.text !== ledger.text) differs.push(`${place} ${shortName(ledger)}`);
+  }
+  const registered = target.labels.read();
+  for (const [label, { colour, firstUsed }] of planned.labels) {
+    const copied = registered.get(label);
+    if (copied?.colour !== colour || copied.firstUsed !== firstUsed) differs.push(`label ${label}`);
   }
   archive.forEach((ledger, index) => {
     const { repo, name } = ledger;

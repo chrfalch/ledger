@@ -4,11 +4,12 @@ import { fail, Failure } from './failure.js';
 import { exists } from './files.js';
 import { parseLedger } from './format.js';
 import { isKind, KINDS, STAGES } from './kinds.js';
+import { labelsOf } from './labels.js';
 import { CITATION_ADVICE, realPath, SESSION_CITATION } from './paths.js';
 import { parseRecord, renderRecord, validateRecord, type Constraint, type Decision, type Question, type Step, type TaskRecord } from './record.js';
 import { checkTransition, stateOf } from './states.js';
 import { notOnThisMachine, type Task } from './tasks.js';
-import { currentTask, liveTask, readLedger, today, updateLedger, type Context } from './write.js';
+import { currentTask, liveTask, readLedger, registerLabels, today, updateLedger, type Context } from './write.js';
 
 export const TAGS = ['observed', 'confirmed', 'inferred'] as const;
 export type Tag = (typeof TAGS)[number];
@@ -250,6 +251,39 @@ export function addNote(context: Context, name: string | undefined, text: string
 }
 
 export const addNoteText = ({ slug }: ReturnType<typeof addNote>): string => `Added a note to ${slug}.`;
+
+/** Adds each of `given` the task lacks, after its labels, and gives each that the registry lacks its colour (D53). */
+export function addLabels(context: Context, name: string | undefined, given: string[]) {
+  const wanted = labelsOf(given);
+  const written = write(context, name, (record) => {
+    const had = record.labels ?? [];
+    const added = wanted.filter((label) => !had.includes(label));
+    record.labels = [...had, ...added];
+    return { labels: record.labels, added };
+  });
+  registerLabels(context.store, wanted);
+  return written;
+}
+
+export const addLabelsText = ({ slug, added, labels }: ReturnType<typeof addLabels>): string =>
+  added.length === 0 ? `${slug} has those labels already: ${labels.join(', ')}.` : `Added ${added.join(', ')} to ${slug}, which now has the labels ${labels.join(', ')}.`;
+
+/** Removes each of `given` from the task's labels; a label it lacks fails, and nothing is written. Its colour stays registered. */
+export function removeLabels(context: Context, name: string | undefined, given: string[]) {
+  const unwanted = labelsOf(given);
+  return write(context, name, (record, task) => {
+    const had = record.labels ?? [];
+    const missing = unwanted.filter((label) => !had.includes(label));
+    if (missing.length > 0) fail(`${task.slug} has no label ${missing.join(', ')}, so no label was removed. Its labels: ${had.join(', ') || 'none'}.`);
+    const labels = had.filter((label) => !unwanted.includes(label));
+    if (labels.length === 0) delete record.labels;
+    else record.labels = labels;
+    return { labels, removed: unwanted };
+  });
+}
+
+export const removeLabelsText = ({ slug, removed, labels }: ReturnType<typeof removeLabels>): string =>
+  `Removed ${removed.join(', ')} from ${slug}, which now has ${labels.length === 0 ? 'no labels' : `the labels ${labels.join(', ')}`}.`;
 
 export function setNext(context: Context, name: string | undefined, text: string) {
   const next = given(text, 'The next step');

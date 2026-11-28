@@ -1,6 +1,6 @@
 ---
-description: Write a backlog ledger for a separate task, with no worktree or branch yet; `/ledger:go <slug>` starts it. With no current ledger, it starts the task at once and continues in this session. `--stack` makes its worktree and branch at once, on top of the current branch. `--here [<slug>]` adds a ledger to the current linked worktree instead.
-argument-hint: "<what the task is> | --here [<slug>]"
+description: Write a backlog ledger for a separate task, with no worktree or branch yet; `/ledger:go <slug>` starts it. With no current ledger, it starts the task at once and continues in this session. `--stack` makes its worktree and branch at once, on top of the current branch. `--here [<slug>]` adds a ledger to the current linked worktree instead. Labels the operator names, such as sdk-59, go on the task.
+argument-hint: "<what the task is> [labels: <label>, …] | --here [<slug>]"
 ---
 
 The operator asks for a separate task: $ARGUMENTS
@@ -71,6 +71,9 @@ parent task.
    If step 4 picked LLPs, add `--design-refs` with their numbers,
    comma-separated, such as `--design-refs 3,12`. The script writes them on
    the `- design refs:` line of the new ledger.
+
+   If the operator named labels for the task, add `--label <label>` for
+   each, such as `--label sdk-59`. Add no label the operator did not name.
 
    Pick the kind of task from the goal, and always add `--kind` with it.
    Use `docs` when the work changes only documentation. Use `investigation`

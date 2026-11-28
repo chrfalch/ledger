@@ -19,6 +19,7 @@ import { limitGitCalls, mainCheckout, resetGitLimits } from './git.js';
 import { logHookFailure, oneLine } from './hook-failures.js';
 import { answerHook, HOOK_EVENTS, sessionLedgers, sessionTitle, type HookContext, type HookEvent } from './hooks.js';
 import { KINDS, STAGES } from './kinds.js';
+import { hasLabels, labelColours, labelPainter, labelsOf, labelStyle, type PaintLabels } from './labels.js';
 import { limitLockWaits } from './lock.js';
 import { ledgerBin, ledgerPaths, realPath, type LedgerPaths } from './paths.js';
 import { forgetRepoKeys, repoKey, repoLabel } from './repo-key.js';
@@ -35,6 +36,10 @@ import {
   addDecisionText,
   addNote,
   addNoteText,
+  addLabels,
+  addLabelsText,
+  removeLabels,
+  removeLabelsText,
   addQuestion,
   addQuestionText,
   addStep,
@@ -140,6 +145,7 @@ function listed(task: Task) {
     ...(task.elsewhere ? { elsewhere: true } : {}),
     ...(task.host === undefined ? {} : { host: task.host }),
     branch: task.branch ?? '',
+    labels: ledger.location.labels ?? [],
     ...(ledger.location.designRefs === undefined ? {} : { designRefs: ledger.location.designRefs }),
     ...(parent === undefined ? {} : { parent: { slug: parent.slug, ...(parentMain === undefined ? {} : { main: parentMain }) } }),
     updated: new Date(task.mtimeMs).toISOString(),
@@ -200,6 +206,7 @@ const archiveFields = ({ repo, term, folder, rows }: ArchiveList) => ({
     slug: task.slug,
     path: task.file,
     branch: writtenBranch(task),
+    labels: task.ledger.location.labels ?? [],
     goal: task.ledger.goal,
     ...(match === undefined ? {} : { match }),
   })),
@@ -280,6 +287,12 @@ function deploy(args: string[]): number {
 const JSON_HELP = 'print one JSON object: {"ok":true,...} or {"ok":false,"error":"..."}';
 const sessionOption = (): Option => new Option('--session <id>', 'the Claude Code session; by default $CLAUDE_CODE_SESSION_ID');
 const ACTIVE_SLUG = 'the active task in this repo, or <slug>@<path> for the repo at <path>; by default the task of the worktree you are in';
+const repeated = (value: string, previous: string[] = []): string[] => [...previous, value];
+const labelOption = (description: string): Option => new Option('--label <label>', description).argParser(repeated);
+const labelFilter = (what: string): Option => labelOption(`keep only the ${what} that carry this label; repeat it to keep those that carry each label named`);
+type LabelOption = { label?: string[] };
+/** What a listing filtered by `labels` says when it keeps nothing. */
+const noneCarry = (labels: string[], what: string): string => `No ${what} carries ${labels.length === 1 ? 'the label' : 'each of the labels'} ${labels.join(', ')}.`;
 
 type ClaimsOptions = { session?: string; all?: boolean };
 
@@ -288,7 +301,8 @@ function sessionForAll(slug: string | undefined, session: string | undefined): s
   return requiredSession(session);
 }
 
-export type LedgerIo = { home: string; cwd: string; env: NodeJS.ProcessEnv; store?: LedgerStore; stdin?: string; clock?: Clock };
+/** `tty` says whether stdout is a terminal, which gets labels in colour; false by default. */
+export type LedgerIo = { home: string; cwd: string; env: NodeJS.ProcessEnv; store?: LedgerStore; stdin?: string; clock?: Clock; tty?: boolean };
 export type LedgerRun = { code: number; stdout: string; stderr: string };
 
 /** A run's inputs, with stdin read only by a command that needs it, and the streams it prints to. */
@@ -296,7 +310,16 @@ type RunInputs = Omit<LedgerIo, 'stdin' | 'clock'> & { stdin: () => string; cloc
 
 /** Runs the `ledger` command line `argv`, without the node and script paths, and returns its exit code. */
 export async function main(argv: string[]): Promise<number> {
-  return run(argv, { home: process.env.HOME || homedir(), cwd: process.cwd(), env: process.env, stdin: () => readFileSync(0, 'utf8'), clock: systemClock, stdout: process.stdout, stderr: process.stderr });
+  return run(argv, {
+    home: process.env.HOME || homedir(),
+    cwd: process.cwd(),
+    env: process.env,
+    stdin: () => readFileSync(0, 'utf8'),
+    clock: systemClock,
+    stdout: process.stdout,
+    stderr: process.stderr,
+    tty: process.stdout.isTTY === true,
+  });
 }
 
 /** Runs `argv` as main does, inside this process: with the inputs of `io`, and with what it prints collected. A store given in `io` stays open. */
@@ -321,7 +344,7 @@ function run(argv: string[], io: RunInputs): Promise<number> {
   return inRun({ env: io.env, console: new Console({ stdout: io.stdout, stderr: io.stderr }), clock: io.clock }, () => commandLine(argv, io));
 }
 
-async function commandLine(argv: string[], { home, cwd, store: given, stdin, stdout, stderr }: RunInputs): Promise<number> {
+async function commandLine(argv: string[], { home, cwd, store: given, stdin, stdout, stderr, tty = false }: RunInputs): Promise<number> {
   // Shadows the global console, so that each command prints to the streams of this run.
   const console = runConsole();
   const paths = ledgerPaths(home);
@@ -346,6 +369,8 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
   const warn = (warnings: string[]): void => {
     if (!json) for (const warning of warnings) console.error(`warning: ${warning}`);
   };
+  /** How a table shows labels: in colour on a terminal, else after their squares (D53). */
+  const painter = (): PaintLabels => labelPainter(context.store.labels.read(), labelStyle(tty, runEnv()));
   /** A folder skipped by a safety rule is no failure; one that could not be deleted is. */
   const printPruned = ({ text, failed }: PruneReport): void => {
     console.log(text);
@@ -385,14 +410,17 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
         'List the live tasks of every known repo: active, parked, blocked, waiting, done, lost and backlog. A waiting task whose PR gh says is merged is marked done first. Retired tasks are in ledger task archive.',
       )
       .option('--archived', 'list the retired tasks too')
-      .option('--json', JSON_HELP)
-      .action(({ archived = false }: { archived?: boolean }) => {
+      .addOption(labelFilter('tasks'))
+      .option('--json', 'print one JSON object: {"ok":true,"tasks":[...],"labelColours":{"<label>":{"square":...,"hex":...}}}')
+      .action(({ archived = false, label = [] }: { archived?: boolean } & LabelOption) => {
+        const labels = labelsOf(label);
         const found = list(context, archived);
         const checks = found.map((task) => markMergedDone(context, task));
-        const tasks = checks.some(({ marked }) => marked) ? list(context, archived) : found;
+        const tasks = (checks.some(({ marked }) => marked) ? list(context, archived) : found).filter((task) => hasLabels(task.ledger.location.labels, labels));
         for (const { notice } of checks) if (notice !== undefined) console.error(notice);
-        if (json) printJson({ tasks: realMains(tasks.map(listed)) });
-        else console.log(listView(tasks));
+        const shown = tasks.flatMap((task) => task.ledger.location.labels ?? []);
+        if (json) printJson({ tasks: realMains(tasks.map(listed)), labelColours: labelColours(context.store.labels.read(), shown) });
+        else console.log(tasks.length === 0 && labels.length > 0 ? noneCarry(labels, 'task') : listView(tasks, painter()));
       });
   const showCommand = (command: Command): Command =>
     command
@@ -435,6 +463,7 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
     .option('--goal <text>', 'one paragraph: the problem, then what done looks like')
     .option('--design-refs <n,n>', 'the LLP numbers for the "- design refs:" line, comma-separated')
     .option('--kind <kind>', `the kind of task for the "- kind:" line, which sets its stages: ${KINDS}; code by default`)
+    .addOption(labelOption('a label for the "- labels:" line, such as sdk-59: 1 to 40 lowercase letters, digits, dots, underscores and hyphens; repeat it for each label'))
     .option('--stack', 'make the worktree and branch at once, on top of the current branch')
     .option('--here', 'add a ledger to this linked worktree instead; prints no start line')
     .option('--repo <path>', 'write the task for the repo that holds <path>')
@@ -554,11 +583,15 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
     .description("List this repo's archived ledgers, newest first.")
     .argument('[term]', 'keep only the ledgers that contain this text, in any case')
     .option('--all', 'list the archive of every repo')
+    .addOption(labelFilter('ledgers'))
     .option('--json', JSON_HELP)
-    .action((term: string | undefined, { all = false }: { all?: boolean }) => {
+    .action((term: string | undefined, { all = false, label = [] }: { all?: boolean } & LabelOption) => {
+      const labels = labelsOf(label);
       const found = archive(context, term ?? '', all);
-      if (json) printJson(archiveFields(found));
-      else console.log(archiveView(found.rows, found.repo, found.term, `${paths.tilde(found.folder)}/`));
+      const shown = { ...found, rows: found.rows.filter(({ task }) => hasLabels(task.ledger.location.labels, labels)) };
+      if (json) printJson(archiveFields(shown));
+      else if (shown.rows.length === 0 && labels.length > 0) console.log(noneCarry(labels, 'archived ledger'));
+      else console.log(archiveView(shown.rows, shown.repo, shown.term, `${paths.tilde(shown.folder)}/`, painter()));
     });
   taskGroup
     .command('gate')
@@ -653,6 +686,15 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
   notesCommand(notesGroup, 'note', 'Add a general note.')
     .argument('<text>', 'the note')
     .action((text: string, { task }: TaskOption) => written(addNote(context, task, text), addNoteText));
+  const labelGroup = notesGroup
+    .command('label')
+    .description('Add labels to a task or remove them. A label is 1 to 40 lowercase letters, digits, dots, underscores and hyphens; ledger list --label <label> lists the tasks that carry it.');
+  notesCommand(labelGroup, 'add', 'Add each label the task lacks, after its others. A label no task had before gets the palette colour the fewest labels have, and keeps it.')
+    .argument('<labels...>', 'the labels, such as sdk-59; uppercase is lowered')
+    .action((labels: string[], { task }: TaskOption) => written(addLabels(context, task, labels), addLabelsText));
+  notesCommand(labelGroup, 'remove', 'Remove each label from the task. A label the task lacks fails, and then none is removed.')
+    .argument('<labels...>', 'the labels')
+    .action((labels: string[], { task }: TaskOption) => written(removeLabels(context, task, labels), removeLabelsText));
   notesCommand(notesGroup, 'next', 'Set the next step, in place of the one there.')
     .argument('<text>', 'exactly one action, with the agent and effort to use')
     .action((text: string, { task }: TaskOption) => written(setNext(context, task, text), setNextText));
@@ -736,11 +778,14 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
     .command('show')
     .description('Show a parent task and the status of each child task.')
     .argument('<slug>', parentSlug)
+    .addOption(labelFilter('child tasks'))
     .option('--json', JSON_HELP)
-    .action((slug: string) => {
+    .action((slug: string, { label = [] }: LabelOption) => {
+      const labels = labelsOf(label);
       const { task, main: repo, children } = parent(context, slug);
-      if (json) printJson({ slug: task.slug, main: repo, goal: task.ledger.goal, children });
-      else console.log(parentView(task, repo, children));
+      const shown = children.filter((child) => hasLabels(child.labels, labels));
+      if (json) printJson({ slug: task.slug, main: repo, goal: task.ledger.goal, children: shown });
+      else console.log(shown.length === 0 && labels.length > 0 ? noneCarry(labels, `child task of ${task.slug}`) : parentView(task, repo, shown, painter()));
     });
   const childChanges = [
     ['add', 'Make <child> a child task of <slug>, in the ledgers of both.'],
@@ -951,8 +996,12 @@ async function commandLine(argv: string[], { home, cwd, store: given, stdin, std
     .description("Show each linked worktree of this repo with its size, last commit, uncommitted files, ledger and PR, largest first; or prune its build folders.");
   worktrees
     .command('table', { isDefault: true, hidden: true })
+    .addOption(labelOption('keep only the worktrees whose task carries this label; repeat it to keep those whose task carries each label named'))
     .option('--json', JSON_HELP)
-    .action(() => show(listWorktrees(context), worktreesView));
+    .action(({ label = [] }: LabelOption) => {
+      const labels = labelsOf(label);
+      show(listWorktrees(context, labels), (list) => (list.worktrees.length === 0 && labels.length > 0 ? noneCarry(labels, 'worktree task') : worktreesView(list, painter())));
+    });
   worktrees
     .command('prune')
     .description(

@@ -2,6 +2,7 @@
 import { realpathSync } from 'node:fs';
 import { fail, Failure } from './failure.js';
 import { holdsAnything } from './files.js';
+import type { LabelColour, LabelRegistry } from './labels.js';
 import { isRepoKey } from './repo-key.js';
 
 /**
@@ -255,6 +256,19 @@ export interface Aliases {
   replace(removed: readonly Alias[], added: readonly Alias[]): void;
 }
 
+/** The colour of each label any task was given (D53), store-wide, so a label keeps its colour everywhere. */
+export interface Labels {
+  /** Each registered label with its entry; one that cannot be read is left out, as unregistered. It never writes. */
+  read(): LabelRegistry;
+  /**
+   * Gives each of `labels` the registry lacks the colour fewest labels have, first used at `firstUsed`, in one write that
+   * no other register runs inside of. An entry that cannot be read counts as missing, and is written anew.
+   */
+  register(labels: readonly string[], firstUsed: string): void;
+  /** Writes each of `entries` the registry lacks as given, colour and first use too, in one write as `register` does, so a label another store registered keeps its colour. */
+  copy(entries: Iterable<readonly [string, LabelColour]>): void;
+}
+
 /** An old repo key and the key that replaced it. */
 export type Alias = readonly [old: string, key: string];
 
@@ -293,12 +307,13 @@ export function needsAlias(entries: Iterable<readonly [string, unknown]>, old: s
   return current === undefined;
 }
 
-/** Stores backlog and active records, archive copies and aliases. */
+/** Stores backlog and active records, archive copies, aliases and label colours. */
 export interface LedgerStore {
   backlog: Backlog;
   active: Active;
   archive: Archive;
   aliases: Aliases;
+  labels: Labels;
   /** The text of the task list older versions kept, undefined when there is none; only the one-time moves read it. */
   oldTaskList(): string | undefined;
   /**
