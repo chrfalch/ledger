@@ -6,6 +6,7 @@ import test, { type TestContext } from 'node:test';
 import { stripVTControlCharacters } from 'node:util';
 import stringWidth from 'string-width';
 import { FORMAT, GITIGNORE, isAllowed } from '../tools/ledger/clone.js';
+import { addWorktree } from '../tools/ledger/git.js';
 import { parseLedger } from '../tools/ledger/format.js';
 import { Failure } from '../tools/ledger/failure.js';
 import { earlier, fallbackColour, labelColourJson, PALETTE, type LabelRegistry } from '../tools/ledger/labels.js';
@@ -27,8 +28,8 @@ import {
   noSqlite,
   ok,
   putActive,
+  repoFixtures,
   repoKeyOf,
-  repository,
   runInProcessWith,
   worktreeOf,
   type InProcessOptions,
@@ -48,13 +49,14 @@ function makeClone(h: string): void {
   writeFileSync(path.join(clone, '.ledger-data'), `${JSON.stringify({ format: FORMAT })}\n`);
 }
 
-function setup(t: TestContext, storage: Storage = 'file'): Setup {
+/** The repo ~/repos/app; real git when git storage takes part, whose clone git.ts does not run; see repoFixtures. */
+function setup(t: TestContext, storage: Storage = 'file', { realGit = storage === 'git' } = {}): Setup {
   const h = home(t);
   copyFileSync(path.join(REPO, 'ledger.template.md'), path.join(h, '.claude/ledger.template.md'));
   if (storage !== 'file') writeFileSync(path.join(h, '.claude/ledger-settings.json'), JSON.stringify({ storage }));
   if (storage === 'git') makeClone(h);
-  const app = repository(h, path.join(h, 'repos/app'));
-  writeFileSync(path.join(app, '.git/info/exclude'), '.claude/\n');
+  const app = repoFixtures(t, h, { realGit }).addRepo(path.join(h, 'repos/app'));
+  if (realGit) writeFileSync(path.join(app, '.git/info/exclude'), '.claude/\n');
   const run = (cwd: string, args: string[], { env, ...options }: InProcessOptions = {}): Promise<Ran> =>
     runInProcessWith(h, cwd, { ...options, env: { LEDGER_TEST_NO_BACKGROUND_SYNC: '1', ...env } }, ...args);
   return { h, app, storage, run };
@@ -254,7 +256,7 @@ test('--label keeps only the tasks that carry every label named: list, task arch
   archivedTask(h, app, '2026-11-02', { slug: 'old-none' });
   for (const [slug, labels] of [['live-a', ['a']], ['live-none', []]] as const) {
     const worktree = worktreeOf(app, slug);
-    git(h, app, 'worktree', 'add', '--quiet', '-b', `me/${slug}`, worktree, 'main');
+    assert.equal(addWorktree(app, worktree, `me/${slug}`, 'main'), undefined);
     mkdirSync(path.join(worktree, '.claude'));
     const text = ledgerText({ slug, worktree, branch: `me/${slug}` });
     putActive(h, app, slug, labels.length === 0 ? text : labelled(text, [...labels]));
@@ -299,7 +301,7 @@ test('the session start shows the labels of the task, and of each open tree, as 
   const s = setup(t);
   const { h, app } = s;
   const worktree = worktreeOf(app, 'lab');
-  git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/lab', worktree, 'main');
+  assert.equal(addWorktree(app, worktree, 'me/lab', 'main'), undefined);
   mkdirSync(path.join(worktree, '.claude'));
   putActive(h, app, 'lab', ledgerText({ slug: 'lab', worktree, branch: 'me/lab' }));
   ok(await s.run(worktree, ['notes', 'label', 'add', 'sdk-59']));
@@ -418,7 +420,7 @@ test('git storage: a pull whose rebase stops on a label file and a ledger too is
 for (const from of STORAGES) {
   for (const to of STORAGES.filter((storage) => storage !== from)) {
     test(`migrate ${from} → ${to} copies the label registry, each label with its colour and first use`, { skip: (from === 'sqlite' || to === 'sqlite') && noSqlite }, async (t) => {
-      const s = setup(t, from);
+      const s = setup(t, from, { realGit: from === 'git' || to === 'git' });
       const clock = fakeClock('2026-11-27T09:00:00.000Z');
       ok(await s.run(s.app, ['task', 'new', 'one', '--goal', 'One.', '--label', 'zeta', '--label', 'alpha'], { clock }));
       clock.advance(60_000);

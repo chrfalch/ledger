@@ -9,11 +9,13 @@ import { pathToFileURL } from 'node:url';
 import { runLedger } from '../tools/ledger/cli.js';
 import type { Clock } from '../tools/ledger/clock.js';
 import { fileStore } from '../tools/ledger/file-store.js';
+import { replaceGitForTests, run } from '../tools/ledger/git.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { parseRecord, readRecordJson, recordJson, renderRecord } from '../tools/ledger/record.js';
 import { repoKey } from '../tools/ledger/repo-key.js';
 import { hostLabel } from '../tools/ledger/settings.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
+import { fakeGit, type FakeGit } from './fixtures/fake-git.js';
 import { replay } from './git-fixture-copies.js';
 import { freshHome, REPO } from './helpers.js';
 
@@ -249,6 +251,77 @@ export function repository(h: string, main: string): string {
   return main;
 }
 
+const fakes = new WeakMap<TestContext, FakeGit>();
+let fakeInUse: FakeGit | undefined;
+
+/** A fake git in place of git.ts's git until the test ends, with no repository declared yet; a second call in the same test gives the same fake. */
+export function useFakeGit(t: TestContext): FakeGit {
+  const existing = fakes.get(t);
+  if (existing) return existing;
+  const fake = fakeGit({ repos: {} });
+  const previous = { runner: replaceGitForTests(fake.runner), fake: fakeInUse };
+  fakeInUse = fake;
+  t.after(() => {
+    replaceGitForTests(previous.runner);
+    fakeInUse = previous.fake;
+  });
+  fakes.set(t, fake);
+  return fake;
+}
+
+const FAKE_REPOSITORY_COMMIT = 'f1257c0b6e1d2a3c4b5a69788796a5b4c3d2e1f0';
+
+/**
+ * repository() as the ledger sees it through git.ts, declared to `fake`, with the commit every fake repository shares
+ * and `h` outside any repository; on disk only the folders `main` and <main>/.git/info.
+ */
+export function fakeRepository(fake: FakeGit, h: string, main: string): string {
+  fake.state.repos[main] = {
+    branch: 'main',
+    originHead: 'origin/main',
+    remotes: { origin: { url: path.join(h, 'remotes', `${path.basename(main)}.git`), branches: { main: FAKE_REPOSITORY_COMMIT } } },
+    refs: { 'refs/heads/main': FAKE_REPOSITORY_COMMIT, 'refs/remotes/origin/main': FAKE_REPOSITORY_COMMIT },
+    commits: { [FAKE_REPOSITORY_COMMIT]: { subject: 'first', date: '2026-11-01' } },
+  };
+  fakeOutside(fake, h);
+  mkdirSync(path.join(main, '.git/info'), { recursive: true });
+  return main;
+}
+
+/** Declares `folder` to `fake` as in no repository, as is a HOME with no repo; gives `folder`. */
+export function fakeOutside(fake: FakeGit, folder: string): string {
+  const outside = (fake.state.outside ??= []);
+  if (!outside.includes(folder)) outside.push(folder);
+  return folder;
+}
+
+/**
+ * worktreeTask() in a fakeRepository, with `fake` in place of git. On disk only the worktree with its .claude folder and
+ * the .git file the ledger looks for to tell a worktree is on this machine, and the worktree's git folder.
+ */
+export function fakeWorktreeTask(fake: FakeGit, h: string, main: string, fields: Omit<Fields, 'worktree' | 'branch' | 'base'>): string {
+  const repo = fake.state.repos[main] ?? assert.fail(`no fake repository at ${main}`);
+  const commit = repo.refs?.['refs/heads/main'] ?? assert.fail(`the fake repository at ${main} has no refs/heads/main to branch the worktree from`);
+  const worktree = worktreeOf(main, fields.slug);
+  const branch = `me/${fields.slug}`;
+  const added = fake.runner(main, ['worktree', 'add', '--quiet', '-b', branch, worktree, 'main'], process.env);
+  assert.ok(added.ok, added.stderr);
+  mkdirSync(path.join(worktree, '.claude'));
+  return putActive(h, main, fields.slug, ledgerText({ ...fields, worktree, branch, base: `origin/main @ ${commit.slice(0, 7)}` }));
+}
+
+export type RepoFixtures = { addRepo: (main: string) => string; addTask: (main: string, fields: Omit<Fields, 'worktree' | 'branch' | 'base'>) => string };
+
+/**
+ * repository() and worktreeTask() under the HOME `h`, as fakeRepository() and fakeWorktreeTask() in the fake git of `t`;
+ * with `realGit`, made by real git, for a ledger run as a child process or a test of what git reads from the disk.
+ */
+export function repoFixtures(t: TestContext, h: string, { realGit = false } = {}): RepoFixtures {
+  if (realGit) return { addRepo: (main) => repository(h, main), addTask: (main, fields) => worktreeTask(h, main, fields) };
+  const fake = useFakeGit(t);
+  return { addRepo: (main) => fakeRepository(fake, h, main), addTask: (main, fields) => fakeWorktreeTask(fake, h, main, fields) };
+}
+
 /** A linked worktree at <main>/.claude/worktrees/<slug> on branch me/<slug>, with a .claude folder and its active record in the file store; gives the record's file. */
 export function worktreeTask(h: string, main: string, fields: Omit<Fields, 'worktree' | 'branch' | 'base'>): string {
   const worktree = worktreeOf(main, fields.slug);
@@ -278,14 +351,19 @@ export const worktreeOf = (main: string, slug: string): string => path.join(main
 
 /**
  * The store key of the repo at `main`: the address of its origin, which every fixture repo has as a local bare repo,
- * so that path without .git; the main path for a repo without origin or a folder that is gone.
+ * so that path without .git; the main path for a repo without origin, or under real git a folder that is gone. It finds the origin
+ * apart from repoKey, whose answer it checks: in the state of the fake git in use, else with a git command of its own.
  */
 export function repoKeyOf(main: string): string {
-  const origin = spawnSync('git', ['-C', main, 'remote', 'get-url', 'origin'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  const url = origin.status === 0 ? origin.stdout.trim() : undefined;
+  const url = fakeInUse === undefined ? originUrl(main) : fakeInUse.state.repos[main]?.remotes?.origin?.url;
   if (url === undefined) return main;
   assert.ok(path.isAbsolute(url), `the fixture knows only local origins, not ${url}`);
   return url.replace(/\.git$/, '');
+}
+
+function originUrl(main: string): string | undefined {
+  const origin = run(main, ['remote', 'get-url', 'origin']);
+  return origin.ok ? origin.stdout.trim() : undefined;
 }
 
 /** The file store's folder of the repo at `main` in `place`. */

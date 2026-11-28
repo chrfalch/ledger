@@ -19,7 +19,7 @@ import type { LedgerStore } from '../tools/ledger/store.js';
 import { findTasks } from '../tools/ledger/tasks.js';
 import { createTask, goTask, orderChildren, parkTask, type Context } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
-import { archivedTask, home, ledgerText, noSqlite, repoKeyOf, repository } from './ledger-core-fixtures.js';
+import { archivedTask, fakeRepository, home, ledgerText, noSqlite, repoKeyOf, useFakeGit } from './ledger-core-fixtures.js';
 import { memoryStore } from './memory-store.js';
 
 const text = (slug: string): string => ledgerText({ slug, main: '/repos/app' });
@@ -1435,7 +1435,7 @@ function includesAll(calls: string[], expected: string[]): void {
 test('the core reads and writes backlog ledgers through the store it is given, and never reads the old task list', (t) => {
   const h = home(t);
   copyFileSync(path.join(REPO, 'ledger.template.md'), path.join(h, '.claude/ledger.template.md'));
-  const app = repository(h, path.join(h, 'repos/app'));
+  const app = fakeRepository(useFakeGit(t), h, path.join(h, 'repos/app'));
   archivedTask(h, app, '2026-10-01', { slug: 'old-task', main: app });
   const paths = ledgerPaths(h);
   const { store, calls } = recording(fileStore(paths));
@@ -1470,7 +1470,7 @@ test('the core reads and writes backlog ledgers through the store it is given, a
 
 test('tree order checks every child for a ## Location section before it gives any child an order', (t) => {
   const h = home(t);
-  const app = repository(h, path.join(h, 'repos/app'));
+  const app = fakeRepository(useFakeGit(t), h, path.join(h, 'repos/app'));
   const paths = ledgerPaths(h);
   const inner = fileStore(paths);
   const key = repoKeyOf(app);

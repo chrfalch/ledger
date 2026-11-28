@@ -7,14 +7,16 @@ import type { Storage } from '../tools/ledger/settings.js';
 import { today } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
 import { FORMAT } from '../tools/ledger/clone.js';
-import { archivedTask, backlogTask, commandEnv, git, home, LEDGER_BIN, noSqlite, readLedgerFile, recordFile, repository, runInProcessWith, worktreeOf, worktreeTask, writeLedgerFile, type Ran } from './ledger-core-fixtures.js';
+import { archivedTask, backlogTask, commandEnv, git, home, LEDGER_BIN, noSqlite, readLedgerFile, recordFile, repoFixtures, runInProcessWith, worktreeOf, writeLedgerFile, type Fields, type Ran } from './ledger-core-fixtures.js';
 
 const TODAY = today();
 
 type Run = (cwd: string, ...args: string[]) => Promise<Ran>;
-type Setup = { h: string; app: string; env: NodeJS.ProcessEnv; run: Run; spawned: Run };
+type Task = Omit<Fields, 'worktree' | 'branch' | 'base'>;
+type Setup = { h: string; app: string; env: NodeJS.ProcessEnv; run: Run; spawned: Run; addTask: (fields: Task) => string };
 
-function setup(t: TestContext, storage: Storage = 'file'): Setup {
+/** The repo ~/repos/app; `realGit` as in repoFixtures, by default when git storage takes part. */
+function setup(t: TestContext, storage: Storage = 'file', { realGit = storage === 'git' } = {}): Setup {
   const h = home(t);
   copyFileSync(path.join(REPO, 'ledger.template.md'), path.join(h, '.claude/ledger.template.md'));
   if (storage === 'git') {
@@ -23,8 +25,10 @@ function setup(t: TestContext, storage: Storage = 'file'): Setup {
     writeFileSync(path.join(clone, '.ledger-data'), `${JSON.stringify({ format: FORMAT })}\n`);
   }
   if (storage !== 'file') writeFileSync(path.join(h, '.claude/ledger-settings.json'), JSON.stringify({ storage }));
-  const app = repository(h, path.join(h, 'repos', 'app'));
-  writeFileSync(path.join(app, '.git/info/exclude'), '.claude/\n');
+  const repos = repoFixtures(t, h, { realGit });
+  const app = repos.addRepo(path.join(h, 'repos', 'app'));
+  if (realGit) writeFileSync(path.join(app, '.git/info/exclude'), '.claude/\n');
+  const addTask = (fields: Task): string => repos.addTask(app, fields);
   const env = { ...commandEnv(h), LEDGER_TEST_NO_BACKGROUND_SYNC: '1' };
   const run: Run = (cwd, ...args) => runInProcessWith(h, cwd, { env: { LEDGER_TEST_NO_BACKGROUND_SYNC: '1' } }, ...args);
   const spawned: Run = async (cwd, ...args) => {
@@ -32,7 +36,7 @@ function setup(t: TestContext, storage: Storage = 'file'): Setup {
     if (result.error) throw result.error;
     return { status: result.status, stdout: result.stdout, stderr: result.stderr };
   };
-  return { h, app, env, run, spawned };
+  return { h, app, env, run, spawned, addTask };
 }
 
 function passed(ran: Ran): string {
@@ -46,9 +50,9 @@ function refused(ran: Ran): string {
 }
 
 /** A worktree task `wt` of the fixture ledger: steps 1 and 2, one decision, and a goal. */
-function withWorktree(t: TestContext, fields: { goal?: string } = {}) {
-  const s = setup(t);
-  const file = worktreeTask(s.h, s.app, { slug: 'wt', main: s.app, ...fields });
+function withWorktree(t: TestContext, fields: { goal?: string } = {}, { realGit = false } = {}) {
+  const s = setup(t, 'file', { realGit });
+  const file = s.addTask({ slug: 'wt', main: s.app, ...fields });
   const worktree = worktreeOf(s.app, 'wt');
   const read = (): string => readLedgerFile(file);
   const notes = (...args: string[]): Promise<Ran> => s.run(worktree, 'notes', ...args);
@@ -574,7 +578,7 @@ test('a write to a ledger over 16,000 characters succeeds and warns of its size,
 });
 
 test('writes to an active ledger at the same time all land, as each holds the lock of its record', async (t) => {
-  const { worktree, env, read } = withWorktree(t);
+  const { worktree, env, read } = withWorktree(t, {}, { realGit: true });
   const runs = await Promise.all(
     Array.from(
       { length: 5 },

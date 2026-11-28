@@ -4,20 +4,35 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { parseHookInput } from '../tools/ledger/hooks.js';
 import { limitLockWaitForTests } from '../tools/ledger/lock.js';
-import { activeFile, archivedTask, backlogTask, fakeClock, home, readLedgerFile, repository, runInProcessWith, storeFolder, worktreeOf, worktreeTask, writeLedgerFile, type Ran } from './ledger-core-fixtures.js';
+import {
+  activeFile,
+  archivedTask,
+  backlogTask,
+  fakeClock,
+  fakeRepository,
+  fakeWorktreeTask,
+  home,
+  readLedgerFile,
+  runInProcessWith,
+  storeFolder,
+  useFakeGit,
+  worktreeOf,
+  writeLedgerFile,
+  type Ran,
+} from './ledger-core-fixtures.js';
 
 const T0 = '2026-11-20T10:00:00Z';
 const later = (minutes: number): string => new Date(Date.parse(T0) + minutes * 60_000).toISOString().replace('.000Z', 'Z');
 const claimLine = (session: string, since: string, active: string): string => `- claim: session ${session} since ${since}, active ${active}`;
 const CLAIM_LINE = /^- claim: .*$/m;
 
-/** ~/repos/app with the active task fix-login, whose .claude/ git ignores; `file` is its active record. */
+/** ~/repos/app with the active task fix-login, in a fake git that `fake` declares; `file` is its active record. */
 function setup(t: TestContext) {
   const h = home(t);
-  const app = repository(h, path.join(h, 'repos/app'));
-  writeFileSync(path.join(app, '.git/info/exclude'), '.claude/\n');
-  const file = worktreeTask(h, app, { slug: 'fix-login' });
-  return { h, app, file, worktree: worktreeOf(app, 'fix-login') };
+  const fake = useFakeGit(t);
+  const app = fakeRepository(fake, h, path.join(h, 'repos/app'));
+  const file = fakeWorktreeTask(fake, h, app, { slug: 'fix-login' });
+  return { h, app, file, fake, worktree: worktreeOf(app, 'fix-login') };
 }
 
 type Env = { now: string; session?: string; input?: string };
@@ -174,9 +189,9 @@ test('release removes this session\'s own expired claim too', async (t) => {
 /** fix-login and other claimed by s1, third by s2, and unclaimed with no claim at all. */
 function claimedBySessions(t: TestContext, active = T0) {
   const repo = setup(t);
-  const other = worktreeTask(repo.h, repo.app, { slug: 'other' });
-  const third = worktreeTask(repo.h, repo.app, { slug: 'third' });
-  const unclaimed = worktreeTask(repo.h, repo.app, { slug: 'unclaimed' });
+  const other = fakeWorktreeTask(repo.fake, repo.h, repo.app, { slug: 'other' });
+  const third = fakeWorktreeTask(repo.fake, repo.h, repo.app, { slug: 'third' });
+  const unclaimed = fakeWorktreeTask(repo.fake, repo.h, repo.app, { slug: 'unclaimed' });
   withClaim(repo.file, claimLine('s1', T0, active));
   withClaim(other, claimLine('s1', T0, active));
   withClaim(third, claimLine('s2', T0, active));
@@ -267,8 +282,8 @@ async function withOneBrokenBetweenTwo(t: TestContext, check: (repo: Broken) => 
   const lockWaitMs = limitLockWaitForTests(500);
   t.after(() => limitLockWaitForTests(lockWaitMs));
   const repo = setup(t);
-  const broken = worktreeTask(repo.h, repo.app, { slug: 'm-broken' });
-  const good = worktreeTask(repo.h, repo.app, { slug: 'z-good' });
+  const broken = fakeWorktreeTask(repo.fake, repo.h, repo.app, { slug: 'm-broken' });
+  const good = fakeWorktreeTask(repo.fake, repo.h, repo.app, { slug: 'z-good' });
   for (const file of [repo.file, broken, good]) withClaim(file, claimLine('s1', T0, T0));
   mkdirSync(`${broken}.lock`);
   await check({ ...repo, broken, good });
@@ -354,8 +369,8 @@ test('go --take-over says whose claim it took over, in its output and as "tookOv
 });
 
 test('go with a session claims nothing for a task of another repo than the one it runs in, and says so', async (t) => {
-  const { h, app, file } = setup(t);
-  const other = repository(h, path.join(h, 'repos/other'));
+  const { h, app, file, fake } = setup(t);
+  const other = fakeRepository(fake, h, path.join(h, 'repos/other'));
   backlogTask(h, app, { slug: 'next-up' });
   const ran = exits(await run(h, other, { now: T0, session: 's1' }, 'go', 'fix-login', '--repo', app), 0);
   assert.equal(claimOf(file), undefined);
@@ -368,8 +383,8 @@ test('go with a session claims nothing for a task of another repo than the one i
 });
 
 test('go of a task of another repo still refuses while a session holds it live', async (t) => {
-  const { h, app, file } = setup(t);
-  const other = repository(h, path.join(h, 'repos/other'));
+  const { h, app, file, fake } = setup(t);
+  const other = fakeRepository(fake, h, path.join(h, 'repos/other'));
   withClaim(file, claimLine('s2', T0, later(10)));
   exits(await run(h, other, { now: later(20), session: 's1' }, 'go', 'fix-login', '--repo', app), 3);
   assert.equal(claimOf(file), claimLine('s2', T0, later(10)));
@@ -455,8 +470,8 @@ test('session start adds one line for a ledger held live by another session; its
 });
 
 test('the report names a sibling held live by another session', async (t) => {
-  const { h, app, file } = setup(t);
-  worktreeTask(h, app, { slug: 'other', parent: 'epic' });
+  const { h, app, file, fake } = setup(t);
+  fakeWorktreeTask(fake, h, app, { slug: 'other', parent: 'epic' });
   backlogTask(h, app, { slug: 'epic', children: ['- fix-login', '- other'] });
   withClaim(file, claimLine('s1', T0, later(10)));
   const context = await sessionStart(h, worktreeOf(app, 'other'), later(20), 's2');

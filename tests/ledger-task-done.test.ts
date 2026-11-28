@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { backlogTask, home, readLedgerFile, repository, runInProcess, recordFile, worktreeOf, worktreeTask, writeLedgerFile, type Ran } from './ledger-core-fixtures.js';
+import type { FakeGit } from './fixtures/fake-git.js';
+import { backlogTask, fakeRepository, fakeWorktreeTask, home, readLedgerFile, runInProcess, recordFile, useFakeGit, worktreeOf, writeLedgerFile, type Ran } from './ledger-core-fixtures.js';
 
 // LLP 0001 D4 and D15: a task becomes done on "Goal met" when it has no PR, and only once its PR is merged when it has one.
 
@@ -10,12 +11,13 @@ const PR = 'https://github.com/acme/app/pull/42';
 
 function setup(t: TestContext) {
   const h = home(t);
-  const app = repository(h, path.join(h, 'repos/app'));
-  return { h, app, calls: path.join(h, 'gh-calls') };
+  const fake = useFakeGit(t);
+  const app = fakeRepository(fake, h, path.join(h, 'repos/app'));
+  return { h, app, fake, calls: path.join(h, 'gh-calls') };
 }
 
-function located(h: string, app: string, slug: string, ...bullets: string[]): string {
-  const file = worktreeTask(h, app, { slug });
+function located(fake: FakeGit, h: string, app: string, slug: string, ...bullets: string[]): string {
+  const file = fakeWorktreeTask(fake, h, app, { slug });
   writeLedgerFile(file, readLedgerFile(file).replace('- design refs: none', ['- design refs: none', ...bullets].join('\n')));
   return file;
 }
@@ -43,8 +45,8 @@ function refused(ran: Ran, message: RegExp): void {
 }
 
 test('task done marks the active task of the worktree done when it has no PR, and says to finalize it', async (t) => {
-  const { h, app } = setup(t);
-  const file = located(h, app, 'epic');
+  const { h, app, fake } = setup(t);
+  const file = located(fake, h, app, 'epic');
   const ran = await runInProcess(h, worktreeOf(app, 'epic'), 'task', 'done');
   assert.equal(ran.status, 0, ran.stderr);
   assert.equal(ran.stdout, doneText('epic'));
@@ -52,9 +54,9 @@ test('task done marks the active task of the worktree done when it has no PR, an
 });
 
 test('task done takes a slug, or <slug>@<path> from outside the repo, which the finalize command then names', async (t) => {
-  const { h, app } = setup(t);
-  located(h, app, 'epic');
-  located(h, app, 'other');
+  const { h, app, fake } = setup(t);
+  located(fake, h, app, 'epic');
+  located(fake, h, app, 'other');
   const named = await runInProcess(h, app, 'task', 'done', 'epic');
   assert.equal(named.stdout, doneText('epic'), named.stderr);
   const elsewhere = await runInProcess(h, h, 'task', 'done', `other@${app}`);
@@ -62,17 +64,17 @@ test('task done takes a slug, or <slug>@<path> from outside the repo, which the 
 });
 
 test('task done --json prints the task, its ledger and the finalize command', async (t) => {
-  const { h, app } = setup(t);
-  const file = located(h, app, 'epic');
+  const { h, app, fake } = setup(t);
+  const file = located(fake, h, app, 'epic');
   const ran = await runInProcess(h, app, 'task', 'done', 'epic', '--json');
   assert.equal(ran.status, 0, ran.stderr);
   assert.deepEqual(JSON.parse(ran.stdout), { ok: true, slug: 'epic', ledger: file, finalize: 'ledger task gate finalize epic' });
 });
 
 test('task done refuses a parked, blocked, lost or done task with the move check message, and changes nothing', async (t) => {
-  const { h, app } = setup(t);
+  const { h, app, fake } = setup(t);
   const lost = `- lost: 2026-11-22 — folder ${worktreeOf(app, 'epic')} not found`;
-  const file = located(h, app, 'epic');
+  const file = located(fake, h, app, 'epic');
   const plain = readLedgerFile(file);
   const withBullet = (bullet: string): string => plain.replace('- design refs: none', `- design refs: none\n${bullet}`);
   for (const [bullet, message] of [
@@ -89,10 +91,10 @@ test('task done refuses a parked, blocked, lost or done task with the move check
 });
 
 test('task done marks a task done whose PR gh says is merged, waiting or active', async (t) => {
-  const { h, app, calls } = setup(t);
+  const { h, app, calls, fake } = setup(t);
   stubGh(h, calls, prState('MERGED'));
-  const waiting = located(h, app, 'waiting', '- status: waiting 2026-11-20', `- pr: ${PR}`);
-  const active = located(h, app, 'active', `- pr: ${PR}`);
+  const waiting = located(fake, h, app, 'waiting', '- status: waiting 2026-11-20', `- pr: ${PR}`);
+  const active = located(fake, h, app, 'active', `- pr: ${PR}`);
   for (const [slug, file] of [['waiting', waiting], ['active', active]]) {
     const ran = await runInProcess(h, app, 'task', 'done', slug);
     assert.equal(ran.stdout, doneText(slug), ran.stderr);
@@ -102,8 +104,8 @@ test('task done marks a task done whose PR gh says is merged, waiting or active'
 });
 
 test('task done refuses a task whose PR is not merged, and says to merge it after the merge question', async (t) => {
-  const { h, app, calls } = setup(t);
-  const file = located(h, app, 'epic', '- status: waiting 2026-11-20', `- pr: ${PR}`);
+  const { h, app, calls, fake } = setup(t);
+  const file = located(fake, h, app, 'epic', '- status: waiting 2026-11-20', `- pr: ${PR}`);
   const before = readLedgerFile(file);
   for (const state of ['OPEN', 'CLOSED']) {
     stubGh(h, calls, prState(state));
@@ -116,8 +118,8 @@ test('task done refuses a task whose PR is not merged, and says to merge it afte
 });
 
 test('task done refuses a task with a PR when gh cannot say whether it is merged, and changes nothing', async (t) => {
-  const { h, app, calls } = setup(t);
-  const file = located(h, app, 'epic', '- status: waiting 2026-11-20', `- pr: ${PR}`);
+  const { h, app, calls, fake } = setup(t);
+  const file = located(fake, h, app, 'epic', '- status: waiting 2026-11-20', `- pr: ${PR}`);
   const before = readLedgerFile(file);
   for (const script of ['echo "gh: not logged in" >&2; exit 4', 'echo not json']) {
     stubGh(h, calls, script);
@@ -127,9 +129,9 @@ test('task done refuses a task with a PR when gh cannot say whether it is merged
 });
 
 test('task done does not ask gh about a task with a PR that cannot become done', async (t) => {
-  const { h, app, calls } = setup(t);
+  const { h, app, calls, fake } = setup(t);
   stubGh(h, calls, prState('MERGED'));
-  const file = located(h, app, 'epic', '- status: parked 2026-11-20 — later', `- pr: ${PR}`);
+  const file = located(fake, h, app, 'epic', '- status: parked 2026-11-20 — later', `- pr: ${PR}`);
   const before = readLedgerFile(file);
   refused(await runInProcess(h, app, 'task', 'done', 'epic'), /^epic is parked, so it cannot become done\./m);
   assert.equal(readLedgerFile(file), before);
@@ -150,8 +152,8 @@ test('task done outside a task, with no slug, says to name one', async (t) => {
 });
 
 test('task done refuses when the PR link changes while gh is asked, and changes nothing else', async (t) => {
-  const { h, app, calls } = setup(t);
-  const file = located(h, app, 'epic', '- status: waiting 2026-11-20', `- pr: ${PR}`);
+  const { h, app, calls, fake } = setup(t);
+  const file = located(fake, h, app, 'epic', '- status: waiting 2026-11-20', `- pr: ${PR}`);
   stubGh(h, calls, `perl -pi -e 's{pull/42}{pull/43}g' ${JSON.stringify(recordFile(file))}; echo '{"state":"MERGED"}'`);
   const before = readLedgerFile(file);
   refused(await runInProcess(h, app, 'task', 'done', 'epic'), /^epic: its PR link changed while it was being marked done\. Run ledger task done again\.$/m);
@@ -160,9 +162,9 @@ test('task done refuses when the PR link changes while gh is asked, and changes 
 });
 
 test('task done does not ask gh about a task of another machine, and refuses it', async (t) => {
-  const { h, app, calls } = setup(t);
+  const { h, app, calls, fake } = setup(t);
   stubGh(h, calls, prState('MERGED'));
-  const file = located(h, app, 'epic', '- status: waiting 2026-11-20', `- pr: ${PR}`, '- host: other-host');
+  const file = located(fake, h, app, 'epic', '- status: waiting 2026-11-20', `- pr: ${PR}`, '- host: other-host');
   const before = readLedgerFile(file);
   refused(await runInProcess(h, app, 'task', 'done', 'epic'), /other-host/);
   assert.equal(readLedgerFile(file), before);

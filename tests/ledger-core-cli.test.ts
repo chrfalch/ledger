@@ -11,25 +11,26 @@ import {
   lineWith,
   noSqlite,
   ok,
+  repoFixtures,
   repoKeyOf,
-  repository,
   runInProcess,
   storeFolder,
   touch,
-  worktreeTask,
 } from './ledger-core-fixtures.js';
 import { REPO } from './helpers.js';
 
 /**
  * Two repos under ~/repos. The parent task epic in app lists nine children: two live worktrees (one parked), a backlog
  * task, four archived tasks with no "(retired)" mark (one with a hand-written suffix, one archived under its branch name),
- * a child that exists nowhere (in the <slug>@<path> form, else it would be prose), and a child in the repo lib.
+ * a child that exists nowhere (in the <slug>@<path> form, else it would be prose), and a child in the repo lib. Git is
+ * a fake, or real git with `realGit`.
  */
-function world(t: TestContext) {
+function world(t: TestContext, { realGit = false } = {}) {
   const h = home(t);
-  const app = repository(h, path.join(h, 'repos/app'));
-  const lib = repository(h, path.join(h, 'repos/lib'));
-  const epic = worktreeTask(h, app, {
+  const { addRepo, addTask } = repoFixtures(t, h, { realGit });
+  const app = addRepo(path.join(h, 'repos/app'));
+  const lib = addRepo(path.join(h, 'repos/lib'));
+  const epic = addTask(app, {
     slug: 'epic',
     goal: 'Rewrite the ledger core.',
     children: [
@@ -44,21 +45,21 @@ function world(t: TestContext) {
       `- lib-part @ ${lib}`,
     ],
   });
-  const live = worktreeTask(h, app, { slug: 'live-child', parent: 'epic', report: ['PR #31 is open.'] });
-  const parked = worktreeTask(h, app, { slug: 'parked-child', parent: 'epic', next: 'Parked: 2026-11-10 — waiting for design\nThen implement.' });
+  const live = addTask(app, { slug: 'live-child', parent: 'epic', report: ['PR #31 is open.'] });
+  const parked = addTask(app, { slug: 'parked-child', parent: 'epic', next: 'Parked: 2026-11-10 — waiting for design\nThen implement.' });
   const idea = backlogTask(h, app, { slug: 'idea', parent: 'epic' });
   archivedTask(h, app, '2026-10-19', { slug: 'old-a', parent: 'epic' });
   archivedTask(h, app, '2026-10-21', { slug: 'old-b', parent: 'epic' });
   archivedTask(h, app, '2026-10-21', { slug: 'old-c', parent: 'epic', report: ['Merged in PR #26.'] });
   archivedTask(h, app, '2026-10-21', { slug: 'old-d', parent: 'epic', report: ['Merged in PR #27.'] }, 'feature-old-d');
-  const libPart = worktreeTask(h, lib, { slug: 'lib-part', parent: `epic @ ${app}` });
+  const libPart = addTask(lib, { slug: 'lib-part', parent: `epic @ ${app}` });
   archivedTask(h, lib, '2026-09-01', { slug: 'lib-old', goal: 'An old task in lib.' });
   touch(epic, '2026-11-15T10:00:00Z');
   touch(live, '2026-11-14T10:00:00Z');
   touch(parked, '2026-11-13T10:00:00Z');
   touch(idea, '2026-11-12T10:00:00Z');
   touch(libPart, '2026-11-11T10:00:00Z');
-  return { h, app, lib, files: { epic, live, parked, idea, libPart } };
+  return { h, app, lib, files: { epic, live, parked, idea, libPart }, addRepo, addTask };
 }
 
 type ListedTask = { slug: string; repo: string; main: string; status: string; worktree?: string; path?: string; branch: string; parent?: { slug: string; main: string }; updated: string; goal: string; next: string };
@@ -135,12 +136,13 @@ test('ledger list --json gives one object per live task, newest first', async (t
 
 test('ledger list puts each child task under its parent, marked ↳ and indented per level, a backlog parent too; active children first', async (t) => {
   const h = home(t);
-  const app = repository(h, path.join(h, 'repos/app'));
+  const { addRepo, addTask } = repoFixtures(t, h);
+  const app = addRepo(path.join(h, 'repos/app'));
   const plan = backlogTask(h, app, { slug: 'plan', children: ['- step-a', '- step-b'] });
   const stepA = backlogTask(h, app, { slug: 'step-a', parent: 'plan' });
-  const stepB = worktreeTask(h, app, { slug: 'step-b', parent: 'plan', children: ['- deep'] });
+  const stepB = addTask(app, { slug: 'step-b', parent: 'plan', children: ['- deep'] });
   const deep = backlogTask(h, app, { slug: 'deep', parent: 'step-b' });
-  const solo = worktreeTask(h, app, { slug: 'solo' });
+  const solo = addTask(app, { slug: 'solo' });
   touch(deep, '2026-11-17T10:00:00Z');
   touch(stepA, '2026-11-16T10:00:00Z');
   touch(solo, '2026-11-15T10:00:00Z');
@@ -163,9 +165,9 @@ test('list finds the repos of the stored ledgers from any folder, and writes no 
 });
 
 test('a stale old task list changes nothing the list shows, and stays as it was: a gone ledger is not listed, a stored one outside ~/repos is', async (t) => {
-  const { h, app } = world(t);
-  const elsewhere = repository(h, path.join(h, 'work/tool'));
-  worktreeTask(h, elsewhere, { slug: 'tool-task' });
+  const { h, app, addRepo, addTask } = world(t);
+  const elsewhere = addRepo(path.join(h, 'work/tool'));
+  addTask(elsewhere, { slug: 'tool-task' });
   const created = '2020-01-01T00:00:00.000Z';
   const stale = `${JSON.stringify([{ repo: 'app', slug: 'gone', path: path.join(app, '.claude/worktrees/gone/.claude/ledger.md'), branch: 'me/gone', status: 'active', main: app, created, updated: created }], null, 2)}\n`;
   writeFileSync(oldTaskListFile(h), stale);
@@ -211,10 +213,10 @@ test('ledger archive --all lists every repo and names the repo of each ledger', 
 });
 
 test('ledger archive says so when nothing is archived or nothing matches', async (t) => {
-  const { h, app } = world(t);
+  const { h, app, addRepo } = world(t);
   const shown = (main: string): string => `~/${path.relative(h, storeFolder(h, 'ledger-archive', main))}/`;
   assert.equal(ok(await runInProcess(h, app, 'task', 'archive', 'zzz')).trim(), `No archived ledger in ${shown(app)} contains "zzz".`);
-  const empty = repository(h, path.join(h, 'repos/empty'));
+  const empty = addRepo(path.join(h, 'repos/empty'));
   assert.equal(ok(await runInProcess(h, empty, 'task', 'archive')).trim(), `No archived ledgers in ${shown(empty)}.`);
 });
 
@@ -224,7 +226,7 @@ test('ledger archive --all says so when nothing is archived in any repo', async 
 });
 
 test('ledger archive outside a git repository fails and suggests --all', (t) => {
-  const { h } = world(t);
+  const { h } = world(t, { realGit: true });
   const ran = ledger(h, h, 'task', 'archive');
   assert.equal(ran.status, 1);
   assert.match(ran.stderr, /--all/);
@@ -276,17 +278,17 @@ test('ledger parent shows the parent, its goal, and a row per child with status 
 });
 
 test('a child with a live ledger and an archive copy has the live status in both parent and list: the live ledger wins', async (t) => {
-  const { h, app } = world(t);
-  worktreeTask(h, app, { slug: 'old-a', parent: 'epic' });
+  const { h, app, addTask } = world(t);
+  addTask(app, { slug: 'old-a', parent: 'epic' });
   const shown: Shown = JSON.parse(ok(await runInProcess(h, app, 'tree', 'show', 'epic', '--json')));
   assert.equal(shown.children.find(({ slug }) => slug === 'old-a')?.status, 'active');
   assert.equal((await listJson(h, app)).find(({ slug }) => slug === 'old-a')?.status, 'active');
 });
 
 test('a Children bullet is a child only when it names a known task or has the <slug>@<path> form', async (t) => {
-  const { h, app, lib } = world(t);
+  const { h, app, lib, addTask } = world(t);
   archivedTask(h, app, '2026-10-02', { slug: 'old-free' });
-  worktreeTask(h, app, {
+  addTask(app, {
     slug: 'prose',
     children: ['- Superseded by the new plan.', '- RN-side work is tracked in the RN repo.', '- nobody', '- old-free', '- live-child', `- elsewhere @ ${lib}`],
   });
@@ -315,8 +317,9 @@ test('an archive copy of a same-named repo elsewhere does not retire a child', a
 
 test('a child with no ledger anywhere is missing, even when the parent marks it retired', async (t) => {
   const h = home(t);
-  const app = repository(h, path.join(h, 'repos/app'));
-  worktreeTask(h, app, { slug: 'epic', children: [`- lost @ ${app} (retired 2026-10-01)`] });
+  const { addRepo, addTask } = repoFixtures(t, h);
+  const app = addRepo(path.join(h, 'repos/app'));
+  addTask(app, { slug: 'epic', children: [`- lost @ ${app} (retired 2026-10-01)`] });
   const shown: Shown = JSON.parse(ok(await runInProcess(h, app, 'tree', 'show', 'epic', '--json')));
   assert.deepEqual(shown.children.map(({ slug, status }) => [slug, status]), [['lost', 'missing']]);
   assert.match(lineWith(ok(await runInProcess(h, app, 'tree', 'show', 'epic')), 'lost'), /^lost +missing\b/);
@@ -324,8 +327,9 @@ test('a child with no ledger anywhere is missing, even when the parent marks it 
 
 test('a reused slug: an archive copy of another parent does not retire a live child', async (t) => {
   const h = home(t);
-  const app = repository(h, path.join(h, 'repos/app'));
-  worktreeTask(h, app, { slug: 'epic', children: ['- fix-ci'] });
+  const { addRepo, addTask } = repoFixtures(t, h);
+  const app = addRepo(path.join(h, 'repos/app'));
+  addTask(app, { slug: 'epic', children: ['- fix-ci'] });
   backlogTask(h, app, { slug: 'fix-ci', parent: 'epic' });
   archivedTask(h, app, '2026-10-01', { slug: 'fix-ci', parent: 'other-epic' });
   const shown: Shown = JSON.parse(ok(await runInProcess(h, app, 'tree', 'show', 'epic', '--json')));
@@ -334,11 +338,12 @@ test('a reused slug: an archive copy of another parent does not retire a live ch
 
 test('an archive copy with no parent line counts only when no live ledger has the slug', async (t) => {
   const h = home(t);
-  const app = repository(h, path.join(h, 'repos/app'));
-  worktreeTask(h, app, { slug: 'epic', children: ['- old-x', '- both'] });
+  const { addRepo, addTask } = repoFixtures(t, h);
+  const app = addRepo(path.join(h, 'repos/app'));
+  addTask(app, { slug: 'epic', children: ['- old-x', '- both'] });
   archivedTask(h, app, '2026-10-01', { slug: 'old-x' });
   archivedTask(h, app, '2026-10-01', { slug: 'both' });
-  worktreeTask(h, app, { slug: 'both' });
+  addTask(app, { slug: 'both' });
   const shown: Shown = JSON.parse(ok(await runInProcess(h, app, 'tree', 'show', 'epic', '--json')));
   const statuses = Object.fromEntries(shown.children.map(({ slug, status }) => [slug, status]));
   assert.deepEqual(statuses, { 'old-x': 'retired', both: 'active' });
@@ -381,11 +386,11 @@ test('ledger parent refuses a slug the reading rule does not accept', async (t) 
   assert.match(ran.stderr, /slug/);
 });
 
-/** A HOME with ~/.claude/ledger.template.md and the repo ~/repos/app, for the commands that write a task. */
-function writable(t: TestContext) {
+/** A HOME with ~/.claude/ledger.template.md and the repo ~/repos/app, for the commands that write a task; git as in world(). */
+function writable(t: TestContext, { realGit = false } = {}) {
   const h = home(t);
   copyFileSync(path.join(REPO, 'ledger.template.md'), path.join(h, '.claude/ledger.template.md'));
-  return { h, app: repository(h, path.join(h, 'repos/app')) };
+  return { h, app: repoFixtures(t, h, { realGit }).addRepo(path.join(h, 'repos/app')) };
 }
 
 const withoutUsage = (help: string): string[] => help.split('\n').slice(1);
@@ -419,7 +424,7 @@ test('the short forms go, list and show take the arguments and options of their 
 });
 
 test('ledger task new, show, list, park, unpark, go, retire and archive take a task from the backlog to the archive', (t) => {
-  const { h, app } = writable(t);
+  const { h, app } = writable(t, { realGit: true });
   const file = backlogLedger(h, app, 'fix-login');
   assert.equal(ok(ledger(h, app, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.')), `ledger:  ${file}\nstatus:  backlog\nstart:   /ledger:go fix-login\n`);
 

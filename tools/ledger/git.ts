@@ -72,7 +72,8 @@ export function replaceGitForTests(runner: GitRunner | undefined): GitRunner | u
   return replaced;
 }
 
-function run(folder: string, args: string[], env = runEnv()): { ok: boolean; stdout: string; stderr: string } {
+/** One git command in `folder`, behind the limits of limitGitCalls and through the runner of replaceGitForTests. */
+export function run(folder: string, args: string[], env = runEnv()): { ok: boolean; stdout: string; stderr: string } {
   const unanswering = { ok: false, stdout: '', stderr: `git did not answer in ${folder}` };
   const markUnanswered = (): void => {
     const stopped = path.resolve(folder);
