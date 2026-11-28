@@ -31,7 +31,7 @@ test('a go <slug> prompt claims the task for this session and passes the prompt 
 
   await $.prompt.submit({ text: '  go epic\n' })
 
-  expect(w.argvs()).toEqual([claimArgv('epic')])
+  expect(w.argvs()).toEqual([claimArgv('epic'), ['session', CWD, '--json']])
   expect(w.events).toEqual(['submit:   go epic\n'])
   expect(w.reminders).toEqual([])
 })
@@ -75,7 +75,7 @@ test('a go <slug> prompt with more than one space before the slug claims the tas
   await $.prompt.submit({ text: 'go   epic' })
   await $.prompt.submit({ text: 'go\tepic' })
 
-  expect(w.argvs()).toEqual([claimArgv('epic'), claimArgv('epic')])
+  expect(w.argvs()).toEqual([claimArgv('epic'), ['session', CWD, '--json'], claimArgv('epic'), ['session', CWD, '--json']])
 })
 
 test('a held answer whose claim is malformed is a plain claim failure', async ($, on) => {

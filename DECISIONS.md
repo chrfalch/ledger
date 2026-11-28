@@ -1523,3 +1523,19 @@ is for, so it wins.
 
 **T3 follows once its rename lands.** The T3 thread name gets the same title
 when the T3 rename sync (branch `wf-t3-rename-sync`) is merged.
+
+## 2026-11-28 — The T3 thread follows the task at once
+
+**The thread is renamed when the task changes.** Before, the T3 thread got its
+name only at the turn end. A cleared session that ran `go <slug>` kept the old
+task's name for its whole first turn. Now the thread is renamed when a
+`go <slug>` prompt claims a task, and when EnterWorktree moves the session into
+a task's worktree.
+
+**/rename stays at the turn end.** The engine refuses a command while a turn
+waits on a hook, so /rename cannot move earlier. The shell prompt hook already
+gives the Claude title at `go <slug>`.
+
+**Each name is set once per session and title.** The mod keeps the last thread
+title apart from the last /rename title. A failed thread rename is not tried
+again; a failed /rename is tried at the next turn end.

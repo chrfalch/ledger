@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { done, ledgerOf, MAIN, session, task, turnEnd, world, worktreeOf } from './fake-ledger.test-helper'
+import { done, ledgerOf, MAIN, ran, refused, session, task, turnEnd, world, worktreeOf } from './fake-ledger.test-helper'
 
 // D43: the session name is always the state icon and slug of the task the session works on, and changes at each task change and each state change.
 
@@ -150,4 +150,91 @@ test('D43: a T3 thread rename that fails is not tried again, nor is /rename', as
   await $.turn.complete(turnEnd)
 
   expect(w.events).toEqual(['rename: 🔍 alpha', 't3: 🔍 alpha'])
+})
+
+const inMain = { [sessionAt(MAIN)]: session(MAIN, undefined, [task('beta')]) }
+const claimBeta = 'task claim beta --session session-1 --json'
+const heldBeta = ran(3, JSON.stringify({ ok: false, error: 'held: session session-2', held: { session: 'session-2', since: '2026-11-20T08:00:00Z', active: '2026-11-20T09:30:00Z' } }))
+
+test('D43: in T3 Code a go <slug> prompt that claims a task renames the thread at once, and the turn end only runs /rename', async ($, on) => {
+  const w = world(on, { ...inMain, [claimBeta]: claimed('beta', 'session-1') }, { cwd: MAIN, t3: 'renames' })
+
+  await $.prompt.submit({ text: 'go beta' })
+  expect(w.events).toEqual(['t3: 🔨 beta', 'submit: go beta'])
+
+  await $.turn.complete(turnEnd)
+  expect(w.events).toEqual(['t3: 🔨 beta', 'submit: go beta', 'rename: 🔨 beta'])
+})
+
+test('D43: in T3 Code a go <slug> prompt names the thread with the bare slug when the session cannot be read', async ($, on) => {
+  const w = world(on, { [claimBeta]: claimed('beta', 'session-1') }, { cwd: MAIN, t3: 'renames' })
+
+  await $.prompt.submit({ text: 'go beta' })
+
+  expect(w.events).toEqual(['t3: beta', 'submit: go beta'])
+})
+
+for (const [name, reply] of [['held', heldBeta], ['failed', refused('no task beta')]] as const) {
+  test(`D43: in T3 Code a go <slug> prompt whose claim ${name} leaves the thread to the turn end`, async ($, on) => {
+    const w = world(on, { ...inMain, [claimBeta]: reply }, { cwd: MAIN, t3: 'renames' })
+
+    await $.prompt.submit({ text: 'go beta' })
+
+    expect(t3Renames(w.events)).toEqual([])
+  })
+}
+
+test('D43: in T3 Code the main agent\'s EnterWorktree renames the thread at the tool call, and the turn end only runs /rename', async ($, on) => {
+  const w = world(on, ownTasks, { cwd: A, t3: 'renames' })
+
+  await $.tool.call({ tool: 'EnterWorktree', path: B })
+  expect(w.events).toEqual(['t3: 🔨 beta'])
+
+  await $.turn.complete(turnEnd)
+  expect(w.events).toEqual(['t3: 🔨 beta', 'rename: 🔨 beta'])
+})
+
+for (const [name, answer] of [['errors', { isError: true }], ['is denied', { deny: 'no worktree' }]] as const) {
+  test(`D43: in T3 Code an EnterWorktree that ${name} leaves the thread as it was`, async ($, on) => {
+    const w = world(on, ownTasks, { cwd: A, t3: 'renames' })
+    w.answerEnterWorktree(answer)
+
+    await $.tool.call({ tool: 'EnterWorktree', path: B })
+
+    expect(w.events).toEqual([])
+  })
+}
+
+test('D43: in T3 Code an agent\'s EnterWorktree leaves the thread as it was', async ($, on) => {
+  const w = world(on, ownTasks, { cwd: A, t3: 'renames' })
+
+  await $.tool.call({ tool: 'EnterWorktree', path: B, agentId: 'a1' })
+
+  expect(w.events).toEqual([])
+})
+
+test('D43: outside T3 Code an EnterWorktree and a go <slug> prompt rename nothing until the turn end', async ($, on) => {
+  const w = world(on, { ...ownTasks, ...inMain, [claimBeta]: claimed('beta', 'session-1') }, { cwd: MAIN })
+
+  await $.prompt.submit({ text: 'go beta' })
+  await $.tool.call({ tool: 'EnterWorktree', path: B })
+  await $.turn.complete(turnEnd)
+
+  expect(w.events).toEqual(['submit: go beta', 'rename: 🔨 beta'])
+})
+
+test('D43: in T3 Code a go <slug> prompt in another task\'s worktree takes the claimed task\'s title from the main checkout', async ($, on) => {
+  const w = world(on, { [sessionAt(A)]: session(A, task('alpha')), ...inMain, [claimBeta]: claimed('beta', 'session-1') }, { cwd: A, t3: 'renames' })
+
+  await $.prompt.submit({ text: 'go beta' })
+
+  expect(w.events).toEqual(['t3: 🔨 beta', 'submit: go beta'])
+})
+
+test('D43: in T3 Code a go <slug> prompt in another task\'s worktree names the thread with the bare slug when the main checkout does not list it', async ($, on) => {
+  const w = world(on, { [sessionAt(A)]: session(A, task('alpha')), [sessionAt(MAIN)]: session(MAIN, undefined, [task('alpha')]), [claimBeta]: claimed('beta', 'session-1') }, { cwd: A, t3: 'renames' })
+
+  await $.prompt.submit({ text: 'go beta' })
+
+  expect(w.events).toEqual(['t3: beta', 'submit: go beta'])
 })
