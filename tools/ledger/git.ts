@@ -51,6 +51,27 @@ export function gitTimedOut(folder: string): boolean {
 // spawnSync stops a child at 1 MiB of output by default, which git status passes in a checkout with a few thousand untracked files.
 const MAX_OUTPUT = 256 * 1024 * 1024;
 
+/** One git command in `folder`; `timedOut` when it was stopped after `timeout` ms. */
+export type GitRunner = (folder: string, args: string[], env: NodeJS.ProcessEnv, timeout?: number) => { ok: boolean; stdout: string; stderr: string; timedOut?: boolean };
+
+const spawnGit: GitRunner = (folder, args, env, timeout) => {
+  const result = spawnSync('git', ['-C', folder, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout, env, maxBuffer: MAX_OUTPUT });
+  const timedOut = result.error !== undefined && 'code' in result.error && result.error.code === 'ETIMEDOUT';
+  return { ok: result.status === 0, stdout: result.stdout ?? '', stderr: result.stderr ?? '', timedOut };
+};
+
+let replacement: GitRunner | undefined;
+
+/**
+ * For tests only: runs every later git command of `run` with `runner` in place of git, behind the limits of
+ * limitGitCalls. `undefined` brings git back. Gives the runner it replaces.
+ */
+export function replaceGitForTests(runner: GitRunner | undefined): GitRunner | undefined {
+  const replaced = replacement;
+  replacement = runner;
+  return replaced;
+}
+
 function run(folder: string, args: string[], env = runEnv()): { ok: boolean; stdout: string; stderr: string } {
   const unanswering = { ok: false, stdout: '', stderr: `git did not answer in ${folder}` };
   const markUnanswered = (): void => {
@@ -63,9 +84,9 @@ function run(folder: string, args: string[], env = runEnv()): { ok: boolean; std
     markUnanswered();
     return unanswering;
   }
-  const result = spawnSync('git', ['-C', folder, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout, env, maxBuffer: MAX_OUTPUT });
-  if (result.error !== undefined && 'code' in result.error && result.error.code === 'ETIMEDOUT') markUnanswered();
-  return { ok: result.status === 0, stdout: result.stdout ?? '', stderr: (result.stderr ?? '').trim() };
+  const { ok, stdout, stderr, timedOut } = (replacement ?? spawnGit)(folder, args, env, timeout);
+  if (timedOut) markUnanswered();
+  return { ok, stdout, stderr: stderr.trim() };
 }
 
 function git(folder: string, ...args: string[]): string | undefined {

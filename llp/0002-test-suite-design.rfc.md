@@ -309,6 +309,60 @@ processes. Those are the cases this RFC keeps in the full run:
 
 Existing test files move one at a time.
 
+### 6. A fake git
+
+**As built.** Many tests make a real repository only so that a main
+checkout, a branch or a repo key exists. That setup costs about 1–1.5 s a
+test (`docs/test-audit-2026-11.md`). With a fake git, such a test declares
+the repository as data, and no git process starts.
+
+- **The replacement point.** Every everyday git command of ledger starts in
+  one private function, `run()` in `tools/ledger/git.ts` [observed].
+  `replaceGitForTests(runner)` replaces the `spawnSync` call inside it with a
+  `GitRunner`: `(folder, args, env, timeout?) => { ok, stdout, stderr,
+  timedOut? }`. It gives back
+  the runner it replaced, as `limitHookTimeForTests` gives back its limit.
+  `undefined` brings real git back.
+- **Why at the spawn.** The hang limits run in `run()` before the spawn: a
+  folder that did not answer is not asked again, and no call starts after the
+  deadline. With the fake behind them, those rules still apply.
+  - A runner that reports `timedOut` marks the folder as not answering, as
+    real git does. The fake never reports it, so a hang stays a
+    real-process test (section 2).
+- **Not cleared by `resetRunState()`.** In-process runs call it at every
+  start (section 1). A test sets the fake before the run and removes it in
+  `t.after`, as it does a `…ForTests` limit.
+- **The fake.** `fakeGit(state)` in `tests/fixtures/fake-git.ts`.
+  - The state is plain data: repositories keyed by main checkout, each with
+    refs, commits, remotes, `origin/HEAD`, linked worktrees and status lines.
+  - Commands that change a repository change the state. Worktree commands
+    also make or remove the worktree's folder, as git does. Only `worktree
+    prune` and `worktree repair` look at the disk; the other commands do
+    not need the folders to exist.
+  - A command or a folder the state does not know throws an error that names
+    both. The fake never answers with a default, so a gap fails the test that
+    hit it.
+- **Kept honest.** `tests/git-fake.test.ts` runs each `git.ts` function that
+  starts git against a real repository and against the same repository
+  declared to the fake, and expects the same answer.
+- **The git store stays real.** `cloneGit` in `clone.ts` runs the commands of
+  the git storage clone: commit, rebase, push and pull. A fake of those would
+  reimplement git's objects and merges. Section 4 keeps the git store in
+  real-process tests.
+- **Child processes, later.** A spawned `bin/ledger` does not see a fake set
+  in the test process. A later task can pass one through the preload
+  `tests/fixtures/git-test-remote.mjs`: an environment variable names the
+  state, and the preload calls `replaceGitForTests`.
+- **Rule 8 of the audit.** This settles two seams of open rule 8 in
+  `docs/test-audit-2026-11.md`:
+  - the repo key and main checkout, about 200 tests: both come from `git.ts`
+    (`remoteUrls`, `mainCheckout`), so the fake answers them;
+  - the git runner in `retire.ts`, which has none of its own and calls
+    `git.ts` [observed].
+
+  It is the choice that rule 2 asks for, in place of a repo-key seam or one
+  shared template repository. The gh, `deploy()` and wizard seams stay open.
+
 ### Not proposed
 
 - **Running test files one at a time** (`--test-concurrency=1`). It avoids
