@@ -21,6 +21,7 @@ import {
   installHook,
   isAncestor,
   isKnownFormat,
+  isLabelFile,
   MARKER,
   markerFormat,
   markerText,
@@ -45,6 +46,7 @@ import {
 import { fail, Failure } from './failure.js';
 import { isFolder, isTaken, writeAtomic } from './files.js';
 import { gh } from './git.js';
+import { earlier, labelColourJson, parseLabelColour, type LabelColour } from './labels.js';
 import { withLockIfFree } from './lock.js';
 import { realPath, type LedgerPaths } from './paths.js';
 import { runClock } from './run-io.js';
@@ -513,7 +515,8 @@ const ABORT_MS = 500;
 /**
  * Rebases the commits made here onto `incoming`, the commit the fetch found, once every commit it brings holds only
  * ledgers as plain files; with no commit made here, it moves the branch forward to `incoming` without a rebase. A
- * rebase that stops or runs out of time is aborted, so the clone is left as it was, with every commit made here; when
+ * rebase that stops on label files alone goes on with the earlier entry of each (resolveLabelConflicts). A rebase that
+ * stops otherwise or runs out of time is aborted, so the clone is left as it was, with every commit made here; when
  * the abort fails, the rebase left is cleared if it holds no work, and is otherwise a problem a person must fix. When
  * the remote has nothing new, there is nothing to rebase, and a merge stays a merge; otherwise a merge made here stops
  * it, as a rebase would drop it.
@@ -542,9 +545,17 @@ function rebaseOnto({ clone, where, remote }: Sync, { upstream, incoming }: { up
     if (forwarded.timedOut) throw new SyncProblem('timeout', `The pull from ${remote.shown} ran out of time; the next sync pulls again.`);
     throw new SyncProblem('conflict', `The pull from ${remote.shown} failed, so nothing was pushed.\n${forwarded.stderr}\n${ASK_THE_OPERATOR}`);
   }
-  const rebased = committingGit(clone, ['rebase', '--quiet', '--merge', '--no-autostash', incoming], deadline === undefined ? undefined : deadline - ABORT_MS);
+  const rebaseDeadline = deadline === undefined ? undefined : deadline - ABORT_MS;
+  const conflictsOf = (run: GitRun): string[] => (run.ok || run.timedOut ? [] : nulSeparated(cloneGit(clone, ['diff', '--name-only', '-z', '--diff-filter=U'], { deadline }).stdout));
+  let rebased = committingGit(clone, ['rebase', '--quiet', '--merge', '--no-autostash', incoming], rebaseDeadline);
+  let conflicted = conflictsOf(rebased);
+  while (!rebased.ok && resolveLabelConflicts(clone, conflicted, deadline)) {
+    // A commit that held nothing but the label entry the other machine's won is empty now, and is dropped.
+    const staged = !cloneGit(clone, ['diff', '--cached', '--quiet'], { deadline }).ok;
+    rebased = committingGit(clone, ['rebase', staged ? '--continue' : '--skip'], rebaseDeadline);
+    conflicted = conflictsOf(rebased);
+  }
   if (rebased.ok) return;
-  const conflicted = rebased.timedOut ? [] : nulSeparated(cloneGit(clone, ['diff', '--name-only', '-z', '--diff-filter=U'], { deadline }).stdout);
   cloneGit(clone, ['rebase', '--abort'], { deadline });
   clearLeftoverRebase(clone, deadline);
   if (rebased.timedOut) throw new SyncProblem('timeout', `The pull from ${remote.shown} ran out of time, so it was undone; the next sync pulls again.`);
@@ -557,6 +568,29 @@ function rebaseOnto({ clone, where, remote }: Sync, { upstream, incoming }: { up
       ASK_THE_OPERATOR,
     ].join('\n'),
   );
+}
+
+/**
+ * Stages, for each of `conflicted`, the paths a rebase stopped on, the registry entry of the machine that first used the
+ * label (D53), so two machines that first used one label at once never leave a conflict for a person. False, with
+ * nothing staged, when any of them is no label file, or one holds an entry on neither side: then the rebase is aborted
+ * as for any other conflict.
+ */
+function resolveLabelConflicts(clone: string, conflicted: string[], deadline?: number): boolean {
+  if (conflicted.length === 0 || !conflicted.every(isLabelFile)) return false;
+  const sideOf = (file: string, stage: 2 | 3): LabelColour | undefined => {
+    const shown = cloneGit(clone, ['show', `:${stage}:${file}`], { deadline });
+    return shown.ok ? parseLabelColour(shown.stdout) : undefined;
+  };
+  const chosen = conflicted.flatMap((file): [string, LabelColour][] => {
+    const [ours, theirs] = [sideOf(file, 2), sideOf(file, 3)];
+    const entry = ours === undefined || theirs === undefined ? (ours ?? theirs) : earlier(ours, theirs);
+    return entry === undefined ? [] : [[file, entry]];
+  });
+  if (chosen.length < conflicted.length) return false;
+  for (const [file, entry] of chosen) writeAtomic(path.join(clone, file), labelColourJson(entry));
+  must(cloneGit(clone, ['add', '--', ...conflicted], { env: { GIT_LITERAL_PATHSPECS: '1' }, deadline }));
+  return true;
 }
 
 /**

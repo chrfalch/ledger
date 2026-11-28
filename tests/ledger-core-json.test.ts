@@ -241,8 +241,8 @@ test('archive --json lists the archived ledgers with date, branch, goal and the 
   assert.equal(all.repo, repo);
   assert.equal(all.folder, folder);
   assert.deepEqual(all.ledgers, [
-    { date: '2026-10-05', repo, slug: 'old-b', path: path.join(folder, '2026-10-05-old-b.md'), branch: 'me/old-b', goal: 'Goal of old-b.' },
-    { date: '2026-10-01', repo, slug: 'old-a', path: path.join(folder, '2026-10-01-old-a.md'), branch: 'me/old-a', goal: 'Goal of old-a.' },
+    { date: '2026-10-05', repo, slug: 'old-b', path: path.join(folder, '2026-10-05-old-b.md'), branch: 'me/old-b', labels: [], goal: 'Goal of old-b.' },
+    { date: '2026-10-01', repo, slug: 'old-a', path: path.join(folder, '2026-10-01-old-a.md'), branch: 'me/old-a', labels: [], goal: 'Goal of old-a.' },
   ]);
   const matched = done(await json(h, app, 'task', 'archive', 'pr #27'));
   assert.equal(matched.term, 'pr #27');
@@ -260,7 +260,7 @@ test('parent --json shows the parent; add, remove, start and next each report wh
 
   const shown = done(await json(h, app, 'tree', 'show', 'epic'));
   assert.deepEqual([shown.slug, shown.main, shown.goal], ['epic', app, 'The epic.']);
-  assert.deepEqual(shown.children, [{ slug: 'first', main: app, status: 'backlog', next: 'Next step of first.', report: [] }]);
+  assert.deepEqual(shown.children, [{ slug: 'first', main: app, status: 'backlog', labels: [], next: 'Next step of first.', report: [] }]);
 
   const added = done(await json(h, app, 'tree', 'add', 'epic', 'second'));
   assert.deepEqual(added, { ok: true, action: 'add', parent: { slug: 'epic', main: app }, child: { slug: 'second', main: app } });
@@ -549,8 +549,8 @@ test('worktrees --json gives each linked worktree with its ledger; prune --json 
   assert.equal(table.main, app);
   assert.match(String(table.prError), /gh/);
   const rows = new Map((table.worktrees as { name: string }[]).map((row) => [row.name, row as Record<string, unknown>]));
-  assert.deepEqual(rows.get('epic')?.ledger, { slug: 'epic', path: activeFile(h, app, 'epic'), activeChildren: 1 });
-  assert.deepEqual(rows.get('part')?.ledger, { slug: 'part', path: activeFile(h, app, 'part'), parent: 'epic' });
+  assert.deepEqual(rows.get('epic')?.ledger, { slug: 'epic', path: activeFile(h, app, 'epic'), labels: [], activeChildren: 1 });
+  assert.deepEqual(rows.get('part')?.ledger, { slug: 'part', path: activeFile(h, app, 'part'), labels: [], parent: 'epic' });
   assert.equal(rows.get('epic')?.branch, 'me/epic');
   assert.equal(rows.get('epic')?.dirty, 0);
   assert.ok(Number(rows.get('epic')?.sizeGb) >= 0.05);

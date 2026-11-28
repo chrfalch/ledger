@@ -2,11 +2,12 @@ import { cpSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, rena
 import path from 'node:path';
 import { fail } from './failure.js';
 import { createFile, folderEntries, holdsAnything, isEntryName, isFolder, isReadableFile, isTaken, moveAside, putBack, readText, readTimedText, sameTree, treeEntries, writeAtomic, type TimedText } from './files.js';
+import { isLabel, labelColourJson, newLabelColours, parseLabelColour, type LabelColour } from './labels.js';
 import { withLock } from './lock.js';
 import type { LedgerPaths } from './paths.js';
 import { ownHosts, validHost } from './settings.js';
 import { parseRecord, readStoredRecord, recordJson, recordToWrite, renderRecord, type StoredRecord } from './record.js';
-import { byCodeUnit, checkedAliases, findWorktree, isAsChecked, NameTaken, needsAlias, noteCreated, readable, refuseHiddenMarkdown, resolvedWorktree, type Archive, type Backlog, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
+import { byCodeUnit, checkedAliases, findWorktree, isAsChecked, NameTaken, needsAlias, noteCreated, readable, refuseHiddenMarkdown, resolvedWorktree, type Archive, type Backlog, type Labels, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
 import { pauseForTest } from './wait.js';
 
 /**
@@ -232,7 +233,42 @@ function collection(root: string, legacyMarkdown = true): FileCollection {
  * Where a file store keeps its parts. The evidence of the archive copy `name` of `repo` is the folder
  * <evidence>/<repo folder>/<name>/.
  */
-export type FileRoots = { backlog: string; active: string; archive: string; evidence: string; registry: string; aliases: string };
+export type FileRoots = { backlog: string; active: string; archive: string; evidence: string; registry: string; aliases: string; labels: string };
+
+/**
+ * The label registry as a folder that holds `<label>.json` for each label. One file a label, so two machines that sync the
+ * folder, as git storage does, only ever both write the file of a label both first used at once.
+ */
+export function labelFolder(folder: string): Labels {
+  const entryOf = (file: string): LabelColour | undefined => {
+    try {
+      return parseLabelColour(readText(file));
+    } catch {
+      return undefined;
+    }
+  };
+  const read = (): Map<string, LabelColour> =>
+    new Map(
+      folderEntries(folder).flatMap((entry): [string, LabelColour][] => {
+        const label = entry.name.replace(/\.json$/, '');
+        const colour = entry.isFile() && label !== entry.name && isLabel(label) ? entryOf(path.join(folder, entry.name)) : undefined;
+        return colour === undefined ? [] : [[label, colour]];
+      }),
+    );
+  const write = (added: readonly (readonly [string, LabelColour])[]): void => {
+    if (added.length > 0) mkdirSync(folder, { recursive: true });
+    for (const [label, colour] of added) writeAtomic(path.join(folder, `${label}.json`), labelColourJson(colour));
+  };
+  return {
+    read,
+    register: (labels, firstUsed) => withLock(folder, () => write(newLabelColours(read(), labels, firstUsed))),
+    copy: (entries) =>
+      withLock(folder, () => {
+        const kept = read();
+        write([...entries].filter(([label]) => !kept.has(label)));
+      }),
+  };
+}
 
 /**
  * A move between repo folders, on one disk, links a ledger file at the target and then removes it from the source, and
@@ -248,11 +284,19 @@ export function fileStore(paths: LedgerPaths, options: FileStoreOptions = {}): L
   return { ...fileStoreAt(fileStoreRoots(paths), options), host: validHost(paths.home), ownHosts: ownHosts(paths.home) };
 }
 
-/** Where the file store under ~/.claude keeps its ledgers, registry and aliases. */
+/** Where the file store under ~/.claude keeps its ledgers, old task list, aliases and label colours. */
 export function fileStoreRoots({ home }: LedgerPaths): FileRoots {
   const claude = path.join(home, '.claude');
   const archive = path.join(claude, 'ledger-archive');
-  return { backlog: path.join(claude, 'ledger-backlog'), active: path.join(claude, 'ledger-active'), archive, evidence: archive, registry: path.join(claude, 'ledgers.json'), aliases: path.join(claude, 'ledger-aliases.json') };
+  return {
+    backlog: path.join(claude, 'ledger-backlog'),
+    active: path.join(claude, 'ledger-active'),
+    archive,
+    evidence: archive,
+    registry: path.join(claude, 'ledgers.json'),
+    aliases: path.join(claude, 'ledger-aliases.json'),
+    labels: path.join(claude, 'ledger-labels'),
+  };
 }
 
 /**
@@ -646,5 +690,6 @@ export function fileStoreAt(roots: FileRoots, { link = linkSync, rename = rename
           if (kept.length < current.length || next.length > kept.length) writeAtomic(aliases, `${JSON.stringify(Object.fromEntries(next), null, 2)}\n`);
         }),
     },
+    labels: labelFolder(roots.labels),
   };
 }

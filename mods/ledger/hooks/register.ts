@@ -412,16 +412,35 @@ async function finishTurn($: EngineInterface, clearPointTokens: number): Promise
   if (!(pruned.ok && pruned.finished)) await markClearPoint($, clearPointTokens)
 }
 
+/**
+ * `given` without its `--label <label>` pairs, and those pairs as `ledger` takes them, which checks each label itself. A
+ * last `--label` with no label stays one, so `ledger` says it lacks its value.
+ */
+function withoutLabels(given: string[]): { rest: string[]; labels: string[] } {
+  const rest: string[] = []
+  const labels: string[] = []
+  for (let index = 0; index < given.length; index++) {
+    if (given[index] !== '--label') rest.push(given[index])
+    else {
+      labels.push(...given.slice(index, index + 2))
+      index++
+    }
+  }
+  return { rest, labels }
+}
+
 function archiveArgs(given: string[]): string[] {
-  const term = given.filter(word => word !== '--all').join(' ')
-  return ['task', 'archive', ...(term === '' ? [] : [term]), ...(given.includes('--all') ? ['--all'] : [])]
+  const { rest, labels } = withoutLabels(given)
+  const term = rest.filter(word => word !== '--all').join(' ')
+  return ['task', 'archive', ...(term === '' ? [] : [term]), ...(rest.includes('--all') ? ['--all'] : []), ...labels]
 }
 
 /** /ledger:parent takes `<slug> [<action> <child>]`; `ledger tree` takes the action first, and `show` for none. */
 function treeArgs(given: string[]): string[] {
-  const options = given.filter(word => word.startsWith('-'))
-  const [slug = '', action = 'show', ...rest] = given.filter(word => !word.startsWith('-'))
-  return ['tree', action, slug, ...rest, ...options]
+  const { rest, labels } = withoutLabels(given)
+  const options = rest.filter(word => word.startsWith('-'))
+  const [slug = '', action = 'show', ...more] = rest.filter(word => !word.startsWith('-'))
+  return ['tree', action, slug, ...more, ...options, ...labels]
 }
 
 // The hook sees the model's raw input: the name may be missing, or carry a leading slash the Skill tool strips later.
@@ -436,13 +455,13 @@ function answerOf($: EngineInterface, command: string, args: string | undefined)
   const given = words(args)
   switch (command) {
     case 'ledger:all': {
-      const list = ledgerText($, ['list', '--archived'])
+      const list = ledgerText($, ['list', '--archived', ...withoutLabels(given).labels])
       return given.includes('--scan') ? list.then(text => `${SCAN_DROPPED}\n\n${text}`) : list
     }
     case 'ledger:archive':
       return ledgerText($, archiveArgs(given))
     case 'ledger:parent':
-      return given.every(word => word.startsWith('-')) ? Promise.resolve(PARENT_USAGE) : ledgerText($, treeArgs(given))
+      return withoutLabels(given).rest.every(word => word.startsWith('-')) ? Promise.resolve(PARENT_USAGE) : ledgerText($, treeArgs(given))
     case 'ledger:worktrees':
       return ledgerText($, ['worktrees', ...given], LONG_TIMEOUT_MS)
     case 'ledger:retire':
@@ -503,8 +522,11 @@ async function heldSlug($: EngineInterface): Promise<string | null> {
 function isTypedOnly(command: string, args: string | undefined): boolean {
   const given = words(args)
   switch (command) {
-    case 'ledger:parent':
-      return given[1] !== undefined && given[1] !== 'next'
+    case 'ledger:parent': {
+      // A label filter changes nothing, so it leaves the show to the model.
+      const [, action] = withoutLabels(given).rest
+      return action !== undefined && action !== 'next'
+    }
     // --force discards uncommitted changes and unmerged work.
     case 'ledger:retire':
       return given.includes('--force')

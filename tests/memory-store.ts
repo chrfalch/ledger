@@ -1,5 +1,6 @@
 import { fail } from '../tools/ledger/failure.js';
 import { holdsAnything } from '../tools/ledger/files.js';
+import { newLabelColours, type LabelColour } from '../tools/ledger/labels.js';
 import { recordToWrite, renderRecord, type TaskRecord } from '../tools/ledger/record.js';
 import { runClock } from '../tools/ledger/run-io.js';
 import { evidenceIn, sameEvidence, writeEvidence, type EvidenceEntry } from '../tools/ledger/sqlite-store.js';
@@ -22,7 +23,7 @@ import {
 type Place = 'backlog' | 'active' | 'archive';
 /** A ledger as the memory store keeps it; only an archive copy has evidence. */
 type Kept = { repo: string; name: string; record: TaskRecord; mtimeMs: number; birthtimeMs: number; evidence: EvidenceEntry[] };
-type Memory = { ledgers: Record<Place, Map<string, Kept>>; aliases: Map<string, string> };
+type Memory = { ledgers: Record<Place, Map<string, Kept>>; aliases: Map<string, string>; labels: Map<string, LabelColour> };
 
 const memories = new Map<string, Memory>();
 
@@ -33,7 +34,7 @@ const byFileName = (a: { name: string }, b: { name: string }): number => byCodeU
 function memoryOf(home: string): Memory {
   let memory = memories.get(home);
   if (memory === undefined) {
-    memory = { ledgers: { backlog: new Map(), active: new Map(), archive: new Map() }, aliases: new Map() };
+    memory = { ledgers: { backlog: new Map(), active: new Map(), archive: new Map() }, aliases: new Map(), labels: new Map() };
     memories.set(home, memory);
   }
   return memory;
@@ -200,6 +201,15 @@ export function memoryStore({ home }: { home: string }): LedgerStore {
         for (const [old, key] of removed) if (aliases.get(old) === key) aliases.delete(old);
         for (const [old, key] of added) if (needsAlias(aliases, old, key, aliasesWhere)) aliases.set(old, key);
         memory.aliases = aliases;
+      },
+    },
+    labels: {
+      read: () => new Map(memory.labels),
+      register: (labels, firstUsed) => {
+        for (const [label, colour] of newLabelColours(memory.labels, labels, firstUsed)) memory.labels.set(label, colour);
+      },
+      copy: (entries) => {
+        for (const [label, colour] of entries) if (!memory.labels.has(label)) memory.labels.set(label, colour);
       },
     },
   };

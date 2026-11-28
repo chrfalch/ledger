@@ -1,5 +1,6 @@
 import stringWidth from 'string-width';
 import { plainLine } from './format.js';
+import { withLabels, type PaintLabels } from './labels.js';
 import { repoKey, repoLabel } from './repo-key.js';
 import { inRepo, type ChildView, type Task } from './tasks.js';
 
@@ -75,7 +76,7 @@ function familyOrder(tasks: Task[]): { task: Task; depth: number }[] {
 
 const nestedName = (slug: string, depth: number): string => (depth === 0 ? slug : `${'  '.repeat(depth - 1)}↳ ${slug}`);
 
-export function listView(tasks: Task[]): string {
+export function listView(tasks: Task[], paint: PaintLabels): string {
   if (tasks.length === 0) return 'No live tasks. Retired tasks are listed by: ledger task archive';
   const count = (status: string): number => tasks.filter((task) => task.status === status).length;
   const someHave = (['blocked', 'waiting', 'done', 'lost'] as const).flatMap((status) => (count(status) > 0 ? [`${count(status)} ${status}`] : []));
@@ -83,7 +84,7 @@ export function listView(tasks: Task[]): string {
   // A task of another machine names that machine; one of this machine whose worktree is gone gets the footnote, unless it is marked lost.
   const isGone = ({ elsewhere, host, status }: Task): boolean => elsewhere === true && host === undefined && status !== 'lost';
   const status = (task: Task): string => (task.host !== undefined ? `${task.status} on ${task.host}` : isGone(task) ? `${task.status}*` : task.status);
-  const rows = familyOrder(tasks).map(({ task, depth }) => [repoLabel(task.repo), nestedName(task.slug, depth), status(task), parentCell(task), localDate(task.mtimeMs), truncate(task.ledger.next)]);
+  const rows = familyOrder(tasks).map(({ task, depth }) => [repoLabel(task.repo), withLabels(nestedName(task.slug, depth), task.ledger.location.labels, paint), status(task), parentCell(task), localDate(task.mtimeMs), truncate(task.ledger.next)]);
   const note = tasks.some(isGone) ? ['', '* its worktree is not on this machine'] : [];
   return [heading('Task ledgers', `${plural(tasks.length, 'task')}: ${counts.join(', ')}`), '', ...table(['repo', 'task', 'status', 'parent', 'updated', 'next'], rows), ...note].join('\n');
 }
@@ -95,7 +96,7 @@ export const writtenBranch = (task: Task): string =>
   task.ledger.lines.map((line) => /^- branch:[ \t]*(.*)$/.exec(plainLine(line))?.[1].trim()).find((branch) => branch !== undefined) ?? '';
 
 /** `repo` is undefined for the archive of every repo, which adds a repo column. */
-export function archiveView(rows: ArchiveRow[], repo: string | undefined, term: string, folder: string): string {
+export function archiveView(rows: ArchiveRow[], repo: string | undefined, term: string, folder: string, paint: PaintLabels): string {
   if (rows.length === 0) return term ? `No archived ledger in ${folder} contains "${term}".` : `No archived ledgers in ${folder}.`;
   const contains = term ? ` that contain${rows.length === 1 ? 's' : ''} "${term}"` : '';
   const count = `${plural(rows.length, 'ledger')}${contains}${rows.length === 1 ? '' : ', newest first'}`;
@@ -103,7 +104,7 @@ export function archiveView(rows: ArchiveRow[], repo: string | undefined, term: 
   const cells = rows.map(({ task, match }) => [
     task.archived ?? '',
     ...(repo === undefined ? [repoLabel(task.repo)] : []),
-    task.slug,
+    withLabels(task.slug, task.ledger.location.labels, paint),
     writtenBranch(task),
     truncate(task.ledger.goal),
     ...(term ? [truncate(match ?? '')] : []),
@@ -114,11 +115,11 @@ export function archiveView(rows: ArchiveRow[], repo: string | undefined, term: 
 /** A child in another repo is named `<slug>@<main>`, the form `ledger tree` takes. */
 const childName = (child: ChildView, parentMain: string): string => (child.main === parentMain ? child.slug : `${child.slug}@${child.main}`);
 
-export function parentView(parent: Task, parentMain: string, children: ChildView[]): string {
+export function parentView(parent: Task, parentMain: string, children: ChildView[], paint: PaintLabels): string {
   if (children.length === 0) return `${parent.slug} has no child tasks.`;
   const active = children.filter(({ status }) => status === 'active').length;
   const rows = children.flatMap((child) => [
-    [childName(child, parentMain), child.status, truncate(child.next)],
+    [withLabels(childName(child, parentMain), child.labels, paint), child.status, truncate(child.next)],
     ...child.report.map((line) => ['', '', line.trimEnd()]),
   ]);
   return [

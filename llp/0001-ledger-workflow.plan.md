@@ -266,6 +266,47 @@ by itself. The time is the setting `claimExpiryMinutes` in
 then takes the task with no warning. This covers a session that crashed or was
 closed without `/ledger:close`.
 
+### 5.5 Labels
+
+**Decision D53 (2026-11-27):** a task may carry labels, such as `sdk-59`, so
+the operator can group tasks across trees and repos. A label is 1 to 40
+lowercase letters, digits, dots, underscores and hyphens, and starts with a
+letter or digit; the tool lowers and trims what it is given, drops repeats,
+and refuses anything else with nothing written. The labels are a line under
+`## Location`, `- labels: a, b`, in the order they were added, and the line is
+left out for none. `ledger task new --label <l>` (repeatable) and
+`ledger notes label add|remove <l...>` set them; removing a label the task
+lacks fails.
+
+Each label has one colour in the whole store, so it looks the same in every
+listing and on every machine. The registry maps each label to a palette index
+and the time a task first got it. The first time a label is added to a task,
+it gets the palette colour that the fewest labels have, the lowest index on a
+tie, and keeps it; removing a label leaves its colour registered. Reading a
+list never writes the registry: a label missing from it, as one whose ledger
+reached this machine before its entry did, is shown in the colour a hash of
+its name gives. The palette has ten colours. Each has a 256-colour and a
+true-colour code for a terminal, and a square drawn only from 🟦 🟪 🟧 🟫 ⬜ ⬛,
+never 🟩 🟥 🟨, which mark results (`rules/20-writing.md`). So the ten
+terminal colours map onto six squares, and the pairs 0 and 6, 1 and 7, 2 and
+8, and 3 and 9 look alike outside a terminal.
+
+`ledger list`, `task archive`, `tree show` and `worktrees` show a task's
+labels after its name: in colour when stdout is a terminal and `NO_COLOR` is
+unset, else as `<square> <label>`. The session-start report goes to the
+model, so it always uses the squares. Each of those listings takes a
+repeatable `--label <l>`, which keeps only the tasks that carry every label
+named; `tree show` keeps the parent row and filters its children. The plugin
+commands pass `--label` through unchanged (principle 6).
+
+On git storage, the registry is one file a label, `labels/<label>.json` in
+the clone, committed and pushed with the ledgers. Two machines can each give a
+label its first colour before either syncs. The sync then meets two versions
+of one file, and keeps the entry with the earlier first use, the lower colour
+on a tie, so no person has to merge it. Reason: with one file a label, two
+machines only ever meet on a label both first used, and choosing one whole
+entry is a merge with no text to join.
+
 ## 6. When a task is required
 
 A task is required before the agent edits files, unless the operator says the
@@ -456,7 +497,7 @@ The agent changes a task only through `ledger` commands. **Decision D30
 
 | Group | Command | Changes |
 |---|---|---|
-| `ledger task` | `new <slug> --goal … [--kind <kind>] [--parent <slug>] [--after <slug>]` | Makes a task (D14) |
+| `ledger task` | `new <slug> --goal … [--kind <kind>] [--label <label>…] [--parent <slug>] [--after <slug>]` | Makes a task (D14, D53) |
 | | `go <slug>` | Starts a task (section 7, step 2) |
 | | `park <slug> --reason …` / `unpark <slug>` | Parked state |
 | | `block <slug> --on …` / `unblock <slug>` | Blocked state (D7) |
@@ -473,6 +514,7 @@ The agent changes a task only through `ledger` commands. **Decision D30
 | | `report --step <n> --file <path>` / `report --parent "<text>"` | Step reports; the report to the parent |
 | | `note "<text>"` | General notes (D29) |
 | | `next "<text>"` | Next step |
+| | `label add <label…>` / `label remove <label…>` | Labels, and the colour of a label first used (D53) |
 | | `check` | Structure and size check |
 | `ledger tree` | `show [<slug>]`, `add`, `remove`, `start`, `order`, `depends`, `next` | Parents, children, order, dependencies (D16) |
 | `ledger store` | `migrate`, `repair`, `check`, `sync` | The store (D1, D9) |
@@ -855,6 +897,16 @@ Decided 2026-11-26:
   operator approved a plan they could not see (section 11). D51 is left to
   the control-room design.
 
+Decided 2026-11-27:
+
+- **D53** Tasks carry labels, set with `ledger task new --label` and
+  `ledger notes label add|remove`, and listed and filtered with `--label`.
+  Each label has one store-wide colour, given at its first use to the palette
+  colour the fewest labels have; a terminal shows it in colour, anything else
+  as a square that is never a result mark. Git storage keeps one registry
+  file a label, and a sync keeps the earlier entry when two machines first
+  used a label at once (section 5.5).
+
 ## 15. From today to this spec
 
 | Area | Today | Work |
@@ -875,6 +927,7 @@ Decided 2026-11-26:
 | Repo identity (D10) | remote address, normalized by `remoteKey` in `tools/ledger/repo-key.ts` as D10 says, else the main checkout's path; a remote that is a local path keeps its case; `ledger store migrate --repo-ids` converts old tasks once and keeps an alias map; `ledger store repair --remote` files a renamed remote's tasks under the new key and keeps the old address as an alias; before a move starts, a task stays under the old key when its main checkout is gone or belongs to another repo, when it names no main and no alias exists yet, or when the new key has a live task with its title's slug; it refuses the whole command, moving nothing, when an alias of the old key files a live task whose slug the new key has, or when the new key is an alias of a third key already, as that would chain two aliases; it also moves evidence left under the old key whose archive copy is under the new key, and leaves an unreadable record there, names it and exits 1; it writes the aliases before the moves when the plan moves everything, so a run that stops after the moves leaves the alias a rerun finds, and takes them back when a move fails; evidence whose archive copy is under neither key stays and does not block the alias; on git storage a failed commit exits 1, keeps the aliases, which are never committed, and says to run `ledger store sync`, also when a move failed too; repair, commands and sync recognise pending moves when the alias points to the new key, the old HEAD path is gone on disk, HEAD has nothing at the new path or the same blob there under the same spelling, and the new file matches the new path by exact spelling and has the same blob; repair names an unreadable old evidence folder and exits 1; a rerun finishes a record or Markdown linked under both keys without checking the checkout again; it refuses an old key that shares the new key's store folder; file moves check the inode before removing a source or taking back a target, so a writer can reclaim a stale lock and keep its update, except in the limits LLP 0000 records; a dependency that names the old key names the task filed under the new one | none |
 | Hook failures (D11) | allowed, error not visible | failure log at session start |
 | LLP 0000 upkeep (D12) | the rule in `CONTRIBUTING.md`; the reviewer check in `agents/reviewer.md`; the `npm run llp` warning (`llp0000Warnings` in `tools/llp-refs.ts`); the other `npm run llp` checks, in [LLP 0000, Checks](0000-ledger-architecture.explainer.md#checks) | none |
+| Labels (D53) | `labels`, a field of the task record (`tools/ledger/record.ts`), checked by `labelsOf` in `tools/ledger/labels.ts`; the colour registry is the `Labels` interface in `tools/ledger/store.ts`, kept as `~/.claude/ledger-labels/<label>.json`, the `labels` table of `~/.claude/ledgers.db`, or `labels/<label>.json` in the git clone, where `resolveLabelConflicts` in `tools/ledger/sync.ts` keeps the earlier entry during a rebase; `labelPainter` renders them; `--label` filters `list`, `task archive`, `tree show` and `worktrees` (`tools/ledger/cli.ts`); the plugin passes it through (`withoutLabels` in `mods/ledger/hooks/register.ts`) | none |
 | Design refs (D46) | `designRefs`, a field of the task record (`tools/ledger/record.ts`), set by `ledger task new --design-refs` with the LLPs that `/ledger:task` and `/ledger:go` pick | none |
 | LLP decisions (D47) | the Plan gate in `rules/10-operating-model.md` reads the design refs before the plan and puts lasting decisions in an LLP in the same PR; `agents/reviewer.md` checks that they reached one | none |
 | Deploy migration (D48) | `ledger store migrate --pending` lists the one-time moves from their own dry runs (`tools/ledger/pending.ts`); `bin/deploy` offers them after Deploy, has a Migrate menu entry, and runs them with `--migrate` (`tools/deploy.ts`, `tools/wizard.ts`) | none |

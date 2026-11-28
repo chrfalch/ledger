@@ -1,5 +1,6 @@
 ---
-description: Show every task ledger on this machine, from every repository, active, backlog and archived, with its parent and next step.
+description: Show every task ledger on this machine, from every repository, active, backlog and archived, with its labels, parent and next step. `--label <label>`, repeatable, keeps the tasks that carry every label named.
+argument-hint: "[--label <label>]…"
 ---
 
 The ledger mod's hook answers this command, so this text reaches you only when

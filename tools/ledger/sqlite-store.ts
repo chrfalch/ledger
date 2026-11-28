@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { fail } from './failure.js';
 import { holdsAnything, treeEntries } from './files.js';
+import { asLabelColour, isLabel, newLabelColours, type LabelColour } from './labels.js';
 import { ownHosts, shownSettingsFile, validHost } from './settings.js';
 import { parseRecord, readRecordJson, recordJson, recordToWrite, renderRecord, type TaskRecord } from './record.js';
 import { byCodeUnit, checkedAliases, findWorktree, isAsChecked, NameTaken, needsAlias, noteCreated, readable, refuseHiddenMarkdown, resolvedWorktree, type Archive, type Backlog, type LedgerCollection, type LedgerStore, type StoredLedger } from './store.js';
@@ -48,6 +49,11 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS aliases (
     old TEXT PRIMARY KEY,
     repo TEXT NOT NULL
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS labels (
+    label TEXT PRIMARY KEY,
+    colour INTEGER NOT NULL,
+    first_used TEXT NOT NULL
   ) STRICT;
 `;
 
@@ -404,6 +410,15 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
     one(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'aliases'`) === undefined
       ? []
       : all<{ old: string; repo: string }>('SELECT old, repo FROM aliases').map(({ old, repo }) => [old, repo]);
+  const storedLabels = (): Map<string, LabelColour> =>
+    new Map(
+      one(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'labels'`) === undefined
+        ? []
+        : all<{ label: string; colour: number; first_used: string }>('SELECT label, colour, first_used FROM labels').flatMap(({ label, colour, first_used: firstUsed }): [string, LabelColour][] => {
+            const entry = asLabelColour({ colour, firstUsed });
+            return entry === undefined || !isLabel(label) ? [] : [[label, entry]];
+          }),
+    );
 
   function writable(place: 'backlog' | 'active'): Backlog {
     const ledgers = collection(place);
@@ -510,6 +525,20 @@ export function sqliteStore({ home }: { home: string }, { readOnly = false } = {
         transaction(() => {
           for (const [old, repo] of removed) run('DELETE FROM aliases WHERE old = ? AND repo = ?', old, repo);
           for (const [old, repo] of added) if (needsAlias(storedAliases(), old, repo, file)) run('INSERT INTO aliases VALUES (?, ?)', old, repo);
+        }),
+    },
+    labels: {
+      read: storedLabels,
+      register: (labels, firstUsed) =>
+        transaction(() => {
+          for (const [label, { colour }] of newLabelColours(storedLabels(), labels, firstUsed)) {
+            run('INSERT OR REPLACE INTO labels VALUES (?, ?, ?)', label, colour, firstUsed);
+          }
+        }),
+      copy: (entries) =>
+        transaction(() => {
+          const kept = storedLabels();
+          for (const [label, { colour, firstUsed }] of entries) if (!kept.has(label)) run('INSERT OR REPLACE INTO labels VALUES (?, ?, ?)', label, colour, firstUsed);
         }),
     },
     close: () => db.close(),

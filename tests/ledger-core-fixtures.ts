@@ -165,12 +165,15 @@ export function ledger(home: string, cwd: string, ...args: string[]): Ran {
 /** Runs the ledger command line as `ledger` does, but inside this process, without the cost of starting one. */
 export const runInProcess = (home: string, cwd: string, ...args: string[]): Promise<Ran> => runInProcessWith(home, cwd, {}, ...args);
 
-/** What a test may give an in-process run: the clock it reads, variables added to its environment, its stdin, and the store it uses in place of the one the settings name. */
-export type InProcessOptions = { clock?: Clock; env?: NodeJS.ProcessEnv; input?: string; store?: LedgerStore };
+/**
+ * What a test may give an in-process run: the clock it reads, variables added to its environment, its stdin, the store it
+ * uses in place of the one the settings name, and whether its stdout counts as a terminal.
+ */
+export type InProcessOptions = { clock?: Clock; env?: NodeJS.ProcessEnv; input?: string; store?: LedgerStore; tty?: boolean };
 
-/** runInProcess with the clock, extra environment, stdin and store of `options`. */
-export async function runInProcessWith(home: string, cwd: string, { clock, env, input, store }: InProcessOptions, ...args: string[]): Promise<Ran> {
-  const { code, stdout, stderr } = await runLedger(args, { home, cwd, env: { ...commandEnv(home), ...env }, clock, stdin: input, store });
+/** runInProcess with the clock, extra environment, stdin, store and terminal of `options`. */
+export async function runInProcessWith(home: string, cwd: string, { clock, env, input, store, tty }: InProcessOptions, ...args: string[]): Promise<Ran> {
+  const { code, stdout, stderr } = await runLedger(args, { home, cwd, env: { ...commandEnv(home), ...env }, clock, stdin: input, store, tty });
   return { status: code, stdout, stderr };
 }
 

@@ -5,6 +5,7 @@ import { fail } from './failure.js';
 import { exists, folderEntries, isFolder, writeAtomic } from './files.js';
 import { parseLedger, planProgress } from './format.js';
 import { branchPrs, changedFiles, checkoutRoot, gitDir, ignoredPaths, inMainCheckout, lastCommitDate, mainCheckout, worktrees, type PullRequest, type Worktree } from './git.js';
+import { hasLabels, withLabels, type PaintLabels } from './labels.js';
 import { samePath, type LedgerPaths } from './paths.js';
 import { runConsole, runEnv } from './run-io.js';
 import { findTasks, locateChild, namedChildren, type Task } from './tasks.js';
@@ -155,7 +156,7 @@ function repoOf(cwd: string): Repo {
 const nameOf = ({ path: folder }: Worktree): string => path.basename(folder);
 
 /** A worktree's ledger: `activeChildren` when it lists children, counting those not retired; `parent` as its Location names it. */
-export type WorktreeLedger = { slug: string; path: string; activeChildren?: number; parent?: string };
+export type WorktreeLedger = { slug: string; path: string; labels: string[]; activeChildren?: number; parent?: string };
 
 /** A value git or du could not read is left out; `pr` is null for no PR and left out when gh could not tell. */
 export type WorktreeRow = { name: string; path: string; branch?: string; sizeGb?: number; lastCommit?: string; dirty?: number; ledger: WorktreeLedger | null; pr?: PullRequest | null };
@@ -170,6 +171,7 @@ function worktreeLedgerOf(task: Task, tasks: Task[], main: string): WorktreeLedg
   return {
     slug: task.slug,
     path: task.file,
+    labels: task.ledger.location.labels ?? [],
     ...(children.length === 0 ? {} : { activeChildren: children.filter((line) => locateChild(tasks, { slug: line.slug, main: line.main ?? main }, self)?.status !== 'retired').length }),
     ...(parent === undefined ? {} : { parent: parent.slug }),
   };
@@ -181,15 +183,20 @@ function ledgerCell(ledger: WorktreeLedger | null): string {
   return ledger.parent === undefined ? 'yes' : `child of ${ledger.parent}`;
 }
 
-/** `ledger worktrees`: each linked worktree with its size, last commit, uncommitted files, ledger and PR, largest first. */
-export function listWorktrees({ store, cwd }: Context): WorktreesList {
+/**
+ * `ledger worktrees`: each linked worktree with its size, last commit, uncommitted files, ledger and PR, largest first.
+ * With `labels`, only those whose task carries each of them.
+ */
+export function listWorktrees({ store, cwd }: Context, labels: readonly string[] = []): WorktreesList {
   const { main, linked } = repoOf(cwd);
   const tasks = linked.length === 0 ? [] : findTasks(store);
+  const taskOf = (worktree: Worktree): Task | undefined => tasks.find((each) => each.worktree !== undefined && samePath(each.worktree, worktree.path));
   let prError: string | undefined;
-  const rows = linked.map((worktree): WorktreeRow => {
+  const shown = labels.length === 0 ? linked : linked.filter((worktree) => hasLabels(taskOf(worktree)?.ledger.location.labels, labels));
+  const rows = shown.map((worktree): WorktreeRow => {
     const prs = worktree.branch === undefined ? [] : branchPrs(worktree.path, worktree.branch);
     if ('error' in prs) prError ??= prs.error;
-    const task = tasks.find((each) => each.worktree !== undefined && samePath(each.worktree, worktree.path));
+    const task = taskOf(worktree);
     const size = sizeGb(worktree.path);
     const lastCommit = lastCommitDate(worktree.path);
     const dirty = changedFiles(worktree.path)?.length;
@@ -209,11 +216,11 @@ export function listWorktrees({ store, cwd }: Context): WorktreesList {
   return { main, worktrees: rows, totalGb, ...(prError === undefined ? {} : { prError }) };
 }
 
-export function worktreesView({ worktrees: rows, totalGb, prError }: WorktreesList): string {
+export function worktreesView({ worktrees: rows, totalGb, prError }: WorktreesList, paint: PaintLabels): string {
   if (rows.length === 0) return 'No linked worktrees.';
   const count = rows.length === 1 ? '1 worktree' : `${rows.length} worktrees, largest first`;
   const prCell = (pr: PullRequest | null | undefined): string => (pr === undefined ? '?' : pr === null ? 'none' : `${pr.state} #${pr.number}`);
-  const cells = rows.map((row) => [row.name, gbText(row.sizeGb), row.lastCommit ?? '?', String(row.dirty ?? '?'), ledgerCell(row.ledger), prCell(row.pr)]);
+  const cells = rows.map((row) => [withLabels(row.name, row.ledger?.labels, paint), gbText(row.sizeGb), row.lastCommit ?? '?', String(row.dirty ?? '?'), ledgerCell(row.ledger), prCell(row.pr)]);
   return [
     heading('Worktrees', count, `${totalGb.toFixed(1)} GB total`),
     '',

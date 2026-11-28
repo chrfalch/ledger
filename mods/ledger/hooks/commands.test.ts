@@ -83,6 +83,38 @@ test('/ledger:parent with options but no slug answers its usage and runs nothing
   expect(w.calls).toEqual([])
 })
 
+test('/ledger:all, /ledger:archive, /ledger:parent and /ledger:worktrees pass each --label on to ledger', async ($, on) => {
+  const answers = ['list --archived --label sdk-59 --label ui', 'task archive login fix --all --label sdk-59', 'tree show epic --label sdk-59', 'worktrees --label sdk-59']
+  const w = world(on, Object.fromEntries(answers.map(argv => [argv, ran(0, 'listed\n')])), { cwd: CWD })
+
+  await $.command.run({ command: 'ledger:all', args: '--label sdk-59 --label ui' })
+  await $.command.run({ command: 'ledger:archive', args: 'login --label sdk-59 fix --all' })
+  await $.command.run({ command: 'ledger:parent', args: 'epic --label sdk-59' })
+  await $.command.run({ command: 'ledger:worktrees', args: '--label sdk-59' })
+
+  expect(w.argvs()).toEqual([
+    ['list', '--archived', '--label', 'sdk-59', '--label', 'ui'],
+    ['task', 'archive', 'login fix', '--all', '--label', 'sdk-59'],
+    ['tree', 'show', 'epic', '--label', 'sdk-59'],
+    ['worktrees', '--label', 'sdk-59'],
+  ])
+})
+
+test('/ledger:all, /ledger:archive and /ledger:parent pass a trailing --label with no value on last, so ledger says it lacks one', async ($, on) => {
+  const answers = ['list --archived --label sdk-59 --label', 'task archive login --label', 'tree show epic --label']
+  const w = world(on, Object.fromEntries(answers.map(argv => [argv, ran(1, '', "error: option '--label <label>' argument missing\n")])), { cwd: CWD })
+
+  await $.command.run({ command: 'ledger:all', args: '--label sdk-59 --label' })
+  await $.command.run({ command: 'ledger:archive', args: 'login --label' })
+  await $.command.run({ command: 'ledger:parent', args: 'epic --label' })
+
+  expect(w.argvs()).toEqual([
+    ['list', '--archived', '--label', 'sdk-59', '--label'],
+    ['task', 'archive', 'login', '--label'],
+    ['tree', 'show', 'epic', '--label'],
+  ])
+})
+
 test('/ledger:worktrees shows the table from `ledger worktrees`', async ($, on) => {
   const w = world(on, { worktrees: ran(0, 'Worktrees of repo · 2 linked\n') }, { cwd: CWD })
 
@@ -214,6 +246,7 @@ for (const [command, args, key] of [
   ['ledger:all', '', 'list --archived'],
   ['ledger:archive', 'login', 'task archive login'],
   ['ledger:parent', 'epic', 'tree show epic'],
+  ['ledger:parent', 'epic --label sdk-59', 'tree show epic --label sdk-59'],
   ['ledger:worktrees', '', 'worktrees'],
   ['ledger:retire', 'epic --dry-run', 'task retire epic --dry-run'],
 ] as const) {

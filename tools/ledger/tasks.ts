@@ -42,7 +42,7 @@ export type Task = {
 };
 
 export type ChildStatus = TaskStatus | 'missing';
-export type ChildView = { slug: string; main: string; status: ChildStatus; next: string; report: readonly string[] };
+export type ChildView = { slug: string; main: string; status: ChildStatus; labels: readonly string[]; next: string; report: readonly string[] };
 
 type Found = {
   file: string;
@@ -373,6 +373,7 @@ export function childrenOf(parent: Task, parentMain: string, tasks: Task[], repo
     slug: ref.slug,
     main: ref.main,
     status: task?.status ?? 'missing',
+    labels: task?.ledger.location.labels ?? [],
     next: task === undefined || task.status === 'retired' ? '' : task.ledger.next,
     report: task?.ledger.report ?? [],
   }));

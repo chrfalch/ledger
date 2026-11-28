@@ -54,6 +54,12 @@ export const markerText = (): string => `${JSON.stringify({ format: FORMAT })}\n
 /** What `ledger store sync init` writes or expects, and must never find as a symbolic link. */
 export const GENERATED = [MARKER, '.gitignore', 'backlog', 'active', 'archive'];
 
+/** The folder of the clone that holds the label registry (D53), one `<label>.json` a label, pushed with the ledgers. */
+export const LABELS = 'labels';
+
+/** Whether a path of the clone is the registry entry of a label, which a sync merges itself when two machines wrote it. */
+export const isLabelFile = (file: string): boolean => file.startsWith(`${LABELS}/`) && isAllowed(file);
+
 /** Git ignores everything but the allowlist, so `git status` shows no lock or temporary file. */
 export const GITIGNORE = [
   '# Written by ledger store sync init. Only the ledgers and these setup files are pushed.',
@@ -71,13 +77,15 @@ export const GITIGNORE = [
   '!/archive/*/',
   '!/archive/*/*.md',
   '!/archive/*/*.json',
+  `!/${LABELS}/`,
+  `!/${LABELS}/*.json`,
   '',
 ].join('\n');
 
-// A repo folder and a ledger name are never . or .., which would make a path that leaves its folder, and hold no / or \,
-// as in the file store, and no line break, which would split a name where git or the hook prints one per line. The
-// pre-push hook checks the same rule in bash.
-const ALLOWED = /^(\.ledger-data|\.gitignore|(backlog|active|archive)\/(?!\.\.?\/)[^/\\\n]+\/(?!\.\.?\.(md|json)$)[^/\\\n]+\.(md|json))$/;
+// A repo folder, a ledger name and a label file name are never . or .., which would make a path that leaves its folder,
+// and hold no / or \, as in the file store, and no line break, which would split a name where git or the hook prints one
+// per line. The pre-push hook checks the same rule in bash.
+const ALLOWED = /^(\.ledger-data|\.gitignore|(backlog|active|archive)\/(?!\.\.?\/)[^/\\\n]+\/(?!\.\.?\.(md|json)$)[^/\\\n]+\.(md|json)|labels\/(?!\.\.?\.json$)[^/\\\n]+\.json)$/;
 
 /**
  * A copy of a worktree ledger as git storage kept it before active records, active/<host>/<repo>/<slug>.md. Reads skip
@@ -296,9 +304,12 @@ function identity(clone: string, deadline?: number): NodeJS.ProcessEnv {
   };
 }
 
-/** git that writes commits: with an identity, and unsigned, as a signing prompt would hang a background push. */
+/**
+ * git that writes commits: with an identity, unsigned, and with no editor, as a signing prompt or the editor a
+ * `rebase --continue` opens would hang a background push.
+ */
 export const committingGit = (clone: string, args: string[], deadline?: number): GitRun =>
-  cloneGit(clone, ['-c', 'commit.gpgSign=false', ...args], { env: identity(clone, deadline), deadline });
+  cloneGit(clone, ['-c', 'commit.gpgSign=false', ...args], { env: { ...identity(clone, deadline), GIT_EDITOR: 'true' }, deadline });
 
 export const outsideAllowlist = (files: string[]): string => `Only ledgers are pushed, and these paths are not ledgers: ${shownPaths(files)}.`;
 

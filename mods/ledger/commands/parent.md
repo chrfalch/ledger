@@ -1,6 +1,6 @@
 ---
-description: Show a parent task and each child's status and next step. `<slug> add <child>` and `<slug> remove <child>` change a parent's children. Write `<slug>@<path>` for a task in the repository that holds `<path>`.
-argument-hint: "<slug> [add <child> | remove <child>]"
+description: Show a parent task and each child's labels, status and next step. `--label <label>`, repeatable, shows only the children that carry every label named. `<slug> add <child>` and `<slug> remove <child>` change a parent's children. Write `<slug>@<path>` for a task in the repository that holds `<path>`.
+argument-hint: "<slug> [--label <label>]… | <slug> add <child> | <slug> remove <child>"
 ---
 
 The ledger mod's hook answers this command, so this text reaches you only when

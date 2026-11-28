@@ -41,6 +41,7 @@ import { withLock } from './lock.js';
 import { samePath, taskWorktree, type LedgerPaths } from './paths.js';
 import { withHint } from './migrate-repo-ids.js';
 import { hasStage, isKind, KINDS, type Kind } from './kinds.js';
+import { labelsOf } from './labels.js';
 import { parseRecord, storedText } from './record.js';
 import { remoteKey, repoKey } from './repo-key.js';
 import { runClock, runConsole } from './run-io.js';
@@ -294,9 +295,14 @@ function startWorktree(context: Context, main: string, slug: string, branch: str
   return started;
 }
 
-export type TaskOptions = { goal?: string; designRefs?: string; kind?: string; stack?: boolean; here?: boolean; repo?: string };
+/** Gives each of `labels` the store's registry lacks its colour (D53), first used now. */
+export function registerLabels(store: LedgerStore, labels: readonly string[]): void {
+  if (labels.length > 0) store.labels.register(labels, runClock().now().toISOString());
+}
 
-export function createTask(context: Context, slug: string | undefined, { goal: rawGoal, designRefs: refs, kind = 'code', stack = false, here = false, repo }: TaskOptions): CreatedTask {
+export type TaskOptions = { goal?: string; designRefs?: string; kind?: string; label?: string[]; stack?: boolean; here?: boolean; repo?: string };
+
+export function createTask(context: Context, slug: string | undefined, { goal: rawGoal, designRefs: refs, kind = 'code', label = [], stack = false, here = false, repo }: TaskOptions): CreatedTask {
   const { paths, cwd, store } = context;
   if (here && stack) fail('--here adds a ledger to this worktree, so it takes no --stack.');
   if (here && repo !== undefined) fail('--here adds a ledger to this worktree, so it takes no --repo.');
@@ -304,8 +310,13 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
   if (slug !== undefined && !isNewSlug(slug)) fail(slugRule(slug));
   if (refs !== undefined && !/^\d+(?:,\d+)*$/.test(refs)) fail(`--design-refs takes LLP numbers, comma-separated, such as 3,12. "${refs}" is not.`);
   if (!isKind(kind)) fail(`--kind takes one of ${KINDS}. "${kind}" is not.`);
+  const labels = labelsOf(label);
   const goal = rawGoal === undefined || oneLine(rawGoal) === '' ? undefined : oneLine(rawGoal);
-  if (here) return hereTask(context, slug, goal, refs, kind);
+  if (here) {
+    const created = hereTask(context, slug, goal, refs, kind, labels);
+    registerLabels(store, labels);
+    return created;
+  }
   if (slug === undefined) return fail('ledger task new needs a slug, or --here for this worktree.');
 
   const main = repoOf(cwd, repo === undefined ? cwd : path.resolve(cwd, repo));
@@ -320,14 +331,15 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
   if (stack) {
     const base = currentBranch(cwd) ?? fail(`--stack needs a branch, but HEAD is detached in ${cwd}.`);
     const root = checkoutRoot(cwd) ?? cwd;
-    const started = startWorktree(context, main, slug, slug, base, (filled) => fillLedger(template, { slug, goal, ...filled, designRefs: designRefs(root, refs), kind }));
+    const started = startWorktree(context, main, slug, slug, base, (filled) => fillLedger(template, { slug, goal, ...filled, designRefs: designRefs(root, refs), kind, labels }));
     created = { slug, main, status: 'active', ...started };
   } else {
     checkTarget(main, slug, slug);
     pauseForTest();
-    if (!store.backlog.create(key, slug, fillLedger(template, { slug, goal, main, designRefs: designRefs(main, refs), kind }))) taken();
+    if (!store.backlog.create(key, slug, fillLedger(template, { slug, goal, main, designRefs: designRefs(main, refs), kind, labels }))) taken();
     created = { slug, main, status: 'backlog', ledger: backlog };
   }
+  registerLabels(store, labels);
   const cwdMain = mainCheckout(cwd);
   const [named, start] = cwdMain !== undefined && samePath(cwdMain, main) ? [slug, `/ledger:go ${slug}`] : [`${slug} in ${main}`, `ledger go ${slug} --repo ${shellWord(main)}`];
   if (current !== undefined) {
@@ -337,7 +349,7 @@ export function createTask(context: Context, slug: string | undefined, { goal: r
   return { ...created, start };
 }
 
-function hereTask(context: Context, given: string | undefined, goal: string | undefined, refs: string | undefined, kind: Kind): CreatedTask {
+function hereTask(context: Context, given: string | undefined, goal: string | undefined, refs: string | undefined, kind: Kind, labels: string[]): CreatedTask {
   const { paths, cwd, store } = context;
   const main = repoOf(cwd);
   const worktree = checkoutRoot(cwd) ?? fail(`${cwd} is not inside a git repository.`);
@@ -356,7 +368,7 @@ function hereTask(context: Context, given: string | undefined, goal: string | un
     refuseBacklog(context, repoKey(main), slug);
     const commit = commitOf(cwd, 'HEAD') ?? fail(`This worktree has no commit yet: ${worktree}`);
     const location = { worktree, branch: branch ?? 'detached HEAD', base: `HEAD @ ${short(cwd, commit)}` };
-    return { slug, ...location, ledger: createActive(context, main, slug, onThisHost(store, fillLedger(readTemplate(paths, refs), { slug, goal, ...location, designRefs: designRefs(worktree, refs), kind }))) };
+    return { slug, ...location, ledger: createActive(context, main, slug, onThisHost(store, fillLedger(readTemplate(paths, refs), { slug, goal, ...location, designRefs: designRefs(worktree, refs), kind, labels }))) };
   });
   noteStamped(context);
   excludeEvidence(main);
