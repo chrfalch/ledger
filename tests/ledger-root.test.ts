@@ -9,7 +9,7 @@ import { parseHookInput, preToolUse } from '../tools/ledger/hooks.js';
 import { limitLockWaits } from '../tools/ledger/lock.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { switchRootOn } from '../tools/ledger/root.js';
-import { fakeClock, home, LEDGER_BIN, repository, runInProcessWith, worktreeTask, type FakeClock, type Ran } from './ledger-core-fixtures.js';
+import { fakeClock, fakeRepository, fakeWorktreeTask, home, LEDGER_BIN, runInProcessWith, useFakeGit, type FakeClock, type Ran } from './ledger-core-fixtures.js';
 
 const START = '2026-11-27T10:00:00Z';
 const MINUTE = 60_000;
@@ -180,11 +180,12 @@ const logged = (h: string): LoggedAction[] =>
         .map((line) => JSON.parse(line) as LoggedAction)
     : [];
 
-/** A main checkout <h>/main with the worktree of task `task`, whose ledger is not archived. */
+/** A main checkout <h>/main with the worktree of task `task`, whose ledger is not archived, in a fake git. */
 function world(t: TestContext): { h: string; main: string; task: string } {
   const h = home(t);
-  const main = repository(h, path.join(h, 'main'));
-  worktreeTask(h, main, { slug: 'task', main });
+  const fake = useFakeGit(t);
+  const main = fakeRepository(fake, h, path.join(h, 'main'));
+  fakeWorktreeTask(fake, h, main, { slug: 'task', main });
   return { h, main, task: path.join(main, '.claude/worktrees/task') };
 }
 

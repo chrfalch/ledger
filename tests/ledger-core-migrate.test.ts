@@ -13,7 +13,7 @@ import { ledgerPaths, type LedgerPaths } from '../tools/ledger/paths.js';
 import { sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { Archive, Backlog, LedgerCollection, LedgerStore } from '../tools/ledger/store.js';
 import { REPO } from './helpers.js';
-import { cannotHideSqlite, home, LEDGER_BIN, ledger, ledgerIn, ledgerText, noSqlite, ok, repository, runInProcess, withoutSqlite, type Ran } from './ledger-core-fixtures.js';
+import { cannotHideSqlite, fakeOutside, home, LEDGER_BIN, ledger, ledgerIn, ledgerText, noSqlite, ok, repoFixtures, runInProcess, useFakeGit, withoutSqlite, type Ran } from './ledger-core-fixtures.js';
 
 type Storage = 'file' | 'sqlite';
 
@@ -68,14 +68,17 @@ function writeEvidence(folder: string): void {
 /**
  * A HOME whose `from` storage holds the backlog ledgers app/fix-login and lib/idea, the archive copy app/<today>-old
  * with evidence. The settings file names `from` and keeps one more key, which migrate must not drop. With `repos`, the
- * repos ~/repos/app and ~/repos/lib exist, for a command that finds its repo from the folder it runs in.
+ * repos ~/repos/app and ~/repos/lib exist, for a command that finds its repo from the folder it runs in. Git is a fake
+ * that knows the HOME and the repos, unless `realGit` makes them with real git for a ledger run as a child process.
  */
-function populated(t: TestContext, from: Storage, { repos = false } = {}) {
+function populated(t: TestContext, from: Storage, { repos = false, realGit = false } = {}) {
   const h = home(t);
+  if (!realGit) fakeOutside(useFakeGit(t), h);
+  const { addRepo } = repoFixtures(t, h, { realGit });
   writeFileSync(settingsFile(h), JSON.stringify({ storage: from, editor: 'vim' }));
   const [app, lib] = ['app', 'lib'].map((name) => {
     const main = path.join(h, 'repos', name);
-    if (repos) repository(h, main);
+    if (repos) addRepo(main);
     else mkdirSync(main, { recursive: true });
     return main;
   });
@@ -118,7 +121,7 @@ for (const from of ['file', 'sqlite'] as const) {
   const skip = noSqlite;
 
   test(`migrate ${from} → ${to} copies every backlog ledger, and archive copy with its evidence bytes, and switches the setting`, { skip }, (t) => {
-    const { h, app, source, archived } = populated(t, from, { repos: true });
+    const { h, app, source, archived } = populated(t, from, { repos: true, realGit: true });
     const before = listed(h, app);
     const stdout = ok(ledger(h, app, 'store', 'migrate', '--to', to));
     assert.deepEqual(readSettings(h), { storage: to, editor: 'vim' });
@@ -467,14 +470,14 @@ for (const from of ['file', 'sqlite'] as const) {
 }
 
 test('migrate --to sqlite --dry-run without node:sqlite exits 1, says migrate needs node:sqlite, and makes no database', { skip: cannotHideSqlite }, (t) => {
-  const { h, app } = populated(t, 'file');
+  const { h, app } = populated(t, 'file', { realGit: true });
   const stderr = failed(ledgerIn(withoutSqlite(h), app, 'store', 'migrate', '--to', 'sqlite', '--dry-run'));
   assert.match(stderr, /ledger store migrate needs a Node version with node:sqlite: 22\.13 or later, and 23\.4 or later on Node 23\./);
   assert.equal(existsSync(sqliteFile(h)), false);
 });
 
 test('migrate --to file from SQLite storage without node:sqlite exits 1 and says migrate needs node:sqlite, not to set storage to file', { skip: cannotHideSqlite || noSqlite }, (t) => {
-  const { h, app, source } = populated(t, 'sqlite');
+  const { h, app, source } = populated(t, 'sqlite', { realGit: true });
   const stderr = failed(ledgerIn(withoutSqlite(h), app, 'store', 'migrate', '--to', 'file'));
   assert.match(stderr, /ledger store migrate needs a Node version with node:sqlite: 22\.13 or later, and 23\.4 or later on Node 23\./);
   assert.doesNotMatch(stderr, /set "storage"/);

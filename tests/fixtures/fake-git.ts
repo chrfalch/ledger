@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { GitRunner } from '../../tools/ledger/git.js';
 
@@ -102,6 +102,8 @@ const isBranchName = (name: string): boolean => !name.startsWith('-') && name !=
 
 const checkBranchName = (name: string): Answer => (isBranchName(name) ? done(`${name}\n`) : failed(`fatal: '${name}' is not a valid branch name`));
 
+const gitFolderOf = (main: string, worktree: string): string => path.join(main, '.git/worktrees', path.basename(worktree));
+
 function addWorktree(here: Here, branch: string, folder: string, start: string): Answer {
   const at = path.resolve(here.root, folder);
   if (!isBranchName(branch)) return checkBranchName(branch);
@@ -111,7 +113,10 @@ function addWorktree(here: Here, branch: string, folder: string, start: string):
   if (sha === undefined) return failed(`fatal: invalid reference: ${start}`);
   refsOf(here.repo)[`refs/heads/${branch}`] = sha;
   (here.repo.worktrees ??= []).push({ path: at, branch });
+  const gitFolder = gitFolderOf(here.main, at);
+  mkdirSync(gitFolder, { recursive: true });
   mkdirSync(at, { recursive: true });
+  writeFileSync(path.join(at, '.git'), `gitdir: ${gitFolder}\n`);
   return done();
 }
 
@@ -123,6 +128,7 @@ function removeWorktree(here: Here, folder: string, force: boolean): Answer {
   if (!force && (worktree.status ?? []).some((entry) => !entry.startsWith('!! '))) return failed(`fatal: '${folder}' contains modified or untracked files, use --force to delete it`);
   here.repo.worktrees = here.repo.worktrees?.filter((other) => other !== worktree);
   rmSync(worktree.path, { recursive: true, force: true });
+  rmSync(gitFolderOf(here.main, worktree.path), { recursive: true, force: true });
   return done();
 }
 
@@ -199,7 +205,7 @@ const COMMANDS: Command[] = [
   { usage: 'rev-parse --path-format=absolute --git-common-dir', answer: ({ main }) => done(`${path.join(main, '.git')}\n`) },
   ...['rev-parse --absolute-git-dir', 'rev-parse --path-format=absolute --git-dir'].map((usage) => ({
     usage,
-    answer: ({ main, root }: Here) => done(`${root === main ? path.join(main, '.git') : path.join(main, '.git/worktrees', path.basename(root))}\n`),
+    answer: ({ main, root }: Here) => done(`${root === main ? path.join(main, '.git') : gitFolderOf(main, root)}\n`),
   })),
   { usage: 'rev-parse --show-toplevel', answer: ({ root }) => done(`${root}\n`) },
   { usage: 'branch --show-current', answer: ({ checkout }) => done(checkout.branch === undefined ? '' : `${checkout.branch}\n`) },

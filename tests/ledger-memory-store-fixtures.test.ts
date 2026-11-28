@@ -1,21 +1,21 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { storedText } from '../tools/ledger/record.js';
 import { repoKey } from '../tools/ledger/repo-key.js';
-import { activeFile, archivedTask, backlogTask, home, ledgerText, ok, repository, runInProcessWith, storeFolder, worktreeOf, writeLedgerFile } from './ledger-core-fixtures.js';
+import { activeFile, archivedTask, backlogTask, fakeOutside, fakeRepository, home, ledgerText, ok, runInProcessWith, storeFolder, useFakeGit, worktreeOf, writeLedgerFile } from './ledger-core-fixtures.js';
 import { memoryStore } from './memory-store.js';
 
 /** The folders of the file store under `h` that hold anything a fixture wrote. */
 const fileStoreFolders = (h: string): string[] => ['ledger-backlog', 'ledger-active', 'ledger-archive'].filter((folder) => existsSync(path.join(h, '.claude', folder)));
 
 /** A main checkout path with no repo, so its repo key is the path itself and no git runs. */
-const mainOf = (h: string): string => path.join(h, 'repos/app');
+const mainOf = (t: TestContext, h: string): string => path.join(fakeOutside(useFakeGit(t), h), 'repos/app');
 
 test('backlogTask with a store writes the ledger through it, gives its location, and writes no file', (t) => {
   const h = home(t);
-  const main = mainOf(h);
+  const main = mainOf(t, h);
   const store = memoryStore({ home: h });
   const location = backlogTask(h, main, { slug: 'fix-login' }, { store });
   const stored = store.backlog.read(main, 'fix-login');
@@ -26,7 +26,7 @@ test('backlogTask with a store writes the ledger through it, gives its location,
 
 test('archivedTask with a store archives the copy through it, modified at noon UTC on its date, under its slug or a given name', (t) => {
   const h = home(t);
-  const main = mainOf(h);
+  const main = mainOf(t, h);
   const store = memoryStore({ home: h });
   const location = archivedTask(h, main, '2026-10-01', { slug: 'old' }, undefined, { store });
   archivedTask(h, main, '2026-10-02', { slug: 'old' }, 'feature-old', { store });
@@ -46,7 +46,7 @@ test('archivedTask with a store archives the copy through it, modified at noon U
 
 test('activeFile with a store gives the location of the active record there, and writeLedgerFile rewrites a ledger by that location', (t) => {
   const h = home(t);
-  const main = mainOf(h);
+  const main = mainOf(t, h);
   const store = memoryStore({ home: h });
   const key = repoKey(main);
   store.active.write(key, 'live', ledgerText({ slug: 'live', worktree: h }));
@@ -66,7 +66,7 @@ test('activeFile with a store gives the location of the active record there, and
 
 test('backlogTask and archivedTask without a store still write legacy Markdown files and give their paths', (t) => {
   const h = home(t);
-  const main = mainOf(h);
+  const main = mainOf(t, h);
   const backlog = backlogTask(h, main, { slug: 'fix-login' });
   assert.equal(backlog, path.join(storeFolder(h, 'ledger-backlog', main), 'fix-login.md'));
   assert.equal(readFileSync(backlog, 'utf8'), ledgerText({ slug: 'fix-login', main, branch: 'fix-login' }));
@@ -76,7 +76,7 @@ test('backlogTask and archivedTask without a store still write legacy Markdown f
 
 test('a command run in process with a store reads the tasks seeded through it', async (t) => {
   const h = home(t);
-  const app = repository(h, path.join(h, 'repos/app'));
+  const app = fakeRepository(useFakeGit(t), h, path.join(h, 'repos/app'));
   const store = memoryStore({ home: h });
   backlogTask(h, app, { slug: 'later', goal: 'Seeded in memory.' }, { store });
   archivedTask(h, app, '2026-10-01', { slug: 'old', goal: 'Archived in memory.' }, undefined, { store });

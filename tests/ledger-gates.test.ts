@@ -4,8 +4,9 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 
 import { ALL_GATE_NAMES, buildGate, GATE_NAMES, gateQuestion, type GateDefinition, type GateQuestion } from '../tools/ledger/gates.js';
+import { addWorktree, shortCommit } from '../tools/ledger/git.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
-import { archivedTask, backlogTask, git, home, ledgerText, ok, repoKeyOf, repository, runInProcessWith, worktreeOf, type Fields, type Ran } from './ledger-core-fixtures.js';
+import { archivedTask, backlogTask, fakeOutside, fakeRepository, home, ledgerText, ok, repoKeyOf, runInProcessWith, useFakeGit, worktreeOf, type Fields, type Ran } from './ledger-core-fixtures.js';
 import { memoryStore } from './memory-store.js';
 
 const pick: GateDefinition = {
@@ -130,7 +131,7 @@ type Tree = { h: string; app: string; store: LedgerStore };
 
 function tree(t: TestContext): Tree {
   const h = home(t);
-  return { h, app: repository(h, path.join(h, 'repos/app')), store: memoryStore({ home: h }) };
+  return { h, app: fakeRepository(useFakeGit(t), h, path.join(h, 'repos/app')), store: memoryStore({ home: h }) };
 }
 
 const gate = ({ h, store }: Tree, cwd: string, ...args: string[]): Promise<Ran> => runInProcessWith(h, cwd, { store }, 'task', 'gate', ...args);
@@ -138,8 +139,8 @@ const gate = ({ h, store }: Tree, cwd: string, ...args: string[]): Promise<Ran> 
 /** A linked worktree at <app>/.claude/worktrees/<slug> on branch me/<slug>, with its active record in the store; gives the record's location. */
 function worktreeTask({ h, app, store }: Tree, fields: Omit<Fields, 'worktree' | 'branch' | 'base'>, edit = (text: string): string => text): string {
   const worktree = worktreeOf(app, fields.slug);
-  git(h, app, 'worktree', 'add', '--quiet', '-b', `me/${fields.slug}`, worktree, 'main');
-  const short = git(h, app, 'rev-parse', '--short', 'main');
+  assert.equal(addWorktree(app, worktree, `me/${fields.slug}`, 'main'), undefined);
+  const short = shortCommit(app, 'main') ?? assert.fail(`${app} has no main`);
   mkdirSync(path.join(worktree, '.claude'));
   return putActive({ h, app, store }, fields.slug, edit(ledgerText({ ...fields, worktree, branch: `me/${fields.slug}`, base: `origin/main @ ${short}` })));
 }
@@ -214,7 +215,7 @@ test('ledger task gate in an untitled worktree ledger takes the folder slug', as
 
 /** A HOME with no repo, whose ledgers are in a memory store. */
 function bare(t: TestContext): Tree {
-  const h = home(t);
+  const h = fakeOutside(useFakeGit(t), home(t));
   return { h, app: path.join(h, 'repos/app'), store: memoryStore({ home: h }) };
 }
 

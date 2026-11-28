@@ -210,6 +210,7 @@ test('worktree add and remove change the worktrees, the branches and the folder'
   const next = worktreeOf(main, 'next');
   assert.equal(within(() => addWorktree(main, next, 'me/next', SECOND)), undefined);
   assert.ok(existsSync(next), 'git makes the folder of a new worktree');
+  assert.equal(readFileSync(path.join(next, '.git'), 'utf8'), `gitdir: ${path.join(main, '.git/worktrees/next')}\n`, 'git links a new worktree to its git folder');
   assert.deepEqual(
     within(() => worktrees(main)).find((entry) => entry.path === next),
     { path: next, branch: 'me/next' },
@@ -218,6 +219,7 @@ test('worktree add and remove change the worktrees, the branches and the folder'
   assert.equal(typeof within(() => addWorktree(main, worktreeOf(main, 'again'), 'me/next', FIRST)), 'string', 'a branch that exists is refused');
   assert.equal(within(() => removeLinkedWorktree(main, next, false)), undefined);
   assert.ok(!existsSync(next), 'git removes the folder of a removed worktree');
+  assert.ok(!existsSync(path.join(main, '.git/worktrees/next')), 'git removes the git folder of a removed worktree');
   assert.deepEqual(within(() => worktrees(main)).map((entry) => entry.path), [main, worktree]);
   assert.ok(within(() => branchExists(main, 'me/next')), 'removing a worktree keeps its branch');
 });

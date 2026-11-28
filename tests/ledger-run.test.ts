@@ -6,7 +6,7 @@ import { runLedger, type LedgerIo, type LedgerRun } from '../tools/ledger/cli.js
 import { fileStore } from '../tools/ledger/file-store.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { REPO } from './helpers.js';
-import { backlogTask, commandEnv, home, repository, worktreeOf, worktreeTask } from './ledger-core-fixtures.js';
+import { backlogTask, commandEnv, fakeRepository, fakeWorktreeTask, home, repository, useFakeGit, worktreeOf } from './ledger-core-fixtures.js';
 
 const io = (h: string, cwd: string, more: Partial<LedgerIo> = {}): LedgerIo => ({ home: h, cwd, env: commandEnv(h), ...more });
 
@@ -34,12 +34,18 @@ function setProcessEnv(t: TestContext, name: string, value: string | undefined):
   t.after(() => set(saved));
 }
 
-/** A HOME with the template, and the repo ~/repos/app. */
-function setup(t: TestContext) {
+function templateHome(t: TestContext): string {
   const h = home(t);
   copyFileSync(path.join(REPO, 'ledger.template.md'), path.join(h, '.claude/ledger.template.md'));
-  const app = repository(h, path.join(h, 'repos/app'));
-  return { h, app };
+  return h;
+}
+
+/** A HOME with the template, and the repo ~/repos/app in a fake git that `fake` declares. */
+function setup(t: TestContext) {
+  const h = templateHome(t);
+  const fake = useFakeGit(t);
+  const app = fakeRepository(fake, h, path.join(h, 'repos/app'));
+  return { h, app, fake };
 }
 
 test('help goes to the run, not to this process', async (t) => {
@@ -85,8 +91,8 @@ test('the store is read under io.home, not under $HOME', async (t) => {
 });
 
 test('the task of the worktree the command runs in is found from io.cwd, not process.cwd()', async (t) => {
-  const { h, app } = setup(t);
-  worktreeTask(h, app, { slug: 'here' });
+  const { h, app, fake } = setup(t);
+  fakeWorktreeTask(fake, h, app, { slug: 'here' });
 
   const ran = await runQuietly(t, ['show', '--json'], io(h, worktreeOf(app, 'here')));
   assert.equal(ran.code, 0, ran.stderr);
@@ -94,8 +100,8 @@ test('the task of the worktree the command runs in is found from io.cwd, not pro
 });
 
 test('a claim is made for the session CLAUDE_CODE_SESSION_ID names in io.env', async (t) => {
-  const { h, app } = setup(t);
-  worktreeTask(h, app, { slug: 'claimed' });
+  const { h, app, fake } = setup(t);
+  fakeWorktreeTask(fake, h, app, { slug: 'claimed' });
   setProcessEnv(t, 'CLAUDE_CODE_SESSION_ID', undefined);
 
   const ran = await runQuietly(t, ['task', 'claim', '--json'], io(h, worktreeOf(app, 'claimed'), { env: { ...commandEnv(h), CLAUDE_CODE_SESSION_ID: 'session-in-io' } }));
@@ -104,7 +110,8 @@ test('a claim is made for the session CLAUDE_CODE_SESSION_ID names in io.env', a
 });
 
 test('git runs with io.env: its PATH and the variables only io.env has', async (t) => {
-  const { h, app } = setup(t);
+  const h = templateHome(t);
+  const app = repository(h, path.join(h, 'repos/app'));
   const stubs = path.join(h, 'git-stub');
   mkdirSync(stubs);
   writeFileSync(path.join(stubs, 'git'), `#!/bin/sh\necho "$*" >> "$GIT_CALLS"\nPATH='${process.env.PATH}' exec git "$@"\n`);
@@ -118,8 +125,8 @@ test('git runs with io.env: its PATH and the variables only io.env has', async (
 });
 
 test('the hook acts on io.stdin', async (t) => {
-  const { h, app } = setup(t);
-  worktreeTask(h, app, { slug: 'from-stdin' });
+  const { h, app, fake } = setup(t);
+  fakeWorktreeTask(fake, h, app, { slug: 'from-stdin' });
   const stdin = JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup', cwd: worktreeOf(app, 'from-stdin') });
 
   const ran = await runQuietly(t, ['hook', 'session-start'], io(h, h, { stdin }));

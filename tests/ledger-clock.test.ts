@@ -9,7 +9,7 @@ import { limitPrCheckTimeForTests } from '../tools/ledger/pr-check.js';
 import { inRun } from '../tools/ledger/run-io.js';
 import { limitBusyWaitForTests } from '../tools/ledger/sqlite-store.js';
 import { allowRemoteForTests } from '../tools/ledger/sync.js';
-import { fakeClock, home, ok, readLedgerFile, repository, runInProcessWith, worktreeTask } from './ledger-core-fixtures.js';
+import { fakeClock, fakeRepository, fakeWorktreeTask, home, ok, readLedgerFile, runInProcessWith, useFakeGit } from './ledger-core-fixtures.js';
 import { machine, remote, URL, useGitStorage } from './ledger-git-fixtures.js';
 
 const MINUTE = 60_000;
@@ -18,9 +18,9 @@ const LATER = '2030-06-15T12:00:00Z';
 /** ~/repos/app with the active task fix-login; gives the HOME, the repo and the task's record. */
 function appWithTask(t: TestContext) {
   const h = home(t);
-  const app = repository(h, path.join(h, 'repos/app'));
-  writeFileSync(path.join(app, '.git/info/exclude'), '.claude/\n');
-  return { h, app, file: worktreeTask(h, app, { slug: 'fix-login' }) };
+  const fake = useFakeGit(t);
+  const app = fakeRepository(fake, h, path.join(h, 'repos/app'));
+  return { h, app, file: fakeWorktreeTask(fake, h, app, { slug: 'fix-login' }) };
 }
 
 const atClock = <T>(clock: Clock, work: () => T): T => inRun({ env: process.env, console, clock }, work);

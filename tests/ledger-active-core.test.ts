@@ -7,6 +7,7 @@ import test, { type TestContext } from 'node:test';
 import { FORMAT, isAllowed } from '../tools/ledger/clone.js';
 import { fileStore } from '../tools/ledger/file-store.js';
 import { parseLedger } from '../tools/ledger/format.js';
+import { addWorktree, removeLinkedWorktree } from '../tools/ledger/git.js';
 import { limitLockWaits } from '../tools/ledger/lock.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { prePushHook } from '../tools/ledger/secret-scan.js';
@@ -14,14 +15,37 @@ import { sqliteFile, sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { createTask, currentTask, updateLedger } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
-import { backlogTask, commandEnv, git, home, LEDGER_BIN, ledger, ledgerText, noSqlite, ok, repoKeyOf, repository, runInProcess, runInProcessWith, worktreeOf, worktreeTask, type Ran } from './ledger-core-fixtures.js';
+import {
+  backlogTask,
+  commandEnv,
+  git,
+  home,
+  LEDGER_BIN,
+  ledger,
+  ledgerText,
+  noSqlite,
+  ok,
+  repoFixtures,
+  repoKeyOf,
+  runInProcess,
+  runInProcessWith,
+  useFakeGit,
+  worktreeOf,
+  type Fields,
+  type Ran,
+} from './ledger-core-fixtures.js';
 
-/** A HOME with the ledger template and the repo ~/repos/app, whose origin is a local bare repo. */
-function setup(t: TestContext) {
+/**
+ * A HOME with the ledger template and the repo ~/repos/app, whose origin is a local bare repo; `addTask` adds a worktree
+ * task there, `addRepo` another repo and `addTaskIn` a task in it. `realGit` as in repoFixtures.
+ */
+function setup(t: TestContext, { realGit = false } = {}) {
   const h = home(t);
   copyFileSync(path.join(REPO, 'ledger.template.md'), path.join(h, '.claude/ledger.template.md'));
-  const app = repository(h, path.join(h, 'repos/app'));
-  return { h, app, key: repoKeyOf(app), store: () => fileStore(ledgerPaths(h)) };
+  const repos = repoFixtures(t, h, { realGit });
+  const app = repos.addRepo(path.join(h, 'repos/app'));
+  const addTask = (fields: Omit<Fields, 'worktree' | 'branch' | 'base'>): string => repos.addTask(app, fields);
+  return { h, app, key: repoKeyOf(app), store: () => fileStore(ledgerPaths(h)), addTask, addRepo: repos.addRepo, addTaskIn: repos.addTask };
 }
 
 const json = (ran: Ran): Record<string, unknown> => JSON.parse(ok(ran));
@@ -71,8 +95,8 @@ test('ledger go of a slug an active record already has fails, and leaves the bac
 });
 
 test('ledger task new --stack writes an active record for the new worktree, and its decision line to the active record of this worktree', async (t) => {
-  const { h, app, key, store } = setup(t);
-  worktreeTask(h, app, { slug: 'epic' });
+  const { h, app, key, store, addTask } = setup(t);
+  addTask({ slug: 'epic' });
   const epic = worktreeOf(app, 'epic');
 
   const created = json(await runInProcess(h, epic, 'task', 'new', 'part', '--stack', '--json'));
@@ -90,7 +114,7 @@ test('ledger task new --stack writes an active record for the new worktree, and 
 test('ledger task new --here writes an active record for this linked worktree, once', async (t) => {
   const { h, app, key, store } = setup(t);
   const loose = path.join(app, '.claude/worktrees/loose');
-  git(h, app, 'worktree', 'add', '--quiet', '-b', 'loose', loose);
+  assert.equal(addWorktree(app, loose, 'loose', 'main'), undefined);
 
   ok(await runInProcess(h, loose, 'task', 'new', '--here'));
 
@@ -102,8 +126,8 @@ test('ledger task new --here writes an active record for this linked worktree, o
 });
 
 test('notes and park write the active record', async (t) => {
-  const { h, app, key, store } = setup(t);
-  worktreeTask(h, app, { slug: 'epic' });
+  const { h, app, key, store, addTask } = setup(t);
+  addTask({ slug: 'epic' });
   const epic = worktreeOf(app, 'epic');
 
   ok(await runInProcess(h, epic, 'notes', 'decide', 'Keep records', '--because', 'the store holds them', '--tag', 'observed'));
@@ -118,8 +142,8 @@ test('notes and park write the active record', async (t) => {
 });
 
 test('ledger show with no slug prints the active task of this worktree, and fails in one line naming ledger show <slug> elsewhere', async (t) => {
-  const { h, app, key, store } = setup(t);
-  worktreeTask(h, app, { slug: 'epic' });
+  const { h, app, key, store, addTask } = setup(t);
+  addTask({ slug: 'epic' });
 
   assert.equal(ok(await runInProcess(h, worktreeOf(app, 'epic'), 'show')), store().active.read(key, 'epic')?.text);
 
@@ -131,8 +155,8 @@ test('ledger show with no slug prints the active task of this worktree, and fail
 });
 
 test('ledger list --json gives an active task its worktree and no path, and a backlog task neither', (t) => {
-  const { h, app } = setup(t);
-  worktreeTask(h, app, { slug: 'epic' });
+  const { h, app, addTask } = setup(t, { realGit: true });
+  addTask({ slug: 'epic' });
   backlogTask(h, app, { slug: 'idea' });
 
   const { tasks } = json(ledger(h, app, 'list', '--json')) as { tasks: Record<string, unknown>[] };
@@ -148,8 +172,8 @@ test('ledger list --json gives an active task its worktree and no path, and a ba
 });
 
 test('ledger task retire archives the text of the active record, then removes the record and the worktree', (t) => {
-  const { h, app, key, store } = setup(t);
-  worktreeTask(h, app, { slug: 'fix' });
+  const { h, app, key, store, addTask } = setup(t, { realGit: true });
+  addTask({ slug: 'fix' });
   const { text } = store().active.read(key, 'fix') ?? assert.fail('no active record');
 
   ok(ledger(h, app, 'task', 'retire', 'fix', '--force'));
@@ -160,9 +184,9 @@ test('ledger task retire archives the text of the active record, then removes th
 });
 
 test('ledger session lists the own active task in a linked worktree, and every active task of the repo in the main checkout', (t) => {
-  const { h, app } = setup(t);
-  worktreeTask(h, app, { slug: 'a' });
-  worktreeTask(h, app, { slug: 'b' });
+  const { h, app, addTask } = setup(t, { realGit: true });
+  addTask({ slug: 'a' });
+  addTask({ slug: 'b' });
   const a = worktreeOf(app, 'a');
 
   const own = json(ledger(h, a, 'session', '--json')) as { own: boolean; ledgers: Record<string, unknown>[] };
@@ -177,11 +201,11 @@ test('ledger session lists the own active task in a linked worktree, and every a
 });
 
 test('the worktree-removal guard denies a worktree an active record names, and one that holds a .claude/ledger.md not yet moved into the store', async (t) => {
-  const { h, app } = setup(t);
-  worktreeTask(h, app, { slug: 'task' });
+  const { h, app, addTask } = setup(t);
+  addTask({ slug: 'task' });
   const task = worktreeOf(app, 'task');
   const loose = path.join(app, '.claude/worktrees/loose');
-  git(h, app, 'worktree', 'add', '--quiet', '-b', 'loose', loose);
+  assert.equal(addWorktree(app, loose, 'loose', 'main'), undefined);
   mkdirSync(path.join(loose, '.claude'), { recursive: true });
   writeFileSync(path.join(loose, '.claude/ledger.md'), ledgerText({ slug: 'loose', worktree: loose }));
 
@@ -190,9 +214,9 @@ test('the worktree-removal guard denies a worktree an active record names, and o
 });
 
 test('the task list finds active tasks from the store records and no plain-folder ledger under the scan roots', async (t) => {
-  const { h } = setup(t);
-  const tool = repository(h, path.join(h, 'work/tool'));
-  worktreeTask(h, tool, { slug: 'tool-task' });
+  const { h, addRepo, addTaskIn } = setup(t);
+  const tool = addRepo(path.join(h, 'work/tool'));
+  addTaskIn(tool, { slug: 'tool-task' });
   const plain = path.join(h, 'repos/notes');
   mkdirSync(path.join(plain, '.claude'), { recursive: true });
   writeFileSync(path.join(plain, '.claude/ledger.md'), ledgerText({ slug: 'notes' }));
@@ -203,8 +227,8 @@ test('the task list finds active tasks from the store records and no plain-folde
 });
 
 test('worktrees auto-prune takes the worktree folder only, not the path of its old .claude/ledger.md', async (t) => {
-  const { h, app, key, store } = setup(t);
-  worktreeTask(h, app, { slug: 'done' });
+  const { h, app, key, store, addTask } = setup(t);
+  addTask({ slug: 'done' });
   const done = worktreeOf(app, 'done');
   assert.ok(store().active.update(key, 'done', (text) => text.replace('| 2 | implement | todo |', '| 2 | implement | done |')));
 
@@ -232,7 +256,7 @@ const formatOf = (clone: string): unknown => JSON.parse(readFileSync(path.join(c
 
 test('git storage reads a clone of format 1 as it is, and its first write upgrades it to format 2 in a commit of its own', (t) => {
   assert.equal(FORMAT, 2);
-  const { h, app } = setup(t);
+  const { h, app } = setup(t, { realGit: true });
   const clone = gitStorage(h, 1);
 
   ok(ledger(h, app, 'list'));
@@ -248,7 +272,7 @@ test('git storage reads a clone of format 1 as it is, and its first write upgrad
 });
 
 test('git storage with a stray file in a clone of format 1: a read works, and a write fails as its commit would, leaving format 1', (t) => {
-  const { h, app, key } = setup(t);
+  const { h, app, key } = setup(t, { realGit: true });
   const clone = gitStorage(h, 1);
   writeFileSync(path.join(clone, 'notes.txt'), 'private\n');
 
@@ -262,7 +286,7 @@ test('git storage with a stray file in a clone of format 1: a read works, and a 
 });
 
 test('git storage refuses a clone of a format newer than 2', (t) => {
-  const { h, app } = setup(t);
+  const { h, app } = setup(t, { realGit: true });
   gitStorage(h, 3);
 
   const ran = ledger(h, app, 'list');
@@ -275,8 +299,10 @@ test('git storage refuses a clone of a format newer than 2', (t) => {
 function twoClones(t: TestContext) {
   const world = setup(t);
   const second = path.join(world.h, 'issues/app-b');
-  git(world.h, world.h, 'clone', '--quiet', path.join(world.h, 'remotes/app.git'), second);
-  worktreeTask(world.h, world.app, { slug: 'x' });
+  const { repos } = useFakeGit(t).state;
+  repos[second] = structuredClone(repos[world.app]);
+  mkdirSync(path.join(second, '.git/info'), { recursive: true });
+  world.addTask({ slug: 'x' });
   return { ...world, second, taken: worktreeOf(world.app, 'x') };
 }
 
@@ -296,7 +322,7 @@ test('ledger task new --stack and --here of a slug another clone has active fail
   const { h, second, taken, key, store } = twoClones(t);
   refusedTaken(await runInProcess(h, second, 'task', 'new', 'x', '--stack'), taken);
   const loose = path.join(second, '.claude/worktrees/loose');
-  git(h, second, 'worktree', 'add', '--quiet', '-b', 'loose', loose);
+  assert.equal(addWorktree(second, loose, 'loose', 'main'), undefined);
   refusedTaken(await runInProcess(h, loose, 'task', 'new', '--here', 'x'), taken);
   assert.equal(parseLedger(store().active.read(key, 'x')?.text ?? '').location.worktree, taken);
 });
@@ -368,8 +394,8 @@ test('ledger task retire of an active task whose worktree is not on this machine
 });
 
 test('two active records naming one worktree are both listed, and only the lookup of that worktree fails, naming both', async (t) => {
-  const { h, app, key, store } = setup(t);
-  worktreeTask(h, app, { slug: 'a' });
+  const { h, app, key, store, addTask } = setup(t);
+  addTask({ slug: 'a' });
   store().active.write(key, 'b', ledgerText({ slug: 'b', main: app, worktree: worktreeOf(app, 'a') }));
 
   const { tasks } = json(await runInProcess(h, app, 'list', '--json')) as { tasks: { slug: string }[] };
@@ -456,13 +482,13 @@ function gitLog(h: string): { calls: () => string[]; clear: () => void } {
 }
 
 test('listing active tasks costs git no call per record, and at most one worktree listing per clone', (t) => {
-  const { h, app } = setup(t);
-  worktreeTask(h, app, { slug: 'one' });
+  const { h, app, addTask } = setup(t, { realGit: true });
+  addTask({ slug: 'one' });
   const { calls, clear } = gitLog(h);
   const measured = (run: () => unknown): string[] => (clear(), run(), calls());
 
   const withOne = measured(() => ok(ledger(h, app, 'list', '--json')));
-  for (const slug of ['two', 'three']) worktreeTask(h, app, { slug });
+  for (const slug of ['two', 'three']) addTask({ slug });
   const withThree = measured(() => ok(ledger(h, app, 'list', '--json')));
   const prompt = (): string => hook(h, 'prompt-submit', { cwd: app, prompt: 'go three' });
   const promptWithThree = measured(prompt);
@@ -479,7 +505,7 @@ test('ledger task new --here refuses a slug of the backlog, and of an active tas
   store().aliases.add('app', key);
   store().active.write('app', 'old', ledgerText({ slug: 'old', main: app, worktree: worktreeOf(app, 'old') }));
   const loose = path.join(app, '.claude/worktrees/loose');
-  git(h, app, 'worktree', 'add', '--quiet', '-b', 'loose', loose);
+  assert.equal(addWorktree(app, loose, 'loose', 'main'), undefined);
 
   const backlog = await runInProcess(h, loose, 'task', 'new', '--here', 'idea');
   assert.equal(backlog.status, 1, backlog.stderr);
@@ -503,8 +529,8 @@ test('ledger task new of a slug that is active in the repo fails, naming its wor
 });
 
 test('the worktree-removal guard denies removing a folder two active records name, naming both', async (t) => {
-  const { h, app, key, store } = setup(t);
-  worktreeTask(h, app, { slug: 'a' });
+  const { h, app, key, store, addTask } = setup(t);
+  addTask({ slug: 'a' });
   store().active.write(key, 'b', ledgerText({ slug: 'b', main: app, worktree: worktreeOf(app, 'a') }));
 
   const output = await removalGate(h, app, worktreeOf(app, 'a'));
@@ -516,8 +542,8 @@ test('the worktree-removal guard denies removing a folder two active records nam
 });
 
 test('session-start in a main checkout names no undefined worktree for an active record that names none', async (t) => {
-  const { h, app, key, store } = setup(t);
-  worktreeTask(h, app, { slug: 'a' });
+  const { h, app, key, store, addTask } = setup(t);
+  addTask({ slug: 'a' });
   store().active.write(key, 'bare', '# Task ledger — bare\n\n## Goal\nA goal.\n\n## Next step\nA step.\n');
 
   const context: string = JSON.parse(await inProcessHook(h, 'session-start', { cwd: app })).hookSpecificOutput.additionalContext;
@@ -541,10 +567,10 @@ test('an active record whose worktree folder exists but is no worktree of its cl
 });
 
 test('an active record whose worktree path is a checkout of a repo with another key is elsewhere, and retire --force leaves that checkout', async (t) => {
-  const { h, app, key, store } = setup(t);
-  const other = repository(h, path.join(h, 'repos/other'));
+  const { h, app, key, store, addRepo } = setup(t);
+  const other = addRepo(path.join(h, 'repos/other'));
   const folder = worktreeOf(other, 'x');
-  git(h, other, 'worktree', 'add', '--quiet', '-b', 'me/x', folder);
+  assert.equal(addWorktree(other, folder, 'me/x', 'main'), undefined);
   store().active.write(key, 'x', ledgerText({ slug: 'x', main: app, worktree: folder }));
 
   const { tasks } = json(await runInProcess(h, app, 'list', '--json')) as { tasks: Record<string, unknown>[] };
@@ -556,8 +582,8 @@ test('an active record whose worktree path is a checkout of a repo with another 
 });
 
 test('ledger task retire with no slug, in a folder two active records name, refuses, names both slugs, and removes nothing', async (t) => {
-  const { h, app, key, store } = setup(t);
-  worktreeTask(h, app, { slug: 'a' });
+  const { h, app, key, store, addTask } = setup(t);
+  addTask({ slug: 'a' });
   store().active.write(key, 'b', ledgerText({ slug: 'b', main: app, worktree: worktreeOf(app, 'a') }));
 
   for (const flags of [[], ['--force']]) {
@@ -571,10 +597,10 @@ test('ledger task retire with no slug, in a folder two active records name, refu
 });
 
 /** A worktree task whose .claude/evidence/ holds red.txt, and which git ignores, as excludeEvidence makes it. */
-function taskWithEvidence(t: TestContext, slug: string) {
-  const world = setup(t);
-  worktreeTask(world.h, world.app, { slug });
-  writeFileSync(path.join(world.app, '.git/info/exclude'), '.claude/\n');
+function taskWithEvidence(t: TestContext, slug: string, { realGit = false } = {}) {
+  const world = setup(t, { realGit });
+  world.addTask({ slug });
+  if (realGit) writeFileSync(path.join(world.app, '.git/info/exclude'), '.claude/\n');
   const evidence = path.join(worktreeOf(world.app, slug), '.claude/evidence');
   mkdirSync(evidence);
   writeFileSync(path.join(evidence, 'red.txt'), 'failing\n');
@@ -585,7 +611,7 @@ test('ledger task retire --force finishes a retire that stopped after it archive
   const { h, app, key, store, worktree, evidence } = taskWithEvidence(t, 'fix');
   const { text } = store().active.read(key, 'fix') ?? assert.fail('no active record');
   store().archive.write(key, '2026-11-01-fix', text, evidence);
-  git(h, app, 'worktree', 'remove', '--force', worktree);
+  assert.equal(removeLinkedWorktree(app, worktree, true), undefined);
 
   ok(await runInProcess(h, app, 'task', 'retire', 'fix', '--force'));
 
@@ -594,7 +620,7 @@ test('ledger task retire --force finishes a retire that stopped after it archive
 });
 
 test('a second ledger task retire finishes one whose worktree removal failed halfway, after it deleted the evidence', (t) => {
-  const { h, app, key, store, worktree, evidence } = taskWithEvidence(t, 'fix');
+  const { h, app, key, store, worktree, evidence } = taskWithEvidence(t, 'fix', { realGit: true });
   const { text } = store().active.read(key, 'fix') ?? assert.fail('no active record');
   const real = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
   const stub = path.join(h, 'stub-bin/git');
@@ -616,7 +642,7 @@ test('a second ledger task retire finishes one whose worktree removal failed hal
 test('ledger task new --here refuses a worktree whose .claude/ledger.md is not moved into the store yet, and names ledger store migrate --active', async (t) => {
   const { h, app, key, store } = setup(t);
   const loose = path.join(app, '.claude/worktrees/loose');
-  git(h, app, 'worktree', 'add', '--quiet', '-b', 'loose', loose);
+  assert.equal(addWorktree(app, loose, 'loose', 'main'), undefined);
   mkdirSync(path.join(loose, '.claude'));
   writeFileSync(path.join(loose, '.claude/ledger.md'), ledgerText({ slug: 'old', worktree: loose }));
 
@@ -629,7 +655,7 @@ test('ledger task new --here refuses a worktree whose .claude/ledger.md is not m
 });
 
 test('git storage of format 1 whose upgrade commit failed upgrades in a commit of its own at the next write', (t) => {
-  const { h, app } = setup(t);
+  const { h, app } = setup(t, { realGit: true });
   const clone = gitStorage(h, 1);
   git(h, clone, 'add', '.ledger-data');
   git(h, clone, 'commit', '--quiet', '-m', 'format 1');
@@ -666,9 +692,9 @@ test('store migrate --to sqlite stops, and changes nothing, when an active slug 
 });
 
 /** A linked worktree of `app` on a branch of its own, with no task yet. */
-function looseWorktree(h: string, app: string, name: string): string {
+function looseWorktree(app: string, name: string): string {
   const folder = worktreeOf(app, name);
-  git(h, app, 'worktree', 'add', '--quiet', '-b', name, folder);
+  assert.equal(addWorktree(app, folder, name, 'main'), undefined);
   return folder;
 }
 
@@ -677,7 +703,7 @@ const recordsNaming = (store: LedgerStore, key: string, worktree: string): strin
 
 test('of two ledger task new --here in one worktree, the one that checks while the other writes is refused: one record names the worktree', (t) => {
   const { h, app, key, store } = setup(t);
-  const loose = looseWorktree(h, app, 'loose');
+  const loose = looseWorktree(app, 'loose');
   const paths = ledgerPaths(h);
   const files = store();
   let second: unknown;
@@ -707,8 +733,8 @@ test('of two ledger task new --here in one worktree, the one that checks while t
 });
 
 test('a write to an active task whose record a pull replaced with one of another machine is refused, and the pulled record stays', (t) => {
-  const { h, app, key, store } = setup(t);
-  worktreeTask(h, app, { slug: 'fix' });
+  const { h, app, key, store, addTask } = setup(t);
+  addTask({ slug: 'fix' });
   const worktree = worktreeOf(app, 'fix');
   const context = { paths: ledgerPaths(h), cwd: worktree, store: store() };
   const task = currentTask(context.store, worktree) ?? assert.fail('no task in its worktree');
@@ -720,9 +746,9 @@ test('a write to an active task whose record a pull replaced with one of another
 });
 
 test('ledger task new --here and --stack make no active record while "host" is no host label, and say how to fix it', async (t) => {
-  const { h, app, key, store } = setup(t);
-  worktreeTask(h, app, { slug: 'epic' });
-  const loose = looseWorktree(h, app, 'loose');
+  const { h, app, key, store, addTask } = setup(t);
+  addTask({ slug: 'epic' });
+  const loose = looseWorktree(app, 'loose');
   writeFileSync(path.join(h, '.claude/ledger-settings.json'), JSON.stringify({ host: 'Not A Label' }));
 
   for (const [cwd, args] of [[loose, ['--here']], [worktreeOf(app, 'epic'), ['side', '--stack']]] as const) {
@@ -741,9 +767,9 @@ test('ledger task new --here and --stack make no active record from a template w
     { cut: /^## Location\n(?:- .*\n)*\n/m, says: /## Location/, never: /no host label/ },
   ];
   for (const { cut, says, never } of broken) {
-    const { h, app, key, store } = setup(t);
-    worktreeTask(h, app, { slug: 'epic' });
-    const loose = looseWorktree(h, app, 'loose');
+    const { h, app, key, store, addTask } = setup(t);
+    addTask({ slug: 'epic' });
+    const loose = looseWorktree(app, 'loose');
     const template = path.join(h, '.claude/ledger.template.md');
     writeFileSync(template, readFileSync(template, 'utf8').replace(cut, ''));
 

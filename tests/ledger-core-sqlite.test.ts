@@ -4,13 +4,14 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFile
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { fileStore } from '../tools/ledger/file-store.js';
+import { addWorktree } from '../tools/ledger/git.js';
 import { ledgerPaths } from '../tools/ledger/paths.js';
 import { storedText } from '../tools/ledger/record.js';
 import { sqliteStore } from '../tools/ledger/sqlite-store.js';
 import type { LedgerStore } from '../tools/ledger/store.js';
 import { shellWord } from '../tools/ledger/write.js';
 import { REPO } from './helpers.js';
-import { cannotHideSqlite, git, home, LEDGER_BIN, ledger, ledgerIn, ledgerText, lineWith, noSqlite, noSqliteOn, ok, repoKeyOf, repository, runInProcess, runInProcessWith, storeFolder, withoutSqlite, worktreeOf, type Ran } from './ledger-core-fixtures.js';
+import { cannotHideSqlite, home, LEDGER_BIN, ledger, ledgerIn, ledgerText, lineWith, noSqlite, noSqliteOn, ok, repoFixtures, repoKeyOf, runInProcess, runInProcessWith, storeFolder, withoutSqlite, worktreeOf, type Ran } from './ledger-core-fixtures.js';
 
 type Storage = 'file' | 'sqlite';
 
@@ -19,15 +20,17 @@ const writeSettings = (h: string, settings: object): void => writeFileSync(setti
 
 /**
  * A HOME with the ledger template and the repos ~/repos/app and ~/repos/lib, whose untracked .claude/ folders git
- * ignores. The file store runs with no settings file, as every HOME did before the setting existed.
+ * ignores. The file store runs with no settings file, as every HOME did before the setting existed. `realGit` as in
+ * repoFixtures.
  */
-function setup(t: TestContext, storage: Storage) {
+function setup(t: TestContext, storage: Storage, { realGit = false } = {}) {
   const h = home(t);
   copyFileSync(path.join(REPO, 'ledger.template.md'), path.join(h, '.claude/ledger.template.md'));
   if (storage === 'sqlite') writeSettings(h, { storage: 'sqlite' });
+  const { addRepo } = repoFixtures(t, h, { realGit });
   const [app, lib] = ['app', 'lib'].map((name) => {
-    const main = repository(h, path.join(h, 'repos', name));
-    writeFileSync(path.join(main, '.git/info/exclude'), '.claude/\n');
+    const main = addRepo(path.join(h, 'repos', name));
+    if (realGit) writeFileSync(path.join(main, '.git/info/exclude'), '.claude/\n');
     return main;
   });
   return { h, app, lib, store: (): LedgerStore => (storage === 'sqlite' ? sqliteStore({ home: h }) : fileStore(ledgerPaths(h))) };
@@ -69,7 +72,7 @@ function failed(ran: Ran): string {
 
 /** The task fix-login started with `go`, given evidence, and retired with `retire`: its archive copy and evidence. */
 function retiredWithEvidence(t: TestContext, storage: Storage) {
-  const world = setup(t, storage);
+  const world = setup(t, storage, { realGit: true });
   const { h, app, store } = world;
   ok(ledger(h, app, 'task', 'new', 'fix-login', '--goal', 'Users cannot log in.'));
   ok(ledger(h, app, 'go', 'fix-login'));
@@ -152,7 +155,7 @@ for (const storage of ['file', 'sqlite'] as const) {
   test(`${storage} store: the SessionStart hook counts a backlog child as open and an archived child as not, by the status the store gives them`, { skip }, async (t) => {
     const { h, app, store } = setup(t, storage);
     const epic = worktreeOf(app, 'epic');
-    git(h, app, 'worktree', 'add', '--quiet', '-b', 'me/epic', epic, 'main');
+    assert.equal(addWorktree(app, epic, 'me/epic', 'main'), undefined);
     store().active.write(keyOf(h, 'app'), 'epic', ledgerText({ slug: 'epic', main: app, worktree: epic, children: ['- idea', '- old'] }));
     ok(await runInProcess(h, app, 'task', 'new', 'idea', '--goal', 'An idea.'));
     store().archive.write(keyOf(h, 'app'), '2026-10-01-old', ledgerText({ slug: 'old', main: app, worktree: path.join(app, '.claude/worktrees/old'), parent: 'epic' }));
@@ -447,7 +450,7 @@ test('the node:sqlite probe of the test fixtures names the version of the Node i
 });
 
 test('with storage sqlite and no node:sqlite, ledger exits 1 and says SQLite storage needs Node 22.13, or 23.4 on Node 23, and names the settings file', { skip: cannotHideSqlite }, (t) => {
-  const { h, app } = setup(t, 'sqlite');
+  const { h, app } = setup(t, 'sqlite', { realGit: true });
   const stderr = failed(ledgerIn(withoutSqlite(h), app, 'list'));
   assert.match(stderr, /SQLite storage needs Node 22\.13 or later, and 23\.4 or later on Node 23\./);
   assert.doesNotMatch(stderr, /experimental-sqlite/);
@@ -455,7 +458,7 @@ test('with storage sqlite and no node:sqlite, ledger exits 1 and says SQLite sto
 });
 
 test('without node:sqlite the file store still works, so node:sqlite loads only for storage sqlite', { skip: cannotHideSqlite }, (t) => {
-  const { h, app } = setup(t, 'file');
+  const { h, app } = setup(t, 'file', { realGit: true });
   ok(ledgerIn(withoutSqlite(h), app, 'list'));
 });
 
@@ -481,7 +484,7 @@ function withSqliteWarnings(h: string, warnings: [message: string, type?: string
 }
 
 test("with storage sqlite, node:sqlite's experimental warning stays off stderr, and other warnings still print: another ExperimentalWarning, the SQLite text of another type, and an ExperimentalWarning that says more", { skip: noSqlite }, (t) => {
-  const { h, app } = setup(t, 'sqlite');
+  const { h, app } = setup(t, 'sqlite', { realGit: true });
   const env = withSqliteWarnings(h, [
     ['SQLite is an experimental feature and might change at any time', 'ExperimentalWarning'],
     ['Other is an experimental feature and might change at any time', 'ExperimentalWarning'],
