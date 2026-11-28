@@ -74,6 +74,7 @@ export function world(on: On, replies: Record<string, Reply>, { cwd: startCwd, m
   const broken = new Map<Breakable, number>()
   let markdown: { command: string; args?: string } | undefined
   let skillAnswer: { deny?: string; isError?: true; text?: string } = {}
+  let worktreeAnswer: { deny?: string; isError?: true } = {}
   let questionAnswer: { answers: Record<string, string>; afkTimeoutMs?: number } = { answers: {} }
   const reminders: string[] = []
   let contextTokens: number | undefined = 0
@@ -132,6 +133,13 @@ export function world(on: On, replies: Record<string, Reply>, { cwd: startCwd, m
     if (skillAnswer.isError) return { isError: true, result: {}, text: skillAnswer.text }
     return skillAnswer.deny === undefined ? { result: {} } : { deny: skillAnswer.deny }
   })
+  // Stands for the EnterWorktree tool, which moves the session into `path` unless it fails.
+  on('tool.call', { tool: 'EnterWorktree' }, async (_, e) => {
+    if (worktreeAnswer.deny !== undefined) return { deny: worktreeAnswer.deny }
+    if (worktreeAnswer.isError) return { isError: true, result: {} }
+    if (e.path !== undefined) cwd = e.path
+    return { result: { worktreePath: cwd } }
+  })
   on('tool.call', { tool: 'AskUserQuestion' }, async function operatorAnswers(_, e) {
     asked.push(e.questions.map(({ question }) => question).join(' | '))
     return { result: { questions: e.questions, ...questionAnswer } }
@@ -182,6 +190,9 @@ export function world(on: On, replies: Record<string, Reply>, { cwd: startCwd, m
     markdown: () => markdown,
     answerSkill: (answer: typeof skillAnswer) => {
       skillAnswer = answer
+    },
+    answerEnterWorktree: (answer: typeof worktreeAnswer) => {
+      worktreeAnswer = answer
     },
     answerQuestion: (answer: typeof questionAnswer) => {
       questionAnswer = answer

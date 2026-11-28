@@ -57,6 +57,7 @@ type PreviousTask = NonNullable<GoArm['previous']>
 
 const armed = { plugin: 'ledger', key: 'armed' } as const
 const titled = { plugin: 'ledger', key: 'titled' } as const
+const threadTitled = { plugin: 'ledger', key: 'threadTitled' } as const
 const claimedTask = { plugin: 'ledger', key: 'claimedTask' } as const
 const clearApproved = { plugin: 'ledger', key: 'clearApproved' } as const
 const takeOverApproved = { plugin: 'ledger', key: 'takeOverApproved' } as const
@@ -299,9 +300,38 @@ async function titleSession($: EngineInterface, title: string): Promise<void> {
     // titles had icons holds a slug, and so never equals a title.
     if (last?.sessionId === sessionId && last.title === title) return
     await $.command.run({ command: 'rename', args: title })
-    await renameT3Thread($, title)
+    await titleThread($, title)
     await $.state.set(titled, { sessionId, title })
   } catch {}
+}
+
+/**
+ * Renames the session's T3 Code thread, once per session and title. Unlike /rename, it may run while a turn waits on a
+ * hook, so it can follow the task as soon as the session takes one.
+ */
+async function titleThread($: EngineInterface, title: string): Promise<void> {
+  try {
+    const sessionId = await $.session.id()
+    const { value: last } = await $.state.get(threadTitled)
+    if (last?.sessionId === sessionId && last.title === title) return
+    await renameT3Thread($, title)
+    await $.state.set(threadTitled, { sessionId, title })
+  } catch {}
+}
+
+/**
+ * A linked worktree's session lists only its own task, so a task claimed from there is looked up in the main checkout.
+ * The thread gets the bare slug when neither lists it.
+ */
+async function titleClaimedThread($: EngineInterface, slug: string): Promise<void> {
+  const listed = (session: Session) => session.ledgers.find(ledger => ledger.slug === slug)?.title
+  const here = await readSession($).catch(() => undefined)
+  let title = here?.ok ? listed(here) : undefined
+  if (title === undefined && here?.ok && here.main !== undefined && here.main !== here.folder) {
+    const main = await ledgerJson<Session>($, ['session', here.main]).catch(() => undefined)
+    title = main?.ok ? listed(main) : undefined
+  }
+  await titleThread($, title ?? slug)
 }
 
 /**
@@ -341,9 +371,10 @@ async function recordHeld($: EngineInterface, sessionId: string, slug: string): 
 }
 
 /**
- * Claims the task for this session; a line for the model when it could not, which never stops the turn. A claim forgets
- * a task found held before, so a later "Take over" pick cannot approve taking that one over. The first go prompt after an
- * armed /ledger:go cleared ends the hand-over; for that task, it takes the claim over from the session that cleared.
+ * Claims the task for this session and names the T3 Code thread after it; a line for the model when it could not, which
+ * never stops the turn. A claim forgets a task found held before, so a later "Take over" pick cannot approve taking that
+ * one over. The first go prompt after an armed /ledger:go cleared ends the hand-over; for that task, it takes the claim
+ * over from the session that cleared.
  */
 async function claimAtGo($: EngineInterface, slug: string): Promise<ClaimLine | undefined> {
   const sessionId = await $.session.id()
@@ -354,6 +385,7 @@ async function claimAtGo($: EngineInterface, slug: string): Promise<ClaimLine | 
   if (answer.ok) {
     await $.state.set(heldTask, null).catch(() => undefined)
     await $.state.set(claimedTask, { sessionId, slug: answer.slug }).catch(() => undefined)
+    await titleClaimedThread($, answer.slug)
     return undefined
   }
   if (answer.held === undefined) return { text: claimFailedMessage(slug, answer.error), held: false }
@@ -670,6 +702,15 @@ export const register: Register = (on, options) => {
       await $.state.set(armed, { ...value, queued: true })
     }
     return sent
+  }).catch(async ($, e, next) => next(e))
+
+  // /rename must wait for the turn end, but the T3 thread can take the new worktree's task as soon as the session enters it.
+  on('tool.call', { tool: 'EnterWorktree' }, async ($, e, next) => {
+    const entered = await next(e)
+    if (e.agentId !== undefined || entered.deny !== undefined || entered.isError === true) return entered
+    const session = await readSession($)
+    if (session.ok && session.title !== undefined) await titleThread($, session.title)
+    return entered
   }).catch(async ($, e, next) => next(e))
 
   // The first word names another task only when a live task of this repo has that slug; otherwise it is part of the reason. A slug of

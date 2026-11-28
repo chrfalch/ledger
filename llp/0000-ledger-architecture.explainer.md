@@ -731,7 +731,10 @@ because its turn end does not clear the session.
 - `prompt-submit`: titles the session when the prompt is exactly
   `go <slug>`. The title is `<icon> <slug>`: the icon shows the task's
   state (`taskTitle` in `tools/ledger/awareness.ts`, D43), and the plugin
-  renames the session at a turn end whenever that title changes.
+  renames the session at a turn end whenever that title changes. The T3
+  thread is renamed sooner: when a `go <slug>` prompt claims a task, and when
+  EnterWorktree moves the session into a task's worktree. /rename stays at the
+  turn end, because the engine refuses a command while a turn runs.
 - `pre-compact`: tells the compaction to keep the task's slug, worktree path
   and next step.
 - `pre-tool-use`: denies four kinds of tool calls. The first removes a
