@@ -28,6 +28,7 @@ const RETIRED_NAME = /\b(cc-task-new|cc-worktree-retire|cc-ledger-parent|cc-ledg
 const MAY_NAME_RETIRED = new Set([
   // History.
   'DECISIONS.md',
+  'docs/test-audit-2026-11.md',
   // Removes the old hook commands from settings.json files that an earlier deploy wrote.
   'tools/apply-policy.ts',
   'tests/apply-policy.test.ts',

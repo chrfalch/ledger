@@ -126,7 +126,7 @@ test('the hook acts on io.stdin', async (t) => {
   assert.equal(ran.code, 0, ran.stderr);
   assert.equal(ran.stderr, '');
   const output = JSON.parse(ran.stdout) as { hookSpecificOutput: { sessionTitle?: string } };
-  assert.equal(output.hookSpecificOutput.sessionTitle, 'from-stdin');
+  assert.equal(output.hookSpecificOutput.sessionTitle, '🔨 from-stdin');
 });
 
 test("a run starts free of the git and lock time limits an earlier run's hook set", async (t) => {
